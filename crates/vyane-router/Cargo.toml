@@ -1,0 +1,15 @@
+[package]
+name = "vyane-router"
+description = "Target selection policy (minimal static rules; learned routing is a non-goal for now)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vyane-core = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

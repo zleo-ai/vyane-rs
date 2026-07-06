@@ -1,0 +1,30 @@
+[package]
+name = "vyane-cli"
+description = "The vyane binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "vyane"
+path = "src/main.rs"
+
+[dependencies]
+vyane-core = { workspace = true }
+vyane-config = { workspace = true }
+vyane-provider = { workspace = true }
+vyane-protocol = { workspace = true }
+vyane-harness = { workspace = true }
+vyane-kernel = { workspace = true }
+vyane-ledger = { workspace = true }
+vyane-router = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

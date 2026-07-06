@@ -1,0 +1,14 @@
+# build
+/target
+**/target
+
+# local config with real endpoints/keys — only *.example.toml is tracked
+profiles.toml
+secrets.env
+.env
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/
+*.swp

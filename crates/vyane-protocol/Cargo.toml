@@ -1,0 +1,26 @@
+[package]
+name = "vyane-protocol"
+description = "Wire-protocol chat clients: OpenAI Chat, Anthropic Messages, OpenAI Responses"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vyane-core = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }
+
+[lints]
+workspace = true

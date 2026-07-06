@@ -1,0 +1,122 @@
+# Vyane example configuration — copy to one of:
+#   ~/.config/vyane/config.toml   (user-level defaults)
+#   .vyane/config.toml            (project-level overrides)
+# and edit. Never commit a file containing real endpoints or keys; the tracked
+# copy is this *.example.toml only (see .gitignore).
+#
+# The four layers — provider / protocol / harness / model — are configured as
+# independent fields. This file never stores key material: `api_key_env` names
+# an environment variable, and Vyane reads the value from the environment (or
+# from an optional gitignored secrets file) at run time.
+#
+# NOTE: this is target-state configuration. The crates that consume it are still
+# being built; treat the shape here as the contract, not a promise that every
+# field is wired up yet.
+
+# ---------------------------------------------------------------------------
+# providers — who supplies the endpoint, key, quota and billing.
+# A provider id is an arbitrary label, not a closed set. An OpenAI-compatible
+# relay is its own provider; it is never conflated with the protocol it speaks.
+# ---------------------------------------------------------------------------
+
+[providers.openai]
+base_url      = "https://api.openai.com/v1"
+api_key_env   = "OPENAI_API_KEY"       # indirection only — value stays in env
+auth_style    = "bearer"               # bearer | x_api_key
+protocol      = "openai_chat"          # openai_chat | openai_responses | anthropic_messages
+default_model = "a-fast-openai-model"
+
+[providers.openai.extra]
+max_output_tokens = 4096
+
+[providers.anthropic]
+base_url      = "https://api.anthropic.com"
+api_key_env   = "ANTHROPIC_API_KEY"
+auth_style    = "x_api_key"
+protocol      = "anthropic_messages"
+default_model = "a-capable-anthropic-model"
+
+# An OpenAI-compatible relay: a distinct provider that happens to speak the
+# OpenAI Chat protocol. Its model ids live in *its* namespace and must never be
+# carried into a failover attempt against a different provider.
+[providers.some-relay]
+base_url      = "https://relay.example/v1"
+api_key_env   = "SOME_RELAY_API_KEY"
+auth_style    = "bearer"
+protocol      = "openai_chat"
+default_model = "relay-hosted-model"
+
+# ---------------------------------------------------------------------------
+# profiles — a named bundle binding provider + protocol + harness + model +
+# params. A profile resolves to exactly one vyane_core::BoundTarget.
+# `harness` is optional: omit it (or set harness = "none") for a direct-HTTP
+# chat target with no workspace; name a harness to wrap a coding CLI.
+# ---------------------------------------------------------------------------
+
+# Direct-HTTP chat target (no harness, no workspace capabilities).
+[profiles.review]
+provider = "anthropic"
+protocol = "anthropic_messages"
+harness  = "none"
+model    = "a-capable-anthropic-model"
+
+[profiles.review.params]
+effort = "high"
+
+# Coding-CLI harness target: Claude Code driven headless against a model.
+[profiles.builder]
+provider = "anthropic"
+protocol = "anthropic_messages"
+harness  = "claude-code"          # claude-code | codex-cli | opencode | <other>
+model    = "a-capable-anthropic-model"
+sandbox  = "write"                # read-only (default) | write | full
+
+# Codex CLI harness target.
+[profiles.codex]
+provider = "openai"
+protocol = "openai_responses"
+harness  = "codex-cli"
+model    = "a-capable-openai-model"
+sandbox  = "read-only"
+
+# ---------------------------------------------------------------------------
+# failover — an ordered chain tried left to right. Each element is resolved
+# independently and fully: either a profile name, or a "provider/model" pair.
+# A model id is only ever paired with the provider written next to it, so a
+# model can never leak across providers via failover.
+# ---------------------------------------------------------------------------
+
+[profiles.resilient-review]
+provider = "anthropic"
+protocol = "anthropic_messages"
+harness  = "none"
+model    = "a-capable-anthropic-model"
+# If the primary target fails with a failover-eligible error, try these in turn:
+failover = ["review", "some-relay/relay-hosted-model", "openai/a-fast-openai-model"]
+
+# ---------------------------------------------------------------------------
+# env injection (optional) — per-provider rules that produce the self-contained
+# child environment for harness runs. Harnesses are spawned scrubbed by default
+# (a minimal baseline of the parent env); these injected variables are what the
+# CLI actually authenticates with, so a parent session's credentials never leak
+# into the child. Values here are variable *names* to inject, mapped to the
+# provider fields Vyane fills in.
+# ---------------------------------------------------------------------------
+
+[providers.anthropic.env_inject]
+ANTHROPIC_BASE_URL  = "base_url"
+ANTHROPIC_API_KEY   = "api_key"
+ANTHROPIC_MODEL     = "model"
+
+[providers.openai.env_inject]
+OPENAI_BASE_URL     = "base_url"
+OPENAI_API_KEY      = "api_key"
+
+# ---------------------------------------------------------------------------
+# cost table (optional) — overrides for the builtin price table, in USD per
+# 1,000,000 tokens. An unknown model yields cost = None; Vyane never guesses.
+# ---------------------------------------------------------------------------
+
+[cost.models."a-capable-anthropic-model"]
+input_per_mtok  = 5.0
+output_per_mtok = 25.0

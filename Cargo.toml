@@ -1,0 +1,75 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/vyane-core",
+    "crates/vyane-config",
+    "crates/vyane-provider",
+    "crates/vyane-protocol",
+    "crates/vyane-harness",
+    "crates/vyane-kernel",
+    "crates/vyane-ledger",
+    "crates/vyane-router",
+    "crates/vyane-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zleo-ai/vyane-rs"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# intra-workspace
+vyane-core = { path = "crates/vyane-core" }
+vyane-config = { path = "crates/vyane-config" }
+vyane-provider = { path = "crates/vyane-provider" }
+vyane-protocol = { path = "crates/vyane-protocol" }
+vyane-harness = { path = "crates/vyane-harness" }
+vyane-kernel = { path = "crates/vyane-kernel" }
+vyane-ledger = { path = "crates/vyane-ledger" }
+vyane-router = { path = "crates/vyane-router" }
+
+# async runtime & io
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "io-util", "signal", "fs"] }
+tokio-util = "0.7"
+futures = "0.3"
+async-trait = "0.1"
+
+# http
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+
+# serialization & config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# errors
+thiserror = "2"
+anyhow = "1"
+
+# observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# misc
+uuid = { version = "1", features = ["v7", "serde"] }
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+fs4 = "0.13"
+
+# cli
+clap = { version = "4", features = ["derive", "env"] }
+
+# dev
+tempfile = "3"
+wiremock = "0.6"
+assert_cmd = "2"
+predicates = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
