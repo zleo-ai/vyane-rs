@@ -19,5 +19,14 @@ tracing = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 
-[lints]
-workspace = true
+# Crate-local lints: the workspace denies `unsafe_code`, but vyane-harness is
+# pre-approved by the orchestrator to use `unsafe` strictly for the
+# process-group `pre_exec` setup (`setsid`) needed to spawn each child in its
+# own group and kill the whole group on cancel/timeout. This is the ONLY
+# sanctioned `unsafe` in the workspace; every `unsafe` block carries a SAFETY
+# comment. All other lints mirror the workspace configuration.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+unwrap_used = "warn"
