@@ -42,20 +42,31 @@ pipelines since early 2026. It is being rebuilt here in the open, capability by
 capability, tracking the private system as it evolves — so the design reflects
 what actually held up in daily use, not a greenfield guess.
 
+## How it's built
+
+This repo is developed by an orchestrated fleet of AI coding agents: different
+frontier models write the code, adversarially cross-review each other's work,
+and fix what the review turns up, all under a human-owned architecture and
+integration gate. Every merge passes independent cross-model review plus the
+`cargo fmt` / `clippy` / `cargo test` gates described in
+[CONTRIBUTING.md](CONTRIBUTING.md) — no change lands on the say-so of the
+model that wrote it.
+
 ## Status
 
-**Early bootstrap. APIs are unstable and will change without notice.** Only the
-core type system is settled; everything else is scaffolding in progress.
+**v0.1 surface complete end-to-end. APIs are still unstable pre-release and
+will change without notice.** Every crate below is implemented and covered by
+tests; the CLI runs real dispatch/broadcast/failover today.
 
 | capability | crate | state |
 |------------|-------|-------|
 | core type system (four-layer model, traits, errors, env policy) | `vyane-core` | [x] |
-| config & profiles | `vyane-config` | [ ] |
-| OpenAI-Chat + Anthropic-Messages clients | `vyane-protocol` | [ ] |
-| Claude Code + Codex CLI harnesses | `vyane-harness` | [ ] |
-| dispatch / broadcast / failover kernel | `vyane-kernel` | [ ] |
-| JSONL ledger & sessions | `vyane-ledger` | [ ] |
-| CLI | `vyane-cli` | [ ] |
+| config & profiles | `vyane-config` | [x] |
+| OpenAI-Chat + Anthropic-Messages clients (Responses non-streaming) | `vyane-protocol` | [x] |
+| Claude Code + Codex CLI harnesses | `vyane-harness` | [x] |
+| dispatch / broadcast / failover kernel | `vyane-kernel` | [x] |
+| JSONL ledger & sessions | `vyane-ledger` | [x] |
+| CLI (check / dispatch / broadcast / history / sessions) | `vyane-cli` | [x] |
 | workflow engine | — | [ ] (v0.2) |
 | daemon & async tasks | — | [ ] (v0.2) |
 | MCP server | — | [ ] (v0.3) |
@@ -100,12 +111,10 @@ layer. Nine crates:
 | `vyane-router` | target selection / routing policy (grows into pluggable routing) |
 | `vyane-cli` | the assembler and entry point: wires the crates together behind a command-line UI |
 
-## Target state (not yet implemented)
+## Usage
 
-The snippets below show where this is headed. They describe the intended CLI
-and config once the checklist above is filled in — they do **not** run today.
-
-Configuration is a TOML file (`~/.config/vyane/config.toml` for user defaults,
+Configuration is a TOML file (a platform config directory for user defaults —
+e.g. `~/Library/Application Support/vyane/config.toml` on macOS — merged with
 `.vyane/config.toml` for project overrides). See
 [`profiles.example.toml`](profiles.example.toml) for the full shape; a
 provider and a profile look like:
@@ -137,6 +146,29 @@ vyane dispatch "review this diff" --target myprofile
 
 # Broadcast the same task to several target chains, concurrently.
 vyane broadcast "compare approaches" --targets a,b,c
+```
+
+Sample `vyane check` output against a config with two providers and three
+profiles (one profile's required env var deliberately left unset, to show
+what a missing-key warning looks like):
+
+```
+config files:
+  .vyane/config.toml (loaded)
+providers:
+  anthropic: anthropic_messages default_model=a-capable-anthropic-model
+  openai: openai_chat default_model=a-fast-openai-model
+profiles:
+  builder: anthropic/a-capable-anthropic-model via claude-code (anthropic_messages)
+  codex: warning: provider requires environment variable `OPENAI_API_KEY` for its API key, but it is not set
+  review: anthropic/a-capable-anthropic-model (anthropic_messages)
+harnesses:
+  claude-code: available
+  codex-cli: available
+profile environment:
+  builder: ANTHROPIC_API_KEY present
+  codex: OPENAI_API_KEY missing
+  review: ANTHROPIC_API_KEY present
 ```
 
 ## Design principles

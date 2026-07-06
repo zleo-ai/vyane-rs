@@ -35,20 +35,28 @@ owner scope**，让多用户隔离永远不需要事后改 schema。
 2026 年初起就在跑真实的多模型开发流水线。现在它在开源世界里被逐能力重建，并持续跟随私有
 系统演进——所以这里的设计反映的是日常使用中真正扛住了的东西，而不是凭空的推测。
 
+## 这个仓库是怎么写出来的
+
+这个仓库由一支被编排调度的 AI coding agent 舰队开发：不同的前沿模型负责写代码、互相对抗性
+交叉审查（adversarial cross-review）、再修复审查中发现的问题，整个过程置于人类主导的架构
+与整合关卡（integration gate）之下。每一次合并都经过独立的跨模型审查，外加
+[CONTRIBUTING.md](CONTRIBUTING.md) 里描述的 `cargo fmt` / `clippy` / `cargo test` 检查
+关卡——没有任何改动仅凭写它的那个模型自己说了算就能落地。
+
 ## 状态
 
-**早期 bootstrap。API 不稳定，会不加通知地变动。** 目前只有核心类型系统定稿，其余都是
-在建的脚手架。
+**v0.1 表层能力端到端完整。API 仍处于发布前不稳定阶段，会不加通知地变动。** 下表每一个
+crate 都已实现并有测试覆盖；CLI 今天就能跑真实的 dispatch/broadcast/failover。
 
 | 能力 | crate | 状态 |
 |------|-------|------|
 | 核心类型系统（four-layer model、traits、errors、env policy） | `vyane-core` | [x] |
-| config & profiles | `vyane-config` | [ ] |
-| OpenAI-Chat + Anthropic-Messages clients | `vyane-protocol` | [ ] |
-| Claude Code + Codex CLI harnesses | `vyane-harness` | [ ] |
-| dispatch / broadcast / failover kernel | `vyane-kernel` | [ ] |
-| JSONL ledger & sessions | `vyane-ledger` | [ ] |
-| CLI | `vyane-cli` | [ ] |
+| config & profiles | `vyane-config` | [x] |
+| OpenAI-Chat + Anthropic-Messages clients（含 Responses 非流式） | `vyane-protocol` | [x] |
+| Claude Code + Codex CLI harnesses | `vyane-harness` | [x] |
+| dispatch / broadcast / failover kernel | `vyane-kernel` | [x] |
+| JSONL ledger & sessions | `vyane-ledger` | [x] |
+| CLI（check / dispatch / broadcast / history / sessions） | `vyane-cli` | [x] |
 | workflow engine | — | [ ] (v0.2) |
 | daemon & async tasks | — | [ ] (v0.2) |
 | MCP server | — | [ ] (v0.3) |
@@ -92,13 +100,11 @@ kernel 只依赖 `vyane-core` 里的 traits 和类型；具体的 client、harne
 | `vyane-router` | target 选择 / 路由策略（后续成长为 pluggable routing） |
 | `vyane-cli` | 组装者与入口：把各 crate 接线到一个命令行 UI 背后 |
 
-## 目标形态（尚未实现）
+## 使用方法
 
-下面的片段展示方向，描述的是 checklist 填满之后**预期**的 CLI 与配置——它们**今天还不能
-运行**。
-
-配置是一个 TOML 文件（`~/.config/vyane/config.toml` 存用户默认，`.vyane/config.toml`
-存项目 override）。完整结构见 [`profiles.example.toml`](profiles.example.toml)；一个
+配置是一个 TOML 文件（用户默认存于对应平台的配置目录——macOS 上是
+`~/Library/Application Support/vyane/config.toml`——再与 `.vyane/config.toml` 的项目
+override 合并）。完整结构见 [`profiles.example.toml`](profiles.example.toml)；一个
 provider 加一个 profile 长这样：
 
 ```toml
@@ -128,6 +134,28 @@ vyane dispatch "review this diff" --target myprofile
 
 # 把同一个任务并发 broadcast 到多条 target 链。
 vyane broadcast "compare approaches" --targets a,b,c
+```
+
+下面是 `vyane check` 在一份含两个 provider、三个 profile 的配置上的真实输出样例（其中一个
+profile 所需的 env var 被故意留空，用来展示缺 key 时的告警长什么样）：
+
+```
+config files:
+  .vyane/config.toml (loaded)
+providers:
+  anthropic: anthropic_messages default_model=a-capable-anthropic-model
+  openai: openai_chat default_model=a-fast-openai-model
+profiles:
+  builder: anthropic/a-capable-anthropic-model via claude-code (anthropic_messages)
+  codex: warning: provider requires environment variable `OPENAI_API_KEY` for its API key, but it is not set
+  review: anthropic/a-capable-anthropic-model (anthropic_messages)
+harnesses:
+  claude-code: available
+  codex-cli: available
+profile environment:
+  builder: ANTHROPIC_API_KEY present
+  codex: OPENAI_API_KEY missing
+  review: ANTHROPIC_API_KEY present
 ```
 
 ## 设计原则
