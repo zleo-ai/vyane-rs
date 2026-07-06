@@ -11,8 +11,9 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use vyane_core::{AuthMaterial, AuthStyle, Endpoint, ErrorKind, ModelId, Protocol, Secret,
-                 VyaneError};
+use vyane_core::{
+    AuthMaterial, AuthStyle, Endpoint, ErrorKind, ModelId, Protocol, Secret, VyaneError,
+};
 
 /// A source of an environment variable's value at env-injection time.
 ///
@@ -158,9 +159,9 @@ impl ProviderRegistry {
     }
 
     pub fn get(&self, id: &str) -> vyane_core::Result<&Provider> {
-        self.providers.get(id).ok_or_else(|| {
-            VyaneError::new(ErrorKind::NotFound, format!("unknown provider `{id}`"))
-        })
+        self.providers
+            .get(id)
+            .ok_or_else(|| VyaneError::new(ErrorKind::NotFound, format!("unknown provider `{id}`")))
     }
 
     pub fn insert(&mut self, id: impl Into<String>, provider: Provider) {
@@ -169,19 +170,30 @@ impl ProviderRegistry {
 
     /// Merge `other` on top of `self`, per provider *and* per field: a
     /// higher-precedence table that only sets one field of an existing
-    /// provider must not clear that provider's other fields. Providers
-    /// present only in `other` are added wholesale.
-    pub fn merge_over(&mut self, other: &ProviderPatchSet) {
+    /// provider must not clear that provider's other fields. A provider
+    /// present only in `other` is added wholesale, but must supply the
+    /// required fields (`base_url`, `auth_style`, `protocol`) since there is
+    /// no existing entry to inherit them from — an incomplete brand-new
+    /// provider is a [`ErrorKind::Config`] error, not a silent no-op.
+    pub fn merge_over(&mut self, other: &ProviderPatchSet) -> vyane_core::Result<()> {
         for (id, patch) in &other.providers {
             match self.providers.get_mut(id) {
                 Some(existing) => existing.apply_patch(patch),
                 None => {
-                    if let Some(full) = patch.as_full_provider() {
-                        self.providers.insert(id.clone(), full);
-                    }
+                    let full = patch.as_full_provider().ok_or_else(|| {
+                        VyaneError::new(
+                            ErrorKind::Config,
+                            format!(
+                                "provider `{id}` is introduced here for the first time and must \
+                                 set base_url, auth_style and protocol"
+                            ),
+                        )
+                    })?;
+                    self.providers.insert(id.clone(), full);
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -337,10 +349,7 @@ mod tests {
     fn resolve_model_prefers_explicit_over_default() {
         let provider = anthropic_provider();
         let explicit = ModelId::new("explicit-model");
-        assert_eq!(
-            provider.resolve_model(Some(&explicit)).unwrap(),
-            explicit
-        );
+        assert_eq!(provider.resolve_model(Some(&explicit)).unwrap(), explicit);
         assert_eq!(
             provider.resolve_model(None).unwrap(),
             ModelId::new("a-capable-anthropic-model")
@@ -358,10 +367,9 @@ mod tests {
     #[test]
     fn env_injections_map_base_url_key_and_model() {
         let mut provider = anthropic_provider();
-        provider.env_inject.insert(
-            "ANTHROPIC_BASE_URL".to_string(),
-            EnvInjectSource::BaseUrl,
-        );
+        provider
+            .env_inject
+            .insert("ANTHROPIC_BASE_URL".to_string(), EnvInjectSource::BaseUrl);
         provider
             .env_inject
             .insert("ANTHROPIC_API_KEY".to_string(), EnvInjectSource::ApiKey);
@@ -421,7 +429,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        registry.merge_over(&patch_set);
+        registry.merge_over(&patch_set).unwrap();
 
         let merged = registry.get("anthropic").unwrap();
         assert_eq!(merged.base_url, "https://overridden.example");
@@ -446,8 +454,24 @@ mod tests {
             "new-provider".to_string(),
             ProviderPatch::from(&anthropic_provider()),
         );
-        registry.merge_over(&patch_set);
+        registry.merge_over(&patch_set).unwrap();
         assert!(registry.get("new-provider").is_ok());
+    }
+
+    #[test]
+    fn merge_over_incomplete_new_provider_errors() {
+        let mut registry = ProviderRegistry::new();
+        let mut patch_set = ProviderPatchSet::default();
+        patch_set.providers.insert(
+            "incomplete".to_string(),
+            ProviderPatch {
+                base_url: Some("https://incomplete.example".to_string()),
+                ..Default::default()
+            },
+        );
+        let err = registry.merge_over(&patch_set).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        assert!(err.message.contains("incomplete"));
     }
 
     #[test]
