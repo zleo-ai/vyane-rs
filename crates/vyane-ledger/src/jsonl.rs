@@ -13,6 +13,12 @@
 //! writer that bypassed the lock could not interleave a single line. The
 //! critical section is deliberately tight: lock → write → unlock.
 //!
+//! Durability caveat: appends are **not** fsynced. The guarantee is
+//! consistency against concurrent readers and writers, not durability across
+//! an OS crash or power loss — a record acknowledged inside the crash window
+//! may be lost with the page cache. Crash-durable accounting is a deliberate
+//! non-goal for the plain-files v0.1 backend.
+//!
 //! `query` reads the file and walks it **most-recent-first**, skipping any line
 //! that fails to parse (counted, never fatal). Reading takes no lock; if a
 //! read ever races an in-flight append it will simply treat the still-incomplete

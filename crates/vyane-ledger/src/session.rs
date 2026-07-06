@@ -6,6 +6,11 @@
 //! previous complete file or the new complete file — never a half-written one.
 //! (`rename` is atomic when source and destination share a filesystem, which is
 //! guaranteed by keeping the temp file in the same directory.)
+//!
+//! Durability caveat: neither the temp file nor the directory is fsynced
+//! before the rename, so the guarantee is reader consistency, not durability
+//! across an OS crash — the same trade-off as the JSONL ledger, and a
+//! deliberate non-goal for the plain-files v0.1 backend.
 
 use std::fs::OpenOptions;
 use std::io::Write;
