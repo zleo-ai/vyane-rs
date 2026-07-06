@@ -16,10 +16,14 @@
 //!
 //! See `docs/plan/WP-04.md` for the work-package plan.
 
+mod broadcast;
 mod digest;
+mod dispatch;
 mod executor;
 
+pub use broadcast::DEFAULT_BROADCAST_CONCURRENCY;
 pub use digest::task_digest;
+pub use dispatch::Dispatcher;
 pub use executor::{Executor, ExecutorFactory};
 
 // Re-export the cancellation primitive so callers driving the kernel use the
