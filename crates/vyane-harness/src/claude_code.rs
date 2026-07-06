@@ -234,6 +234,20 @@ impl Harness for ClaudeCodeHarness {
             Termination::Exited(code) => {
                 if code == 0 {
                     let parsed = parse_claude_json(&result.stdout);
+                    if parsed.is_error {
+                        return Err(VyaneError::new(
+                            ErrorKind::HarnessFailed,
+                            format!(
+                                "claude-code returned error envelope{}: {}",
+                                parsed
+                                    .subtype
+                                    .as_deref()
+                                    .map(|s| format!(" ({s})"))
+                                    .unwrap_or_default(),
+                                parsed.text
+                            ),
+                        ));
+                    }
                     Ok(HarnessOutcome {
                         text: parsed.text,
                         native_session_id: parsed.native_session_id,

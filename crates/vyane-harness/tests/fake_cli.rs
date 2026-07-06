@@ -244,6 +244,47 @@ async fn codex_resume_places_sandbox_before_exec_and_session_after_resume_flags(
 }
 
 #[tokio::test]
+async fn codex_resume_does_not_set_process_cwd_from_job_workdir() {
+    let dir = TempDir::new().unwrap();
+    let cwd_file = dir.path().join("cwd.txt");
+    let bin = write_script(
+        &dir,
+        "fake-codex",
+        &format!(
+            r#"#!/bin/sh
+set -eu
+pwd > {cwd_file}
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+printf '%s\n' 'codex final' > "$out"
+printf '%s\n' '{{"type":"thread.started","thread_id":"codex-thread"}}'
+"#,
+            cwd_file = shell_quote(&cwd_file),
+        ),
+    );
+
+    let mut job = base_job("continue");
+    job.resume = Some("resume-thread".into());
+    job.workdir = Some(dir.path().join("job-workdir"));
+    fs::create_dir(job.workdir.as_ref().unwrap()).unwrap();
+
+    let parent_cwd = std::env::current_dir().unwrap();
+    CodexCliHarness::with_binary(bin.to_string_lossy())
+        .run(job, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let observed = fs::read_to_string(cwd_file).unwrap();
+    assert_eq!(observed.trim(), parent_cwd.display().to_string());
+}
+
+#[tokio::test]
 async fn env_scrub_drops_parent_api_keys_and_keeps_injections() {
     let dir = TempDir::new().unwrap();
     let argv_file = dir.path().join("argv.txt");
@@ -302,6 +343,45 @@ async fn nonzero_exit_is_harness_failed() {
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::HarnessFailed);
+}
+
+#[tokio::test]
+async fn claude_exit_zero_error_envelope_is_harness_failed() {
+    let dir = TempDir::new().unwrap();
+    let bin = write_script(
+        &dir,
+        "fake-claude",
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' '{"type":"result","subtype":"error_max_turns","is_error":true,"result":"turn limit reached"}'
+exit 0
+"#,
+    );
+
+    let err = ClaudeCodeHarness::with_binary(bin.to_string_lossy())
+        .run(base_job("fail"), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::HarnessFailed);
+    assert!(err.message.contains("error_max_turns"));
+    assert!(err.message.contains("turn limit reached"));
+}
+
+#[tokio::test]
+async fn codex_missing_last_message_file_is_harness_failed() {
+    let dir = TempDir::new().unwrap();
+    let bin = write_script(
+        &dir,
+        "fake-codex",
+        "#!/bin/sh\nprintf '%s\n' '{\"type\":\"thread.started\",\"thread_id\":\"codex-thread\"}'\nexit 0\n",
+    );
+
+    let err = CodexCliHarness::with_binary(bin.to_string_lossy())
+        .run(base_job("missing last"), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::HarnessFailed);
+    assert!(err.message.contains("last-message"));
 }
 
 #[tokio::test]
@@ -369,9 +449,54 @@ async fn cancellation_kills_process_group_grandchild() {
 }
 
 #[tokio::test]
+async fn normal_exit_returns_when_grandchild_keeps_stdout_open() {
+    let _guard = KILL_TREE_TEST_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let child_pid = dir.path().join("child.pid");
+    let bin = inherited_stdout_script(&dir, &child_pid);
+
+    let started = Instant::now();
+    let outcome = ClaudeCodeHarness::with_binary(bin.to_string_lossy())
+        .run(base_job("prompt"), CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "run waited too long for inherited stdout EOF"
+    );
+    assert_eq!(outcome.text, "captured before exit");
+    assert_pid_dead(&child_pid);
+}
+
+#[tokio::test]
 #[ignore = "requires a real Claude Code install and configured auth"]
 async fn real_claude_smoke_available_only() {
     assert!(ClaudeCodeHarness::new().available().await);
+}
+
+#[tokio::test]
+#[ignore = "requires a real Claude Code install and configured auth; verifies read-only headless behavior"]
+async fn real_claude_smoke_read_only_headless() {
+    let mut job = base_job("Reply with exactly: vyane-read-only-ok");
+    job.sandbox = Sandbox::ReadOnly;
+    let outcome = ClaudeCodeHarness::new()
+        .run(job, CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(outcome.text.contains("vyane-read-only-ok"));
+}
+
+#[tokio::test]
+#[ignore = "requires a real Claude Code install and configured auth; verifies full sandbox opt-in behavior"]
+async fn real_claude_smoke_full_headless() {
+    let mut job = base_job("Reply with exactly: vyane-full-ok");
+    job.sandbox = Sandbox::Full;
+    let outcome = ClaudeCodeHarness::new()
+        .run(job, CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(outcome.text.contains("vyane-full-ok"));
 }
 
 #[tokio::test]
@@ -399,6 +524,23 @@ wait
         child_pid = shell_quote(child_pid),
     );
     write_script(dir, "kill-tree-cli", &body)
+}
+
+fn inherited_stdout_script(dir: &TempDir, child_pid: &Path) -> PathBuf {
+    let body = format!(
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' '{{"result":"captured before exit"}}'
+(
+  trap '' TERM
+  sleep 60
+) &
+printf '%s\n' "$!" > {child_pid}
+exit 0
+"#,
+        child_pid = shell_quote(child_pid),
+    );
+    write_script(dir, "inherited-stdout-cli", &body)
 }
 
 fn assert_heartbeat_stops(path: &Path) {

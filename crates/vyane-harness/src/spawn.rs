@@ -7,6 +7,13 @@
 //! process group** via `setsid(2)` in a `pre_exec` hook, and cancellation kills
 //! the whole group by negative PID (`kill(-pgid, …)`).
 //!
+//! Grandchildren can also inherit stdout/stderr pipe write-ends. If the direct
+//! CLI child exits while a helper keeps those descriptors open, EOF never
+//! arrives on the pipes. Normal exits therefore wait only a bounded post-exit
+//! grace for drains to finish; after that we SIGKILL the process group and
+//! return the output captured so far. Bytes still buffered in a killed helper
+//! process may be lost.
+//!
 //! The child environment is materialized **exclusively** through
 //! [`vyane_core::EnvPolicy::build`] from a snapshot of the parent environment —
 //! never the raw parent env. That is the entire point of the scrub: the calling
@@ -14,10 +21,13 @@
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use vyane_core::EnvPolicy;
 use vyane_core::error::{ErrorKind, Result, VyaneError};
@@ -45,6 +55,10 @@ pub(crate) struct RunResult {
 
 /// Grace period between `SIGTERM` and the escalating `SIGKILL` on the group.
 const KILL_GRACE: Duration = Duration::from_secs(3);
+/// Maximum time to wait for stdout/stderr EOF after the direct child exits.
+const POST_EXIT_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+type SharedOutput = Arc<Mutex<Vec<u8>>>;
 
 /// Snapshot the current process environment once, so a run's child environment
 /// is a pure function of `(policy, snapshot)` and therefore reproducible.
@@ -121,35 +135,17 @@ pub(crate) async fn run_capture(
 
     // Take the pipes up front so we can drain them concurrently with the wait —
     // otherwise a child that fills its stdout pipe buffer blocks forever.
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-
-    let drain_out = async {
-        let mut buf = String::new();
-        if let Some(mut p) = stdout_pipe.take() {
-            let _ = p.read_to_string(&mut buf).await;
-        }
-        buf
-    };
-    let drain_err = async {
-        let mut buf = String::new();
-        if let Some(mut p) = stderr_pipe.take() {
-            let _ = p.read_to_string(&mut buf).await;
-        }
-        buf
-    };
+    let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::new()));
+    let drain_out = spawn_drain(child.stdout.take(), Arc::clone(&stdout_buf));
+    let drain_err = spawn_drain(child.stderr.take(), Arc::clone(&stderr_buf));
 
     // Race: normal exit vs. cancellation vs. timeout. `tokio::select!` polls the
-    // wait and the drains together so pipe backpressure can't deadlock the wait.
-    let (termination, stdout, stderr) = {
-        let wait_all = async {
-            // Drain both pipes and wait for exit concurrently.
-            let (status, out, err) = tokio::join!(child.wait(), drain_out, drain_err);
-            (status, out, err)
-        };
-
-        tokio::pin!(wait_all);
-
+    // wait while background tasks drain pipes so pipe backpressure can't
+    // deadlock the child.
+    let termination = {
+        let wait_child = child.wait();
+        tokio::pin!(wait_child);
         // A timeout of None means "run until completion".
         let timeout_fut = async {
             match timeout {
@@ -161,25 +157,26 @@ pub(crate) async fn run_capture(
         tokio::pin!(timeout_fut);
 
         tokio::select! {
-            res = &mut wait_all => {
-                let (status, out, err) = res;
-                let code = status
-                    .map(exit_code_of)
-                    .unwrap_or_else(|_| -1);
-                (Termination::Exited(code), out, err)
+            status = &mut wait_child => {
+                let code = status.map(exit_code_of).unwrap_or(-1);
+                Termination::Exited(code)
             }
             _ = cancel.cancelled() => {
                 kill_group(pgid).await;
-                let (_status, out, err) = (&mut wait_all).await;
-                (Termination::Cancelled, out, err)
+                let _ = (&mut wait_child).await;
+                Termination::Cancelled
             }
             _ = &mut timeout_fut => {
                 kill_group(pgid).await;
-                let (_status, out, err) = (&mut wait_all).await;
-                (Termination::TimedOut, out, err)
+                let _ = (&mut wait_child).await;
+                Termination::TimedOut
             }
         }
     };
+
+    wait_for_post_exit_drains(drain_out, drain_err, pgid).await;
+    let stdout = captured_string(&stdout_buf).await;
+    let stderr = captured_string(&stderr_buf).await;
 
     Ok(RunResult {
         termination,
@@ -187,6 +184,64 @@ pub(crate) async fn run_capture(
         stderr,
         duration: started.elapsed(),
     })
+}
+
+fn spawn_drain<R>(reader: Option<R>, output: SharedOutput) -> JoinHandle<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let Some(mut reader) = reader else { return };
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match reader.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => output.lock().await.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+async fn wait_for_post_exit_drains(
+    mut drain_out: JoinHandle<()>,
+    mut drain_err: JoinHandle<()>,
+    pgid: Option<i32>,
+) {
+    let mut out_done = false;
+    let mut err_done = false;
+    let grace = tokio::time::sleep(POST_EXIT_DRAIN_GRACE);
+    tokio::pin!(grace);
+
+    loop {
+        if out_done && err_done {
+            return;
+        }
+
+        tokio::select! {
+            _ = &mut drain_out, if !out_done => {
+                out_done = true;
+            }
+            _ = &mut drain_err, if !err_done => {
+                err_done = true;
+            }
+            _ = &mut grace => {
+                sigkill_group(pgid);
+                if !out_done {
+                    drain_out.abort();
+                }
+                if !err_done {
+                    drain_err.abort();
+                }
+                return;
+            }
+        }
+    }
+}
+
+async fn captured_string(output: &SharedOutput) -> String {
+    let bytes = output.lock().await.clone();
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Extract a faithful exit code from an `ExitStatus`. On Unix a process killed
@@ -249,6 +304,15 @@ async fn kill_group(pgid: Option<i32>) {
 
 #[cfg(not(unix))]
 async fn kill_group(_pgid: Option<i32>) {}
+
+#[cfg(unix)]
+fn sigkill_group(pgid: Option<i32>) {
+    let Some(pgid) = pgid else { return };
+    signal_group(pgid, SIGKILL);
+}
+
+#[cfg(not(unix))]
+fn sigkill_group(_pgid: Option<i32>) {}
 
 // --- Minimal libc FFI, scoped to this module ---------------------------------
 //

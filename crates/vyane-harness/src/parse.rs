@@ -20,6 +20,8 @@ pub(crate) struct Parsed {
     pub text: String,
     pub native_session_id: Option<String>,
     pub usage: Option<Usage>,
+    pub is_error: bool,
+    pub subtype: Option<String>,
 }
 
 fn as_u64(v: Option<&Value>) -> u64 {
@@ -36,11 +38,12 @@ fn nonempty_string(v: Option<&Value>) -> Option<String> {
 /// Parse Claude Code `--output-format json` output.
 ///
 /// The document is a single JSON object. We read `result` as the answer,
-/// `session_id` as the native id (for `--resume`), and assemble [`Usage`] from
-/// the `usage` block. Claude reports cache-creation and cache-read input tokens
-/// separately; `cached_input_tokens` captures the cache-read portion, while
-/// `input_tokens` is the sum of direct + cache-creation + cache-read (so token
-/// accounting isn't undercounted).
+/// `session_id` as the native id (for `--resume`), `is_error` / `subtype` as
+/// the envelope status, and assemble [`Usage`] from the `usage` block. Claude
+/// reports cache-creation and cache-read input tokens separately;
+/// `cached_input_tokens` captures the cache-read portion, while `input_tokens`
+/// is the sum of direct + cache-creation + cache-read (so token accounting
+/// isn't undercounted).
 ///
 /// If the payload isn't the expected object (e.g. an error dump), `text` falls
 /// back to the raw trimmed output so the caller still surfaces *something*, and
@@ -73,6 +76,11 @@ pub(crate) fn parse_claude_json(stdout: &str) -> Parsed {
         .to_string();
 
     let native_session_id = nonempty_string(obj.get("session_id"));
+    let is_error = obj
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let subtype = nonempty_string(obj.get("subtype"));
 
     let usage = obj.get("usage").and_then(Value::as_object).map(|u| {
         let direct = as_u64(u.get("input_tokens"));
@@ -95,6 +103,8 @@ pub(crate) fn parse_claude_json(stdout: &str) -> Parsed {
         text,
         native_session_id,
         usage,
+        is_error,
+        subtype,
     }
 }
 
@@ -144,6 +154,7 @@ pub(crate) fn parse_codex_events(stdout: &str) -> Parsed {
         text: String::new(),
         native_session_id,
         usage,
+        ..Default::default()
     }
 }
 
@@ -191,6 +202,7 @@ pub(crate) fn combine_codex(last_message: &str, events: Parsed) -> Parsed {
         text: last_message.trim().to_string(),
         native_session_id: events.native_session_id,
         usage: events.usage,
+        ..Default::default()
     }
 }
 
@@ -212,6 +224,8 @@ mod tests {
         let p = parse_claude_json(out);
         assert_eq!(p.text, "the answer is 42");
         assert_eq!(p.native_session_id.as_deref(), Some("abc-123"));
+        assert!(!p.is_error);
+        assert_eq!(p.subtype.as_deref(), Some("success"));
         let u = p.usage.unwrap();
         assert_eq!(u.input_tokens, 18); // 10 + 5 + 3
         assert_eq!(u.output_tokens, 7);
@@ -233,6 +247,18 @@ mod tests {
         assert_eq!(p.text, "hi");
         assert_eq!(p.native_session_id.as_deref(), Some("s1"));
         assert!(p.usage.is_none());
+    }
+
+    #[test]
+    fn claude_json_extracts_error_envelope_status() {
+        let out = r#"{
+            "type":"result","subtype":"error_max_turns","is_error":true,
+            "result":"turn limit reached"
+        }"#;
+        let p = parse_claude_json(out);
+        assert_eq!(p.text, "turn limit reached");
+        assert!(p.is_error);
+        assert_eq!(p.subtype.as_deref(), Some("error_max_turns"));
     }
 
     #[test]

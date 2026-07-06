@@ -25,6 +25,9 @@
 //! * `--sandbox` is placed before `exec`: `codex exec resume` does not accept
 //!   the flag, while the top-level `codex --sandbox ... exec resume ...` form
 //!   is accepted and preserves the sandbox contract on resumed runs.
+//! * Resumed runs omit both `-C <workdir>` and process cwd override: Codex
+//!   reuses the cwd recorded in the native session, and applying a second cwd
+//!   at process spawn would make argv and runtime behavior disagree.
 //! * `--ask-for-approval never` keeps non-interactive runs headless without
 //!   granting more filesystem access than the selected sandbox.
 //! * Custom endpoint: defined **inline** via `-c model_providers.<name>.*`
@@ -253,15 +256,19 @@ impl Harness for CodexCliHarness {
         let last_message_path = tmp.path().join("last-message.txt");
         let last_message_str = last_message_path.to_string_lossy().to_string();
 
-        // Protocol comes from the endpoint's context; when unknown (native auth,
-        // no endpoint) default to OpenAI Responses, Codex's native wire format.
-        let protocol = job
-            .endpoint
-            .as_ref()
-            .map(|_| Protocol::OpenaiResponses)
-            .unwrap_or(Protocol::OpenaiResponses);
+        // See docs/plan/feedback-wp03.md: until core carries protocol into
+        // HarnessJob, Codex custom endpoints are limited to Responses wire API.
+        let protocol = Protocol::OpenaiResponses;
 
         let argv = build_argv(&job, &last_message_str, protocol);
+        let resuming = job.resume.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
+        // On resume, Codex restores the native session cwd. Do not also set the
+        // process cwd from the new job, or runtime cwd may diverge from argv.
+        let process_cwd = if resuming {
+            None
+        } else {
+            job.workdir.as_deref()
+        };
 
         // Materialize the child env: scrubbed baseline + policy inject + the API
         // key injection. Injection wins; the parent env is never inherited.
@@ -278,15 +285,7 @@ impl Harness for CodexCliHarness {
             "spawning codex-cli harness"
         );
 
-        let result = run_capture(
-            &self.bin,
-            &argv,
-            job.workdir.as_deref(),
-            &env,
-            &cancel,
-            job.timeout,
-        )
-        .await?;
+        let result = run_capture(&self.bin, &argv, process_cwd, &env, &cancel, job.timeout).await?;
 
         match result.termination {
             Termination::Cancelled => Err(VyaneError::cancelled()),
@@ -297,11 +296,21 @@ impl Harness for CodexCliHarness {
             Termination::Exited(code) => {
                 if code == 0 {
                     let events = parse_codex_events(&result.stdout);
-                    // Read the authoritative final answer from the -o file; fall
-                    // back to empty if the CLI produced none.
+                    // Read the authoritative final answer from the -o file.
+                    // A zero exit without it is a harness failure, not an empty
+                    // successful answer.
                     let last = tokio::fs::read_to_string(last_message_path.as_path())
                         .await
-                        .unwrap_or_default();
+                        .map_err(|e| {
+                            VyaneError::with_source(
+                                ErrorKind::HarnessFailed,
+                                format!(
+                                    "codex-cli exited successfully but expected last-message file `{}` was not readable: {e}",
+                                    last_message_path.display()
+                                ),
+                                e,
+                            )
+                        })?;
                     let parsed = combine_codex(&last, events);
                     Ok(HarnessOutcome {
                         text: parsed.text,
