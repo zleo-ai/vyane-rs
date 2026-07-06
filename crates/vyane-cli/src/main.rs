@@ -1,23 +1,25 @@
-//! The `vyane` binary — scaffold only, see `docs/ROADMAP.md`.
+//! The `vyane` binary: the assembler that wires config, protocol clients,
+//! harnesses, kernel orchestration and local persistence behind a CLI.
 
-use clap::{Parser, Subcommand};
+mod app;
+mod cli;
+mod command;
+mod factory;
+mod harness;
+mod output;
 
-#[derive(Parser)]
-#[command(name = "vyane", version, about = "Multi-model orchestration kernel")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
+use std::process::ExitCode;
 
-#[derive(Subcommand)]
-enum Command {
-    /// Sanity-check the current install.
-    Check,
-}
+use clap::Parser;
 
-fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
-        Command::Check => println!("scaffold — see docs/ROADMAP.md"),
+#[tokio::main]
+async fn main() -> ExitCode {
+    app::init_tracing();
+    match command::run(cli::Cli::parse()).await {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::from(1)
+        }
     }
-    Ok(())
 }
