@@ -3,12 +3,26 @@
 //!
 //! - parse → in-memory model → serialize → parse yields an equal model, for
 //!   providers and profiles.
-//! - a resolved `Endpoint`/`AuthMaterial` cannot be `serde`-serialized (the
-//!   `Secret` type forbids it), guarding the "no key material persisted"
-//!   invariant.
+//! - a resolved `Endpoint`/`AuthMaterial`/`Secret` can never be
+//!   `serde`-serialized (the `Secret` type forbids it), guarding the "no key
+//!   material persisted" invariant. This is enforced as a *compile-time* gate
+//!   via the `static_assertions` macros below: if any of those types ever gains
+//!   a `Serialize` impl, this file stops compiling. A runtime test cannot prove
+//!   a negative ("this value is not serializable"), but the type system can.
 
 use vyane_config::{ConfigLayers, RawRoot, ResolvedConfig};
 use vyane_provider::Provider;
+
+// Compile-time proof that no secret-bearing type implements `serde::Serialize`,
+// so an accidental `serde_json::to_string(&secret)` (or `&AuthMaterial`, or
+// `&Endpoint`) fails to *compile* rather than leaking key material into a
+// persisted record at runtime. The macros exploit coherence: a `Serialize`
+// impl would make the trait reference ambiguous, so adding it breaks the
+// build. This is the real gate behind the "secrets never serialize"
+// acceptance item — not a runtime test asserting its own non-serialization.
+static_assertions::assert_not_impl_any!(vyane_core::Secret: serde::Serialize);
+static_assertions::assert_not_impl_any!(vyane_core::AuthMaterial: serde::Serialize);
+static_assertions::assert_not_impl_any!(vyane_core::Endpoint: serde::Serialize);
 
 const SAMPLE_TOML: &str = r#"
     [providers.anthropic]
@@ -80,21 +94,14 @@ fn resolved_provider_roundtrips_after_merge() {
     assert_eq!(resolved_provider, reparsed);
 }
 
-/// A resolved `Endpoint`/`AuthMaterial` must not be `serde::Serialize` at
-/// all, so an accidental `serde_json::to_string(&endpoint)` call fails to
-/// *compile* rather than leaking a secret at runtime. This is a
-/// compile-time guarantee: if this file compiles, the endpoint from
-/// resolution genuinely cannot be serialized, because `vyane_core::Secret`
-/// does not implement `Serialize` (see `crates/vyane-core/src/target.rs`).
-/// There is deliberately no `#[test]` body here to "prove a negative" at
-/// runtime — the proof is that this module compiles without ever calling
-/// `Serialize` on an `Endpoint`, and that attempting to would not compile
-/// (left as a documented invariant rather than a `trybuild`-style
-/// compile-fail test, since `trybuild` is not in the workspace's allowed
-/// dependency set).
+/// The resolved endpoint still carries the secret value (readable only via the
+/// sanctioned `Secret::expose`) and redacts it in `Debug`. This pins the
+/// runtime half of secret handling; the compile-time guarantee that the secret
+/// can never be *serialized* is the `static_assertions` gate at the top of this
+/// file, not this test.
 #[test]
 #[allow(clippy::unwrap_used)]
-fn resolved_endpoint_type_carries_no_serialize_impl() {
+fn resolved_endpoint_carries_secret_with_redacted_debug() {
     let root: RawRoot = toml::from_str(SAMPLE_TOML).unwrap();
     let mut layers = ConfigLayers::new();
     layers.merge(&root).unwrap();
@@ -110,9 +117,9 @@ fn resolved_endpoint_type_carries_no_serialize_impl() {
     let auth = endpoint.auth.expect("x_api_key provider has auth material");
     // `Secret::expose` is the one sanctioned way to read the value back out;
     // `Debug` is redacted (see vyane-core's own `secret_debug_is_redacted`
-    // test), and there is no `Serialize` impl to call at all — the type
-    // system, not a runtime check, is what forbids leaking this into a
-    // persisted record.
+    // test). The fact that this secret can never reach a persisted record is
+    // enforced by the absence of a `Serialize` impl — pinned at compile time
+    // above, not here.
     assert_eq!(auth.secret.expose(), "sk-test-secret");
     assert_eq!(format!("{:?}", auth.secret), "Secret(***)");
 }
