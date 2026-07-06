@@ -101,6 +101,25 @@ fn ledger_records(data_dir: &Path) -> Vec<Value> {
 }
 
 #[tokio::test]
+async fn dispatch_unknown_target_exits_with_config_code() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let config = write_config(&config_dir, &config_for(&server));
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .arg("--config")
+        .arg(config)
+        .arg("dispatch")
+        .arg("hello")
+        .arg("--target")
+        .arg("no-such-profile")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("config error"));
+}
+
+#[tokio::test]
 async fn check_with_temp_config_lists_profile() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");

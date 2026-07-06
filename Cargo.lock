@@ -1900,7 +1900,6 @@ dependencies = [
  "async-trait",
  "clap",
  "dirs",
- "futures",
  "predicates",
  "serde",
  "serde_json",
@@ -1914,8 +1913,6 @@ dependencies = [
  "vyane-kernel",
  "vyane-ledger",
  "vyane-protocol",
- "vyane-provider",
- "vyane-router",
  "wiremock",
 ]
 

@@ -103,9 +103,18 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
 }
 
 async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
-    let loaded = load_config(config_path.as_deref())?;
+    // Config-phase failures exit 2 (mirroring `check`), so wrappers can tell
+    // "fix your config" apart from "the run failed" (exit 1).
+    let phase = load_config(config_path.as_deref())
+        .and_then(|loaded| resolve_target_chain(&loaded, &args.target).map(|c| (loaded, c)));
+    let (loaded, chain) = match phase {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("config error: {error:#}");
+            return Ok(ExitCode::from(2));
+        }
+    };
     let json = args.json;
-    let chain = resolve_target_chain(&loaded, &args.target)?;
     let task = task_from_dispatch(args)?;
     let runtime = Runtime::new(loaded.config, StoragePaths::resolve()?)?;
     let cancel = cancellation_token();
@@ -130,12 +139,22 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
 }
 
 async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Result<ExitCode> {
-    let loaded = load_config(config_path.as_deref())?;
-    let targets = split_targets(&args.targets)?;
-    let mut chains = Vec::with_capacity(targets.len());
-    for target in &targets {
-        chains.push(resolve_target_chain(&loaded, target)?);
-    }
+    // Same config-phase exit-code contract as `run_dispatch`.
+    let phase = load_config(config_path.as_deref()).and_then(|loaded| {
+        let targets = split_targets(&args.targets)?;
+        let mut chains = Vec::with_capacity(targets.len());
+        for target in &targets {
+            chains.push(resolve_target_chain(&loaded, target)?);
+        }
+        Ok((loaded, targets, chains))
+    });
+    let (loaded, targets, chains) = match phase {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("config error: {error:#}");
+            return Ok(ExitCode::from(2));
+        }
+    };
     let json = args.json;
     let task = task_from_broadcast(args)?;
     let runtime = Runtime::new(loaded.config, StoragePaths::resolve()?)?;
