@@ -116,7 +116,7 @@ impl ResolvedConfig {
         let provider = self.providers.get(provider_id)?;
 
         let protocol = patch.protocol.unwrap_or(provider.protocol);
-        let harness = parse_harness(patch.harness.as_deref());
+        let harness = parse_harness(patch.harness.as_deref(), profile_name)?;
         // Sandbox is validated here so profile authors get immediate
         // feedback on typos, but it is not carried on `Target`/`BoundTarget`
         // — it belongs to `TaskSpec` at dispatch time (`vyane_core::task`).
@@ -198,11 +198,27 @@ fn real_env_lookup(name: &str) -> Option<String> {
 /// Parse a `[profiles.<name>].harness` value into `Option<HarnessKind>`.
 /// `"none"` or the field being absent both mean direct HTTP with no
 /// harness; any other string names a harness kind.
-fn parse_harness(raw: Option<&str>) -> Option<HarnessKind> {
-    match raw {
-        None | Some("none") => None,
-        Some(other) => Some(HarnessKind::from(other)),
+///
+/// Harness kinds are matched case-sensitively against their lowercase
+/// canonical forms (see `vyane_core::HarnessKind`). A capitalized value such
+/// as `harness = "None"` would otherwise fall through to `Other("None")` and
+/// silently route to a `CliWrap` of a harness that does not exist, so any
+/// non-lowercase value is rejected as a config error rather than misread.
+fn parse_harness(raw: Option<&str>, profile_name: &str) -> Result<Option<HarnessKind>> {
+    let raw = match raw {
+        None | Some("none") => return Ok(None),
+        Some(other) => other,
+    };
+    if raw.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err(VyaneError::new(
+            ErrorKind::Config,
+            format!(
+                "profile `{profile_name}` has `harness = \"{raw}\"`: harness values must be \
+                 lowercase (use `claude-code`, `codex-cli`, `opencode`, or `none` for direct HTTP)"
+            ),
+        ));
     }
+    Ok(Some(HarnessKind::from(raw)))
 }
 
 fn transport_for(harness: &Option<HarnessKind>) -> AdapterTransport {
@@ -225,7 +241,7 @@ fn gen_params_from_patch(patch: &ProfilePatch) -> GenParams {
 mod tests {
     use super::*;
     use crate::model::RawRoot;
-    use vyane_core::{AdapterTransport, Effort, ProviderId};
+    use vyane_core::{AdapterTransport, Effort, Protocol, ProviderId};
 
     fn config_from_toml(src: &str) -> ResolvedConfig {
         let root: RawRoot = toml::from_str(src).unwrap();
@@ -359,6 +375,7 @@ mod tests {
             chain[0].target.model,
             ModelId::new("a-capable-anthropic-model")
         );
+        assert_eq!(chain[0].target.protocol, Protocol::AnthropicMessages);
 
         // Leg 2 names the "review" profile again — same provider/model.
         assert_eq!(chain[1].target.provider, ProviderId::new("anthropic"));
@@ -366,14 +383,17 @@ mod tests {
             chain[1].target.model,
             ModelId::new("a-capable-anthropic-model")
         );
+        assert_eq!(chain[1].target.protocol, Protocol::AnthropicMessages);
 
         // Leg 3 pins some-relay/relay-hosted-model directly.
         assert_eq!(chain[2].target.provider, ProviderId::new("some-relay"));
         assert_eq!(chain[2].target.model, ModelId::new("relay-hosted-model"));
+        assert_eq!(chain[2].target.protocol, Protocol::OpenaiChat);
 
         // Leg 4 pins openai/a-fast-openai-model directly.
         assert_eq!(chain[3].target.provider, ProviderId::new("openai"));
         assert_eq!(chain[3].target.model, ModelId::new("a-fast-openai-model"));
+        assert_eq!(chain[3].target.protocol, Protocol::OpenaiChat);
 
         // Model-leak assertion: every element's model is paired only with
         // its own provider — no element carries another element's model.
@@ -416,5 +436,88 @@ mod tests {
         let config = config_from_toml(BASE_TOML);
         let bound = config.resolve_profile_with("review", &fake_env).unwrap();
         assert!(config.env_policy_for(&bound).unwrap().is_none());
+    }
+
+    #[test]
+    fn capitalized_harness_value_is_rejected_not_silently_other() {
+        // `harness = "None"` must surface as a clear config error, not silently
+        // become `Other("None")` routed to a CliWrap of a non-existent harness.
+        let toml_src = r#"
+            [providers.anthropic]
+            base_url      = "https://api.anthropic.example"
+            api_key_env   = "VYANE_RESOLVE_TEST_ANTHROPIC_KEY"
+            auth_style    = "x_api_key"
+            protocol      = "anthropic_messages"
+            default_model = "a-capable-anthropic-model"
+
+            [profiles.capital-harness]
+            provider = "anthropic"
+            protocol = "anthropic_messages"
+            harness  = "None"
+            model    = "a-capable-anthropic-model"
+        "#;
+        let config = config_from_toml(toml_src);
+        let err = config
+            .resolve_profile_with("capital-harness", &fake_env)
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        assert!(
+            err.message.contains("None"),
+            "error must name the offending harness value: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn profile_referencing_a_missing_provider_is_not_found() {
+        let toml_src = r#"
+            [providers.anthropic]
+            base_url      = "https://api.anthropic.example"
+            api_key_env   = "VYANE_RESOLVE_TEST_ANTHROPIC_KEY"
+            auth_style    = "x_api_key"
+            protocol      = "anthropic_messages"
+            default_model = "a-capable-anthropic-model"
+
+            [profiles.dangling]
+            provider = "no-such-provider"
+            protocol = "anthropic_messages"
+            harness  = "none"
+            model    = "a-capable-anthropic-model"
+        "#;
+        let config = config_from_toml(toml_src);
+        let err = config
+            .resolve_profile_with("dangling", &fake_env)
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotFound);
+        assert!(
+            err.message.contains("no-such-provider"),
+            "error must name the missing provider: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn profile_omitting_protocol_falls_back_to_provider_protocol() {
+        // The profile below sets no `protocol`; resolution must take it from
+        // the provider's declared `protocol = "openai_chat"`.
+        let toml_src = r#"
+            [providers.openai]
+            base_url      = "https://api.openai.example/v1"
+            api_key_env   = "VYANE_RESOLVE_TEST_OPENAI_KEY"
+            auth_style    = "bearer"
+            protocol      = "openai_chat"
+            default_model = "a-fast-openai-model"
+
+            [profiles.no-protocol]
+            provider = "openai"
+            harness  = "none"
+            model    = "a-fast-openai-model"
+        "#;
+        let config = config_from_toml(toml_src);
+        let bound = config
+            .resolve_profile_with("no-protocol", &fake_env)
+            .unwrap();
+        assert_eq!(bound.target.protocol, Protocol::OpenaiChat);
+        assert_eq!(bound.transport, AdapterTransport::DirectHttp);
     }
 }

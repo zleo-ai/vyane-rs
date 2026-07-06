@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use vyane_core::{Effort, ModelId, Protocol, Sandbox};
+use vyane_core::{Effort, ErrorKind, ModelId, Protocol, Sandbox, VyaneError};
 use vyane_provider::ProviderPatch;
 
 /// One parsed config layer: `[providers.*]` and `[profiles.*]` tables.
@@ -45,8 +45,9 @@ pub struct GenParamsPatch {
 impl GenParamsPatch {
     /// Apply this patch's `Some` fields onto `base`, leaving fields it left
     /// unset untouched. `extra` entries are merged key-by-key rather than
-    /// wholesale-replaced, matching the "override per field" precedence
-    /// rule applied everywhere else in this crate.
+    /// wholesale-replaced — the same sub-map merge `Provider::apply_patch` uses
+    /// for its `extra`, matching the "override per field" precedence rule
+    /// applied to every field throughout this crate.
     pub fn apply_over(&self, base: &mut vyane_core::GenParams) {
         if let Some(v) = self.temperature {
             base.temperature = Some(v);
@@ -82,15 +83,26 @@ impl RawFailoverElement {
     /// and are never required to avoid `/`, so this is a syntax convention
     /// documented in `profiles.example.toml`, not a strict grammar — a
     /// string containing a `/` is always treated as `provider/model`.
-    pub fn parse(raw: &str) -> Self {
+    ///
+    /// A `/` with an empty provider (`"/gpt"`) or empty model (`"openai/"`)
+    /// is a clear syntax error rather than a bare profile name: the author
+    /// clearly intended a `provider/model` pair but left one side blank.
+    pub fn parse(raw: &str) -> vyane_core::Result<Self> {
         match raw.split_once('/') {
+            None => Ok(RawFailoverElement::ProfileName(raw.to_string())),
             Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
-                RawFailoverElement::ProviderModel {
+                Ok(RawFailoverElement::ProviderModel {
                     provider: provider.to_string(),
                     model: ModelId::new(model),
-                }
+                })
             }
-            _ => RawFailoverElement::ProfileName(raw.to_string()),
+            Some((provider, model)) => Err(VyaneError::new(
+                ErrorKind::Config,
+                format!(
+                    "invalid failover element `{raw}`: a `provider/model` pair needs a non-empty \
+                     provider and model (got provider=`{provider}`, model=`{model}`)"
+                ),
+            )),
         }
     }
 }
@@ -110,7 +122,7 @@ impl Serialize for RawFailoverElement {
 impl<'de> Deserialize<'de> for RawFailoverElement {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(d)?;
-        Ok(RawFailoverElement::parse(&raw))
+        RawFailoverElement::parse(&raw).map_err(<D::Error as serde::de::Error>::custom)
     }
 }
 
@@ -191,7 +203,7 @@ mod tests {
 
     #[test]
     fn failover_element_parses_provider_model_pair() {
-        let parsed = RawFailoverElement::parse("openai/gpt-fast");
+        let parsed = RawFailoverElement::parse("openai/gpt-fast").unwrap();
         assert_eq!(
             parsed,
             RawFailoverElement::ProviderModel {
@@ -203,10 +215,35 @@ mod tests {
 
     #[test]
     fn failover_element_parses_bare_profile_name() {
-        let parsed = RawFailoverElement::parse("review");
+        let parsed = RawFailoverElement::parse("review").unwrap();
         assert_eq!(
             parsed,
             RawFailoverElement::ProfileName("review".to_string())
+        );
+    }
+
+    #[test]
+    fn failover_element_empty_model_is_a_syntax_error() {
+        // `"openai/"` must surface as a clear syntax error rather than fall
+        // through to a (nonsensical) bare profile name.
+        let err = RawFailoverElement::parse("openai/").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        assert!(
+            err.message.contains("openai/"),
+            "error must name the offending element: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn failover_element_empty_provider_is_a_syntax_error() {
+        // `"/gpt"` likewise must not become a bare profile name.
+        let err = RawFailoverElement::parse("/gpt").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        assert!(
+            err.message.contains("/gpt"),
+            "error must name the offending element: {}",
+            err.message
         );
     }
 

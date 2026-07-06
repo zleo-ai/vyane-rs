@@ -276,8 +276,14 @@ impl Provider {
         if patch.default_model.is_some() {
             self.default_model = patch.default_model.clone();
         }
+        // `extra` is merged key-by-key rather than wholesale-replaced, so a
+        // higher-precedence layer setting one passthrough key does not drop the
+        // provider's other `extra` entries — consistent with `GenParamsPatch`'s
+        // `extra` merge and the crate-wide "override per field" precedence rule.
         if let Some(v) = &patch.extra {
-            self.extra = v.clone();
+            for (k, val) in v {
+                self.extra.insert(k.clone(), val.clone());
+            }
         }
         if let Some(v) = &patch.env_inject {
             self.env_inject = v.clone();
@@ -443,6 +449,47 @@ mod tests {
         assert_eq!(
             merged.api_key_env.as_deref(),
             Some("VYANE_TEST_ANTHROPIC_KEY")
+        );
+    }
+
+    #[test]
+    fn merge_over_extra_patch_merges_per_key_and_keeps_env_inject() {
+        let mut registry = ProviderRegistry::new();
+        let mut base = anthropic_provider();
+        base.extra
+            .insert("max_output_tokens".to_string(), serde_json::json!(4096));
+        base.extra
+            .insert("stream".to_string(), serde_json::json!(true));
+        base.env_inject
+            .insert("ANTHROPIC_API_KEY".to_string(), EnvInjectSource::ApiKey);
+        registry.insert("anthropic", base);
+
+        // A higher layer sets one new `extra` key without restating the others.
+        let mut extra = serde_json::Map::new();
+        extra.insert("top_k".to_string(), serde_json::json!(40));
+        let mut patch_set = ProviderPatchSet::default();
+        patch_set.providers.insert(
+            "anthropic".to_string(),
+            ProviderPatch {
+                extra: Some(extra),
+                ..Default::default()
+            },
+        );
+        registry.merge_over(&patch_set).unwrap();
+
+        let merged = registry.get("anthropic").unwrap();
+        // The two pre-existing `extra` keys survive the partial override...
+        assert_eq!(
+            merged.extra.get("max_output_tokens"),
+            Some(&serde_json::json!(4096))
+        );
+        assert_eq!(merged.extra.get("stream"), Some(&serde_json::json!(true)));
+        // ...and the new key is merged in alongside them, not replacing the table.
+        assert_eq!(merged.extra.get("top_k"), Some(&serde_json::json!(40)));
+        // The untouched `env_inject` table also survives.
+        assert_eq!(
+            merged.env_inject.get("ANTHROPIC_API_KEY"),
+            Some(&EnvInjectSource::ApiKey)
         );
     }
 
