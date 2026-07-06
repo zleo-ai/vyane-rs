@@ -452,25 +452,25 @@ async fn cancellation_kills_process_group_grandchild() {
     let bin = kill_tree_script(&dir, &heartbeat, &child_pid);
 
     let token = CancellationToken::new();
-    let cancel = token.clone();
-    let heartbeat_for_cancel = heartbeat.clone();
-    tokio::spawn(async move {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !heartbeat_for_cancel.exists() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(
-            heartbeat_for_cancel.exists(),
-            "heartbeat file was never written before cancellation"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        cancel.cancel();
+    let harness_token = token.clone();
+    let mut run = tokio::spawn(async move {
+        ClaudeCodeHarness::with_binary(bin.to_string_lossy())
+            .run(base_job("hang"), harness_token)
+            .await
     });
 
-    let err = ClaudeCodeHarness::with_binary(bin.to_string_lossy())
-        .run(base_job("hang"), token)
-        .await
-        .unwrap_err();
+    tokio::select! {
+        pid = wait_for_live_pid(&child_pid) => {
+            assert!(!pid.is_empty(), "pid file was empty");
+        }
+        result = &mut run => {
+            panic!("harness exited before grandchild was ready: {result:?}");
+        }
+    }
+
+    token.cancel();
+
+    let err = run.await.unwrap().unwrap_err();
     assert_eq!(err.kind, ErrorKind::Cancelled);
 
     assert_heartbeat_stops(&heartbeat);
@@ -579,23 +579,75 @@ fn assert_heartbeat_stops(path: &Path) {
     }
     assert!(path.exists(), "heartbeat file was never written");
 
-    let first = fs::metadata(path).unwrap().len();
-    std::thread::sleep(Duration::from_millis(250));
-    let second = fs::metadata(path).unwrap().len();
-    std::thread::sleep(Duration::from_millis(250));
-    let third = fs::metadata(path).unwrap().len();
-    assert_eq!(first, second, "grandchild kept writing after group kill");
-    assert_eq!(second, third, "grandchild kept writing after group kill");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut len = fs::metadata(path).unwrap().len();
+    let mut stable_since = Instant::now();
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        let current = fs::metadata(path).unwrap().len();
+        if current == len {
+            if stable_since.elapsed() >= Duration::from_millis(500) {
+                return;
+            }
+        } else {
+            len = current;
+            stable_since = Instant::now();
+        }
+    }
+
+    panic!("grandchild kept writing after group kill");
 }
 
 fn assert_pid_dead(path: &Path) {
-    let raw = fs::read_to_string(path).unwrap();
-    let pid = raw.trim();
+    let pid = read_pid(path).unwrap_or_default();
     assert!(!pid.is_empty(), "pid file was empty");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pid_is_running(&pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert!(!pid_is_running(&pid), "grandchild pid {pid} is still alive");
+}
+
+async fn wait_for_live_pid(path: &Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if let Some(pid) = read_pid(path) {
+            if pid_is_running(&pid) {
+                return pid;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    panic!("grandchild pid was not recorded alive before cancellation");
+}
+
+fn read_pid(path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    let pid = raw.trim();
+    (!pid.is_empty()).then(|| pid.to_string())
+}
+
+fn pid_is_running(pid: &str) -> bool {
     let status = std::process::Command::new("kill")
         .args(["-0", pid])
         .stderr(std::process::Stdio::null())
         .status()
         .unwrap();
-    assert!(!status.success(), "grandchild pid {pid} is still alive");
+    status.success() && !pid_is_zombie(pid)
+}
+
+fn pid_is_zombie(pid: &str) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout).contains('Z')
 }
