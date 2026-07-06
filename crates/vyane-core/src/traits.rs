@@ -51,6 +51,8 @@ pub struct HarnessJob {
     /// The task / prompt text (already assembled by the kernel).
     pub prompt: String,
     pub model: ModelId,
+    /// wire protocol of the endpoint, letting harnesses pick a matching wire_api for custom endpoints
+    pub protocol: Protocol,
     /// Endpoint override. `None` = the harness authenticates natively.
     pub endpoint: Option<Endpoint>,
     pub params: GenParams,

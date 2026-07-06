@@ -423,6 +423,7 @@ impl Dispatcher {
                 let job = HarnessJob {
                     prompt,
                     model: bound.target.model.clone(),
+                    protocol: bound.target.protocol,
                     endpoint: bound.endpoint.clone(),
                     params: bound.params.clone(),
                     workdir: task.workdir.clone(),

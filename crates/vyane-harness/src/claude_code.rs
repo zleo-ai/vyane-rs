@@ -302,6 +302,7 @@ mod tests {
         HarnessJob {
             prompt: prompt.into(),
             model: ModelId::new(""),
+            protocol: vyane_core::target::Protocol::AnthropicMessages,
             endpoint: None,
             params: GenParams::default(),
             workdir: None,

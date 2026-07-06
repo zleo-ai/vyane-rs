@@ -99,15 +99,18 @@ fn sandbox_value(sandbox: Sandbox) -> &'static str {
 /// Map a [`Protocol`] to the Codex `wire_api` value for a custom provider.
 /// Codex speaks either the OpenAI Chat Completions API (`chat`) or the OpenAI
 /// Responses API (`responses`).
-fn wire_api_for(protocol: Protocol) -> Option<&'static str> {
+fn wire_api_for(protocol: Protocol) -> Result<&'static str> {
     match protocol {
-        Protocol::OpenaiChat => Some("chat"),
-        Protocol::OpenaiResponses => Some("responses"),
-        // Codex does not speak Anthropic Messages; a config that pairs it with a
-        // Codex harness is a config error, surfaced upstream. Any other/unknown
-        // protocol likewise emits no wire_api (Codex falls back to its default).
-        Protocol::AnthropicMessages => None,
-        _ => None,
+        Protocol::OpenaiChat => Ok("chat"),
+        Protocol::OpenaiResponses => Ok("responses"),
+        Protocol::AnthropicMessages => Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            "transport/protocol/harness combo unsupported: cli_wrap / anthropic_messages / codex-cli",
+        )),
+        _ => Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            format!("unsupported codex-cli wire protocol {protocol}"),
+        )),
     }
 }
 
@@ -117,13 +120,18 @@ fn wire_api_for(protocol: Protocol) -> Option<&'static str> {
 ///
 /// `protocol` decides the `wire_api`. TOML values are JSON-quoted so a value
 /// containing a quote can't break the `-c` token.
-pub(crate) fn provider_config_args(endpoint: Option<&Endpoint>, protocol: Protocol) -> Vec<String> {
+pub(crate) fn provider_config_args(
+    endpoint: Option<&Endpoint>,
+    protocol: Protocol,
+) -> Result<Vec<String>> {
     let mut out = Vec::new();
+    let wire = wire_api_for(protocol)?;
+
     let Some(ep) = endpoint else {
-        return out;
+        return Ok(out);
     };
     if ep.base_url.is_empty() {
-        return out;
+        return Ok(out);
     }
 
     let mut kv = |key: &str, value: &str| {
@@ -141,9 +149,7 @@ pub(crate) fn provider_config_args(endpoint: Option<&Endpoint>, protocol: Protoc
         &format!("model_providers.{PROVIDER_NAME}.base_url"),
         &ep.base_url,
     );
-    if let Some(wire) = wire_api_for(protocol) {
-        kv(&format!("model_providers.{PROVIDER_NAME}.wire_api"), wire);
-    }
+    kv(&format!("model_providers.{PROVIDER_NAME}.wire_api"), wire);
     // Tell Codex which env var holds the API key (we inject its value below).
     if ep.auth.is_some() {
         kv(
@@ -154,7 +160,7 @@ pub(crate) fn provider_config_args(endpoint: Option<&Endpoint>, protocol: Protoc
     // Select the provider we just defined.
     kv("model_provider", PROVIDER_NAME);
 
-    out
+    Ok(out)
 }
 
 /// Construct the full Codex argv (excluding the program name) for a job.
@@ -167,7 +173,7 @@ pub(crate) fn build_argv(
     job: &HarnessJob,
     last_message_path: &str,
     protocol: Protocol,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let mut args: Vec<String> = Vec::new();
 
     let resuming = job.resume.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
@@ -187,7 +193,7 @@ pub(crate) fn build_argv(
     args.push("--sandbox".into());
     args.push(sandbox_value(job.sandbox).into());
 
-    args.extend(provider_config_args(job.endpoint.as_ref(), protocol));
+    args.extend(provider_config_args(job.endpoint.as_ref(), protocol)?);
 
     args.push("exec".into());
     if resuming {
@@ -223,7 +229,7 @@ pub(crate) fn build_argv(
     args.push("--".into());
     args.push(job.prompt.clone());
 
-    args
+    Ok(args)
 }
 
 /// Env-var injections for Codex from `job.endpoint`: only the API key value,
@@ -256,11 +262,7 @@ impl Harness for CodexCliHarness {
         let last_message_path = tmp.path().join("last-message.txt");
         let last_message_str = last_message_path.to_string_lossy().to_string();
 
-        // See docs/plan/feedback-wp03.md: until core carries protocol into
-        // HarnessJob, Codex custom endpoints are limited to Responses wire API.
-        let protocol = Protocol::OpenaiResponses;
-
-        let argv = build_argv(&job, &last_message_str, protocol);
+        let argv = build_argv(&job, &last_message_str, job.protocol)?;
         let resuming = job.resume.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
         // On resume, Codex restores the native session cwd. Do not also set the
         // process cwd from the new job, or runtime cwd may diverge from argv.
@@ -426,6 +428,7 @@ mod tests {
         HarnessJob {
             prompt: prompt.into(),
             model: ModelId::new(""),
+            protocol: Protocol::OpenaiResponses,
             endpoint: None,
             params: GenParams::default(),
             workdir: None,
@@ -439,7 +442,7 @@ mod tests {
     #[test]
     fn argv_fresh_read_only() {
         let j = job("hi");
-        let a = build_argv(&j, "/tmp/lm.txt", Protocol::OpenaiResponses);
+        let a = build_argv(&j, "/tmp/lm.txt", Protocol::OpenaiResponses).unwrap();
         assert_eq!(a[0], "--ask-for-approval");
         assert_eq!(a[1], "never");
         assert!(a.windows(2).any(|w| w == ["--sandbox", "read-only"]));
@@ -458,11 +461,11 @@ mod tests {
     fn argv_sandbox_write_and_full_map_correctly() {
         let mut j = job("x");
         j.sandbox = Sandbox::Write;
-        let a = build_argv(&j, "/tmp/lm", Protocol::OpenaiResponses);
+        let a = build_argv(&j, "/tmp/lm", Protocol::OpenaiResponses).unwrap();
         assert!(a.windows(2).any(|w| w == ["--sandbox", "workspace-write"]));
 
         j.sandbox = Sandbox::Full;
-        let a = build_argv(&j, "/tmp/lm", Protocol::OpenaiResponses);
+        let a = build_argv(&j, "/tmp/lm", Protocol::OpenaiResponses).unwrap();
         assert!(
             a.windows(2)
                 .any(|w| w == ["--sandbox", "danger-full-access"])
@@ -473,7 +476,7 @@ mod tests {
     fn argv_resume_puts_session_id_after_resume() {
         let mut j = job("continue");
         j.resume = Some("thread-77".into());
-        let a = build_argv(&j, "/tmp/lm", Protocol::OpenaiResponses);
+        let a = build_argv(&j, "/tmp/lm", Protocol::OpenaiResponses).unwrap();
         let resume_pos = a.iter().position(|x| x == "resume").unwrap();
         assert_eq!(a[resume_pos - 1], "exec");
         assert!(a.windows(2).any(|w| w == ["--sandbox", "read-only"]));
@@ -490,7 +493,7 @@ mod tests {
         let mut j = job("build");
         j.model = ModelId::new("gpt-5.5");
         j.workdir = Some("/tmp/proj".into());
-        let a = build_argv(&j, "/tmp/lm", Protocol::OpenaiResponses);
+        let a = build_argv(&j, "/tmp/lm", Protocol::OpenaiResponses).unwrap();
         assert!(a.windows(2).any(|w| w == ["-C", "/tmp/proj"]));
         assert!(a.windows(2).any(|w| w == ["--model", "gpt-5.5"]));
     }
@@ -504,7 +507,7 @@ mod tests {
                 secret: Secret::new("k"),
             }),
         };
-        let args = provider_config_args(Some(&ep), Protocol::OpenaiResponses);
+        let args = provider_config_args(Some(&ep), Protocol::OpenaiResponses).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains(r#"model_providers.vyane.base_url="https://relay.example/v1""#));
         assert!(joined.contains(r#"model_providers.vyane.wire_api="responses""#));
@@ -518,7 +521,7 @@ mod tests {
             base_url: "https://relay.example/v1".into(),
             auth: None,
         };
-        let args = provider_config_args(Some(&ep), Protocol::OpenaiChat);
+        let args = provider_config_args(Some(&ep), Protocol::OpenaiChat).unwrap();
         assert!(
             args.join(" ")
                 .contains(r#"model_providers.vyane.wire_api="chat""#)
@@ -529,7 +532,18 @@ mod tests {
 
     #[test]
     fn provider_config_none_endpoint_is_empty() {
-        assert!(provider_config_args(None, Protocol::OpenaiResponses).is_empty());
+        assert!(
+            provider_config_args(None, Protocol::OpenaiResponses)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn provider_config_anthropic_protocol_is_unsupported() {
+        let err = provider_config_args(None, Protocol::AnthropicMessages).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Unsupported);
+        assert!(err.message.contains("anthropic_messages / codex-cli"));
     }
 
     #[test]
