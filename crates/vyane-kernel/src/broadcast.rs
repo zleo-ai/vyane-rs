@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use futures::future::join_all;
 use tokio::sync::Semaphore;
-use vyane_core::{BoundTarget, CancellationToken, Result, RunRecord, TaskSpec};
+use vyane_core::{BoundTarget, CancellationToken, Result, TaskSpec};
 
-use crate::dispatch::Dispatcher;
+use crate::dispatch::{DispatchOutcome, Dispatcher};
 
 /// Default cap on chains dispatched concurrently by [`Dispatcher::broadcast`].
 ///
@@ -33,7 +33,7 @@ impl Dispatcher {
         task: &TaskSpec,
         chains: Vec<Vec<BoundTarget>>,
         cancel: CancellationToken,
-    ) -> Vec<Result<RunRecord>> {
+    ) -> Vec<Result<DispatchOutcome>> {
         let width = NonZeroUsize::new(DEFAULT_BROADCAST_CONCURRENCY).unwrap_or(NonZeroUsize::MIN);
         self.broadcast_with_concurrency(task, chains, cancel, width)
             .await
@@ -54,7 +54,7 @@ impl Dispatcher {
         chains: Vec<Vec<BoundTarget>>,
         cancel: CancellationToken,
         concurrency: NonZeroUsize,
-    ) -> Vec<Result<RunRecord>> {
+    ) -> Vec<Result<DispatchOutcome>> {
         let permits = Arc::new(Semaphore::new(concurrency.get()));
 
         // Build one future per chain. `join_all` yields results positionally
