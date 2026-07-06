@@ -11,9 +11,13 @@ rust-version.workspace = true
 vyane-core = { workspace = true }
 vyane-provider = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
