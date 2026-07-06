@@ -52,6 +52,14 @@ pub struct Dispatcher {
     owner: String,
 }
 
+/// Result of a completed dispatch: the persisted run record plus successful
+/// answer text when the run produced one.
+#[derive(Debug, Clone)]
+pub struct DispatchOutcome {
+    pub record: RunRecord,
+    pub output: Option<String>,
+}
+
 /// The successful product of a single attempt, before it becomes an `Attempt`.
 struct AttemptOk {
     text: String,
@@ -131,7 +139,7 @@ impl Dispatcher {
         task: &TaskSpec,
         chain: Vec<BoundTarget>,
         cancel: CancellationToken,
-    ) -> Result<RunRecord> {
+    ) -> Result<DispatchOutcome> {
         if chain.is_empty() {
             return Err(VyaneError::config(
                 "dispatch received an empty target chain; resolution must supply at least one target",
@@ -247,17 +255,19 @@ impl Dispatcher {
 
         let finished_at = Utc::now();
 
-        let (status, session_id_from_run, transcript_delta, output_chars, error_msg) =
+        let (status, session_id_from_run, transcript_delta, output, output_chars, error_msg) =
             match &final_outcome {
                 Ok(ok) => (
                     RunStatus::Success,
                     ok.native_session_id.clone(),
                     ok.transcript_delta.clone(),
+                    Some(ok.text.clone()),
                     Some(ok.text.chars().count() as u64),
                     None,
                 ),
                 Err(err) => (
                     status_for_error(err.kind),
+                    None,
                     None,
                     None,
                     None,
@@ -328,7 +338,7 @@ impl Dispatcher {
             }
         }
 
-        Ok(record)
+        Ok(DispatchOutcome { record, output })
     }
 
     /// Load the session continuity context for `task`, if it names a session.
@@ -423,6 +433,7 @@ impl Dispatcher {
                 let job = HarnessJob {
                     prompt,
                     model: bound.target.model.clone(),
+                    protocol: bound.target.protocol,
                     endpoint: bound.endpoint.clone(),
                     params: bound.params.clone(),
                     workdir: task.workdir.clone(),

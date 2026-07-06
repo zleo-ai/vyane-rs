@@ -12,6 +12,10 @@ Chat-Completions-only Codex endpoints, `HarnessJob` should carry the resolved
 `Protocol` (or `Endpoint` should carry a wire API hint) so the harness can emit
 the correct per-run `-c model_providers.<name>.wire_api=...` override.
 
+2026-07-07: CLOSED by adding `HarnessJob::protocol` and routing Codex custom
+endpoints to `chat` or `responses`; `anthropic_messages` with `codex-cli` now
+returns `Unsupported`.
+
 ## Known version-sensitive behaviors (needs real-CLI verification)
 
 Claude Code sandbox behavior is version-sensitive and must be checked against

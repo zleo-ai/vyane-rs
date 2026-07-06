@@ -551,18 +551,19 @@ async fn rate_limited_first_target_fails_over_to_second() {
         .await
         .unwrap();
 
-    assert_eq!(rec.status, RunStatus::Success);
-    assert_eq!(rec.attempts.len(), 2, "both targets attempted");
+    assert_eq!(rec.record.status, RunStatus::Success);
+    assert_eq!(rec.record.attempts.len(), 2, "both targets attempted");
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             failed_over: true,
             kind: ErrorKind::RateLimited,
             ..
         }
     ));
-    assert!(matches!(rec.attempts[1].outcome, AttemptOutcome::Ok));
-    assert_eq!(rec.target.model.as_str(), "model-b");
+    assert!(matches!(rec.record.attempts[1].outcome, AttemptOutcome::Ok));
+    assert_eq!(rec.record.target.model.as_str(), "model-b");
+    assert_eq!(rec.output.as_deref(), Some("from b"));
     assert_eq!(ledger.append_count(), 1);
 }
 
@@ -585,17 +586,22 @@ async fn config_first_target_aborts_without_second_attempt() {
         .await
         .unwrap();
 
-    assert_eq!(rec.status, RunStatus::Error);
-    assert_eq!(rec.attempts.len(), 1, "config error must not fail over");
+    assert_eq!(rec.record.status, RunStatus::Error);
+    assert_eq!(
+        rec.record.attempts.len(),
+        1,
+        "config error must not fail over"
+    );
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             failed_over: false,
             kind: ErrorKind::Config,
             ..
         }
     ));
-    assert_eq!(rec.target.model.as_str(), "model-a");
+    assert_eq!(rec.record.target.model.as_str(), "model-a");
+    assert_eq!(rec.output, None);
     assert_eq!(ledger.append_count(), 1);
 }
 
@@ -620,10 +626,10 @@ async fn cancelled_first_target_aborts_without_second_attempt() {
         .await
         .unwrap();
 
-    assert_eq!(rec.status, RunStatus::Cancelled);
-    assert_eq!(rec.attempts.len(), 1);
+    assert_eq!(rec.record.status, RunStatus::Cancelled);
+    assert_eq!(rec.record.attempts.len(), 1);
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             failed_over: false,
             kind: ErrorKind::Cancelled,
@@ -672,15 +678,15 @@ async fn failover_table_is_mirrored_for_every_error_kind() {
         // The kernel must defer to core, never re-derive: compare against the
         // authoritative predicate directly.
         if kind.failover_eligible() {
-            assert_eq!(rec.attempts.len(), 2, "{kind:?} should fail over");
+            assert_eq!(rec.record.attempts.len(), 2, "{kind:?} should fail over");
             assert_eq!(
-                rec.status,
+                rec.record.status,
                 RunStatus::Success,
                 "{kind:?} recovers on second"
             );
             assert!(
                 matches!(
-                    rec.attempts[0].outcome,
+                    rec.record.attempts[0].outcome,
                     AttemptOutcome::Err {
                         failed_over: true,
                         ..
@@ -689,15 +695,15 @@ async fn failover_table_is_mirrored_for_every_error_kind() {
                 "{kind:?} first attempt should be marked failed_over"
             );
         } else {
-            assert_eq!(rec.attempts.len(), 1, "{kind:?} should abort");
+            assert_eq!(rec.record.attempts.len(), 1, "{kind:?} should abort");
             assert_ne!(
-                rec.status,
+                rec.record.status,
                 RunStatus::Success,
                 "{kind:?} must not reach second"
             );
             assert!(
                 matches!(
-                    rec.attempts[0].outcome,
+                    rec.record.attempts[0].outcome,
                     AttemptOutcome::Err {
                         failed_over: false,
                         ..
@@ -735,15 +741,21 @@ async fn model_ids_never_leak_across_provider_boundary() {
         .await
         .unwrap();
 
-    assert_eq!(rec.attempts.len(), 2);
+    assert_eq!(rec.record.attempts.len(), 2);
     // Each attempt's model is paired only with its own provider — no id crossed
     // the boundary.
-    assert_eq!(rec.attempts[0].target.provider.as_str(), "provider-one");
-    assert_eq!(rec.attempts[0].target.model.as_str(), "model-alpha");
-    assert_eq!(rec.attempts[1].target.provider.as_str(), "provider-two");
-    assert_eq!(rec.attempts[1].target.model.as_str(), "model-beta");
+    assert_eq!(
+        rec.record.attempts[0].target.provider.as_str(),
+        "provider-one"
+    );
+    assert_eq!(rec.record.attempts[0].target.model.as_str(), "model-alpha");
+    assert_eq!(
+        rec.record.attempts[1].target.provider.as_str(),
+        "provider-two"
+    );
+    assert_eq!(rec.record.attempts[1].target.model.as_str(), "model-beta");
     // The specific wrong pairings must never appear.
-    for a in &rec.attempts {
+    for a in &rec.record.attempts {
         let paired_alpha_with_two = a.target.provider.as_str() == "provider-two"
             && a.target.model.as_str() == "model-alpha";
         let paired_beta_with_one =
@@ -780,22 +792,22 @@ async fn fail_over_then_succeed_records_full_ordered_trail() {
         .await
         .unwrap();
 
-    assert_eq!(rec.attempts.len(), 2);
+    assert_eq!(rec.record.attempts.len(), 2);
     // Order preserved: first the failing attempt, then the succeeding one.
-    assert_eq!(rec.attempts[0].target.model.as_str(), "m1");
+    assert_eq!(rec.record.attempts[0].target.model.as_str(), "m1");
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             failed_over: true,
             ..
         }
     ));
-    assert_eq!(rec.attempts[1].target.model.as_str(), "m2");
-    assert!(matches!(rec.attempts[1].outcome, AttemptOutcome::Ok));
+    assert_eq!(rec.record.attempts[1].target.model.as_str(), "m2");
+    assert!(matches!(rec.record.attempts[1].outcome, AttemptOutcome::Ok));
     // The record's headline target is the last (successful) attempt's.
-    assert_eq!(rec.target, second.target);
-    assert_eq!(rec.transport, second.transport);
-    assert_eq!(rec.status, RunStatus::Success);
+    assert_eq!(rec.record.target, second.target);
+    assert_eq!(rec.record.transport, second.transport);
+    assert_eq!(rec.record.status, RunStatus::Success);
 }
 
 // ===========================================================================
@@ -833,7 +845,7 @@ async fn broadcast_preserves_input_order_with_partial_failure() {
         let rec = res.as_ref().expect("each chain produces its own RunRecord");
         // Position i must correspond to input chain i (its unique model).
         assert_eq!(
-            rec.target.model.as_str(),
+            rec.record.target.model.as_str(),
             format!("chain{i}"),
             "order preserved at {i}"
         );
@@ -842,7 +854,9 @@ async fn broadcast_preserves_input_order_with_partial_failure() {
         } else {
             RunStatus::Error
         };
-        assert_eq!(rec.status, expected_status, "chain {i} status");
+        assert_eq!(rec.record.status, expected_status, "chain {i} status");
+        let expected_output = expected_ok[i].then(|| format!("r{i}"));
+        assert_eq!(rec.output, expected_output, "chain {i} output");
     }
     // Each chain wrote exactly one record.
     assert_eq!(ledger.append_count(), 5);
@@ -883,8 +897,8 @@ async fn broadcast_bounded_concurrency_still_orders_and_completes_all() {
     assert_eq!(results.len(), n);
     for (i, res) in results.iter().enumerate() {
         let rec = res.as_ref().unwrap();
-        assert_eq!(rec.target.model.as_str(), format!("c{i}"));
-        assert_eq!(rec.status, RunStatus::Success);
+        assert_eq!(rec.record.target.model.as_str(), format!("c{i}"));
+        assert_eq!(rec.record.status, RunStatus::Success);
     }
     assert_eq!(ledger.append_count(), n);
 }
@@ -917,10 +931,10 @@ async fn cancelling_mid_attempt_yields_cancelled_and_still_appends() {
     cancel.cancel();
 
     let rec = handle.await.unwrap().unwrap();
-    assert_eq!(rec.status, RunStatus::Cancelled);
-    assert_eq!(rec.attempts.len(), 1);
+    assert_eq!(rec.record.status, RunStatus::Cancelled);
+    assert_eq!(rec.record.attempts.len(), 1);
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             kind: ErrorKind::Cancelled,
             failed_over: false,
@@ -948,7 +962,7 @@ async fn already_cancelled_token_produces_cancelled_run() {
         .await
         .unwrap();
 
-    assert_eq!(rec.status, RunStatus::Cancelled);
+    assert_eq!(rec.record.status, RunStatus::Cancelled);
     assert_eq!(ledger.append_count(), 1);
 }
 
@@ -980,33 +994,33 @@ async fn all_targets_fail_still_appends_exactly_one_error_record() {
         .await
         .unwrap();
 
-    assert_eq!(rec.status, RunStatus::Error);
-    assert_eq!(rec.attempts.len(), 3, "every target attempted");
+    assert_eq!(rec.record.status, RunStatus::Error);
+    assert_eq!(rec.record.attempts.len(), 3, "every target attempted");
     // The first two failed over; the last did not (chain exhausted).
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             failed_over: true,
             ..
         }
     ));
     assert!(matches!(
-        rec.attempts[1].outcome,
+        rec.record.attempts[1].outcome,
         AttemptOutcome::Err {
             failed_over: true,
             ..
         }
     ));
     assert!(matches!(
-        rec.attempts[2].outcome,
+        rec.record.attempts[2].outcome,
         AttemptOutcome::Err {
             failed_over: false,
             ..
         }
     ));
     // Headline target is the last attempted one.
-    assert_eq!(rec.target.model.as_str(), "m3");
-    assert!(rec.error.is_some(), "terminal error message present");
+    assert_eq!(rec.record.target.model.as_str(), "m3");
+    assert!(rec.record.error.is_some(), "terminal error message present");
     assert_eq!(
         ledger.append_count(),
         1,
@@ -1037,15 +1051,19 @@ async fn successful_run_records_digest_usage_and_appends() {
         .await
         .unwrap();
 
-    assert_eq!(rec.status, RunStatus::Success);
+    assert_eq!(rec.record.status, RunStatus::Success);
     // Digest is SHA-256("greet") first 16 hex chars — deterministic, not body.
-    assert_eq!(rec.task_digest, vyane_kernel::task_digest("greet"));
-    assert_ne!(rec.task_digest, "greet");
-    assert_eq!(rec.task_digest.len(), 16);
-    assert_eq!(rec.usage, Some(usage));
-    assert_eq!(rec.output_chars, Some("hello there".chars().count() as u64));
-    assert_eq!(rec.owner, "local");
-    assert_eq!(rec.attempts.len(), 1);
+    assert_eq!(rec.record.task_digest, vyane_kernel::task_digest("greet"));
+    assert_ne!(rec.record.task_digest, "greet");
+    assert_eq!(rec.record.task_digest.len(), 16);
+    assert_eq!(rec.record.usage, Some(usage));
+    assert_eq!(
+        rec.record.output_chars,
+        Some("hello there".chars().count() as u64)
+    );
+    assert_eq!(rec.output.as_deref(), Some("hello there"));
+    assert_eq!(rec.record.owner, "local");
+    assert_eq!(rec.record.attempts.len(), 1);
     assert_eq!(ledger.append_count(), 1, "success is recorded too");
 }
 
@@ -1076,7 +1094,7 @@ async fn winning_attempt_usage_is_folded_in_via_usage_add() {
         .await
         .unwrap();
 
-    let got = rec.usage.expect("winning attempt usage present");
+    let got = rec.record.usage.expect("winning attempt usage present");
     assert_eq!(got.input_tokens, 5);
     assert_eq!(got.output_tokens, 2);
     assert_eq!(got.reasoning_tokens, None);
@@ -1098,7 +1116,7 @@ async fn attempt_without_reported_usage_leaves_record_usage_none() {
         .dispatch(&task, vec![http_target("p", "m")], CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(rec.usage, None);
+    assert_eq!(rec.record.usage, None);
 }
 
 #[tokio::test]
@@ -1121,9 +1139,10 @@ async fn harness_run_updates_session_native_id_and_run_count() {
         .await
         .unwrap();
 
-    assert_eq!(rec.status, RunStatus::Success);
-    assert_eq!(rec.transport, AdapterTransport::CliWrap);
-    assert_eq!(rec.session_id.as_deref(), Some("sess-1"));
+    assert_eq!(rec.record.status, RunStatus::Success);
+    assert_eq!(rec.record.transport, AdapterTransport::CliWrap);
+    assert_eq!(rec.record.session_id.as_deref(), Some("sess-1"));
+    assert_eq!(rec.output.as_deref(), Some("agent answer"));
 
     // Session was created and updated with the harness native id + run_count.
     let saved = sessions.get("sess-1").expect("session persisted");
@@ -1171,7 +1190,7 @@ async fn no_session_ref_means_no_session_write() {
         .await
         .unwrap();
 
-    assert_eq!(rec.session_id, None);
+    assert_eq!(rec.record.session_id, None);
     assert!(
         sessions.list(None).await.unwrap().is_empty(),
         "no session record written"
@@ -1197,17 +1216,17 @@ async fn factory_build_error_is_treated_as_failover_eligible_attempt() {
         .await
         .unwrap();
 
-    assert_eq!(rec.attempts.len(), 2);
+    assert_eq!(rec.record.attempts.len(), 2);
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             kind: ErrorKind::SpawnFailed,
             failed_over: true,
             ..
         }
     ));
-    assert_eq!(rec.status, RunStatus::Success);
-    assert_eq!(rec.target.model.as_str(), "m2");
+    assert_eq!(rec.record.status, RunStatus::Success);
+    assert_eq!(rec.record.target.model.as_str(), "m2");
 }
 
 #[tokio::test]
@@ -1225,9 +1244,12 @@ async fn labels_and_preview_are_copied_onto_the_record() {
         .await
         .unwrap();
 
-    assert_eq!(rec.labels.get("ticket").map(String::as_str), Some("EOS-4"));
     assert_eq!(
-        rec.task_preview.as_deref(),
+        rec.record.labels.get("ticket").map(String::as_str),
+        Some("EOS-4")
+    );
+    assert_eq!(
+        rec.record.task_preview.as_deref(),
         Some("a rather long prompt body for preview checking")
     );
 }
@@ -1288,11 +1310,11 @@ async fn broadcast_returns_input_order_despite_out_of_order_completion() {
     for (i, res) in results.iter().enumerate() {
         let rec = res.as_ref().expect("each chain produced a record");
         assert_eq!(
-            rec.target.model.as_str(),
+            rec.record.target.model.as_str(),
             format!("c{i}"),
             "position {i} must map to input chain {i} regardless of finish order"
         );
-        assert_eq!(rec.status, RunStatus::Success);
+        assert_eq!(rec.record.status, RunStatus::Success);
     }
 }
 
@@ -1330,7 +1352,7 @@ async fn broadcast_semaphore_bounds_active_dispatches() {
 
     assert_eq!(results.len(), n);
     for res in &results {
-        assert_eq!(res.as_ref().unwrap().status, RunStatus::Success);
+        assert_eq!(res.as_ref().unwrap().record.status, RunStatus::Success);
     }
     let peak = probe.max_concurrent();
     assert!(
@@ -1363,10 +1385,11 @@ async fn attempt_timeout_fires_on_the_tokio_clock() {
         .await
         .unwrap();
 
-    assert_eq!(rec.status, RunStatus::Timeout);
-    assert_eq!(rec.attempts.len(), 1);
+    assert_eq!(rec.record.status, RunStatus::Timeout);
+    assert_eq!(rec.output, None);
+    assert_eq!(rec.record.attempts.len(), 1);
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             kind: ErrorKind::Timeout,
             ..
@@ -1397,17 +1420,17 @@ async fn timeout_is_failover_eligible_and_recovers_on_next_target() {
         .await
         .unwrap();
 
-    assert_eq!(rec.status, RunStatus::Success);
-    assert_eq!(rec.attempts.len(), 2);
+    assert_eq!(rec.record.status, RunStatus::Success);
+    assert_eq!(rec.record.attempts.len(), 2);
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             kind: ErrorKind::Timeout,
             failed_over: true,
             ..
         }
     ));
-    assert_eq!(rec.target.model.as_str(), "fast");
+    assert_eq!(rec.record.target.model.as_str(), "fast");
 }
 
 // ===========================================================================
@@ -1436,7 +1459,7 @@ async fn harness_resume_passes_native_session_id_not_logical_id() {
         .dispatch(&task, chain, CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(rec.status, RunStatus::Success);
+    assert_eq!(rec.record.status, RunStatus::Success);
 
     let jobs = probe.harness_jobs();
     assert_eq!(jobs.len(), 1, "exactly one harness attempt");
@@ -1510,7 +1533,7 @@ async fn direct_chat_replays_transcript_then_current_user_message() {
         .dispatch(&task, chain, CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(rec.status, RunStatus::Success);
+    assert_eq!(rec.record.status, RunStatus::Success);
 
     let reqs = probe.chat_requests();
     assert_eq!(reqs.len(), 1);
@@ -1658,7 +1681,7 @@ async fn failed_chat_run_does_not_grow_transcript() {
         .dispatch(&task, chain, CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(rec.status, RunStatus::Error);
+    assert_eq!(rec.record.status, RunStatus::Error);
 
     let saved = sessions.get("no-grow-on-fail").unwrap();
     assert_eq!(
@@ -1734,10 +1757,14 @@ async fn pre_cancelled_dispatch_never_touches_the_factory() {
         .await
         .unwrap();
 
-    assert_eq!(rec.status, RunStatus::Cancelled);
-    assert_eq!(rec.attempts.len(), 1, "one recorded (cancelled) attempt");
+    assert_eq!(rec.record.status, RunStatus::Cancelled);
+    assert_eq!(
+        rec.record.attempts.len(),
+        1,
+        "one recorded (cancelled) attempt"
+    );
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             kind: ErrorKind::Cancelled,
             failed_over: false,
@@ -1779,14 +1806,14 @@ async fn cancellation_between_attempts_stops_before_next_factory_make() {
     let chain = vec![http_target("p1", "first"), http_target("p2", "second")];
     let rec = d.dispatch(&task, chain, cancel).await.unwrap();
 
-    assert_eq!(rec.status, RunStatus::Cancelled);
+    assert_eq!(rec.record.status, RunStatus::Cancelled);
     assert_eq!(
-        rec.attempts.len(),
+        rec.record.attempts.len(),
         2,
         "failed-over first + cancelled second"
     );
     assert!(matches!(
-        rec.attempts[0].outcome,
+        rec.record.attempts[0].outcome,
         AttemptOutcome::Err {
             kind: ErrorKind::SpawnFailed,
             failed_over: true,
@@ -1794,7 +1821,7 @@ async fn cancellation_between_attempts_stops_before_next_factory_make() {
         }
     ));
     assert!(matches!(
-        rec.attempts[1].outcome,
+        rec.record.attempts[1].outcome,
         AttemptOutcome::Err {
             kind: ErrorKind::Cancelled,
             failed_over: false,
@@ -1835,8 +1862,11 @@ async fn ledger_append_failure_does_not_fail_a_completed_run() {
         .await
         .expect("a completed run must survive a ledger append failure");
 
-    assert_eq!(rec.status, RunStatus::Success);
-    assert_eq!(rec.output_chars, Some("all good".chars().count() as u64));
+    assert_eq!(rec.record.status, RunStatus::Success);
+    assert_eq!(
+        rec.record.output_chars,
+        Some("all good".chars().count() as u64)
+    );
     assert_eq!(
         ledger.append_calls(),
         1,
@@ -1867,8 +1897,8 @@ async fn session_save_failure_does_not_fail_a_completed_run() {
         .await
         .expect("a completed run must survive a session save failure");
 
-    assert_eq!(rec.status, RunStatus::Success);
-    assert_eq!(rec.session_id.as_deref(), Some("sess-save-fail"));
+    assert_eq!(rec.record.status, RunStatus::Success);
+    assert_eq!(rec.record.session_id.as_deref(), Some("sess-save-fail"));
     assert_eq!(ledger.append_count(), 1, "the run was still recorded");
     assert!(
         sessions.save_calls() >= 1,
@@ -1894,7 +1924,7 @@ async fn ledger_failure_on_a_failed_run_still_returns_the_error_record() {
         .await
         .expect("dispatch returns the record even when append fails");
 
-    assert_eq!(rec.status, RunStatus::Error);
-    assert!(rec.error.is_some());
+    assert_eq!(rec.record.status, RunStatus::Error);
+    assert!(rec.record.error.is_some());
     assert_eq!(ledger.append_calls(), 1);
 }
