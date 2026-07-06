@@ -28,6 +28,15 @@ const DEFAULT_OWNER: &str = "local";
 /// preview on the run record (see `RunRecord::task_preview`).
 const TASK_PREVIEW_CHARS: usize = 120;
 
+/// Separator that turns `TaskSpec.system` into appended harness instructions.
+///
+/// Per `vyane-core`'s `task.rs`, `system` is a *system prompt* for direct chat
+/// but *appended instructions* for a harness (a CLI harness has no separate
+/// system-message channel). The kernel therefore folds it onto the end of the
+/// prompt for harness runs using exactly this shape; the constant is pinned by
+/// a test so the wire format cannot drift silently.
+const HARNESS_SYSTEM_HEADING: &str = "\n\n## Additional instructions\n\n";
+
 /// The orchestration kernel: turns a task plus a resolved target chain into a
 /// recorded run.
 ///
@@ -47,8 +56,30 @@ pub struct Dispatcher {
 struct AttemptOk {
     text: String,
     usage: Option<Usage>,
-    /// Native session id reported by a harness, if any.
+    /// Native session id reported by a harness, if any. Drives native
+    /// (CLI-owned) session continuity on the next run.
     native_session_id: Option<String>,
+    /// For a direct-chat win, the (user, assistant) pair to append to the
+    /// stored transcript so the next run replays it. `None` for harness wins —
+    /// the CLI owns its own history and Vyane must not fabricate a transcript
+    /// for it.
+    transcript_delta: Option<(ChatMessage, ChatMessage)>,
+}
+
+/// Session continuity context loaded once, before the attempt loop.
+///
+/// The logical (Vyane) session id is only the store key. Native resume and
+/// transcript replay both need the *stored* [`SessionRecord`], so it is loaded
+/// up front and its two continuity carriers are threaded into the attempt.
+#[derive(Default)]
+struct SessionContext {
+    /// Native session id to resume for harness runs (`None` if the session is
+    /// new or purely a transcript session). Never the logical id.
+    native_session_id: Option<String>,
+    /// Prior transcript to replay for direct-chat continuity, in stored order,
+    /// inserted after any `TaskSpec.system` message and before the current user
+    /// message. Empty for a new or pure-harness session.
+    transcript: Vec<ChatMessage>,
 }
 
 impl Dispatcher {
@@ -84,12 +115,17 @@ impl Dispatcher {
     /// appended to the ledger and (when the task names a session) the session
     /// store is updated, before the record is returned.
     ///
-    /// The `Result::Err` arm is reserved for kernel-level failures that make a
-    /// record impossible or meaningless: an empty chain (a caller/resolution
-    /// bug — there is no target to record against) and a ledger-append I/O
-    /// failure (the run cannot be persisted). A run that simply *failed* is
+    /// Cancellation is checked before building each executor and between
+    /// failover attempts, so a token that is already cancelled yields a
+    /// `Cancelled` run deterministically without ever calling the factory.
+    ///
+    /// The `Result::Err` arm is reserved for one kernel-level failure that
+    /// makes a record impossible: an empty chain (a caller/resolution bug —
+    /// there is no target to record against). A run that simply *failed* is
     /// still `Ok` — it comes back as a record whose `status` is
-    /// `Error`/`Timeout`/`Cancelled`.
+    /// `Error`/`Timeout`/`Cancelled`. Persistence failures *after* a completed
+    /// run (ledger append, session save) are best-effort and never demote a
+    /// finished run to a caller-visible error (see below).
     pub async fn dispatch(
         &self,
         task: &TaskSpec,
@@ -101,6 +137,12 @@ impl Dispatcher {
                 "dispatch received an empty target chain; resolution must supply at least one target",
             ));
         }
+
+        // Load session continuity once, up front: native resume id and any
+        // transcript to replay both come from the stored record, keyed by the
+        // logical id. A load error is not fatal — treat it as a fresh session
+        // and note it, so a flaky store never blocks the run.
+        let session_ctx = self.load_session_context(task).await;
 
         let started_at = Utc::now();
         let total = chain.len();
@@ -120,6 +162,26 @@ impl Dispatcher {
             last_target = Some(bound.target.clone());
             last_transport = bound.transport;
 
+            // Cancellation is checked *before* the factory builds anything, so a
+            // pre-cancelled (or between-attempts cancelled) dispatch produces a
+            // Cancelled run with no factory side effects. Cancelled is not
+            // failover-eligible, so this always aborts the chain.
+            if cancel.is_cancelled() {
+                attempts.push(Attempt {
+                    target: bound.target.clone(),
+                    transport: bound.transport,
+                    started_at: Utc::now(),
+                    duration_ms: 0,
+                    outcome: AttemptOutcome::Err {
+                        kind: ErrorKind::Cancelled,
+                        message: "cancelled by caller".to_string(),
+                        failed_over: false,
+                    },
+                });
+                final_outcome = Err(VyaneError::cancelled());
+                break;
+            }
+
             let attempt_start_wall = Utc::now();
             let attempt_start = Instant::now();
 
@@ -127,7 +189,10 @@ impl Dispatcher {
             // failure is a real attempt failure (e.g. a missing harness
             // binary) and is gated for failover like any execution error.
             let outcome = match self.factory.make(bound) {
-                Ok(executor) => self.run_attempt(executor, task, bound, &cancel).await,
+                Ok(executor) => {
+                    self.run_attempt(executor, task, bound, &session_ctx, &cancel)
+                        .await
+                }
                 Err(e) => Err(e),
             };
 
@@ -182,20 +247,23 @@ impl Dispatcher {
 
         let finished_at = Utc::now();
 
-        let (status, session_id_from_run, output_chars, error_msg) = match &final_outcome {
-            Ok(ok) => (
-                RunStatus::Success,
-                ok.native_session_id.clone(),
-                Some(ok.text.chars().count() as u64),
-                None,
-            ),
-            Err(err) => (
-                status_for_error(err.kind),
-                None,
-                None,
-                Some(err.to_string()),
-            ),
-        };
+        let (status, session_id_from_run, transcript_delta, output_chars, error_msg) =
+            match &final_outcome {
+                Ok(ok) => (
+                    RunStatus::Success,
+                    ok.native_session_id.clone(),
+                    ok.transcript_delta.clone(),
+                    Some(ok.text.chars().count() as u64),
+                    None,
+                ),
+                Err(err) => (
+                    status_for_error(err.kind),
+                    None,
+                    None,
+                    None,
+                    Some(err.to_string()),
+                ),
+            };
 
         // The logical session this run belongs to, if the caller named one.
         let session_id = task.session.as_ref().map(|s| s.as_str().to_string());
@@ -226,17 +294,30 @@ impl Dispatcher {
             labels: task.labels.clone(),
         };
 
-        // Ledger append is the run's source of truth and happens on success and
-        // failure alike. A real append failure is infrastructure-level and
-        // surfaces as Err — the run could not be persisted.
-        self.ledger.append(&record).await?;
+        // Persistence after a completed run is **best-effort** (architect
+        // decision): the model call already happened, so a ledger or session
+        // store error must not convert a successful run into a caller-visible
+        // failure. We emit a `tracing::warn` and return the record normally.
+        // The `Result::Err` arm of `dispatch` stays reserved for the empty
+        // chain, i.e. failures that make a record impossible in the first place.
+        if let Err(e) = self.ledger.append(&record).await {
+            tracing::warn!(
+                run_id = %record.run_id,
+                error = %e,
+                "ledger append failed after run completed; returning run anyway"
+            );
+        }
 
-        // Session continuity is best-effort: the run is already durably
-        // recorded, so a session-store hiccup must not discard it. Only runs
-        // that name a session touch the store.
+        // Session continuity is likewise best-effort. Only runs that name a
+        // session touch the store.
         if let Some(sid) = session_id.as_deref() {
             if let Err(e) = self
-                .update_session(sid, &record, session_id_from_run.as_deref())
+                .update_session(
+                    sid,
+                    &record,
+                    session_id_from_run.as_deref(),
+                    transcript_delta,
+                )
                 .await
             {
                 tracing::warn!(
@@ -250,6 +331,34 @@ impl Dispatcher {
         Ok(record)
     }
 
+    /// Load the session continuity context for `task`, if it names a session.
+    ///
+    /// Returns native-resume id + replayable transcript from the *stored*
+    /// record. A missing session yields an empty context (fresh session); a
+    /// load error also yields an empty context but is logged — a flaky store
+    /// degrades to "start fresh" rather than failing the whole dispatch.
+    async fn load_session_context(&self, task: &TaskSpec) -> SessionContext {
+        let Some(session_ref) = task.session.as_ref() else {
+            return SessionContext::default();
+        };
+        let sid = session_ref.as_str();
+        match self.sessions.load(sid).await {
+            Ok(Some(record)) => SessionContext {
+                native_session_id: record.native_session_id.clone(),
+                transcript: record.transcript.clone(),
+            },
+            Ok(None) => SessionContext::default(),
+            Err(e) => {
+                tracing::warn!(
+                    session_id = sid,
+                    error = %e,
+                    "session load failed; continuing as a fresh session"
+                );
+                SessionContext::default()
+            }
+        }
+    }
+
     /// Execute exactly one attempt against a built executor, enforcing the
     /// task timeout and cancellation uniformly across both transports.
     async fn run_attempt(
@@ -257,26 +366,44 @@ impl Dispatcher {
         executor: Executor,
         task: &TaskSpec,
         bound: &BoundTarget,
+        session_ctx: &SessionContext,
         cancel: &CancellationToken,
     ) -> std::result::Result<AttemptOk, VyaneError> {
         match executor {
             Executor::Chat(client) => {
-                let mut messages = Vec::new();
+                // Direct-chat continuity: assemble messages as system (if any)
+                // → replayed transcript → current user message. The system
+                // prompt comes from `TaskSpec.system`; the transcript is the
+                // prior turns loaded from the stored session record.
+                let mut messages: Vec<ChatMessage> = Vec::new();
                 if let Some(system) = task.system.as_ref() {
                     messages.push(ChatMessage::system(system.clone()));
                 }
-                messages.push(ChatMessage::user(task.prompt.clone()));
+                messages.extend(session_ctx.transcript.iter().cloned());
+                let user_message = ChatMessage::user(task.prompt.clone());
+                messages.push(user_message.clone());
+
                 let req = ChatRequest {
                     model: bound.target.model.clone(),
                     messages,
                     params: bound.params.clone(),
                 };
+                let continued = task.session.is_some();
                 let fut = async move {
                     let out = client.complete(req).await?;
+                    // On success, remember the (user, assistant) pair so the
+                    // caller can append it to the stored transcript — but only
+                    // for runs that belong to a session.
+                    let transcript_delta = if continued {
+                        Some((user_message, ChatMessage::assistant(out.text.clone())))
+                    } else {
+                        None
+                    };
                     Ok(AttemptOk {
                         text: out.text,
                         usage: out.usage,
                         native_session_id: None,
+                        transcript_delta,
                     })
                 };
                 drive(fut, task.timeout, cancel).await
@@ -286,14 +413,21 @@ impl Dispatcher {
                 // scrubbed env policy; concrete injection (auth, base URL,
                 // model overrides) is the assembler/adapter's responsibility,
                 // not the kernel's.
+                //
+                // `TaskSpec.system` is *appended instructions* for a harness
+                // (not a separate system channel), so it is folded onto the end
+                // of the prompt. Native session continuity resumes the CLI's
+                // own session via `native_session_id` from the stored record —
+                // never the logical id, which is only the store key.
+                let prompt = compose_harness_prompt(&task.prompt, task.system.as_deref());
                 let job = HarnessJob {
-                    prompt: task.prompt.clone(),
+                    prompt,
                     model: bound.target.model.clone(),
                     endpoint: bound.endpoint.clone(),
                     params: bound.params.clone(),
                     workdir: task.workdir.clone(),
                     sandbox: task.sandbox,
-                    resume: task.session.as_ref().map(|s| s.as_str().to_string()),
+                    resume: session_ctx.native_session_id.clone(),
                     env: EnvPolicy::scrubbed(),
                     timeout: task.timeout,
                 };
@@ -307,6 +441,9 @@ impl Dispatcher {
                         text: out.text,
                         usage: out.usage,
                         native_session_id: out.native_session_id,
+                        // Harness history is CLI-owned; the kernel never
+                        // fabricates a transcript for it.
+                        transcript_delta: None,
                     })
                 };
                 drive(fut, task.timeout, cancel).await
@@ -320,6 +457,7 @@ impl Dispatcher {
         session_id: &str,
         record: &RunRecord,
         native_session_id: Option<&str>,
+        transcript_delta: Option<(ChatMessage, ChatMessage)>,
     ) -> Result<()> {
         let now = Utc::now();
         let mut session = match self.sessions.load(session_id).await? {
@@ -342,17 +480,37 @@ impl Dispatcher {
 
         // Native harness continuity: when the run produced a native session id
         // (only harness/`CliWrap` runs do), store it so the next run resumes
-        // the CLI's own session; the transcript stays empty because the CLI
-        // owns that history. Direct-chat transcript growth is left to the
-        // assembler's session integration — the kernel does not have the
-        // assistant reply threaded back here as a message, and inventing one
-        // would corrupt the replay. Keyed on the id (not the transport enum) so
-        // it stays exhaustive as new transports are added.
+        // the CLI's own session. Harness runs skip transcript replay entirely
+        // — the CLI owns that history — so they update the native id + run
+        // count and nothing else.
         if let Some(native) = native_session_id {
             session.native_session_id = Some(native.to_string());
         }
 
+        // Direct-chat continuity: append this run's (user, assistant) pair to
+        // the stored transcript so the next run replays it. Harness runs carry
+        // no delta, so this is skipped for them.
+        if let Some((user, assistant)) = transcript_delta {
+            session.transcript.push(user);
+            session.transcript.push(assistant);
+        }
+
         self.sessions.save(&session).await
+    }
+}
+
+/// Compose the prompt handed to a harness from the task prompt and, when set,
+/// `TaskSpec.system` appended as instructions.
+///
+/// The shape is fixed — `prompt + "\n\n## Additional instructions\n\n" +
+/// system` — because a harness has no separate system-message channel; the
+/// system text has to ride along inside the single prompt string. When there is
+/// no system text the prompt is passed through unchanged. Pinned by a test so
+/// the format cannot drift.
+fn compose_harness_prompt(prompt: &str, system: Option<&str>) -> String {
+    match system {
+        Some(system) => format!("{prompt}{HARNESS_SYSTEM_HEADING}{system}"),
+        None => prompt.to_string(),
     }
 }
 
@@ -419,5 +577,27 @@ fn fallback_target() -> Target {
         protocol: Protocol::OpenaiChat,
         harness: None,
         model: ModelId::new("unknown"),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harness_prompt_appends_system_in_fixed_shape() {
+        // Pin the exact wire shape the harness receives: prompt, the heading,
+        // then the system text — nothing else, in this order.
+        let composed = compose_harness_prompt("do the thing", Some("be terse"));
+        assert_eq!(
+            composed,
+            "do the thing\n\n## Additional instructions\n\nbe terse"
+        );
+    }
+
+    #[test]
+    fn harness_prompt_without_system_is_passthrough() {
+        assert_eq!(compose_harness_prompt("just this", None), "just this");
     }
 }
