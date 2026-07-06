@@ -8,7 +8,7 @@ use vyane_config::{ConfigLayers, ResolvedConfig, load_secrets_file};
 use vyane_core::{Ledger, SessionStore};
 use vyane_ledger::{FsSessionStore, JsonlLedger};
 
-use crate::factory::{AssemblerFactory, OutputCapture};
+use crate::factory::AssemblerFactory;
 
 const APP_DIR_NAME: &str = "vyane";
 const SECRETS_FILE: &str = "secrets.env";
@@ -80,7 +80,6 @@ pub struct Runtime {
     pub dispatcher: vyane_kernel::Dispatcher,
     pub ledger: Arc<dyn Ledger>,
     pub sessions: Arc<dyn SessionStore>,
-    pub capture: OutputCapture,
 }
 
 impl Runtime {
@@ -94,8 +93,7 @@ impl Runtime {
                 .with_context(|| format!("create ledger dir {}", parent.display()))?;
         }
 
-        let capture = OutputCapture::default();
-        let factory = Arc::new(AssemblerFactory::new(config, capture.clone()));
+        let factory = Arc::new(AssemblerFactory::new(config));
         let ledger: Arc<dyn Ledger> = Arc::new(JsonlLedger::new(paths.ledger_path));
         let sessions: Arc<dyn SessionStore> = Arc::new(FsSessionStore::new(paths.sessions_dir));
         let dispatcher =
@@ -105,7 +103,6 @@ impl Runtime {
             dispatcher,
             ledger,
             sessions,
-            capture,
         })
     }
 }

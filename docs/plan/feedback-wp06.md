@@ -14,3 +14,8 @@
   wrapper clients/harnesses. A kernel return type that carries both
   `RunRecord` and `Option<String>` would remove this extra capture layer and
   would be safer for duplicate targets in broadcast.
+
+2026-07-07: CLOSED. `vyane-harness` now exports concrete
+`ClaudeCodeHarness`/`CodexCliHarness`, and the CLI assembles those directly;
+`vyane-kernel` now returns `DispatchOutcome { record, output }`, so the CLI no
+longer carries output-capture clients/harnesses.

@@ -9,10 +9,10 @@ use vyane_core::{
     BoundTarget, CancellationToken, Harness, HarnessKind, ProviderId, RunQuery, RunStatus,
     SessionRef, TaskSpec,
 };
+use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs};
-use crate::harness::CliHarness;
 use crate::output::{BroadcastJson, BroadcastRow, RunJson};
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
@@ -75,7 +75,7 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
 
     println!("harnesses:");
     for kind in [HarnessKind::ClaudeCode, HarnessKind::CodexCli] {
-        let available = CliHarness::for_kind(kind.clone())?.available().await;
+        let available = harness_available(kind.clone()).await;
         println!(
             "  {kind}: {}",
             if available { "available" } else { "missing" }
@@ -109,8 +109,9 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
     let task = task_from_dispatch(args)?;
     let runtime = Runtime::new(loaded.config, StoragePaths::resolve()?)?;
     let cancel = cancellation_token();
-    let record = runtime.dispatcher.dispatch(&task, chain, cancel).await?;
-    let output = runtime.capture.pop_for_target(&record.target);
+    let outcome = runtime.dispatcher.dispatch(&task, chain, cancel).await?;
+    let record = outcome.record;
+    let output = outcome.output;
     let success = record.status == RunStatus::Success;
 
     if json {
@@ -147,9 +148,10 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
 
     for (target, result) in targets.into_iter().zip(results) {
         match result {
-            Ok(record) => {
+            Ok(outcome) => {
+                let record = outcome.record;
+                let output = outcome.output;
                 all_success &= record.status == RunStatus::Success;
-                let output = runtime.capture.pop_for_target(&record.target);
                 json_rows.push(BroadcastJson {
                     target: target.clone(),
                     record: Some(record.clone()),
@@ -193,6 +195,14 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
     } else {
         ExitCode::from(1)
     })
+}
+
+async fn harness_available(kind: HarnessKind) -> bool {
+    match kind {
+        HarnessKind::ClaudeCode => ClaudeCodeHarness::new().available().await,
+        HarnessKind::CodexCli => CodexCliHarness::new().available().await,
+        HarnessKind::OpenCode | HarnessKind::Other(_) => false,
+    }
 }
 
 async fn run_history(args: HistoryArgs) -> Result<ExitCode> {

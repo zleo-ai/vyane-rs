@@ -5,7 +5,6 @@ mod app;
 mod cli;
 mod command;
 mod factory;
-mod harness;
 mod output;
 
 use std::process::ExitCode;
