@@ -157,6 +157,33 @@ async fn anthropic_complete_success_parses_outcome_and_request() {
 
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
+async fn anthropic_complete_with_bearer_auth_sends_version_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("authorization", "Bearer sk-test"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg-example",
+            "model": "anthropic-echo",
+            "content": [{ "type": "text", "text": "bearer answer" }],
+            "stop_reason": "end_turn"
+        })))
+        .mount(&server)
+        .await;
+
+    let client =
+        AnthropicMessagesClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let outcome = client.complete(request()).await.unwrap();
+
+    assert_eq!(outcome.text, "bearer answer");
+    assert_eq!(outcome.model_echo.as_deref(), Some("anthropic-echo"));
+    assert_eq!(outcome.finish_reason.as_deref(), Some("end_turn"));
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
 async fn openai_responses_complete_success_parses_outcome() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -192,6 +219,18 @@ async fn openai_responses_complete_success_parses_outcome() {
             cached_input_tokens: Some(1),
         })
     );
+
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = requests[0].body_json().unwrap();
+    assert_eq!(body["model"], "model-example");
+    assert!(body.get("messages").is_none());
+    assert!(body.get("instructions").is_none());
+    assert_eq!(body["input"][0]["role"], "system");
+    assert_eq!(body["input"][0]["content"], "system prompt");
+    assert_eq!(body["input"][1]["role"], "user");
+    assert_eq!(body["input"][1]["content"], "hello");
+    assert_eq!(body["max_output_tokens"], 32);
+    assert_eq!(body["reasoning"]["effort"], "low");
 }
 
 #[tokio::test]

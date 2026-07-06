@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use reqwest::RequestBuilder;
-use vyane_core::{
-    AuthStyle, ChatClient, ChatOutcome, ChatRequest, Endpoint, Protocol, Result, StreamEvent,
-};
+use vyane_core::{ChatClient, ChatOutcome, ChatRequest, Endpoint, Protocol, Result, StreamEvent};
 
 use crate::http::{ClientOptions, HttpClient};
 use crate::sse::{StreamProtocol, response_to_stream};
@@ -22,7 +20,6 @@ pub const DEFAULT_MAX_TOKENS: u32 = wire::anthropic::DEFAULT_MAX_TOKENS;
 #[derive(Debug, Clone)]
 pub struct AnthropicMessagesClient {
     http: HttpClient,
-    auth_style: Option<AuthStyle>,
 }
 
 impl AnthropicMessagesClient {
@@ -31,10 +28,8 @@ impl AnthropicMessagesClient {
     }
 
     pub fn with_options(endpoint: Endpoint, options: ClientOptions) -> Result<Self> {
-        let auth_style = endpoint.auth.as_ref().map(|auth| auth.style);
         Ok(Self {
             http: HttpClient::new(endpoint, options)?,
-            auth_style,
         })
     }
 }
@@ -69,12 +64,8 @@ impl ChatClient for AnthropicMessagesClient {
 
 impl AnthropicMessagesClient {
     fn decorate(&self, request: RequestBuilder) -> RequestBuilder {
-        let request = request.header("accept", "application/json");
-        match self.auth_style {
-            Some(AuthStyle::XApiKey) => {
-                request.header("anthropic-version", wire::anthropic::VERSION)
-            }
-            Some(AuthStyle::Bearer) | None => request,
-        }
+        request
+            .header("accept", "application/json")
+            .header("anthropic-version", wire::anthropic::VERSION)
     }
 }
