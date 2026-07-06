@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use vyane_core::env::EnvPolicy;
 use vyane_core::error::ErrorKind;
-use vyane_core::target::{AuthMaterial, AuthStyle, Endpoint, ModelId, Sandbox, Secret};
+use vyane_core::target::{AuthMaterial, AuthStyle, Endpoint, ModelId, Protocol, Sandbox, Secret};
 use vyane_core::task::GenParams;
 use vyane_core::traits::{Harness, HarnessJob};
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
@@ -21,6 +21,7 @@ fn base_job(prompt: &str) -> HarnessJob {
     HarnessJob {
         prompt: prompt.to_string(),
         model: ModelId::new(""),
+        protocol: Protocol::OpenaiResponses,
         endpoint: None,
         params: GenParams::default(),
         workdir: None,
@@ -199,6 +200,10 @@ async fn codex_fake_cli_argv_env_and_parsing() {
         .any(|a| a == "model_providers.vyane.base_url=\"https://openai-compatible.example/v1\""));
     assert!(
         argv.iter()
+            .any(|a| a == "model_providers.vyane.wire_api=\"responses\"")
+    );
+    assert!(
+        argv.iter()
             .any(|a| a == "model_providers.vyane.env_key=\"OPENAI_API_KEY\"")
     );
     assert!(argv.iter().any(|a| a == "model_provider=\"vyane\""));
@@ -207,6 +212,26 @@ async fn codex_fake_cli_argv_env_and_parsing() {
 
     let child_env = fs::read_to_string(env_file).unwrap();
     assert!(child_env.contains("OPENAI_API_KEY=test-codex-child-key\n"));
+}
+
+#[tokio::test]
+async fn codex_anthropic_messages_protocol_is_unsupported_before_spawn() {
+    let dir = TempDir::new().unwrap();
+    let argv_file = dir.path().join("argv.txt");
+    let env_file = dir.path().join("env.txt");
+    let bin = argv_capture_script(&dir, "fake-codex", &argv_file, &env_file);
+
+    let mut job = base_job("unsupported");
+    job.protocol = Protocol::AnthropicMessages;
+
+    let err = CodexCliHarness::with_binary(bin.to_string_lossy())
+        .run(job, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::Unsupported);
+    assert!(err.message.contains("anthropic_messages / codex-cli"));
+    assert!(!argv_file.exists());
 }
 
 #[tokio::test]
@@ -434,6 +459,10 @@ async fn cancellation_kills_process_group_grandchild() {
         while !heartbeat_for_cancel.exists() && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        assert!(
+            heartbeat_for_cancel.exists(),
+            "heartbeat file was never written before cancellation"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
         cancel.cancel();
     });
