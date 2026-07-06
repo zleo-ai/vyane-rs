@@ -65,6 +65,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # dev
 tempfile = "3"
 wiremock = "0.6"
+static_assertions = "1"
 assert_cmd = "2"
 predicates = "3"
 
