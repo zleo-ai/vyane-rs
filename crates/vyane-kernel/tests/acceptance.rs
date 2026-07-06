@@ -6,17 +6,74 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::pending;
 use vyane_core::{
-    AdapterTransport, AttemptOutcome, BoundTarget, CancellationToken, ChatClient, ChatOutcome,
-    ChatRequest, Endpoint, ErrorKind, GenParams, Harness, HarnessJob, HarnessKind, HarnessOutcome,
-    Ledger, ModelId, Protocol, ProviderId, Result, RunQuery, RunRecord, RunStatus, SessionRecord,
-    SessionStore, Target, TaskSpec, Usage, VyaneError,
+    AdapterTransport, AttemptOutcome, BoundTarget, CancellationToken, ChatClient, ChatMessage,
+    ChatOutcome, ChatRequest, Endpoint, ErrorKind, GenParams, Harness, HarnessJob, HarnessKind,
+    HarnessOutcome, Ledger, ModelId, Protocol, ProviderId, Result, Role, RunQuery, RunRecord,
+    RunStatus, SessionRecord, SessionRef, SessionStore, Target, TaskSpec, Usage, VyaneError,
 };
 use vyane_kernel::{Dispatcher, Executor, ExecutorFactory};
+
+// ---------------------------------------------------------------------------
+// Shared probe: concurrency high-water mark + captured requests/jobs
+// ---------------------------------------------------------------------------
+
+/// Instrumentation shared by every mock executor a factory builds. It records
+/// the maximum number of attempts in flight at once (to prove the broadcast
+/// semaphore truly bounds concurrency) and captures the `ChatRequest` /
+/// `HarnessJob` each attempt saw (to prove transcript replay, native-id resume,
+/// and harness prompt composition).
+#[derive(Default)]
+struct Probe {
+    active_now: AtomicUsize,
+    active_max: AtomicUsize,
+    chat_requests: Mutex<Vec<ChatRequest>>,
+    harness_jobs: Mutex<Vec<HarnessJob>>,
+}
+
+impl Probe {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Mark one attempt as entered; updates the high-water mark. The returned
+    /// guard decrements on drop, so overlap is measured for real.
+    fn enter(self: &Arc<Self>) -> ActiveGuard {
+        let now = self.active_now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.active_max.fetch_max(now, Ordering::SeqCst);
+        ActiveGuard {
+            probe: Arc::clone(self),
+        }
+    }
+
+    fn max_concurrent(&self) -> usize {
+        self.active_max.load(Ordering::SeqCst)
+    }
+
+    fn chat_requests(&self) -> Vec<ChatRequest> {
+        self.chat_requests.lock().unwrap().clone()
+    }
+
+    fn harness_jobs(&self) -> Vec<HarnessJob> {
+        self.harness_jobs.lock().unwrap().clone()
+    }
+}
+
+struct ActiveGuard {
+    probe: Arc<Probe>,
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.probe.active_now.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Behaviour scripting
@@ -36,6 +93,13 @@ enum Behaviour {
     /// Never complete on its own — used to test cancellation/timeout, where
     /// the kernel's own `drive` layer must terminate the attempt.
     Hang,
+    /// Sleep for `delay` (on the tokio clock, so `tokio::time::pause`/`advance`
+    /// drives it), then behave as `then`. Used to force out-of-order broadcast
+    /// completion and to exercise the real kernel timeout.
+    Delay {
+        delay: Duration,
+        then: Box<Behaviour>,
+    },
 }
 
 impl Behaviour {
@@ -66,14 +130,33 @@ impl Behaviour {
             message: format!("mock {kind:?}"),
         }
     }
+    fn delayed_succeed(delay: Duration, text: &str) -> Self {
+        Behaviour::Delay {
+            delay,
+            then: Box::new(Behaviour::succeed(text)),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Mock ChatClient / Harness
 // ---------------------------------------------------------------------------
 
+/// Walk any leading `Delay` layers (sleeping on the tokio clock), returning the
+/// terminal non-delay behaviour to enact. The caller already holds the active
+/// guard across the whole attempt, so the sleep is counted as in-flight.
+async fn settle(behaviour: &Behaviour) -> &Behaviour {
+    let mut current = behaviour;
+    while let Behaviour::Delay { delay, then } = current {
+        tokio::time::sleep(*delay).await;
+        current = then;
+    }
+    current
+}
+
 struct MockChat {
     behaviour: Behaviour,
+    probe: Arc<Probe>,
 }
 
 #[async_trait]
@@ -81,8 +164,10 @@ impl ChatClient for MockChat {
     fn protocol(&self) -> Protocol {
         Protocol::OpenaiChat
     }
-    async fn complete(&self, _req: ChatRequest) -> Result<ChatOutcome> {
-        match &self.behaviour {
+    async fn complete(&self, req: ChatRequest) -> Result<ChatOutcome> {
+        self.probe.chat_requests.lock().unwrap().push(req);
+        let _guard = self.probe.enter();
+        match settle(&self.behaviour).await {
             Behaviour::Succeed { text, usage, .. } => Ok(ChatOutcome {
                 text: text.clone(),
                 usage: *usage,
@@ -95,12 +180,14 @@ impl ChatClient for MockChat {
                 pending::<()>().await;
                 unreachable!("hang behaviour must be cancelled by the kernel")
             }
+            Behaviour::Delay { .. } => unreachable!("settle strips all Delay layers"),
         }
     }
 }
 
 struct MockHarnessImpl {
     behaviour: Behaviour,
+    probe: Arc<Probe>,
 }
 
 #[async_trait]
@@ -111,8 +198,10 @@ impl Harness for MockHarnessImpl {
     async fn available(&self) -> bool {
         true
     }
-    async fn run(&self, _job: HarnessJob, _cancel: CancellationToken) -> Result<HarnessOutcome> {
-        match &self.behaviour {
+    async fn run(&self, job: HarnessJob, _cancel: CancellationToken) -> Result<HarnessOutcome> {
+        self.probe.harness_jobs.lock().unwrap().push(job);
+        let _guard = self.probe.enter();
+        match settle(&self.behaviour).await {
             Behaviour::Succeed {
                 text,
                 usage,
@@ -129,6 +218,7 @@ impl Harness for MockHarnessImpl {
                 pending::<()>().await;
                 unreachable!("hang behaviour must be cancelled by the kernel")
             }
+            Behaviour::Delay { .. } => unreachable!("settle strips all Delay layers"),
         }
     }
 }
@@ -145,6 +235,19 @@ struct MockFactory {
     /// If a factory should refuse to build an executor for a given key (e.g. a
     /// missing harness binary), the error kind is recorded here.
     build_errors: HashMap<String, ErrorKind>,
+    /// Shared instrumentation handed to every built mock (concurrency
+    /// high-water mark + captured requests/jobs). Also lets a test detect
+    /// whether the factory was ever called (pre-cancelled determinism).
+    probe: Arc<Probe>,
+    /// Count of `make` calls, to assert the factory is never touched when a
+    /// dispatch is cancelled before any attempt.
+    make_calls: Arc<AtomicUsize>,
+    /// When `make` is asked to build this model, it cancels the paired token
+    /// (synchronously, before returning) and reports a `SpawnFailed` build
+    /// error. This lets a test cancel *between* failover attempts with no
+    /// await-point race: attempt 1 fails over, then the loop's pre-make guard
+    /// catches the cancellation before attempt 2.
+    cancel_on: Option<(String, CancellationToken)>,
 }
 
 impl MockFactory {
@@ -152,6 +255,9 @@ impl MockFactory {
         Self {
             behaviours: HashMap::new(),
             build_errors: HashMap::new(),
+            probe: Probe::new(),
+            make_calls: Arc::new(AtomicUsize::new(0)),
+            cancel_on: None,
         }
     }
     fn on(mut self, model: &str, behaviour: Behaviour) -> Self {
@@ -162,6 +268,21 @@ impl MockFactory {
         self.build_errors.insert(model.to_string(), kind);
         self
     }
+    /// Cancel `token` (and abort with a `SpawnFailed` build error) when asked to
+    /// build `model`. See the field docs for why this is race-free.
+    fn cancel_on_make(mut self, model: &str, token: CancellationToken) -> Self {
+        self.cancel_on = Some((model.to_string(), token));
+        self
+    }
+    /// Handle to the shared probe, cloned before the factory is consumed by
+    /// `into_arc`.
+    fn probe(&self) -> Arc<Probe> {
+        Arc::clone(&self.probe)
+    }
+    /// Handle to the `make` call counter.
+    fn make_calls(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.make_calls)
+    }
     fn into_arc(self) -> Arc<dyn ExecutorFactory> {
         Arc::new(self)
     }
@@ -169,7 +290,19 @@ impl MockFactory {
 
 impl ExecutorFactory for MockFactory {
     fn make(&self, target: &BoundTarget) -> Result<Executor> {
+        self.make_calls.fetch_add(1, Ordering::SeqCst);
         let key = target.target.model.as_str();
+        if let Some((model, token)) = self.cancel_on.as_ref() {
+            if model == key {
+                // Cancel synchronously, then fail this attempt over: the next
+                // loop iteration's pre-make guard sees the cancellation.
+                token.cancel();
+                return Err(VyaneError::new(
+                    ErrorKind::SpawnFailed,
+                    format!("mock cancel-on-make for {key}"),
+                ));
+            }
+        }
         if let Some(kind) = self.build_errors.get(key) {
             return Err(VyaneError::new(
                 *kind,
@@ -181,14 +314,18 @@ impl ExecutorFactory for MockFactory {
             .get(key)
             .cloned()
             .unwrap_or_else(|| Behaviour::succeed("default"));
+        let probe = Arc::clone(&self.probe);
         match target.transport {
-            AdapterTransport::DirectHttp => Ok(Executor::Chat(Arc::new(MockChat { behaviour }))),
-            AdapterTransport::CliWrap => {
-                Ok(Executor::Agent(Arc::new(MockHarnessImpl { behaviour })))
+            AdapterTransport::DirectHttp => {
+                Ok(Executor::Chat(Arc::new(MockChat { behaviour, probe })))
             }
+            AdapterTransport::CliWrap => Ok(Executor::Agent(Arc::new(MockHarnessImpl {
+                behaviour,
+                probe,
+            }))),
             // `AdapterTransport` is non-exhaustive; treat any future transport
             // as direct chat for the purposes of these mocks.
-            _ => Ok(Executor::Chat(Arc::new(MockChat { behaviour }))),
+            _ => Ok(Executor::Chat(Arc::new(MockChat { behaviour, probe }))),
         }
     }
 }
@@ -237,6 +374,14 @@ impl MockSessions {
     fn get(&self, id: &str) -> Option<SessionRecord> {
         self.store.lock().unwrap().get(id).cloned()
     }
+    /// Pre-populate a session record (e.g. an existing transcript or native id
+    /// to resume) so the dispatcher loads it as continuity context.
+    fn seed(&self, record: SessionRecord) {
+        self.store
+            .lock()
+            .unwrap()
+            .insert(record.session_id.clone(), record);
+    }
 }
 
 #[async_trait]
@@ -253,6 +398,63 @@ impl SessionStore for MockSessions {
     }
     async fn list(&self, _owner: Option<&str>) -> Result<Vec<SessionRecord>> {
         Ok(self.store.lock().unwrap().values().cloned().collect())
+    }
+}
+
+/// A ledger whose `append` always fails, to prove persistence is best-effort:
+/// a completed run must still come back `Ok` even when the ledger errors.
+#[derive(Clone, Default)]
+struct ErroringLedger {
+    append_calls: Arc<AtomicUsize>,
+}
+
+impl ErroringLedger {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn append_calls(&self) -> usize {
+        self.append_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Ledger for ErroringLedger {
+    async fn append(&self, _record: &RunRecord) -> Result<()> {
+        self.append_calls.fetch_add(1, Ordering::SeqCst);
+        Err(VyaneError::new(ErrorKind::Io, "mock ledger append failure"))
+    }
+    async fn query(&self, _query: RunQuery) -> Result<Vec<RunRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+/// A session store whose `save` always fails (loads succeed as empty), to prove
+/// a session-persistence error also never demotes a completed run.
+#[derive(Clone, Default)]
+struct ErroringSessions {
+    save_calls: Arc<AtomicUsize>,
+}
+
+impl ErroringSessions {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn save_calls(&self) -> usize {
+        self.save_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl SessionStore for ErroringSessions {
+    async fn load(&self, _session_id: &str) -> Result<Option<SessionRecord>> {
+        Ok(None)
+    }
+    async fn save(&self, _record: &SessionRecord) -> Result<()> {
+        self.save_calls.fetch_add(1, Ordering::SeqCst);
+        Err(VyaneError::new(ErrorKind::Io, "mock session save failure"))
+    }
+    async fn list(&self, _owner: Option<&str>) -> Result<Vec<SessionRecord>> {
+        Ok(Vec::new())
     }
 }
 
@@ -299,6 +501,31 @@ fn dispatcher(
     sessions: MockSessions,
 ) -> Dispatcher {
     Dispatcher::new(factory, Arc::new(ledger), Arc::new(sessions))
+}
+
+/// A `SessionRecord` for seeding continuity state: a given native id and
+/// transcript, against a placeholder target.
+fn seed_record(
+    session_id: &str,
+    native_session_id: Option<&str>,
+    transcript: Vec<ChatMessage>,
+) -> SessionRecord {
+    let now = chrono::Utc::now();
+    SessionRecord {
+        session_id: session_id.to_string(),
+        owner: "local".to_string(),
+        target: Target {
+            provider: ProviderId::new("seed-provider"),
+            protocol: Protocol::OpenaiChat,
+            harness: None,
+            model: ModelId::new("seed-model"),
+        },
+        native_session_id: native_session_id.map(str::to_string),
+        transcript,
+        created_at: now,
+        updated_at: now,
+        run_count: 3,
+    }
 }
 
 // ===========================================================================
@@ -1022,4 +1249,652 @@ async fn empty_chain_is_a_kernel_error_not_a_record() {
         0,
         "no record for an unrunnable dispatch"
     );
+}
+
+// ===========================================================================
+// Finding 5: strengthened concurrency — delayed mocks, out-of-order
+// completion, and a real semaphore high-water probe
+// ===========================================================================
+
+#[tokio::test(start_paused = true)]
+async fn broadcast_returns_input_order_despite_out_of_order_completion() {
+    // Chains finish in the *reverse* of input order: chain 0 is the slowest,
+    // chain 4 the fastest. If the kernel returned completion order the result
+    // would be reversed; input-order alignment is proven by each position's
+    // model matching its input index even though later chains finished first.
+    let n = 5usize;
+    let mut factory = MockFactory::new();
+    for i in 0..n {
+        // Later indices get shorter delays → they complete earlier.
+        let delay = Duration::from_millis(((n - i) * 100) as u64);
+        factory = factory.on(
+            &format!("c{i}"),
+            Behaviour::delayed_succeed(delay, &format!("r{i}")),
+        );
+    }
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory.into_arc(), ledger.clone(), MockSessions::new());
+
+    let task = TaskSpec::new("fan out, out of order");
+    let chains: Vec<_> = (0..n)
+        .map(|i| vec![http_target("p", &format!("c{i}"))])
+        .collect();
+
+    // With the clock paused, drive the whole broadcast to completion by
+    // auto-advancing time as the sleeps register.
+    let results = d.broadcast(&task, chains, CancellationToken::new()).await;
+
+    assert_eq!(results.len(), n);
+    for (i, res) in results.iter().enumerate() {
+        let rec = res.as_ref().expect("each chain produced a record");
+        assert_eq!(
+            rec.target.model.as_str(),
+            format!("c{i}"),
+            "position {i} must map to input chain {i} regardless of finish order"
+        );
+        assert_eq!(rec.status, RunStatus::Success);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn broadcast_semaphore_bounds_active_dispatches() {
+    use std::num::NonZeroUsize;
+    // 10 chains, each sleeping, through a width-3 semaphore. The shared probe's
+    // high-water mark proves no more than 3 attempts were ever in flight at
+    // once — the semaphore genuinely bounds concurrency, it isn't just a label.
+    let n = 10usize;
+    let width = 3usize;
+    let mut factory = MockFactory::new();
+    for i in 0..n {
+        factory = factory.on(
+            &format!("c{i}"),
+            Behaviour::delayed_succeed(Duration::from_millis(100), &format!("r{i}")),
+        );
+    }
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory.into_arc(), ledger.clone(), MockSessions::new());
+
+    let task = TaskSpec::new("bounded fan out");
+    let chains: Vec<_> = (0..n)
+        .map(|i| vec![http_target("p", &format!("c{i}"))])
+        .collect();
+    let results = d
+        .broadcast_with_concurrency(
+            &task,
+            chains,
+            CancellationToken::new(),
+            NonZeroUsize::new(width).unwrap(),
+        )
+        .await;
+
+    assert_eq!(results.len(), n);
+    for res in &results {
+        assert_eq!(res.as_ref().unwrap().status, RunStatus::Success);
+    }
+    let peak = probe.max_concurrent();
+    assert!(
+        peak <= width,
+        "at most {width} attempts may run at once, observed peak {peak}"
+    );
+    assert!(
+        peak >= 2,
+        "with 10 sleeping chains and width 3, real overlap is expected (peak {peak})"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn attempt_timeout_fires_on_the_tokio_clock() {
+    // A hanging attempt under a task timeout must terminate as Timeout once the
+    // clock advances past the deadline — proving the kernel's own `drive`
+    // timeout works, not just adapter-side timeouts. `start_paused` + the
+    // runtime's auto-advance move virtual time to the timer deadline.
+    let factory = MockFactory::new().on("slow", Behaviour::Hang).into_arc();
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory, ledger.clone(), MockSessions::new());
+
+    let task = TaskSpec::new("times out").with_timeout(Duration::from_secs(30));
+    let rec = d
+        .dispatch(
+            &task,
+            vec![http_target("p", "slow")],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rec.status, RunStatus::Timeout);
+    assert_eq!(rec.attempts.len(), 1);
+    assert!(matches!(
+        rec.attempts[0].outcome,
+        AttemptOutcome::Err {
+            kind: ErrorKind::Timeout,
+            ..
+        }
+    ));
+    assert_eq!(
+        ledger.append_count(),
+        1,
+        "a timed-out run is still recorded"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn timeout_is_failover_eligible_and_recovers_on_next_target() {
+    // The first target hangs and trips the timeout (eligible), so the chain
+    // fails over to a fast second target and succeeds.
+    let factory = MockFactory::new()
+        .on("slow", Behaviour::Hang)
+        .on("fast", Behaviour::succeed("recovered"))
+        .into_arc();
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory, ledger.clone(), MockSessions::new());
+
+    let task = TaskSpec::new("timeout then recover").with_timeout(Duration::from_secs(5));
+    let chain = vec![http_target("p1", "slow"), http_target("p2", "fast")];
+    let rec = d
+        .dispatch(&task, chain, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(rec.status, RunStatus::Success);
+    assert_eq!(rec.attempts.len(), 2);
+    assert!(matches!(
+        rec.attempts[0].outcome,
+        AttemptOutcome::Err {
+            kind: ErrorKind::Timeout,
+            failed_over: true,
+            ..
+        }
+    ));
+    assert_eq!(rec.target.model.as_str(), "fast");
+}
+
+// ===========================================================================
+// Finding 1: harness resume uses the native session id, never the logical id
+// ===========================================================================
+
+#[tokio::test]
+async fn harness_resume_passes_native_session_id_not_logical_id() {
+    // A session already carries a native id from a prior harness run. The next
+    // harness dispatch must resume with that native id — never the logical
+    // (store-key) id.
+    let factory = MockFactory::new().on(
+        "agent-model",
+        Behaviour::succeed_harness("continued", "native-2"),
+    );
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    sessions.seed(seed_record("logical-sess", Some("native-abc"), Vec::new()));
+    let d = dispatcher(factory.into_arc(), ledger.clone(), sessions.clone());
+
+    let mut task = TaskSpec::new("keep going");
+    task.session = Some(SessionRef::new("logical-sess"));
+    let chain = vec![cli_target("anthropic", "agent-model")];
+    let rec = d
+        .dispatch(&task, chain, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(rec.status, RunStatus::Success);
+
+    let jobs = probe.harness_jobs();
+    assert_eq!(jobs.len(), 1, "exactly one harness attempt");
+    assert_eq!(
+        jobs[0].resume.as_deref(),
+        Some("native-abc"),
+        "resume must be the stored native id"
+    );
+    assert_ne!(
+        jobs[0].resume.as_deref(),
+        Some("logical-sess"),
+        "the logical id must never be used as the native resume token"
+    );
+
+    // And the run then advances the stored native id to the one it reported.
+    let saved = sessions.get("logical-sess").unwrap();
+    assert_eq!(saved.native_session_id.as_deref(), Some("native-2"));
+}
+
+#[tokio::test]
+async fn harness_resume_is_none_when_session_has_no_native_id() {
+    // A named session that has never produced a native id (e.g. only a
+    // transcript, or brand new) must resume with `None`, not the logical id.
+    let factory = MockFactory::new().on(
+        "agent-model",
+        Behaviour::succeed_harness("first agent turn", "native-first"),
+    );
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    // Seed a session with no native id.
+    sessions.seed(seed_record("sess-no-native", None, Vec::new()));
+    let d = dispatcher(factory.into_arc(), ledger.clone(), sessions.clone());
+
+    let mut task = TaskSpec::new("start agent work");
+    task.session = Some(SessionRef::new("sess-no-native"));
+    let chain = vec![cli_target("anthropic", "agent-model")];
+    d.dispatch(&task, chain, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let jobs = probe.harness_jobs();
+    assert_eq!(jobs[0].resume, None, "no stored native id → resume is None");
+}
+
+// ===========================================================================
+// Finding 2: direct-chat transcript replay + persistence
+// ===========================================================================
+
+#[tokio::test]
+async fn direct_chat_replays_transcript_then_current_user_message() {
+    // A session with an existing transcript [user q1, assistant a1]; the next
+    // chat run with a system prompt must send exactly:
+    //   system, user q1, assistant a1, user q2
+    let factory = MockFactory::new().on("chat-model", Behaviour::succeed("a2"));
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    sessions.seed(seed_record(
+        "chat-sess",
+        None,
+        vec![ChatMessage::user("q1"), ChatMessage::assistant("a1")],
+    ));
+    let d = dispatcher(factory.into_arc(), ledger.clone(), sessions.clone());
+
+    let mut task = TaskSpec::new("q2");
+    task.system = Some("you are terse".to_string());
+    task.session = Some(SessionRef::new("chat-sess"));
+    let chain = vec![http_target("openai", "chat-model")];
+    let rec = d
+        .dispatch(&task, chain, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(rec.status, RunStatus::Success);
+
+    let reqs = probe.chat_requests();
+    assert_eq!(reqs.len(), 1);
+    let msgs = &reqs[0].messages;
+    assert_eq!(msgs.len(), 4, "system + 2 history + current user");
+    assert_eq!(msgs[0].role, Role::System);
+    assert_eq!(msgs[0].content, "you are terse");
+    assert_eq!(msgs[1].role, Role::User);
+    assert_eq!(msgs[1].content, "q1");
+    assert_eq!(msgs[2].role, Role::Assistant);
+    assert_eq!(msgs[2].content, "a1");
+    assert_eq!(msgs[3].role, Role::User);
+    assert_eq!(msgs[3].content, "q2");
+}
+
+#[tokio::test]
+async fn direct_chat_appends_user_and_assistant_to_transcript_on_success() {
+    // After a successful chat run, the session transcript must grow by the
+    // (user, assistant) pair and run_count must bump.
+    let factory = MockFactory::new().on("chat-model", Behaviour::succeed("answer-2"));
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    sessions.seed(seed_record(
+        "grow-sess",
+        None,
+        vec![
+            ChatMessage::user("prev-q"),
+            ChatMessage::assistant("prev-a"),
+        ],
+    ));
+    let d = dispatcher(factory.into_arc(), ledger.clone(), sessions.clone());
+
+    let mut task = TaskSpec::new("new-q");
+    task.session = Some(SessionRef::new("grow-sess"));
+    let chain = vec![http_target("openai", "chat-model")];
+    d.dispatch(&task, chain, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let saved = sessions.get("grow-sess").unwrap();
+    let t = &saved.transcript;
+    assert_eq!(t.len(), 4, "prior pair + this run's pair");
+    assert_eq!((t[0].role, t[0].content.as_str()), (Role::User, "prev-q"));
+    assert_eq!(
+        (t[1].role, t[1].content.as_str()),
+        (Role::Assistant, "prev-a")
+    );
+    assert_eq!((t[2].role, t[2].content.as_str()), (Role::User, "new-q"));
+    assert_eq!(
+        (t[3].role, t[3].content.as_str()),
+        (Role::Assistant, "answer-2")
+    );
+    // run_count was seeded at 3; one run bumps it to 4.
+    assert_eq!(saved.run_count, 4);
+}
+
+#[tokio::test]
+async fn direct_chat_starts_transcript_when_session_is_new() {
+    // No pre-seeded record: the first chat turn creates the session with a
+    // fresh transcript of exactly [user, assistant].
+    let factory = MockFactory::new().on("chat-model", Behaviour::succeed("hello-back"));
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    let d = dispatcher(factory.into_arc(), ledger.clone(), sessions.clone());
+
+    let mut task = TaskSpec::new("hello");
+    task.session = Some(SessionRef::new("brand-new"));
+    let chain = vec![http_target("openai", "chat-model")];
+    d.dispatch(&task, chain, CancellationToken::new())
+        .await
+        .unwrap();
+
+    // First turn replays nothing, just sends the user message.
+    let reqs = probe.chat_requests();
+    assert_eq!(reqs[0].messages.len(), 1);
+    assert_eq!(reqs[0].messages[0].role, Role::User);
+
+    let saved = sessions.get("brand-new").unwrap();
+    assert_eq!(saved.transcript.len(), 2);
+    assert_eq!(
+        (
+            saved.transcript[0].role,
+            saved.transcript[0].content.as_str()
+        ),
+        (Role::User, "hello")
+    );
+    assert_eq!(
+        (
+            saved.transcript[1].role,
+            saved.transcript[1].content.as_str()
+        ),
+        (Role::Assistant, "hello-back")
+    );
+    assert_eq!(saved.run_count, 1);
+}
+
+#[tokio::test]
+async fn harness_run_does_not_grow_transcript() {
+    // Harness continuity is native-id based; a harness run through a session
+    // must leave the transcript empty (the CLI owns its history) while still
+    // updating native id + run_count.
+    let factory = MockFactory::new().on(
+        "agent-model",
+        Behaviour::succeed_harness("agent said", "native-h"),
+    );
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    let d = dispatcher(factory.into_arc(), ledger.clone(), sessions.clone());
+
+    let mut task = TaskSpec::new("agent job");
+    task.session = Some(SessionRef::new("harness-sess"));
+    let chain = vec![cli_target("anthropic", "agent-model")];
+    d.dispatch(&task, chain, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let saved = sessions.get("harness-sess").unwrap();
+    assert!(
+        saved.transcript.is_empty(),
+        "harness runs never fabricate a transcript"
+    );
+    assert_eq!(saved.native_session_id.as_deref(), Some("native-h"));
+    assert_eq!(saved.run_count, 1);
+}
+
+#[tokio::test]
+async fn failed_chat_run_does_not_grow_transcript() {
+    // A failing chat run must not append anything to the transcript — only a
+    // successful turn is recorded as history.
+    let factory = MockFactory::new().on("chat-model", Behaviour::fail(ErrorKind::Config));
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    sessions.seed(seed_record(
+        "no-grow-on-fail",
+        None,
+        vec![ChatMessage::user("q0"), ChatMessage::assistant("a0")],
+    ));
+    let d = dispatcher(factory.into_arc(), ledger.clone(), sessions.clone());
+
+    let mut task = TaskSpec::new("will fail");
+    task.session = Some(SessionRef::new("no-grow-on-fail"));
+    let chain = vec![http_target("openai", "chat-model")];
+    let rec = d
+        .dispatch(&task, chain, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(rec.status, RunStatus::Error);
+
+    let saved = sessions.get("no-grow-on-fail").unwrap();
+    assert_eq!(
+        saved.transcript.len(),
+        2,
+        "transcript unchanged after a failed turn"
+    );
+}
+
+// ===========================================================================
+// Finding 3: TaskSpec.system is appended as harness instructions
+// ===========================================================================
+
+#[tokio::test]
+async fn harness_prompt_appends_system_instructions() {
+    // The composed harness prompt must be exactly
+    //   "<prompt>\n\n## Additional instructions\n\n<system>"
+    let factory = MockFactory::new().on("agent-model", Behaviour::succeed("done"));
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory.into_arc(), ledger.clone(), MockSessions::new());
+
+    let mut task = TaskSpec::new("do the migration");
+    task.system = Some("prefer small commits".to_string());
+    let chain = vec![cli_target("anthropic", "agent-model")];
+    d.dispatch(&task, chain, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let jobs = probe.harness_jobs();
+    assert_eq!(
+        jobs[0].prompt,
+        "do the migration\n\n## Additional instructions\n\nprefer small commits"
+    );
+}
+
+#[tokio::test]
+async fn harness_prompt_without_system_is_unchanged() {
+    let factory = MockFactory::new().on("agent-model", Behaviour::succeed("done"));
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory.into_arc(), ledger.clone(), MockSessions::new());
+
+    let task = TaskSpec::new("just the prompt"); // system = None
+    let chain = vec![cli_target("anthropic", "agent-model")];
+    d.dispatch(&task, chain, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let jobs = probe.harness_jobs();
+    assert_eq!(jobs[0].prompt, "just the prompt");
+}
+
+// ===========================================================================
+// Finding 4: cancellation checked before make and between failover attempts
+// ===========================================================================
+
+#[tokio::test]
+async fn pre_cancelled_dispatch_never_touches_the_factory() {
+    // A token cancelled before dispatch must yield Cancelled with no factory
+    // side effects: `make` is never called, and no chat/harness attempt runs.
+    let factory = MockFactory::new().on("m", Behaviour::succeed("must not run"));
+    let probe = factory.probe();
+    let make_calls = factory.make_calls();
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory.into_arc(), ledger.clone(), MockSessions::new());
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let task = TaskSpec::new("pre-cancelled");
+    let rec = d
+        .dispatch(&task, vec![http_target("p", "m")], cancel)
+        .await
+        .unwrap();
+
+    assert_eq!(rec.status, RunStatus::Cancelled);
+    assert_eq!(rec.attempts.len(), 1, "one recorded (cancelled) attempt");
+    assert!(matches!(
+        rec.attempts[0].outcome,
+        AttemptOutcome::Err {
+            kind: ErrorKind::Cancelled,
+            failed_over: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        make_calls.load(Ordering::SeqCst),
+        0,
+        "factory must not be called for a pre-cancelled dispatch"
+    );
+    assert!(
+        probe.chat_requests().is_empty() && probe.harness_jobs().is_empty(),
+        "no executor attempt may run"
+    );
+    assert_eq!(
+        ledger.append_count(),
+        1,
+        "the cancelled run is still recorded"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_between_attempts_stops_before_next_factory_make() {
+    // Attempt 1 fails over (SpawnFailed) and, in doing so, cancels the token.
+    // The loop's pre-make guard must then catch the cancellation before
+    // building the second target: status Cancelled, and the factory is asked to
+    // build only the first target (make_calls == 1).
+    let cancel = CancellationToken::new();
+    let factory = MockFactory::new()
+        .cancel_on_make("first", cancel.clone())
+        .on("second", Behaviour::succeed("must not run"));
+    let make_calls = factory.make_calls();
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory.into_arc(), ledger.clone(), MockSessions::new());
+
+    let task = TaskSpec::new("cancel mid-chain");
+    let chain = vec![http_target("p1", "first"), http_target("p2", "second")];
+    let rec = d.dispatch(&task, chain, cancel).await.unwrap();
+
+    assert_eq!(rec.status, RunStatus::Cancelled);
+    assert_eq!(
+        rec.attempts.len(),
+        2,
+        "failed-over first + cancelled second"
+    );
+    assert!(matches!(
+        rec.attempts[0].outcome,
+        AttemptOutcome::Err {
+            kind: ErrorKind::SpawnFailed,
+            failed_over: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        rec.attempts[1].outcome,
+        AttemptOutcome::Err {
+            kind: ErrorKind::Cancelled,
+            failed_over: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        make_calls.load(Ordering::SeqCst),
+        1,
+        "second target's factory make must never be called"
+    );
+    assert!(
+        probe.chat_requests().is_empty(),
+        "the second (would-succeed) attempt must never execute"
+    );
+    assert_eq!(ledger.append_count(), 1);
+}
+
+// ===========================================================================
+// Architect decision: persistence after a completed run is best-effort — a
+// ledger or session-store error must not demote a successful run to Err.
+// ===========================================================================
+
+#[tokio::test]
+async fn ledger_append_failure_does_not_fail_a_completed_run() {
+    // The model call succeeds; the ledger append errors. The run must still
+    // come back Ok with status Success — the append failure is only logged.
+    let factory = MockFactory::new()
+        .on("m", Behaviour::succeed("all good"))
+        .into_arc();
+    let ledger = ErroringLedger::new();
+    let sessions = MockSessions::new();
+    let d = Dispatcher::new(factory, Arc::new(ledger.clone()), Arc::new(sessions));
+
+    let task = TaskSpec::new("succeed then fail to persist");
+    let rec = d
+        .dispatch(&task, vec![http_target("p", "m")], CancellationToken::new())
+        .await
+        .expect("a completed run must survive a ledger append failure");
+
+    assert_eq!(rec.status, RunStatus::Success);
+    assert_eq!(rec.output_chars, Some("all good".chars().count() as u64));
+    assert_eq!(
+        ledger.append_calls(),
+        1,
+        "the append was attempted exactly once"
+    );
+}
+
+#[tokio::test]
+async fn session_save_failure_does_not_fail_a_completed_run() {
+    // The model call succeeds; the session store's save errors. The run must
+    // still return Ok/Success — session persistence is best-effort.
+    let factory = MockFactory::new()
+        .on("agent-model", Behaviour::succeed_harness("ok", "native-x"))
+        .into_arc();
+    let ledger = MockLedger::new();
+    let sessions = ErroringSessions::new();
+    let d = Dispatcher::new(
+        factory,
+        Arc::new(ledger.clone()),
+        Arc::new(sessions.clone()),
+    );
+
+    let mut task = TaskSpec::new("succeed then fail to save session");
+    task.session = Some(SessionRef::new("sess-save-fail"));
+    let chain = vec![cli_target("anthropic", "agent-model")];
+    let rec = d
+        .dispatch(&task, chain, CancellationToken::new())
+        .await
+        .expect("a completed run must survive a session save failure");
+
+    assert_eq!(rec.status, RunStatus::Success);
+    assert_eq!(rec.session_id.as_deref(), Some("sess-save-fail"));
+    assert_eq!(ledger.append_count(), 1, "the run was still recorded");
+    assert!(
+        sessions.save_calls() >= 1,
+        "a session save was attempted (and failed, but did not propagate)"
+    );
+}
+
+#[tokio::test]
+async fn ledger_failure_on_a_failed_run_still_returns_the_error_record() {
+    // Even when the run itself failed *and* the ledger append fails, dispatch
+    // still returns Ok with the Error record — the append error never masks the
+    // run's own terminal status.
+    let factory = MockFactory::new()
+        .on("m", Behaviour::fail(ErrorKind::Config))
+        .into_arc();
+    let ledger = ErroringLedger::new();
+    let sessions = MockSessions::new();
+    let d = Dispatcher::new(factory, Arc::new(ledger.clone()), Arc::new(sessions));
+
+    let task = TaskSpec::new("fail then fail to persist");
+    let rec = d
+        .dispatch(&task, vec![http_target("p", "m")], CancellationToken::new())
+        .await
+        .expect("dispatch returns the record even when append fails");
+
+    assert_eq!(rec.status, RunStatus::Error);
+    assert!(rec.error.is_some());
+    assert_eq!(ledger.append_calls(), 1);
 }
