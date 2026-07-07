@@ -62,6 +62,11 @@ pub struct DispatchArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
+    /// Stream deltas to stdout as they arrive. Only meaningful for a
+    /// single-target direct-HTTP dispatch; falls back to non-streaming
+    /// (with a stderr notice) for harness targets or multi-target chains.
+    #[arg(long)]
+    pub stream: bool,
 }
 
 #[derive(Debug, Args)]
