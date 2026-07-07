@@ -17,8 +17,17 @@ use crate::cli::{
     TaskListArgs, TaskStatusArgs, WorkerArgs,
 };
 use crate::output::{BroadcastJson, BroadcastRow, RunJson};
-use crate::task::proc::{SIGKILL, SIGTERM, pgid_of, pid_alive, signal_group};
+use crate::task::proc::{
+    IdentityCheck, SIGKILL, SIGTERM, pgid_of, pid_alive, signal_group, verify_identity,
+};
 use crate::task::store::{JobSpec, StatusFile, TaskPaths, TaskState, interpret_state, list_tasks};
+
+/// The production identity probe used by read-side orphan detection: a
+/// still-`running` status is only trusted if the recorded process still
+/// validates as its own worker (see [`verify_identity`]).
+fn identity_probe(pid: i32, pgid: i32, started_at: chrono::DateTime<chrono::Utc>) -> IdentityCheck {
+    verify_identity(pid, pgid, started_at)
+}
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
@@ -118,12 +127,30 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
 }
 
 async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
-    // Config-phase failures exit 2 (mirroring `check`), so wrappers can tell
-    // "fix your config" apart from "the run failed" (exit 1). This validation
-    // runs FIRST — before `--detach` spawns anything — so a bad config never
-    // leaves a stray task directory behind.
-    let phase = load_config(config_path.as_deref())
-        .and_then(|loaded| resolve_target_chain(&loaded, &args.target).map(|c| (loaded, c)));
+    // Input-phase failures exit 2 (mirroring `check`), so wrappers can tell
+    // "fix your invocation/config" apart from "the run failed" (exit 1). This
+    // validation runs FIRST — before `--detach` spawns anything — so bad input
+    // never leaves a stray task directory behind. It validates BOTH config +
+    // target resolution AND the full TaskSpec (crucially, `--label` parsing:
+    // `--label bad` with no `=` is rejected here, in the parent, not deferred
+    // into a worker that would otherwise briefly exist as a task dir).
+    let phase = load_config(config_path.as_deref()).and_then(|loaded| {
+        let chain = resolve_target_chain(&loaded, &args.target)?;
+        // Prove the whole spec parses (labels included) up front. Discarded —
+        // the online path rebuilds it below, the detached path re-parses in the
+        // worker; this call's only job is to fail early on invalid input.
+        // `task_base` runs the fallible `--label` key=value parsing; session is
+        // infallible (`SessionRef::new`) so it needs no pre-validation here.
+        let _ = task_base(
+            args.task.clone(),
+            args.workdir.clone(),
+            args.sandbox.into(),
+            args.system.clone(),
+            args.timeout,
+            args.label.clone(),
+        )?;
+        Ok((loaded, chain))
+    });
     let (loaded, chain) = match phase {
         Ok(value) => value,
         Err(error) => {
@@ -133,8 +160,9 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
     };
 
     // Detached path: freeze the request and hand it to a re-exec'd worker, then
-    // return immediately. Config is already validated above, so reaching here
-    // means the target resolves.
+    // return immediately. Config + full TaskSpec are already validated above, so
+    // reaching here means the target resolves and every field (labels included)
+    // is well-formed.
     if args.detach {
         return spawn_detached_dispatch(config_path, args);
     }
@@ -202,20 +230,80 @@ fn spawn_detached_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> 
 ///
 /// The worker owns its own process group (installed by the parent via
 /// `setsid`); it never re-exec's further.
+///
+/// ## Two ordering invariants this shell enforces
+///
+/// 1. **Cancellation handler is armed before any `running` state is
+///    observable.** The `SIGTERM` → [`CancellationToken`] handler is installed
+///    here, *before* [`worker_body`] runs (and it is `worker_body` that writes
+///    the first `running` status). Because `task cancel` only signals a task
+///    whose status file already reads `running`, and `running` cannot appear
+///    until after this handler exists, any signal a canceller could deliver is
+///    guaranteed to be caught and turned into a clean kernel cancellation —
+///    never a raw process teardown mid-run. (The handler being live strictly
+///    *before* the state write is what closes the race; the code structure —
+///    handler on line A, `worker_body` call on the next line — encodes it.)
+///
+/// 2. **No path ever exits leaving `running` behind.** [`worker_body`] returns
+///    `Err` for *any* setup or dispatch failure (corrupt `job.json`, config
+///    resolution failure, spec/runtime assembly failure, kernel dispatch
+///    error). This shell converts that `Err` into a terminal `error`
+///    `status.json` (keyed by the worker's own run id, with the message), so a
+///    reader always sees a definitive terminal state, not a stuck `running`.
 async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<ExitCode> {
     let storage = StoragePaths::resolve()?;
     let paths = TaskPaths::new(&storage.tasks_dir, &args.id);
 
-    let job = paths.read_job()?;
+    // Invariant (1): arm the cancellation handler BEFORE running any body that
+    // could publish `running`. See the doc comment above.
+    let cancel = worker_cancellation_token();
+
+    match worker_body(config_path, &args, &paths, cancel).await {
+        Ok(code) => Ok(code),
+        Err(error) => {
+            // Invariant (2): convert any setup/dispatch failure into a terminal
+            // `error` status so nothing is ever left observably `running`.
+            let pid = std::process::id() as i32;
+            let pgid = pgid_of(pid).unwrap_or(pid);
+            let mut status = StatusFile::running(&args.id, pid, pgid, "-", None);
+            status.state = TaskState::Error;
+            status.finished_at = Some(chrono::Utc::now());
+            status.error = Some(format!("{error:#}"));
+            // Best-effort: if even this write fails there is nothing more we can
+            // do (the read side will fall back to `stale`/`died`).
+            let _ = paths.write_status(&status);
+            eprintln!("worker error: {error:#}");
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
+/// The worker's real work, factored out so [`run_worker`] can guarantee a
+/// terminal status on any failure. Returns the process exit code on the happy
+/// path (0 on success, 1 on a non-success terminal run); returns `Err` for any
+/// setup or dispatch failure, which the caller records as a terminal `error`.
+///
+/// The cancellation token is passed in already-armed so the ordering invariant
+/// (handler before `running`) is owned by the caller.
+async fn worker_body(
+    config_path: Option<PathBuf>,
+    args: &WorkerArgs,
+    paths: &TaskPaths,
+    cancel: CancellationToken,
+) -> Result<ExitCode> {
+    let job = paths
+        .read_job()
+        .with_context(|| format!("read job spec for {}", args.id))?;
     // The job's own recorded config override wins over any inherited flag; the
     // parent always writes it (possibly `None`).
     let config_path = job.config.clone().or(config_path);
 
-    // Re-resolve config + target chain exactly as an online dispatch would.
-    // The parent already validated this, but the worker is a fresh process, so
-    // it resolves independently. A failure here is recorded as an error status.
-    let resolved = load_config(config_path.as_deref())
-        .and_then(|loaded| resolve_target_chain(&loaded, &job.target).map(|c| (loaded, c)));
+    // Re-resolve config + target chain exactly as an online dispatch would. The
+    // parent already validated this, but the worker is a fresh process, so it
+    // resolves independently. A failure propagates as `Err` → terminal error.
+    let (loaded, chain) = load_config(config_path.as_deref())
+        .and_then(|loaded| resolve_target_chain(&loaded, &job.target).map(|c| (loaded, c)))
+        .with_context(|| format!("resolve config/target for {}", args.id))?;
 
     let pid = std::process::id() as i32;
     let pgid = pgid_of(pid).unwrap_or(pid);
@@ -224,22 +312,6 @@ async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<Ex
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned());
 
-    let (loaded, chain) = match resolved {
-        Ok(value) => value,
-        Err(error) => {
-            // Config could not be resolved in the worker: record a terminal
-            // error status so `task status` explains why, and exit nonzero.
-            let mut status =
-                StatusFile::running(&job.run_id, pid, pgid, &job.target, workdir.clone());
-            status.state = TaskState::Error;
-            status.finished_at = Some(chrono::Utc::now());
-            status.error = Some(format!("config error: {error:#}"));
-            paths.write_status(&status)?;
-            eprintln!("config error: {error:#}");
-            return Ok(ExitCode::from(1));
-        }
-    };
-
     // The status target is a best-effort label: the first resolved target's
     // identity reads better than the raw selector, but falls back to it.
     let target_label = chain
@@ -247,23 +319,22 @@ async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<Ex
         .map(|bound| bound.target.to_string())
         .unwrap_or_else(|| job.target.clone());
 
-    // 1) Announce `running` up front (atomic write) so `task list/status`
-    //    observe the run the instant the worker is live.
+    // Announce `running` up front (atomic write) so `task list/status` observe
+    // the run the instant the worker is live. The cancellation handler is
+    // already armed by `run_worker`, so any observable `running` implies a
+    // canceller's SIGTERM will be caught (ordering invariant 1).
     let running = StatusFile::running(&job.run_id, pid, pgid, &target_label, workdir.clone());
     paths.write_status(&running)?;
 
-    // 2) A SIGTERM handler cancels the kernel token, so `task cancel` lets the
-    //    dispatch unwind cleanly (RunRecord lands, status becomes `cancelled`)
-    //    instead of the process being torn down mid-run.
-    let cancel = worker_cancellation_token();
-
+    // From here, a failure still lands as a terminal `error` (invariant 2): the
+    // `?` bubbles up to `run_worker`, which overwrites this `running` file.
     let task = task_from_job(&job)?;
     let runtime = Runtime::new(loaded.config, StoragePaths::resolve()?)?;
     let outcome = runtime.dispatcher.dispatch(&task, chain, cancel).await?;
     let record = outcome.record;
     let output = outcome.output;
 
-    // 3) Persist the answer (if any) beside the status, then finalize status.
+    // Persist the answer (if any) beside the status, then finalize status.
     if let Some(text) = output.as_deref() {
         std::fs::write(paths.output(), text)
             .with_context(|| format!("write {}", paths.output().display()))?;
@@ -286,7 +357,7 @@ async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<Ex
 
 async fn run_task_list(args: TaskListArgs) -> Result<ExitCode> {
     let storage = StoragePaths::resolve()?;
-    let rows = list_tasks(&storage.tasks_dir, pid_alive);
+    let rows = list_tasks(&storage.tasks_dir, &identity_probe);
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -305,11 +376,23 @@ async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
     let status = match paths.read_status() {
         Ok(status) => status,
         Err(_) => {
+            // No readable status. Distinguish a *stale* run (the parent froze a
+            // job but the worker never published status — a spawn likely
+            // failed) from a genuinely unknown id, so the failure is
+            // explainable rather than a bare "no such run".
+            if paths.job_mtime().is_some() {
+                eprintln!(
+                    "{}: stale — worker never wrote status (spawn may have failed); see {}",
+                    args.id,
+                    paths.log().display()
+                );
+                return Ok(ExitCode::from(1));
+            }
             eprintln!("no such detached run: {}", args.id);
             return Ok(ExitCode::from(1));
         }
     };
-    let displayed = interpret_state(&status, pid_alive);
+    let displayed = interpret_state(&status, &identity_probe);
 
     // `--output` prints the captured answer and nothing else.
     if args.output {
@@ -369,14 +452,37 @@ async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let pgid = if status.pgid > 0 {
-        status.pgid
-    } else {
-        pgid_of(status.pid).unwrap_or(status.pid)
-    };
+    // Process-identity gate — the guard against pid reuse. Between the worker
+    // recording its pid and this cancel, the OS may have recycled that pid onto
+    // an unrelated process; blindly signalling it (worse, its whole group by
+    // negative pid) could kill something we never launched. Only signal if the
+    // process now holding the pid still validates as *this* worker: its process
+    // group matches the recorded `pgid` AND its start time matches the recorded
+    // `started_at` (see `verify_identity`).
+    match verify_identity(status.pid, status.pgid, status.started_at) {
+        IdentityCheck::Match => {}
+        IdentityCheck::Dead => {
+            // The worker is already gone without finalizing — an orphan, which
+            // the read side shows as `died`. Nothing to signal.
+            eprintln!(
+                "{}: worker process is gone (died); nothing to cancel",
+                args.id
+            );
+            return Ok(ExitCode::from(1));
+        }
+        IdentityCheck::Mismatch(reason) => {
+            eprintln!(
+                "{}: process identity mismatch ({reason}; pid likely reused); refusing to signal",
+                args.id
+            );
+            return Ok(ExitCode::from(1));
+        }
+    }
 
-    // SIGTERM the whole group: the worker catches it and finalizes; any harness
+    // Identity confirmed: `status.pgid` is the live worker's group. SIGTERM the
+    // whole group — the worker catches it and finalizes; any harness
     // grandchildren it spawned die with the group.
+    let pgid = status.pgid;
     signal_group(pgid, SIGTERM);
 
     // Give the worker up to 5s to exit its process group cleanly; escalate to
