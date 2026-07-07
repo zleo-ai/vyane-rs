@@ -498,6 +498,23 @@ async fn normal_exit_returns_when_grandchild_keeps_stdout_open() {
     assert_pid_dead(&child_pid);
 }
 
+/// `base_job`'s `EnvPolicy::scrubbed()` intentionally excludes proxy variables
+/// (they're exactly the kind of ambient network override the scrub exists to
+/// drop by default). On a machine that requires an HTTP(S) proxy for
+/// outbound network access, that same scrub makes the real Claude Code CLI
+/// unable to reach the API at all (auth fails with a 403 before any
+/// permission-mode behavior is even exercised) — a real environment
+/// dependency, but not what these two smoke tests are for. Widen just the
+/// `allow` list for these real-CLI smokes so they exercise sandbox/permission
+/// behavior specifically, not this machine's network path.
+fn real_cli_job(prompt: &str) -> HarnessJob {
+    let mut job = base_job(prompt);
+    job.env.allow.push("HTTPS_PROXY".into());
+    job.env.allow.push("HTTP_PROXY".into());
+    job.env.allow.push("NO_PROXY".into());
+    job
+}
+
 #[tokio::test]
 #[ignore = "requires a real Claude Code install and configured auth"]
 async fn real_claude_smoke_available_only() {
@@ -507,7 +524,7 @@ async fn real_claude_smoke_available_only() {
 #[tokio::test]
 #[ignore = "requires a real Claude Code install and configured auth; verifies read-only headless behavior"]
 async fn real_claude_smoke_read_only_headless() {
-    let mut job = base_job("Reply with exactly: vyane-read-only-ok");
+    let mut job = real_cli_job("Reply with exactly: vyane-read-only-ok");
     job.sandbox = Sandbox::ReadOnly;
     let outcome = ClaudeCodeHarness::new()
         .run(job, CancellationToken::new())
@@ -519,7 +536,7 @@ async fn real_claude_smoke_read_only_headless() {
 #[tokio::test]
 #[ignore = "requires a real Claude Code install and configured auth; verifies full sandbox opt-in behavior"]
 async fn real_claude_smoke_full_headless() {
-    let mut job = base_job("Reply with exactly: vyane-full-ok");
+    let mut job = real_cli_job("Reply with exactly: vyane-full-ok");
     job.sandbox = Sandbox::Full;
     let outcome = ClaudeCodeHarness::new()
         .run(job, CancellationToken::new())
