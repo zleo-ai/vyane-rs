@@ -46,6 +46,18 @@ fn write_config(dir: &TempDir, text: &str) -> std::path::PathBuf {
     path
 }
 
+/// Assert the `tasks/` directory was never created, or is empty — no run dir
+/// leaked. Used by the exit-2 input-validation tests (config error, bad label):
+/// invalid input must be rejected before anything is spawned.
+fn assert_no_task_dir(data_dir: &Path) {
+    let tasks = data_dir.join("tasks");
+    let empty = match fs::read_dir(&tasks) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => true, // not created at all
+    };
+    assert!(empty, "a task dir was created despite invalid input");
+}
+
 /// Mount an OpenAI chat mock returning `answer` after `delay`.
 async fn mock_openai_delayed(server: &MockServer, answer: &str, delay: Duration) {
     let template = ResponseTemplate::new(200)
@@ -248,13 +260,150 @@ async fn detach_config_error_exits_two_and_creates_no_task_dir() {
         .code(2)
         .stderr(predicate::str::contains("config error"));
 
-    // No tasks directory (or an empty one) — certainly no run dir created.
-    let tasks = data_dir.path().join("tasks");
-    let empty = match fs::read_dir(&tasks) {
-        Ok(mut entries) => entries.next().is_none(),
-        Err(_) => true, // not created at all
-    };
-    assert!(empty, "a task dir was created despite a config error");
+    assert_no_task_dir(data_dir.path());
+}
+
+/// Acceptance #2b: an invalid `--label` (no `key=value`) with `--detach` is
+/// rejected in the PARENT — exits 2, exactly like a config error, and creates
+/// no task dir. The reviewer's repro: `--label bad`. This proves the full
+/// TaskSpec (label parsing included) is validated before anything is spawned,
+/// not deferred into a worker that would leave a stray task dir behind.
+#[tokio::test]
+async fn detach_bad_label_exits_two_and_creates_no_task_dir() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &config_for(&server));
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "dispatch", "hello", "--target",
+            "review", // a VALID target, so only the label is wrong
+            "--label", "bad", // no '=', must be rejected
+            "--detach",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("config error"))
+        .stderr(predicate::str::contains("key=value"));
+
+    assert_no_task_dir(data_dir.path());
+}
+
+/// Acceptance #3b: a worker whose setup fails *after* it would publish state
+/// (here: a corrupt `job.json` it cannot parse) must finalize as a terminal
+/// `error`, never leave `running`/`died` behind. We craft the task dir the way
+/// the parent would (valid id + `job.json`), then corrupt `job.json` and invoke
+/// the hidden worker directly; it must write `state: error` and exit nonzero.
+#[tokio::test]
+async fn worker_setup_failure_finalizes_error_not_running() {
+    let data_dir = TempDir::new().expect("data tempdir");
+    let id = "0198c0de-0000-7000-8000-0000000badj0";
+    let task_dir = data_dir.path().join("tasks").join(id);
+    fs::create_dir_all(&task_dir).expect("create task dir");
+    // A job.json that exists but does not parse as a JobSpec → read_job fails
+    // inside the worker's setup phase.
+    fs::write(task_dir.join("job.json"), "{ this is not valid json ")
+        .expect("write corrupt job.json");
+
+    // Invoke the hidden worker subcommand directly (as the parent's re-exec
+    // would). It must not panic; it must record a terminal error status.
+    vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["__worker", id])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("worker error"));
+
+    // status.json exists and is terminal `error` — not left `running`, and (a
+    // status file DOES exist so) not read as `stale` either.
+    let status_path = task_dir.join("status.json");
+    let status: Value = serde_json::from_str(
+        &fs::read_to_string(&status_path).expect("worker must have written status.json"),
+    )
+    .expect("parse status.json");
+    assert_eq!(
+        status["state"], "error",
+        "a worker setup failure must finalize as error, not running/died"
+    );
+    assert!(
+        !status["error"].as_str().unwrap_or("").is_empty(),
+        "the error status must carry a message"
+    );
+
+    // And `task status` reports it as error with exit 1 (unhappy terminal).
+    vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["task", "status", id])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("error"));
+}
+
+/// Acceptance #4b: a task dir with `job.json` but NO `status.json` (the worker
+/// never published status — a spawn likely failed) must be VISIBLE: `task list`
+/// shows it as `stale`, and `task status <id>` exits nonzero explaining that
+/// the worker never wrote status.
+#[tokio::test]
+async fn job_without_status_shows_stale_and_explains() {
+    let data_dir = TempDir::new().expect("data tempdir");
+    let id = "0198c0de-0000-7000-8000-00000000513e";
+    let task_dir = data_dir.path().join("tasks").join(id);
+    fs::create_dir_all(&task_dir).expect("create task dir");
+    // A well-formed job.json but deliberately NO status.json — models a worker
+    // that never came up.
+    let job = json!({
+        "run_id": id,
+        "task": "never ran",
+        "target": "review",
+        "sandbox": "read-only"
+    });
+    fs::write(
+        task_dir.join("job.json"),
+        serde_json::to_string_pretty(&job).expect("serialize job"),
+    )
+    .expect("write job.json");
+
+    // `task list` shows it as stale.
+    vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["task", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stale"))
+        .stdout(predicate::str::contains(id));
+
+    // `task list --json` reports state stale for that id.
+    let out = vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["task", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rows: Value = serde_json::from_slice(&out).expect("task list json");
+    let row = rows
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|r| r["id"] == id)
+        .expect("stale row present");
+    assert_eq!(row["state"], "stale");
+
+    // `task status <id>` exits nonzero and explains the worker never wrote
+    // status (points at the log for triage).
+    vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["task", "status", id])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("stale"))
+        .stderr(predicate::str::contains("worker never wrote status"));
 }
 
 /// Acceptance #3: `task cancel` on a long-running detached run leaves
@@ -290,9 +439,12 @@ async fn cancel_finalizes_cancelled_and_kills_group() {
         v["state"] == "running" && v["pid"].as_i64().unwrap_or(0) > 0
     });
     assert!(running, "worker never reached running with a pid");
-    let pid = task_status_json(data_dir.path(), &id)["pid"]
-        .as_i64()
-        .expect("pid") as i32;
+    let running_status = task_status_json(data_dir.path(), &id);
+    let pid = running_status["pid"].as_i64().expect("pid") as i32;
+    // The worker's own process group (setsid → pgid == worker pid). `task
+    // cancel` group-signals THIS pgid; we assert the whole group is gone after.
+    let pgid = running_status["pgid"].as_i64().expect("pgid") as i32;
+    assert!(pgid > 0, "worker must record a real pgid");
 
     // Cancel — SIGTERM group, wait for finalize; the worker's SIGTERM handler
     // cancels the kernel so the run records `cancelled` and finalizes.
@@ -316,6 +468,16 @@ async fn cancel_finalizes_cancelled_and_kills_group() {
     // worker should be exiting; allow extra headroom for the OS to reap it.
     let dead = wait_pid_dead(pid, Duration::from_secs(8));
     assert!(dead, "worker pid {pid} still alive after cancel");
+
+    // Group-kill proof: the whole recorded process GROUP is empty, not just the
+    // direct worker pid. `kill(-pgid, 0)` returns ESRCH once no member remains,
+    // so this asserts group-level teardown via the stored pgid — the property
+    // that guarantees any harness grandchildren in the group die with it.
+    let group_empty = wait_group_empty(pgid, Duration::from_secs(8));
+    assert!(
+        group_empty,
+        "process group {pgid} still has live members after cancel"
+    );
 
     // Ledger has the cancelled RunRecord (keyed by the kernel's run_id).
     let records = ledger_records(data_dir.path());
@@ -482,6 +644,42 @@ fn wait_pid_dead(pid: i32, budget: Duration) -> bool {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Whether the process GROUP `pgid` is empty, polling `kill(-pgid, 0)` until it
+/// reports ESRCH (no members) or the budget elapses.
+fn wait_group_empty(pgid: i32, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        if !unix_group_has_members(pgid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Test-local group-liveness probe: `kill(-pgid, 0)` returns 0 while ≥1 member
+/// exists, ESRCH once the group is empty.
+#[cfg(unix)]
+fn unix_group_has_members(pgid: i32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    if pgid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 to a negative pid probes the group's existence without
+    // delivering a signal. No memory-safety implications.
+    let rc = unsafe { kill(-pgid, 0) };
+    rc == 0
+}
+
+#[cfg(not(unix))]
+fn unix_group_has_members(_pgid: i32) -> bool {
+    false
 }
 
 /// Test-local liveness probe (the crate's own `pid_alive` is not part of the
