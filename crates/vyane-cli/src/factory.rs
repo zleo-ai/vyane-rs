@@ -72,7 +72,13 @@ impl ExecutorFactory for AssemblerFactory {
     }
 }
 
-fn direct_http_client(bound: &BoundTarget) -> Result<Arc<dyn ChatClient>> {
+/// Build the direct-HTTP `ChatClient` for a `DirectHttp` `BoundTarget`.
+///
+/// Shared with the CLI's `--stream` path (`command.rs`), which needs the same
+/// `Protocol -> concrete client` mapping outside the `ExecutorFactory` seam:
+/// streaming drives the client directly rather than through
+/// `Dispatcher::dispatch` (see `docs/plan/WP-09.md`'s "known seam" note).
+pub(crate) fn direct_http_client(bound: &BoundTarget) -> Result<Arc<dyn ChatClient>> {
     let endpoint = bound.endpoint.clone().ok_or_else(|| {
         VyaneError::new(
             ErrorKind::Config,
