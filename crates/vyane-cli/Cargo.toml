@@ -18,6 +18,7 @@ vyane-protocol = { workspace = true }
 vyane-harness = { workspace = true }
 vyane-kernel = { workspace = true }
 vyane-ledger = { workspace = true }
+vyane-workflow = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

@@ -107,10 +107,12 @@ impl Runtime {
     }
 }
 
+#[derive(Clone)]
 pub struct StoragePaths {
     pub data_dir: PathBuf,
     pub ledger_path: PathBuf,
     pub sessions_dir: PathBuf,
+    pub workflows_dir: PathBuf,
 }
 
 impl StoragePaths {
@@ -124,6 +126,7 @@ impl StoragePaths {
         Ok(Self {
             ledger_path: data_dir.join("ledger.jsonl"),
             sessions_dir: data_dir.join("sessions"),
+            workflows_dir: data_dir.join("workflows"),
             data_dir,
         })
     }

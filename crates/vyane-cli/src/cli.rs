@@ -32,6 +32,19 @@ pub enum Command {
     History(HistoryArgs),
     /// List saved session records.
     Sessions(SessionsArgs),
+    /// Run, resume, and list declarative workflows.
+    #[command(subcommand)]
+    Workflow(WorkflowCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    /// Run a workflow TOML file.
+    Run(WorkflowRunArgs),
+    /// Resume a workflow run from its journal.
+    Resume(WorkflowResumeArgs),
+    /// List workflow journals.
+    List(WorkflowListArgs),
 }
 
 #[derive(Debug, Args)]
@@ -109,6 +122,40 @@ pub struct HistoryArgs {
 
 #[derive(Debug, Args)]
 pub struct SessionsArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowRunArgs {
+    /// Workflow TOML file to run.
+    pub file: PathBuf,
+    /// Workflow variable; repeatable as key=value.
+    #[arg(long = "var", value_name = "k=v")]
+    pub vars: Vec<String>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowResumeArgs {
+    /// Workflow run id to resume.
+    pub wf_run_id: String,
+    /// Workflow TOML file used by the original run.
+    #[arg(long, value_name = "FILE")]
+    pub file: PathBuf,
+    /// Workflow variables are loaded from the journal on resume; passing this is an error.
+    #[arg(long = "var", value_name = "k=v")]
+    pub vars: Vec<String>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowListArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,

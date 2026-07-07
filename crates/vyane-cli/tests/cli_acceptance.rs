@@ -6,7 +6,7 @@ use predicates::prelude::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 fn vyane() -> Command {
     Command::cargo_bin("vyane").expect("vyane binary")
@@ -92,12 +92,45 @@ async fn mock_openai(server: &MockServer, status: u16, answer: &str) {
         .await;
 }
 
+async fn mock_openai_workflow(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(|req: &Request| {
+            let body = String::from_utf8_lossy(&req.body);
+            let answer = if body.contains("review draft answer") {
+                "review answer"
+            } else {
+                "draft answer"
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-test",
+                "model": "test-model",
+                "choices": [{
+                    "message": { "role": "assistant", "content": answer },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2
+                }
+            }))
+        })
+        .mount(server)
+        .await;
+}
+
 fn ledger_records(data_dir: &Path) -> Vec<Value> {
     let ledger = data_dir.join("ledger.jsonl");
     let text = fs::read_to_string(ledger).expect("ledger file");
     text.lines()
         .map(|line| serde_json::from_str(line).expect("run record json"))
         .collect()
+}
+
+fn write_workflow(dir: &TempDir, text: &str) -> std::path::PathBuf {
+    let path = dir.path().join("workflow.toml");
+    fs::write(&path, text).expect("write workflow");
+    path
 }
 
 #[tokio::test]
@@ -219,4 +252,71 @@ async fn dispatch_failover_and_history_work_end_to_end() {
         .clone();
     let parsed: Value = serde_json::from_slice(&output).expect("json history output");
     assert_eq!(parsed.as_array().expect("history array").len(), 1);
+}
+
+#[tokio::test]
+async fn workflow_run_and_list_work_end_to_end() {
+    let server = MockServer::start().await;
+    mock_openai_workflow(&server).await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &config_for(&server));
+    let workflow = write_workflow(
+        &config_dir,
+        r#"
+        [workflow]
+        name = "two-step"
+        max_concurrency = 2
+
+        [[step]]
+        id = "draft"
+        target = "review"
+        prompt = "draft {{vars.topic}}"
+
+        [[step]]
+        id = "review"
+        needs = ["draft"]
+        target = "review"
+        prompt = "review {{steps.draft.output}}"
+        "#,
+    );
+
+    let output = vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .arg("workflow")
+        .arg("run")
+        .arg(&workflow)
+        .args(["--var", "topic=wp07", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).expect("workflow json");
+    assert_eq!(parsed["status"], "completed");
+    assert_eq!(
+        parsed["journal"]["steps"]["draft"]["output"],
+        "draft answer"
+    );
+    assert_eq!(
+        parsed["journal"]["steps"]["review"]["output"],
+        "review answer"
+    );
+    let wf_run_id = parsed["wf_run_id"].as_str().expect("wf_run_id");
+    let journal_path = data_dir
+        .path()
+        .join("workflows")
+        .join(format!("{wf_run_id}.json"));
+    assert!(journal_path.exists(), "workflow journal exists");
+
+    vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["workflow", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("two-step"))
+        .stdout(predicate::str::contains("completed"));
 }

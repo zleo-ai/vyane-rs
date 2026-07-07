@@ -1913,6 +1913,7 @@ dependencies = [
  "vyane-kernel",
  "vyane-ledger",
  "vyane-protocol",
+ "vyane-workflow",
  "wiremock",
 ]
 
@@ -2023,6 +2024,27 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "vyane-core",
+]
+
+[[package]]
+name = "vyane-workflow"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+ "vyane-core",
+ "vyane-kernel",
 ]
 
 [[package]]

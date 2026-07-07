@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -10,9 +11,13 @@ use vyane_core::{
     SessionRef, TaskSpec,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
+use vyane_workflow::{StepEvent, TargetResolver, Workflow, WorkflowEngine, WorkflowError};
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
-use crate::cli::{BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs};
+use crate::cli::{
+    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, WorkflowCommand, WorkflowResumeArgs,
+    WorkflowRunArgs,
+};
 use crate::output::{BroadcastJson, BroadcastRow, RunJson};
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
@@ -22,6 +27,11 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Broadcast(args) => run_broadcast(cli.config, args).await,
         Command::History(args) => run_history(args).await,
         Command::Sessions(args) => run_sessions(args).await,
+        Command::Workflow(command) => match command {
+            WorkflowCommand::Run(args) => run_workflow(cli.config, args).await,
+            WorkflowCommand::Resume(args) => resume_workflow(cli.config, args).await,
+            WorkflowCommand::List(args) => list_workflows(args).await,
+        },
     }
 }
 
@@ -261,6 +271,124 @@ async fn run_sessions(args: crate::cli::SessionsArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+async fn run_workflow(config_path: Option<PathBuf>, args: WorkflowRunArgs) -> Result<ExitCode> {
+    let vars = match parse_vars(args.vars) {
+        Ok(vars) => vars,
+        Err(error) => {
+            eprintln!("config error: {error:#}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let phase = load_config(config_path.as_deref()).and_then(|loaded| {
+        let wf = Workflow::from_path(&args.file).map_err(anyhow::Error::from)?;
+        Ok((loaded, wf))
+    });
+    let (loaded, wf) = match phase {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("config error: {error:#}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+
+    let paths = StoragePaths::resolve()?;
+    let runtime = Runtime::new(loaded.config.clone(), paths.clone())?;
+    let resolver = Arc::new(CliWorkflowResolver { loaded });
+    let mut engine = WorkflowEngine::new(
+        Arc::new(runtime.dispatcher.clone()),
+        resolver,
+        paths.workflows_dir.clone(),
+    );
+    if !args.json {
+        engine = engine.with_observer(Arc::new(CliWorkflowObserver));
+    }
+
+    let outcome = match engine.run(&wf, vars, cancellation_token()).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            print_workflow_error(&error);
+            return Ok(workflow_error_exit(&error));
+        }
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        crate::output::print_workflow_summary(&outcome);
+    }
+    Ok(if outcome.status.is_success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+async fn resume_workflow(
+    config_path: Option<PathBuf>,
+    args: WorkflowResumeArgs,
+) -> Result<ExitCode> {
+    if !args.vars.is_empty() {
+        eprintln!(
+            "config error: workflow resume uses variables from the journal; --var is not allowed"
+        );
+        return Ok(ExitCode::from(2));
+    }
+    let phase = load_config(config_path.as_deref()).and_then(|loaded| {
+        let wf = Workflow::from_path(&args.file).map_err(anyhow::Error::from)?;
+        Ok((loaded, wf))
+    });
+    let (loaded, wf) = match phase {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("config error: {error:#}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+
+    let paths = StoragePaths::resolve()?;
+    let runtime = Runtime::new(loaded.config.clone(), paths.clone())?;
+    let resolver = Arc::new(CliWorkflowResolver { loaded });
+    let mut engine = WorkflowEngine::new(
+        Arc::new(runtime.dispatcher.clone()),
+        resolver,
+        paths.workflows_dir.clone(),
+    );
+    if !args.json {
+        engine = engine.with_observer(Arc::new(CliWorkflowObserver));
+    }
+
+    let outcome = match engine
+        .resume(&args.wf_run_id, &wf, cancellation_token())
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            print_workflow_error(&error);
+            return Ok(workflow_error_exit(&error));
+        }
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        crate::output::print_workflow_summary(&outcome);
+    }
+    Ok(if outcome.status.is_success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+async fn list_workflows(args: crate::cli::WorkflowListArgs) -> Result<ExitCode> {
+    let paths = StoragePaths::resolve()?;
+    let summaries = vyane_workflow::list_journals(&paths.workflows_dir)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&summaries)?);
+    } else {
+        crate::output::print_workflow_list(&summaries);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn task_from_dispatch(args: DispatchArgs) -> Result<TaskSpec> {
     let mut task = task_base(
         args.task,
@@ -384,6 +512,20 @@ fn parse_labels(raw: Vec<String>) -> Result<BTreeMap<String, String>> {
     Ok(labels)
 }
 
+fn parse_vars(raw: Vec<String>) -> Result<BTreeMap<String, String>> {
+    let mut vars = BTreeMap::new();
+    for var in raw {
+        let (key, value) = var
+            .split_once('=')
+            .ok_or_else(|| anyhow!("workflow variable `{var}` must be in key=value form"))?;
+        if key.is_empty() {
+            bail!("workflow variable `{var}` has an empty key");
+        }
+        vars.insert(key.to_string(), value.to_string());
+    }
+    Ok(vars)
+}
+
 fn cancellation_token() -> CancellationToken {
     let token = CancellationToken::new();
     let child = token.clone();
@@ -401,6 +543,71 @@ fn print_run_json(record: vyane_core::RunRecord, output: Option<String>) -> Resu
         serde_json::to_string_pretty(&RunJson { record, output })?
     );
     Ok(())
+}
+
+fn print_workflow_error(error: &WorkflowError) {
+    if error.is_validation_or_config() {
+        eprintln!("config error: {error}");
+    } else {
+        eprintln!("error: {error}");
+    }
+}
+
+fn workflow_error_exit(error: &WorkflowError) -> ExitCode {
+    if error.is_validation_or_config() {
+        ExitCode::from(2)
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+struct CliWorkflowResolver {
+    loaded: LoadedConfig,
+}
+
+impl TargetResolver for CliWorkflowResolver {
+    fn resolve(&self, target: &str) -> vyane_core::Result<Vec<BoundTarget>> {
+        resolve_target_chain(&self.loaded, target).map_err(|error| {
+            vyane_core::VyaneError::new(vyane_core::ErrorKind::Config, error.to_string())
+        })
+    }
+}
+
+struct CliWorkflowObserver;
+
+impl vyane_workflow::WorkflowObserver for CliWorkflowObserver {
+    fn on_event(&self, event: StepEvent) {
+        match event {
+            StepEvent::Started { step_id } => {
+                eprintln!("workflow step {step_id}: started");
+            }
+            StepEvent::Succeeded { step_id, duration } => {
+                eprintln!(
+                    "workflow step {step_id}: succeeded in {}ms",
+                    duration.as_millis()
+                );
+            }
+            StepEvent::Failed {
+                step_id,
+                duration,
+                error,
+            } => {
+                eprintln!(
+                    "workflow step {step_id}: failed in {}ms: {error}",
+                    duration.as_millis()
+                );
+            }
+            StepEvent::Skipped { step_id, reason } => {
+                eprintln!("workflow step {step_id}: skipped: {reason}");
+            }
+            StepEvent::Cancelled { step_id, duration } => {
+                eprintln!(
+                    "workflow step {step_id}: cancelled in {}ms",
+                    duration.as_millis()
+                );
+            }
+        }
+    }
 }
 
 fn env_vars_for_profile(config: &ResolvedConfig, profile_name: &str) -> Vec<String> {
