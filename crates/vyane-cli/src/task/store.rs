@@ -23,6 +23,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::proc::IdentityCheck;
+
 /// Directory name (under the data dir) holding all detached-run directories.
 pub const TASKS_DIR: &str = "tasks";
 
@@ -38,9 +40,12 @@ pub const STATUS_SCHEMA: u32 = 1;
 /// The lifecycle state of a detached run, as persisted in `status.json`.
 ///
 /// `Running` is written up front; the worker rewrites the file with a terminal
-/// state when the dispatch completes. `Died` is **never persisted** — it is a
-/// read-side interpretation of "state is `running` but the pid is gone" (see
-/// [`crate::task::proc::pid_alive`]).
+/// state when the dispatch completes. `Died` and `Stale` are **never
+/// persisted** — they are read-side interpretations:
+/// - `Died`: state is `running` but the recorded process is gone or has been
+///   reused (see [`crate::task::proc::verify_identity`]).
+/// - `Stale`: the task dir has a `job.json` but no `status.json` at all — the
+///   worker never published state (a spawn likely failed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskState {
@@ -49,9 +54,13 @@ pub enum TaskState {
     Error,
     Timeout,
     Cancelled,
-    /// Synthetic: an orphaned worker (status still `running`, pid dead). Only
-    /// ever produced by read-side interpretation, never written to disk.
+    /// Synthetic: an orphaned worker (status still `running`, but its recorded
+    /// process is dead or was reused). Only ever produced by read-side
+    /// interpretation, never written to disk.
     Died,
+    /// Synthetic: a task dir with `job.json` but no `status.json` — the worker
+    /// never wrote status (spawn may have failed). Read-side only.
+    Stale,
 }
 
 impl TaskState {
@@ -63,11 +72,15 @@ impl TaskState {
             TaskState::Timeout => "timeout",
             TaskState::Cancelled => "cancelled",
             TaskState::Died => "died",
+            TaskState::Stale => "stale",
         }
     }
 
     /// A terminal state is one the worker persisted as its final word; a run in
     /// a terminal state has finished and its process is not expected alive.
+    /// `Stale` is *not* terminal in the persisted sense (nothing was persisted),
+    /// but it is not `Running` either — it is treated as not-running so callers
+    /// never wait on or signal it.
     pub fn is_terminal(self) -> bool {
         !matches!(self, TaskState::Running)
     }
@@ -233,6 +246,15 @@ impl TaskPaths {
         serde_json::from_str(&text).with_context(|| format!("parse {}", self.job().display()))
     }
 
+    /// The `job.json` modification time as a UTC timestamp, if the file exists.
+    /// Used as the best-effort `started_at` for a *stale* row (a task dir whose
+    /// worker never wrote status): the parent writes `job.json` immediately
+    /// before spawning, so its mtime is roughly when the run was requested.
+    pub fn job_mtime(&self) -> Option<DateTime<Utc>> {
+        let modified = fs::metadata(self.job()).ok()?.modified().ok()?;
+        Some(DateTime::<Utc>::from(modified))
+    }
+
     /// Atomically write the status file: write a sibling tmp, then rename over
     /// the target. A reader therefore only ever sees a complete status.
     pub fn write_status(&self, status: &StatusFile) -> Result<()> {
@@ -299,13 +321,25 @@ pub struct TaskListRow {
     pub duration_ms: Option<i64>,
 }
 
+/// A probe that answers "is the process this status recorded still the same
+/// worker?" — given the recorded `(pid, pgid, started_at)`, it returns an
+/// [`IdentityCheck`]. Read-side orphan detection uses it so a `running` status
+/// is only trusted when the recorded pid still belongs to *its* worker (not a
+/// reused pid), matching the guard the canceller applies before signalling.
+///
+/// The production probe is [`crate::task::proc::verify_identity`]; tests inject
+/// a closure.
+pub type IdentityProbe<'a> = dyn Fn(i32, i32, DateTime<Utc>) -> IdentityCheck + 'a;
+
 /// Enumerate every task directory under `tasks_root`, read each status,
 /// apply orphan detection, and return rows most-recent-first (by `started_at`).
 ///
-/// Directories without a readable/parseable `status.json` are skipped — a task
-/// dir the parent created but whose worker has not yet written status is
-/// transient and simply not listed until it does.
-pub fn list_tasks(tasks_root: &Path, is_alive: impl Fn(i32) -> bool) -> Vec<TaskListRow> {
+/// A directory whose `status.json` is missing/unreadable but which *does* carry
+/// a `job.json` surfaces as a [`TaskState::Stale`] row (the worker never wrote
+/// status — probably a failed spawn), with its `started_at` taken from the
+/// `job.json` mtime. A directory with neither file is transient scaffolding and
+/// is skipped.
+pub fn list_tasks(tasks_root: &Path, identity: &IdentityProbe<'_>) -> Vec<TaskListRow> {
     let mut rows = Vec::new();
     let Ok(entries) = fs::read_dir(tasks_root) else {
         return rows;
@@ -318,30 +352,51 @@ pub fn list_tasks(tasks_root: &Path, is_alive: impl Fn(i32) -> bool) -> Vec<Task
             continue;
         };
         let paths = TaskPaths::new(tasks_root, &id);
-        let Ok(status) = paths.read_status() else {
-            continue;
-        };
-        let state = interpret_state(&status, &is_alive);
-        rows.push(TaskListRow {
-            id,
-            state,
-            target: status.target.clone(),
-            started_at: status.started_at,
-            duration_ms: status.duration_ms(),
-        });
+        match paths.read_status() {
+            Ok(status) => {
+                let state = interpret_state(&status, identity);
+                rows.push(TaskListRow {
+                    id,
+                    state,
+                    target: status.target.clone(),
+                    started_at: status.started_at,
+                    duration_ms: status.duration_ms(),
+                });
+            }
+            Err(_) => {
+                // No readable status. If a job.json exists, the worker never
+                // published state → show it as `stale` rather than hiding it.
+                if let Some(started_at) = paths.job_mtime() {
+                    rows.push(TaskListRow {
+                        id,
+                        state: TaskState::Stale,
+                        target: "-".to_string(),
+                        started_at,
+                        duration_ms: None,
+                    });
+                }
+                // Neither status nor job → transient scaffolding, skip.
+            }
+        }
     }
     rows.sort_by_key(|row| std::cmp::Reverse(row.started_at));
     rows
 }
 
-/// Interpret a persisted status into a *displayed* state: a `running` status
-/// whose pid is dead becomes [`TaskState::Died`]. Terminal states pass through
-/// unchanged, and the file on disk is never rewritten.
-pub fn interpret_state(status: &StatusFile, is_alive: impl Fn(i32) -> bool) -> TaskState {
-    if status.state == TaskState::Running && !is_alive(status.pid) {
-        TaskState::Died
-    } else {
-        status.state
+/// Interpret a persisted status into a *displayed* state. A `running` status is
+/// only trusted when its recorded process still validates as *its own worker*
+/// via `identity`: a dead pid, or a live pid whose group/start-time no longer
+/// match (a reused pid), both surface as [`TaskState::Died`]. Terminal states
+/// pass through unchanged, and the file on disk is never rewritten.
+pub fn interpret_state(status: &StatusFile, identity: &IdentityProbe<'_>) -> TaskState {
+    if status.state != TaskState::Running {
+        return status.state;
+    }
+    match identity(status.pid, status.pgid, status.started_at) {
+        IdentityCheck::Match => TaskState::Running,
+        // Dead pid, or a reused pid that is no longer our worker: the worker is
+        // gone without finalizing → died.
+        IdentityCheck::Dead | IdentityCheck::Mismatch(_) => TaskState::Died,
     }
 }
 
@@ -355,6 +410,17 @@ mod tests {
         let mut s = StatusFile::running("run-1", pid, pid, "test/model (openai_chat)", None);
         s.state = state;
         s
+    }
+
+    /// Identity probe stub that reports every recorded process as its own live
+    /// worker — the "nothing has been reused, everything is alive" baseline.
+    fn identity_all_match(_pid: i32, _pgid: i32, _started: DateTime<Utc>) -> IdentityCheck {
+        IdentityCheck::Match
+    }
+
+    /// Identity probe stub that reports every recorded process as gone.
+    fn identity_all_dead(_pid: i32, _pgid: i32, _started: DateTime<Utc>) -> IdentityCheck {
+        IdentityCheck::Dead
     }
 
     #[test]
@@ -400,10 +466,28 @@ mod tests {
     #[test]
     fn interpret_state_marks_dead_running_as_died() {
         let running = sample_status(TaskState::Running, 7);
-        // pid alive → stays running.
-        assert_eq!(interpret_state(&running, |_| true), TaskState::Running);
+        // identity match → stays running.
+        assert_eq!(
+            interpret_state(&running, &identity_all_match),
+            TaskState::Running
+        );
         // pid dead → died (read-side only; the value in `running` is untouched).
-        assert_eq!(interpret_state(&running, |_| false), TaskState::Died);
+        assert_eq!(
+            interpret_state(&running, &identity_all_dead),
+            TaskState::Died
+        );
+        assert_eq!(running.state, TaskState::Running);
+    }
+
+    #[test]
+    fn interpret_state_marks_reused_pid_running_as_died() {
+        // A live pid whose identity no longer matches (pid reuse) must read as
+        // died, exactly like a dead pid — a still-`running` status over a reused
+        // pid is an orphan, not a live run.
+        let running = sample_status(TaskState::Running, 7);
+        let mismatch =
+            |_: i32, _: i32, _: DateTime<Utc>| IdentityCheck::Mismatch("process group mismatch");
+        assert_eq!(interpret_state(&running, &mismatch), TaskState::Died);
         assert_eq!(running.state, TaskState::Running);
     }
 
@@ -411,7 +495,10 @@ mod tests {
     fn interpret_state_leaves_terminal_untouched() {
         // A finished run is never reinterpreted, even if the pid is long gone.
         let done = sample_status(TaskState::Success, 7);
-        assert_eq!(interpret_state(&done, |_| false), TaskState::Success);
+        assert_eq!(
+            interpret_state(&done, &identity_all_dead),
+            TaskState::Success
+        );
     }
 
     #[test]
@@ -490,11 +577,16 @@ mod tests {
             s.finished_at = Some(s.started_at);
             paths.write_status(&s).unwrap();
         }
-        // A dir with no status.json must be silently skipped.
+        // A dir with neither status.json nor job.json is transient scaffolding
+        // and must be silently skipped.
         fs::create_dir_all(root.join("pending")).unwrap();
 
-        let rows = list_tasks(root, |_| true);
-        assert_eq!(rows.len(), 2, "pending (no status) dir must be skipped");
+        let rows = list_tasks(root, &identity_all_match);
+        assert_eq!(
+            rows.len(),
+            2,
+            "empty (no status, no job) dir must be skipped"
+        );
         assert_eq!(rows[0].id, "new", "most-recent-first ordering");
         assert_eq!(rows[1].id, "old");
     }
@@ -510,9 +602,58 @@ mod tests {
             .unwrap();
 
         // Dead pid → the row reads `died` without the file being rewritten.
-        let rows = list_tasks(root, |_| false);
+        let rows = list_tasks(root, &identity_all_dead);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, TaskState::Died);
         assert_eq!(paths.read_status().unwrap().state, TaskState::Running);
+    }
+
+    #[test]
+    fn list_tasks_surfaces_job_without_status_as_stale() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        // A task dir with a job.json but no status.json: the parent laid the job
+        // down but the worker never wrote status (spawn likely failed).
+        let stale = TaskPaths::new(root, "stalerun");
+        stale.ensure_dir().unwrap();
+        let job = JobSpec {
+            run_id: "stalerun".into(),
+            task: "never ran".into(),
+            target: "review".into(),
+            workdir: None,
+            sandbox: SandboxSpec::ReadOnly,
+            system: None,
+            timeout_secs: None,
+            labels: vec![],
+            session: None,
+            config: None,
+        };
+        stale.write_job(&job).unwrap();
+
+        // Also a healthy finished run, to prove stale rows coexist and sort.
+        let done = TaskPaths::new(root, "donerun");
+        done.ensure_dir().unwrap();
+        let mut s = sample_status(TaskState::Success, 1);
+        s.run_id = "donerun".into();
+        done.write_status(&s).unwrap();
+
+        let rows = list_tasks(root, &identity_all_match);
+        assert_eq!(rows.len(), 2, "both stale and done rows must appear");
+        let stale_row = rows.iter().find(|r| r.id == "stalerun").expect("stale row");
+        assert_eq!(stale_row.state, TaskState::Stale);
+        // Its started_at comes from the job.json mtime (a real recent time).
+        assert!(stale_row.started_at <= Utc::now());
+    }
+
+    #[test]
+    fn stale_state_serializes_and_names() {
+        assert_eq!(TaskState::Stale.as_str(), "stale");
+        assert_eq!(
+            serde_json::to_string(&TaskState::Stale).unwrap(),
+            "\"stale\""
+        );
+        // Stale is treated as not-running (so callers never wait on / signal it).
+        assert!(TaskState::Stale.is_terminal());
     }
 }
