@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use futures::StreamExt;
 use vyane_config::{ConfigLayers, ResolvedConfig};
@@ -19,11 +19,22 @@ use vyane_workflow::{StepEvent, TargetResolver, Workflow, WorkflowEngine, Workfl
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{
-    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, WorkflowCommand, WorkflowResumeArgs,
-    WorkflowRunArgs,
+    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, TaskCancelArgs, TaskCommand,
+    TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCommand, WorkflowResumeArgs, WorkflowRunArgs,
 };
 use crate::factory::direct_http_client;
 use crate::output::{BroadcastJson, BroadcastRow, RunJson};
+use crate::task::proc::{
+    IdentityCheck, SIGKILL, SIGTERM, pgid_of, pid_alive, signal_group, verify_identity,
+};
+use crate::task::store::{JobSpec, StatusFile, TaskPaths, TaskState, interpret_state, list_tasks};
+
+/// The production identity probe used by read-side orphan detection: a
+/// still-`running` status is only trusted if the recorded process still
+/// validates as its own worker (see [`verify_identity`]).
+fn identity_probe(pid: i32, pgid: i32, started_at: chrono::DateTime<chrono::Utc>) -> IdentityCheck {
+    verify_identity(pid, pgid, started_at)
+}
 
 /// First [`TASK_PREVIEW_CHARS`] characters of the prompt kept as a
 /// human-scannable preview on the hand-built streaming `RunRecord`. Mirrors
@@ -43,6 +54,16 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             WorkflowCommand::Resume(args) => resume_workflow(cli.config, args).await,
             WorkflowCommand::List(args) => list_workflows(args).await,
         },
+        Command::Task(task) => run_task(task).await,
+        Command::Worker(args) => run_worker(cli.config, args).await,
+    }
+}
+
+async fn run_task(command: TaskCommand) -> Result<ExitCode> {
+    match command {
+        TaskCommand::List(args) => run_task_list(args).await,
+        TaskCommand::Status(args) => run_task_status(args).await,
+        TaskCommand::Cancel(args) => run_task_cancel(args).await,
     }
 }
 
@@ -124,10 +145,30 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
 }
 
 async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
-    // Config-phase failures exit 2 (mirroring `check`), so wrappers can tell
-    // "fix your config" apart from "the run failed" (exit 1).
-    let phase = load_config(config_path.as_deref())
-        .and_then(|loaded| resolve_target_chain(&loaded, &args.target).map(|c| (loaded, c)));
+    // Input-phase failures exit 2 (mirroring `check`), so wrappers can tell
+    // "fix your invocation/config" apart from "the run failed" (exit 1). This
+    // validation runs FIRST — before `--detach` spawns anything — so bad input
+    // never leaves a stray task directory behind. It validates BOTH config +
+    // target resolution AND the full TaskSpec (crucially, `--label` parsing:
+    // `--label bad` with no `=` is rejected here, in the parent, not deferred
+    // into a worker that would otherwise briefly exist as a task dir).
+    let phase = load_config(config_path.as_deref()).and_then(|loaded| {
+        let chain = resolve_target_chain(&loaded, &args.target)?;
+        // Prove the whole spec parses (labels included) up front. Discarded —
+        // the online path rebuilds it below, the detached path re-parses in the
+        // worker; this call's only job is to fail early on invalid input.
+        // `task_base` runs the fallible `--label` key=value parsing; session is
+        // infallible (`SessionRef::new`) so it needs no pre-validation here.
+        let _ = task_base(
+            args.task.clone(),
+            args.workdir.clone(),
+            args.sandbox.into(),
+            args.system.clone(),
+            args.timeout,
+            args.label.clone(),
+        )?;
+        Ok((loaded, chain))
+    });
     let (loaded, chain) = match phase {
         Ok(value) => value,
         Err(error) => {
@@ -135,6 +176,15 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
             return Ok(ExitCode::from(2));
         }
     };
+
+    // Detached path: freeze the request and hand it to a re-exec'd worker, then
+    // return immediately. Config + full TaskSpec are already validated above, so
+    // reaching here means the target resolves and every field (labels included)
+    // is well-formed.
+    if args.detach {
+        return spawn_detached_dispatch(config_path, args);
+    }
+
     let json = args.json;
     let want_stream = args.stream;
     let task = task_from_dispatch(args)?;
@@ -550,6 +600,412 @@ fn print_stream_result(json: bool, record: &RunRecord, output: Option<&str>) -> 
         }
     }
     Ok(())
+}
+
+/// Freeze the dispatch request into a task directory and spawn a detached
+/// worker to run it. Prints the run id and returns exit 0 without waiting.
+///
+/// The target chain was already resolved by the caller (so config errors have
+/// exited 2 before we get here); we re-serialize the raw selector string into
+/// the job so the worker re-resolves it identically.
+fn spawn_detached_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
+    let paths_root = StoragePaths::resolve()?;
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let job = JobSpec {
+        run_id: run_id.clone(),
+        task: args.task,
+        target: args.target,
+        workdir: args.workdir,
+        sandbox: vyane_core::Sandbox::from(args.sandbox).into(),
+        system: args.system,
+        timeout_secs: args.timeout,
+        labels: args.label,
+        session: args.session,
+        config: config_path,
+    };
+    let paths = TaskPaths::new(&paths_root.tasks_dir, &run_id);
+    crate::task::spawn::spawn_detached(&paths, &job)?;
+
+    if args.json {
+        println!("{}", serde_json::json!({ "id": run_id }));
+    } else {
+        println!("{run_id}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The detached worker: re-resolve the frozen job, mark the run `running`,
+/// dispatch it through the normal kernel path, then finalize `status.json` and
+/// write `output.txt`. A `SIGTERM` (from `task cancel`) cancels the kernel so
+/// the run finalizes as `cancelled` with its `RunRecord` still on the ledger.
+///
+/// The worker owns its own process group (installed by the parent via
+/// `setsid`); it never re-exec's further.
+///
+/// ## Two ordering invariants this shell enforces
+///
+/// 1. **Cancellation handler is armed before any `running` state is
+///    observable.** The `SIGTERM` → [`CancellationToken`] handler is installed
+///    here, *before* [`worker_body`] runs (and it is `worker_body` that writes
+///    the first `running` status). Because `task cancel` only signals a task
+///    whose status file already reads `running`, and `running` cannot appear
+///    until after this handler exists, any signal a canceller could deliver is
+///    guaranteed to be caught and turned into a clean kernel cancellation —
+///    never a raw process teardown mid-run. (The handler being live strictly
+///    *before* the state write is what closes the race; the code structure —
+///    handler on line A, `worker_body` call on the next line — encodes it.)
+///
+/// 2. **No path ever exits leaving `running` behind.** [`worker_body`] returns
+///    `Err` for *any* setup or dispatch failure (corrupt `job.json`, config
+///    resolution failure, spec/runtime assembly failure, kernel dispatch
+///    error). This shell converts that `Err` into a terminal `error`
+///    `status.json` (keyed by the worker's own run id, with the message), so a
+///    reader always sees a definitive terminal state, not a stuck `running`.
+async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<ExitCode> {
+    let storage = StoragePaths::resolve()?;
+    let paths = TaskPaths::new(&storage.tasks_dir, &args.id);
+
+    // Invariant (1): arm the cancellation handler BEFORE running any body that
+    // could publish `running`. See the doc comment above.
+    let cancel = worker_cancellation_token();
+
+    match worker_body(config_path, &args, &paths, cancel).await {
+        Ok(code) => Ok(code),
+        Err(error) => {
+            // Invariant (2): convert any setup/dispatch failure into a terminal
+            // `error` status so nothing is ever left observably `running`.
+            let pid = std::process::id() as i32;
+            let pgid = pgid_of(pid).unwrap_or(pid);
+            let mut status = StatusFile::running(&args.id, pid, pgid, "-", None);
+            status.state = TaskState::Error;
+            status.finished_at = Some(chrono::Utc::now());
+            status.error = Some(format!("{error:#}"));
+            // Best-effort: if even this write fails there is nothing more we can
+            // do (the read side will fall back to `stale`/`died`).
+            let _ = paths.write_status(&status);
+            eprintln!("worker error: {error:#}");
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
+/// The worker's real work, factored out so [`run_worker`] can guarantee a
+/// terminal status on any failure. Returns the process exit code on the happy
+/// path (0 on success, 1 on a non-success terminal run); returns `Err` for any
+/// setup or dispatch failure, which the caller records as a terminal `error`.
+///
+/// The cancellation token is passed in already-armed so the ordering invariant
+/// (handler before `running`) is owned by the caller.
+async fn worker_body(
+    config_path: Option<PathBuf>,
+    args: &WorkerArgs,
+    paths: &TaskPaths,
+    cancel: CancellationToken,
+) -> Result<ExitCode> {
+    let job = paths
+        .read_job()
+        .with_context(|| format!("read job spec for {}", args.id))?;
+    // The job's own recorded config override wins over any inherited flag; the
+    // parent always writes it (possibly `None`).
+    let config_path = job.config.clone().or(config_path);
+
+    // Re-resolve config + target chain exactly as an online dispatch would. The
+    // parent already validated this, but the worker is a fresh process, so it
+    // resolves independently. A failure propagates as `Err` → terminal error.
+    let (loaded, chain) = load_config(config_path.as_deref())
+        .and_then(|loaded| resolve_target_chain(&loaded, &job.target).map(|c| (loaded, c)))
+        .with_context(|| format!("resolve config/target for {}", args.id))?;
+
+    let pid = std::process::id() as i32;
+    let pgid = pgid_of(pid).unwrap_or(pid);
+    let workdir = job
+        .workdir
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
+
+    // The status target is a best-effort label: the first resolved target's
+    // identity reads better than the raw selector, but falls back to it.
+    let target_label = chain
+        .first()
+        .map(|bound| bound.target.to_string())
+        .unwrap_or_else(|| job.target.clone());
+
+    // Announce `running` up front (atomic write) so `task list/status` observe
+    // the run the instant the worker is live. The cancellation handler is
+    // already armed by `run_worker`, so any observable `running` implies a
+    // canceller's SIGTERM will be caught (ordering invariant 1).
+    let running = StatusFile::running(&job.run_id, pid, pgid, &target_label, workdir.clone());
+    paths.write_status(&running)?;
+
+    // From here, a failure still lands as a terminal `error` (invariant 2): the
+    // `?` bubbles up to `run_worker`, which overwrites this `running` file.
+    let task = task_from_job(&job)?;
+    let runtime = Runtime::new(loaded.config, StoragePaths::resolve()?)?;
+    let outcome = runtime.dispatcher.dispatch(&task, chain, cancel).await?;
+    let record = outcome.record;
+    let output = outcome.output;
+
+    // Persist the answer (if any) beside the status, then finalize status.
+    if let Some(text) = output.as_deref() {
+        std::fs::write(paths.output(), text)
+            .with_context(|| format!("write {}", paths.output().display()))?;
+    }
+
+    let state = run_status_to_task_state(record.status);
+    let mut final_status = running;
+    final_status.state = state;
+    final_status.finished_at = Some(record.finished_at);
+    final_status.ledger_run_id = Some(record.run_id.clone());
+    final_status.error = record.error.clone();
+    paths.write_status(&final_status)?;
+
+    Ok(if record.status == RunStatus::Success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+async fn run_task_list(args: TaskListArgs) -> Result<ExitCode> {
+    let storage = StoragePaths::resolve()?;
+    let rows = list_tasks(&storage.tasks_dir, &identity_probe);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else if rows.is_empty() {
+        println!("no detached runs");
+    } else {
+        crate::output::print_task_table(&rows);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
+    let storage = StoragePaths::resolve()?;
+    let paths = TaskPaths::new(&storage.tasks_dir, &args.id);
+
+    let status = match paths.read_status() {
+        Ok(status) => status,
+        Err(_) => {
+            // No readable status. Distinguish a *stale* run (the parent froze a
+            // job but the worker never published status — a spawn likely
+            // failed) from a genuinely unknown id, so the failure is
+            // explainable rather than a bare "no such run".
+            if paths.job_mtime().is_some() {
+                eprintln!(
+                    "{}: stale — worker never wrote status (spawn may have failed); see {}",
+                    args.id,
+                    paths.log().display()
+                );
+                return Ok(ExitCode::from(1));
+            }
+            eprintln!("no such detached run: {}", args.id);
+            return Ok(ExitCode::from(1));
+        }
+    };
+    let displayed = interpret_state(&status, &identity_probe);
+
+    // `--output` prints the captured answer and nothing else.
+    if args.output {
+        match paths.read_output() {
+            Some(text) => {
+                print!("{text}");
+                if !text.ends_with('\n') {
+                    println!();
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            None => {
+                eprintln!("no output recorded for {}", args.id);
+                return Ok(ExitCode::from(1));
+            }
+        }
+    }
+
+    let log_tail = paths.tail_log(10);
+
+    if args.json {
+        let view = crate::output::TaskStatusJson {
+            status: &status,
+            displayed_state: displayed.as_str(),
+            log_tail: &log_tail,
+        };
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        crate::output::print_task_status(&status, displayed, &log_tail);
+    }
+
+    // A run that finished unhappily, or an orphan, exits nonzero so scripts can
+    // branch on it; `running` and `success` exit 0.
+    let ok = matches!(displayed, TaskState::Running | TaskState::Success);
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
+    let storage = StoragePaths::resolve()?;
+    let paths = TaskPaths::new(&storage.tasks_dir, &args.id);
+
+    let status = match paths.read_status() {
+        Ok(status) => status,
+        Err(_) => {
+            eprintln!("no such detached run: {}", args.id);
+            return Ok(ExitCode::from(1));
+        }
+    };
+
+    // Already finished: nothing to signal.
+    if status.state.is_terminal() {
+        println!("{} already {}", args.id, status.state.as_str());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Process-identity gate — the guard against pid reuse. Between the worker
+    // recording its pid and this cancel, the OS may have recycled that pid onto
+    // an unrelated process; blindly signalling it (worse, its whole group by
+    // negative pid) could kill something we never launched. Only signal if the
+    // process now holding the pid still validates as *this* worker: its process
+    // group matches the recorded `pgid` AND its start time matches the recorded
+    // `started_at` (see `verify_identity`).
+    match verify_identity(status.pid, status.pgid, status.started_at) {
+        IdentityCheck::Match => {}
+        IdentityCheck::Dead => {
+            // The worker is already gone without finalizing — an orphan, which
+            // the read side shows as `died`. Nothing to signal.
+            eprintln!(
+                "{}: worker process is gone (died); nothing to cancel",
+                args.id
+            );
+            return Ok(ExitCode::from(1));
+        }
+        IdentityCheck::Mismatch(reason) => {
+            eprintln!(
+                "{}: process identity mismatch ({reason}; pid likely reused); refusing to signal",
+                args.id
+            );
+            return Ok(ExitCode::from(1));
+        }
+    }
+
+    // Identity confirmed: `status.pgid` is the live worker's group. SIGTERM the
+    // whole group — the worker catches it and finalizes; any harness
+    // grandchildren it spawned die with the group.
+    let pgid = status.pgid;
+    signal_group(pgid, SIGTERM);
+
+    // Give the worker up to 5s to exit its process group cleanly; escalate to
+    // SIGKILL if the group is still alive after the grace.
+    if wait_until(Duration::from_secs(5), Duration::from_millis(100), || {
+        !pid_alive(status.pid)
+    })
+    .await
+    .is_none()
+    {
+        signal_group(pgid, SIGKILL);
+    }
+
+    // Separately, wait up to 2s for the worker to write its *final* status.
+    // (A clean SIGTERM finalize writes `cancelled`; a SIGKILL leaves it
+    // `running`, which read-side interpretation later shows as `died`.)
+    let finalized = wait_until(Duration::from_secs(2), Duration::from_millis(50), || {
+        paths
+            .read_status()
+            .map(|s| s.state.is_terminal())
+            .unwrap_or(false)
+    })
+    .await
+    .is_some();
+
+    if finalized {
+        let final_state = paths
+            .read_status()
+            .map(|s| s.state.as_str().to_string())
+            .unwrap_or_else(|_| "cancelled".to_string());
+        println!("{} {}", args.id, final_state);
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("{}: kill delivered; worker did not finalize", args.id);
+        Ok(ExitCode::from(1))
+    }
+}
+
+/// Poll `predicate` every `interval` until it is true or `budget` elapses.
+/// Returns `Some(())` if it became true in time, `None` on timeout.
+async fn wait_until(
+    budget: Duration,
+    interval: Duration,
+    mut predicate: impl FnMut() -> bool,
+) -> Option<()> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if predicate() {
+            return Some(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Build a `TaskSpec` from a frozen [`JobSpec`], reusing the shared task
+/// assembly so a detached run and an online run are constructed identically.
+fn task_from_job(job: &JobSpec) -> Result<TaskSpec> {
+    let mut task = task_base(
+        job.task.clone(),
+        job.workdir.clone(),
+        job.sandbox.into(),
+        job.system.clone(),
+        job.timeout_secs,
+        job.labels.clone(),
+    )?;
+    if let Some(session) = &job.session {
+        task.session = Some(SessionRef::new(session.clone()));
+    }
+    Ok(task)
+}
+
+/// Map a completed run's status onto the persisted task state.
+fn run_status_to_task_state(status: RunStatus) -> TaskState {
+    match status {
+        RunStatus::Success => TaskState::Success,
+        RunStatus::Error => TaskState::Error,
+        RunStatus::Timeout => TaskState::Timeout,
+        RunStatus::Cancelled => TaskState::Cancelled,
+    }
+}
+
+/// A cancellation token wired to `SIGTERM` (in addition to ctrl-c). `task
+/// cancel` SIGTERMs the worker's group; catching it here cancels the kernel so
+/// the dispatch unwinds and records a `cancelled` run.
+fn worker_cancellation_token() -> CancellationToken {
+    let token = CancellationToken::new();
+
+    // ctrl-c, same as an online dispatch.
+    let ctrl_c_token = token.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            ctrl_c_token.cancel();
+        }
+    });
+
+    // SIGTERM: the signal `task cancel` delivers.
+    #[cfg(unix)]
+    {
+        let term_token = token.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            if let Ok(mut term) = signal(SignalKind::terminate()) {
+                term.recv().await;
+                term_token.cancel();
+            }
+        });
+    }
+
+    token
 }
 
 async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Result<ExitCode> {

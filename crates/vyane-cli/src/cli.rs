@@ -35,6 +35,12 @@ pub enum Command {
     /// Run, resume, and list declarative workflows.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
+    /// Inspect and manage detached background runs.
+    #[command(subcommand)]
+    Task(TaskCommand),
+    /// Internal: execute a detached run. Not for direct use.
+    #[command(name = "__worker", hide = true)]
+    Worker(WorkerArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -45,6 +51,47 @@ pub enum WorkflowCommand {
     Resume(WorkflowResumeArgs),
     /// List workflow journals.
     List(WorkflowListArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    /// List detached runs, most recent first.
+    List(TaskListArgs),
+    /// Show one detached run's status and recent log lines.
+    Status(TaskStatusArgs),
+    /// Terminate a detached run's process group.
+    Cancel(TaskCancelArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TaskListArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TaskStatusArgs {
+    /// The detached run id.
+    pub id: String,
+    /// Print the captured answer (output.txt) instead of the status view.
+    #[arg(long)]
+    pub output: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TaskCancelArgs {
+    /// The detached run id.
+    pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkerArgs {
+    /// The detached run id whose job spec to execute.
+    pub id: String,
 }
 
 #[derive(Debug, Args)]
@@ -72,6 +119,10 @@ pub struct DispatchArgs {
     /// Label to store on the run record; repeatable as key=value.
     #[arg(long, value_name = "k=v")]
     pub label: Vec<String>,
+    /// Run in the background: spawn a detached worker, print its id, and exit
+    /// without waiting. Inspect it later with `vyane task`.
+    #[arg(long)]
+    pub detach: bool,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
