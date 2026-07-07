@@ -111,6 +111,7 @@ pub struct StoragePaths {
     pub data_dir: PathBuf,
     pub ledger_path: PathBuf,
     pub sessions_dir: PathBuf,
+    pub tasks_dir: PathBuf,
 }
 
 impl StoragePaths {
@@ -124,6 +125,7 @@ impl StoragePaths {
         Ok(Self {
             ledger_path: data_dir.join("ledger.jsonl"),
             sessions_dir: data_dir.join("sessions"),
+            tasks_dir: crate::task::tasks_root(&data_dir),
             data_dir,
         })
     }

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use vyane_config::{ConfigLayers, ResolvedConfig};
 use vyane_core::{
     BoundTarget, CancellationToken, Harness, HarnessKind, ProviderId, RunQuery, RunStatus,
@@ -12,8 +12,15 @@ use vyane_core::{
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
-use crate::cli::{BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs};
+use crate::cli::{
+    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, TaskCancelArgs, TaskCommand,
+    TaskListArgs, TaskStatusArgs, WorkerArgs,
+};
 use crate::output::{BroadcastJson, BroadcastRow, RunJson};
+use crate::task::proc::{SIGKILL, SIGTERM, pgid_of, pid_alive, signal_group};
+use crate::task::store::{
+    JobSpec, StatusFile, TaskPaths, TaskState, interpret_state, list_tasks,
+};
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
@@ -22,6 +29,16 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Broadcast(args) => run_broadcast(cli.config, args).await,
         Command::History(args) => run_history(args).await,
         Command::Sessions(args) => run_sessions(args).await,
+        Command::Task(task) => run_task(task).await,
+        Command::Worker(args) => run_worker(cli.config, args).await,
+    }
+}
+
+async fn run_task(command: TaskCommand) -> Result<ExitCode> {
+    match command {
+        TaskCommand::List(args) => run_task_list(args).await,
+        TaskCommand::Status(args) => run_task_status(args).await,
+        TaskCommand::Cancel(args) => run_task_cancel(args).await,
     }
 }
 
@@ -104,7 +121,9 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
 
 async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
     // Config-phase failures exit 2 (mirroring `check`), so wrappers can tell
-    // "fix your config" apart from "the run failed" (exit 1).
+    // "fix your config" apart from "the run failed" (exit 1). This validation
+    // runs FIRST — before `--detach` spawns anything — so a bad config never
+    // leaves a stray task directory behind.
     let phase = load_config(config_path.as_deref())
         .and_then(|loaded| resolve_target_chain(&loaded, &args.target).map(|c| (loaded, c)));
     let (loaded, chain) = match phase {
@@ -114,6 +133,14 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
             return Ok(ExitCode::from(2));
         }
     };
+
+    // Detached path: freeze the request and hand it to a re-exec'd worker, then
+    // return immediately. Config is already validated above, so reaching here
+    // means the target resolves.
+    if args.detach {
+        return spawn_detached_dispatch(config_path, args);
+    }
+
     let json = args.json;
     let task = task_from_dispatch(args)?;
     let runtime = Runtime::new(loaded.config, StoragePaths::resolve()?)?;
@@ -136,6 +163,334 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
     } else {
         ExitCode::from(1)
     })
+}
+
+/// Freeze the dispatch request into a task directory and spawn a detached
+/// worker to run it. Prints the run id and returns exit 0 without waiting.
+///
+/// The target chain was already resolved by the caller (so config errors have
+/// exited 2 before we get here); we re-serialize the raw selector string into
+/// the job so the worker re-resolves it identically.
+fn spawn_detached_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
+    let paths_root = StoragePaths::resolve()?;
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let job = JobSpec {
+        run_id: run_id.clone(),
+        task: args.task,
+        target: args.target,
+        workdir: args.workdir,
+        sandbox: vyane_core::Sandbox::from(args.sandbox).into(),
+        system: args.system,
+        timeout_secs: args.timeout,
+        labels: args.label,
+        session: args.session,
+        config: config_path,
+    };
+    let paths = TaskPaths::new(&paths_root.tasks_dir, &run_id);
+    crate::task::spawn::spawn_detached(&paths, &job)?;
+
+    if args.json {
+        println!("{}", serde_json::json!({ "id": run_id }));
+    } else {
+        println!("{run_id}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The detached worker: re-resolve the frozen job, mark the run `running`,
+/// dispatch it through the normal kernel path, then finalize `status.json` and
+/// write `output.txt`. A `SIGTERM` (from `task cancel`) cancels the kernel so
+/// the run finalizes as `cancelled` with its `RunRecord` still on the ledger.
+///
+/// The worker owns its own process group (installed by the parent via
+/// `setsid`); it never re-exec's further.
+async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<ExitCode> {
+    let storage = StoragePaths::resolve()?;
+    let paths = TaskPaths::new(&storage.tasks_dir, &args.id);
+
+    let job = paths.read_job()?;
+    // The job's own recorded config override wins over any inherited flag; the
+    // parent always writes it (possibly `None`).
+    let config_path = job.config.clone().or(config_path);
+
+    // Re-resolve config + target chain exactly as an online dispatch would.
+    // The parent already validated this, but the worker is a fresh process, so
+    // it resolves independently. A failure here is recorded as an error status.
+    let resolved = load_config(config_path.as_deref())
+        .and_then(|loaded| resolve_target_chain(&loaded, &job.target).map(|c| (loaded, c)));
+
+    let pid = std::process::id() as i32;
+    let pgid = pgid_of(pid).unwrap_or(pid);
+    let workdir = job.workdir.as_ref().map(|p| p.to_string_lossy().into_owned());
+
+    let (loaded, chain) = match resolved {
+        Ok(value) => value,
+        Err(error) => {
+            // Config could not be resolved in the worker: record a terminal
+            // error status so `task status` explains why, and exit nonzero.
+            let mut status =
+                StatusFile::running(&job.run_id, pid, pgid, &job.target, workdir.clone());
+            status.state = TaskState::Error;
+            status.finished_at = Some(chrono::Utc::now());
+            status.error = Some(format!("config error: {error:#}"));
+            paths.write_status(&status)?;
+            eprintln!("config error: {error:#}");
+            return Ok(ExitCode::from(1));
+        }
+    };
+
+    // The status target is a best-effort label: the first resolved target's
+    // identity reads better than the raw selector, but falls back to it.
+    let target_label = chain
+        .first()
+        .map(|bound| bound.target.to_string())
+        .unwrap_or_else(|| job.target.clone());
+
+    // 1) Announce `running` up front (atomic write) so `task list/status`
+    //    observe the run the instant the worker is live.
+    let running = StatusFile::running(&job.run_id, pid, pgid, &target_label, workdir.clone());
+    paths.write_status(&running)?;
+
+    // 2) A SIGTERM handler cancels the kernel token, so `task cancel` lets the
+    //    dispatch unwind cleanly (RunRecord lands, status becomes `cancelled`)
+    //    instead of the process being torn down mid-run.
+    let cancel = worker_cancellation_token();
+
+    let task = task_from_job(&job)?;
+    let runtime = Runtime::new(loaded.config, StoragePaths::resolve()?)?;
+    let outcome = runtime.dispatcher.dispatch(&task, chain, cancel).await?;
+    let record = outcome.record;
+    let output = outcome.output;
+
+    // 3) Persist the answer (if any) beside the status, then finalize status.
+    if let Some(text) = output.as_deref() {
+        std::fs::write(paths.output(), text)
+            .with_context(|| format!("write {}", paths.output().display()))?;
+    }
+
+    let state = run_status_to_task_state(record.status);
+    let mut final_status = running;
+    final_status.state = state;
+    final_status.finished_at = Some(record.finished_at);
+    final_status.ledger_run_id = Some(record.run_id.clone());
+    final_status.error = record.error.clone();
+    paths.write_status(&final_status)?;
+
+    Ok(if record.status == RunStatus::Success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+async fn run_task_list(args: TaskListArgs) -> Result<ExitCode> {
+    let storage = StoragePaths::resolve()?;
+    let rows = list_tasks(&storage.tasks_dir, pid_alive);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else if rows.is_empty() {
+        println!("no detached runs");
+    } else {
+        crate::output::print_task_table(&rows);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
+    let storage = StoragePaths::resolve()?;
+    let paths = TaskPaths::new(&storage.tasks_dir, &args.id);
+
+    let status = match paths.read_status() {
+        Ok(status) => status,
+        Err(_) => {
+            eprintln!("no such detached run: {}", args.id);
+            return Ok(ExitCode::from(1));
+        }
+    };
+    let displayed = interpret_state(&status, pid_alive);
+
+    // `--output` prints the captured answer and nothing else.
+    if args.output {
+        match paths.read_output() {
+            Some(text) => {
+                print!("{text}");
+                if !text.ends_with('\n') {
+                    println!();
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            None => {
+                eprintln!("no output recorded for {}", args.id);
+                return Ok(ExitCode::from(1));
+            }
+        }
+    }
+
+    let log_tail = paths.tail_log(10);
+
+    if args.json {
+        let view = crate::output::TaskStatusJson {
+            status: &status,
+            displayed_state: displayed.as_str(),
+            log_tail: &log_tail,
+        };
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        crate::output::print_task_status(&status, displayed, &log_tail);
+    }
+
+    // A run that finished unhappily, or an orphan, exits nonzero so scripts can
+    // branch on it; `running` and `success` exit 0.
+    let ok = matches!(displayed, TaskState::Running | TaskState::Success);
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
+    let storage = StoragePaths::resolve()?;
+    let paths = TaskPaths::new(&storage.tasks_dir, &args.id);
+
+    let status = match paths.read_status() {
+        Ok(status) => status,
+        Err(_) => {
+            eprintln!("no such detached run: {}", args.id);
+            return Ok(ExitCode::from(1));
+        }
+    };
+
+    // Already finished: nothing to signal.
+    if status.state.is_terminal() {
+        println!("{} already {}", args.id, status.state.as_str());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let pgid = if status.pgid > 0 {
+        status.pgid
+    } else {
+        pgid_of(status.pid).unwrap_or(status.pid)
+    };
+
+    // SIGTERM the whole group: the worker catches it and finalizes; any harness
+    // grandchildren it spawned die with the group.
+    signal_group(pgid, SIGTERM);
+
+    // Give the worker up to 5s to exit its process group cleanly; escalate to
+    // SIGKILL if the group is still alive after the grace.
+    if wait_until(Duration::from_secs(5), Duration::from_millis(100), || {
+        !pid_alive(status.pid)
+    })
+    .await
+    .is_none()
+    {
+        signal_group(pgid, SIGKILL);
+    }
+
+    // Separately, wait up to 2s for the worker to write its *final* status.
+    // (A clean SIGTERM finalize writes `cancelled`; a SIGKILL leaves it
+    // `running`, which read-side interpretation later shows as `died`.)
+    let finalized = wait_until(Duration::from_secs(2), Duration::from_millis(50), || {
+        paths
+            .read_status()
+            .map(|s| s.state.is_terminal())
+            .unwrap_or(false)
+    })
+    .await
+    .is_some();
+
+    if finalized {
+        let final_state = paths
+            .read_status()
+            .map(|s| s.state.as_str().to_string())
+            .unwrap_or_else(|_| "cancelled".to_string());
+        println!("{} {}", args.id, final_state);
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!(
+            "{}: kill delivered; worker did not finalize",
+            args.id
+        );
+        Ok(ExitCode::from(1))
+    }
+}
+
+/// Poll `predicate` every `interval` until it is true or `budget` elapses.
+/// Returns `Some(())` if it became true in time, `None` on timeout.
+async fn wait_until(
+    budget: Duration,
+    interval: Duration,
+    mut predicate: impl FnMut() -> bool,
+) -> Option<()> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if predicate() {
+            return Some(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Build a `TaskSpec` from a frozen [`JobSpec`], reusing the shared task
+/// assembly so a detached run and an online run are constructed identically.
+fn task_from_job(job: &JobSpec) -> Result<TaskSpec> {
+    let mut task = task_base(
+        job.task.clone(),
+        job.workdir.clone(),
+        job.sandbox.into(),
+        job.system.clone(),
+        job.timeout_secs,
+        job.labels.clone(),
+    )?;
+    if let Some(session) = &job.session {
+        task.session = Some(SessionRef::new(session.clone()));
+    }
+    Ok(task)
+}
+
+/// Map a completed run's status onto the persisted task state.
+fn run_status_to_task_state(status: RunStatus) -> TaskState {
+    match status {
+        RunStatus::Success => TaskState::Success,
+        RunStatus::Error => TaskState::Error,
+        RunStatus::Timeout => TaskState::Timeout,
+        RunStatus::Cancelled => TaskState::Cancelled,
+    }
+}
+
+/// A cancellation token wired to `SIGTERM` (in addition to ctrl-c). `task
+/// cancel` SIGTERMs the worker's group; catching it here cancels the kernel so
+/// the dispatch unwinds and records a `cancelled` run.
+fn worker_cancellation_token() -> CancellationToken {
+    let token = CancellationToken::new();
+
+    // ctrl-c, same as an online dispatch.
+    let ctrl_c_token = token.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            ctrl_c_token.cancel();
+        }
+    });
+
+    // SIGTERM: the signal `task cancel` delivers.
+    #[cfg(unix)]
+    {
+        let term_token = token.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            if let Ok(mut term) = signal(SignalKind::terminate()) {
+                term.recv().await;
+                term_token.cancel();
+            }
+        });
+    }
+
+    token
 }
 
 async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Result<ExitCode> {

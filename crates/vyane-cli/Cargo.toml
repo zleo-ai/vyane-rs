@@ -24,6 +24,8 @@ async-trait = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -33,6 +35,17 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
 wiremock = { workspace = true }
+serde_json = { workspace = true }
 
-[lints]
-workspace = true
+# Crate-local lints: the workspace denies `unsafe_code`, but vyane-cli — like
+# vyane-harness — is pre-approved to use `unsafe` strictly for detached-worker
+# process control: the `setsid(2)` `pre_exec` hook that puts each worker in its
+# own process group, and the `kill(2)` calls that group-signal a worker on
+# `task cancel` and probe worker liveness for orphan detection. These are the
+# only `unsafe` blocks in the crate; every one carries a SAFETY comment. All
+# other lints mirror the workspace configuration.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+unwrap_used = "warn"
