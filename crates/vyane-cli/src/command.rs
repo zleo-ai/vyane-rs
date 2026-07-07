@@ -18,9 +18,7 @@ use crate::cli::{
 };
 use crate::output::{BroadcastJson, BroadcastRow, RunJson};
 use crate::task::proc::{SIGKILL, SIGTERM, pgid_of, pid_alive, signal_group};
-use crate::task::store::{
-    JobSpec, StatusFile, TaskPaths, TaskState, interpret_state, list_tasks,
-};
+use crate::task::store::{JobSpec, StatusFile, TaskPaths, TaskState, interpret_state, list_tasks};
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
@@ -221,7 +219,10 @@ async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<Ex
 
     let pid = std::process::id() as i32;
     let pgid = pgid_of(pid).unwrap_or(pid);
-    let workdir = job.workdir.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let workdir = job
+        .workdir
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
 
     let (loaded, chain) = match resolved {
         Ok(value) => value,
@@ -409,10 +410,7 @@ async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
         println!("{} {}", args.id, final_state);
         Ok(ExitCode::SUCCESS)
     } else {
-        eprintln!(
-            "{}: kill delivered; worker did not finalize",
-            args.id
-        );
+        eprintln!("{}: kill delivered; worker did not finalize", args.id);
         Ok(ExitCode::from(1))
     }
 }

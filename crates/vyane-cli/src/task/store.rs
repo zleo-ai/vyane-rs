@@ -243,8 +243,7 @@ impl TaskPaths {
     /// Read the status file, if present and parseable.
     pub fn read_status(&self) -> Result<StatusFile> {
         let path = self.status();
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
     }
 
@@ -272,12 +271,14 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(
         ".{}.tmp.{}",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("status"),
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("status"),
         std::process::id()
     ));
     {
-        let mut f = fs::File::create(&tmp)
-            .with_context(|| format!("create temp {}", tmp.display()))?;
+        let mut f =
+            fs::File::create(&tmp).with_context(|| format!("create temp {}", tmp.display()))?;
         f.write_all(bytes)
             .with_context(|| format!("write temp {}", tmp.display()))?;
         f.sync_all().ok();
@@ -341,5 +342,177 @@ pub fn interpret_state(status: &StatusFile, is_alive: impl Fn(i32) -> bool) -> T
         TaskState::Died
     } else {
         status.state
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn sample_status(state: TaskState, pid: i32) -> StatusFile {
+        let mut s = StatusFile::running("run-1", pid, pid, "test/model (openai_chat)", None);
+        s.state = state;
+        s
+    }
+
+    #[test]
+    fn status_roundtrips_through_json() {
+        let mut status = sample_status(TaskState::Success, 42);
+        status.finished_at = Some(Utc::now());
+        status.ledger_run_id = Some("ledger-9".into());
+        let text = serde_json::to_string(&status).unwrap();
+        let back: StatusFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.schema, STATUS_SCHEMA);
+        assert_eq!(back.run_id, "run-1");
+        assert_eq!(back.state, TaskState::Success);
+        assert_eq!(back.ledger_run_id.as_deref(), Some("ledger-9"));
+    }
+
+    #[test]
+    fn state_serializes_lowercase() {
+        // Persisted names are the stable wire contract for --json consumers.
+        assert_eq!(
+            serde_json::to_string(&TaskState::Running).unwrap(),
+            "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskState::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
+        assert_eq!(TaskState::Died.as_str(), "died");
+    }
+
+    #[test]
+    fn terminal_states_classified() {
+        assert!(!TaskState::Running.is_terminal());
+        for s in [
+            TaskState::Success,
+            TaskState::Error,
+            TaskState::Timeout,
+            TaskState::Cancelled,
+        ] {
+            assert!(s.is_terminal(), "{s:?} should be terminal");
+        }
+    }
+
+    #[test]
+    fn interpret_state_marks_dead_running_as_died() {
+        let running = sample_status(TaskState::Running, 7);
+        // pid alive → stays running.
+        assert_eq!(interpret_state(&running, |_| true), TaskState::Running);
+        // pid dead → died (read-side only; the value in `running` is untouched).
+        assert_eq!(interpret_state(&running, |_| false), TaskState::Died);
+        assert_eq!(running.state, TaskState::Running);
+    }
+
+    #[test]
+    fn interpret_state_leaves_terminal_untouched() {
+        // A finished run is never reinterpreted, even if the pid is long gone.
+        let done = sample_status(TaskState::Success, 7);
+        assert_eq!(interpret_state(&done, |_| false), TaskState::Success);
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_and_is_readable() {
+        let dir = TempDir::new().unwrap();
+        let paths = TaskPaths::new(dir.path(), "abc");
+        paths.ensure_dir().unwrap();
+        let status = sample_status(TaskState::Running, 123);
+        paths.write_status(&status).unwrap();
+
+        let back = paths.read_status().unwrap();
+        assert_eq!(back.run_id, "run-1");
+        assert_eq!(back.pid, 123);
+
+        // No stray temp files remain in the run dir.
+        let leftovers: Vec<_> = fs::read_dir(&paths.dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn job_spec_roundtrips() {
+        let dir = TempDir::new().unwrap();
+        let paths = TaskPaths::new(dir.path(), "j1");
+        paths.ensure_dir().unwrap();
+        let job = JobSpec {
+            run_id: "j1".into(),
+            task: "do it".into(),
+            target: "review".into(),
+            workdir: Some(PathBuf::from("/tmp/work")),
+            sandbox: SandboxSpec::Write,
+            system: Some("be terse".into()),
+            timeout_secs: Some(30),
+            labels: vec!["k=v".into()],
+            session: Some("s1".into()),
+            config: None,
+        };
+        paths.write_job(&job).unwrap();
+        let back = paths.read_job().unwrap();
+        assert_eq!(back.run_id, "j1");
+        assert_eq!(back.target, "review");
+        assert_eq!(back.sandbox, SandboxSpec::Write);
+        assert_eq!(back.timeout_secs, Some(30));
+        assert_eq!(back.labels, vec!["k=v".to_string()]);
+    }
+
+    #[test]
+    fn tail_log_returns_last_n_lines() {
+        let dir = TempDir::new().unwrap();
+        let paths = TaskPaths::new(dir.path(), "log1");
+        paths.ensure_dir().unwrap();
+        fs::write(paths.log(), "l1\nl2\nl3\nl4\nl5\n").unwrap();
+        assert_eq!(paths.tail_log(2), vec!["l4".to_string(), "l5".to_string()]);
+        // Asking for more than exist yields all of them.
+        assert_eq!(paths.tail_log(100).len(), 5);
+        // Missing log → empty.
+        let missing = TaskPaths::new(dir.path(), "nope");
+        assert!(missing.tail_log(10).is_empty());
+    }
+
+    #[test]
+    fn list_tasks_orders_recent_first_and_skips_unwritten() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        // Two runs with distinct start times.
+        for (id, secs) in [("old", 0), ("new", 10)] {
+            let paths = TaskPaths::new(root, id);
+            paths.ensure_dir().unwrap();
+            let mut s = sample_status(TaskState::Success, 1);
+            s.run_id = id.to_string();
+            s.started_at = DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap();
+            s.finished_at = Some(s.started_at);
+            paths.write_status(&s).unwrap();
+        }
+        // A dir with no status.json must be silently skipped.
+        fs::create_dir_all(root.join("pending")).unwrap();
+
+        let rows = list_tasks(root, |_| true);
+        assert_eq!(rows.len(), 2, "pending (no status) dir must be skipped");
+        assert_eq!(rows[0].id, "new", "most-recent-first ordering");
+        assert_eq!(rows[1].id, "old");
+    }
+
+    #[test]
+    fn list_tasks_applies_orphan_detection() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let paths = TaskPaths::new(root, "orphan");
+        paths.ensure_dir().unwrap();
+        paths
+            .write_status(&sample_status(TaskState::Running, 99))
+            .unwrap();
+
+        // Dead pid → the row reads `died` without the file being rewritten.
+        let rows = list_tasks(root, |_| false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, TaskState::Died);
+        assert_eq!(paths.read_status().unwrap().state, TaskState::Running);
     }
 }

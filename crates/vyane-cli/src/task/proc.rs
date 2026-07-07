@@ -145,3 +145,41 @@ const EPERM: i32 = 1;
 fn last_errno() -> Option<i32> {
     std::io::Error::last_os_error().raw_os_error()
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn own_pid_is_alive() {
+        let me = std::process::id() as i32;
+        assert!(pid_alive(me), "the test process must probe as alive");
+    }
+
+    #[test]
+    fn nonexistent_pid_is_dead() {
+        // i32::MAX is far above any real pid; kill(pid, 0) reports ESRCH.
+        assert!(!pid_alive(i32::MAX));
+    }
+
+    #[test]
+    fn nonpositive_pid_is_dead() {
+        // 0 and negatives address groups / special targets, never a live pid
+        // for a liveness probe — treat as dead so orphan detection is safe.
+        assert!(!pid_alive(0));
+        assert!(!pid_alive(-1));
+    }
+
+    #[test]
+    fn own_pgid_is_available() {
+        let me = std::process::id() as i32;
+        let pgid = pgid_of(me).expect("own pgid resolvable");
+        assert!(pgid > 0);
+    }
+
+    #[test]
+    fn signal_group_on_dead_group_is_noop() {
+        // Signalling a group that does not exist must not panic (ESRCH ignored).
+        signal_group(i32::MAX, SIGTERM);
+    }
+}
