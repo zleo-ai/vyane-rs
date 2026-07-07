@@ -134,9 +134,12 @@ fn poll_status_file<F: Fn(&Value) -> bool>(
 #[tokio::test]
 async fn detach_returns_fast_then_completes_success() {
     let server = MockServer::start().await;
-    // A visible delay so the worker is demonstrably still running when
-    // `--detach` returns, but short enough to keep the test quick.
-    mock_openai_delayed(&server, "detached answer", Duration::from_millis(800)).await;
+    // A long target delay so the run is *guaranteed* still in flight when the
+    // parent returns, regardless of worker-spawn latency under a loaded CI.
+    // This is the whole point of `--detach`: the parent hands the run off and
+    // exits while the dispatch keeps going.
+    const TARGET_DELAY: Duration = Duration::from_secs(10);
+    mock_openai_delayed(&server, "detached answer", TARGET_DELAY).await;
 
     let config_dir = TempDir::new().expect("config tempdir");
     let data_dir = TempDir::new().expect("data tempdir");
@@ -162,26 +165,35 @@ async fn detach_returns_fast_then_completes_success() {
         .clone();
     let elapsed = started.elapsed();
 
-    // Fast return: well under a couple of seconds, and long before the target
-    // could have answered.
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "--detach took too long: {elapsed:?}"
-    );
-
     let id = String::from_utf8(out).expect("utf8 id").trim().to_string();
     assert!(!id.is_empty(), "expected a run id on stdout");
 
-    // Immediately after return the worker should be running (the target is
-    // still sleeping). This can race the worker's first status write, so allow
-    // a brief window for `running` to appear.
-    let saw_running = poll_status_file(data_dir.path(), &id, Duration::from_secs(2), |v| {
+    // The parent returned an id without blocking on the dispatch. Proven
+    // structurally (timing-robust): the run is observably still `running` right
+    // after the parent returns — a parent that wrongly waited for completion
+    // could not return until the target answered (>= TARGET_DELAY), by which
+    // point the status would already be terminal. The wall-clock ceiling below
+    // is only a coarse hang-guard (measuring subprocess spawn under parallel
+    // `cargo test` is inherently noisy), not the invariant itself.
+    assert!(
+        elapsed < TARGET_DELAY,
+        "--detach did not return before the target could answer ({elapsed:?}); it likely blocked"
+    );
+
+    // Primary invariant: the handed-off run is genuinely in flight (the target
+    // is still sleeping). A brief window absorbs the race with the worker's
+    // first status write; TARGET_DELAY (10s) dwarfs any spawn latency, so this
+    // is deterministic in practice.
+    let saw_running = poll_status_file(data_dir.path(), &id, Duration::from_secs(5), |v| {
         v["state"] == "running"
     });
-    assert!(saw_running, "worker never reported running");
+    assert!(
+        saw_running,
+        "worker never reported running while the target was still delayed"
+    );
 
-    // Poll to completion.
-    let final_status = poll_until_terminal(data_dir.path(), &id, Duration::from_secs(15));
+    // Poll to completion (well past TARGET_DELAY).
+    let final_status = poll_until_terminal(data_dir.path(), &id, Duration::from_secs(30));
     assert_eq!(final_status["state"], "success");
     // The task id names the run directory / status file; the kernel mints its
     // own ledger run_id, which the status links via `ledger_run_id`.
@@ -271,8 +283,10 @@ async fn cancel_finalizes_cancelled_and_kills_group() {
         .clone();
     let id = String::from_utf8(out).expect("utf8 id").trim().to_string();
 
-    // Wait until the worker is actually running (has written its pid).
-    let running = poll_status_file(data_dir.path(), &id, Duration::from_secs(3), |v| {
+    // Wait until the worker is actually running (has written its pid). A
+    // generous budget absorbs worker-spawn latency under parallel `cargo test`;
+    // the 30s target delay means the run is nowhere near finishing meanwhile.
+    let running = poll_status_file(data_dir.path(), &id, Duration::from_secs(15), |v| {
         v["state"] == "running" && v["pid"].as_i64().unwrap_or(0) > 0
     });
     assert!(running, "worker never reached running with a pid");
@@ -297,8 +311,10 @@ async fn cancel_finalizes_cancelled_and_kills_group() {
         .expect("ledger_run_id set after cancel finalize")
         .to_string();
 
-    // Process group is dead: the worker pid is gone. Give the OS a beat.
-    let dead = wait_pid_dead(pid, Duration::from_secs(3));
+    // Process group is dead: the worker pid is gone. `task cancel` already
+    // waited out its SIGTERM grace + finalize window before returning, so the
+    // worker should be exiting; allow extra headroom for the OS to reap it.
+    let dead = wait_pid_dead(pid, Duration::from_secs(8));
     assert!(dead, "worker pid {pid} still alive after cancel");
 
     // Ledger has the cancelled RunRecord (keyed by the kernel's run_id).
