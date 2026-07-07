@@ -330,7 +330,7 @@ fn parse_openai_responses(data: &str) -> Result<Vec<StreamEvent>> {
         "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
             Ok(responses_text_delta(&value, StreamEvent::ReasoningDelta))
         }
-        "response.completed" => Ok(responses_completed(value)),
+        "response.completed" => responses_completed(value),
         "response.incomplete" => Ok(vec![StreamEvent::Done {
             finish_reason: responses_incomplete_reason(&value),
         }]),
@@ -360,23 +360,29 @@ fn responses_text_delta(value: &Value, make: impl Fn(String) -> StreamEvent) -> 
 /// `response.completed` carries the full `Response` object under `"response"`,
 /// including `usage` when reported. Usage (if present) is emitted before the
 /// terminal `Done` — same ordering as the Chat/Anthropic parsers.
-fn responses_completed(value: Value) -> Vec<StreamEvent> {
+///
+/// A malformed `usage` payload is a protocol error (propagated via `?`), not
+/// silently dropped — mirroring `parse_anthropic_message_delta`'s handling of
+/// its own `usage` field.
+fn responses_completed(value: Value) -> Result<Vec<StreamEvent>> {
     let mut events = Vec::new();
     let usage = value
         .get("response")
         .and_then(|response| response.get("usage"))
         .cloned();
     if let Some(usage) = usage {
-        if let Ok(usage) = serde_json::from_value::<wire::openai_responses::UsageResponse>(usage) {
-            events.push(StreamEvent::Usage(
-                wire::openai_responses::usage_from_response(usage),
-            ));
-        }
+        let usage = serde_json::from_value::<wire::openai_responses::UsageResponse>(usage)
+            .map_err(|e| {
+                VyaneError::with_source(ErrorKind::Protocol, "malformed Responses usage JSON", e)
+            })?;
+        events.push(StreamEvent::Usage(
+            wire::openai_responses::usage_from_response(usage),
+        ));
     }
     events.push(StreamEvent::Done {
         finish_reason: None,
     });
-    events
+    Ok(events)
 }
 
 /// `response.incomplete` carries `response.incomplete_details.reason`,
@@ -541,6 +547,22 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
     fn malformed_responses_json_is_protocol_error() {
         let mut decoder = SseDecoder::default();
         let events = decoder.push(b"data: {nope}\n\n", StreamProtocol::OpenAiResponses);
+        let error = events.into_iter().next().unwrap().unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+    }
+
+    #[test]
+    fn responses_completed_with_malformed_usage_is_protocol_error() {
+        // The envelope and event `type` are well-formed; only the nested
+        // `usage` field fails to deserialize (wrong type for `input_tokens`).
+        // This must surface as a `Protocol` error, not be silently dropped.
+        let mut decoder = SseDecoder::default();
+        let events = decoder.push(
+            br#"data: {"type":"response.completed","response":{"usage":{"input_tokens":"nope"}}}
+
+"#,
+            StreamProtocol::OpenAiResponses,
+        );
         let error = events.into_iter().next().unwrap().unwrap_err();
         assert_eq!(error.kind, ErrorKind::Protocol);
     }

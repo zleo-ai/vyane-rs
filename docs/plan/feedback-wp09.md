@@ -113,3 +113,29 @@ stay within the frozen crate boundary for this work package.
   through `print_run_json` / the same `RunJson { record, output }` shape, so a
   wrapper script that already parses `vyane dispatch --json` output needs no
   branch for the streaming case.
+
+## Noted, not fixed here: `SseDecoder` synthesizes a trailing `Done` after an `Err`
+
+`SseDecoder::finish` (`crates/vyane-protocol/src/sse.rs`), called once when the
+underlying byte stream reaches EOF, decides whether to synthesize a closing
+`Done` event by checking `!self.done_emitted && !out.iter().any(Result::is_err)`
+— but `out` there is only the (usually empty) batch of events decoded from
+`finish`'s own leftover buffer, not the full history of everything the decoder
+has yielded over the stream's lifetime. If an `Err` was already emitted from
+an *earlier* `push()` call (mid-stream, e.g. a malformed frame that isn't the
+last byte on the wire) and no in-band `Done`/`[DONE]` ever arrives afterward,
+`done_emitted` is still `false` when the underlying stream closes, so `finish`
+synthesizes and emits a `Done` *after* the `Err` was already handed to the
+consumer — an error-terminated stream that still ends in a synthetic success
+sentinel. This is cross-protocol (`SseDecoder` is shared by all three
+`StreamProtocol` variants, not something WP-09's `OpenAiResponses` parsing
+introduced) and pre-existing before this work package. It happens not to
+surface in WP-09's own consumer: `stream_attempt`'s event loop
+(`crates/vyane-cli/src/command.rs`) `break`s on the first `Some(Err(_))` and
+never polls the stream again, so it never observes the synthesized trailing
+`Done`. A future consumer that doesn't stop at the first error — or a decoder
+test asserting the full event sequence rather than just the first error — would
+see it. The fix, whenever picked up, is straightforward: track "an error was
+ever emitted" as sticky decoder state (e.g. fold it into `done_emitted`'s
+neighbor field, or simply never synthesize `Done` once any `Err` has been
+produced), not just "the last frame decoded cleanly".

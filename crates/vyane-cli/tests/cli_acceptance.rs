@@ -290,7 +290,15 @@ async fn dispatch_stream_prints_deltas_and_writes_ledger() {
         .env("VYANE_DATA_DIR", data_dir.path())
         .arg("--config")
         .arg(&config)
-        .args(["dispatch", "say hi", "--target", "review", "--stream"])
+        .args([
+            "dispatch",
+            "say hi",
+            "--target",
+            "review",
+            "--stream",
+            "--label",
+            "purpose=acceptance-test",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("streamed answer"))
@@ -300,14 +308,39 @@ async fn dispatch_stream_prints_deltas_and_writes_ledger() {
 
     let records = ledger_records(data_dir.path());
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["status"], "success");
-    assert_eq!(records[0]["usage"]["input_tokens"], 4);
-    assert_eq!(records[0]["usage"]["output_tokens"], 3);
-    assert_eq!(records[0]["target"]["protocol"], "openai_responses");
-    assert_eq!(
-        records[0]["attempts"].as_array().expect("attempts").len(),
-        1
+    let record = &records[0];
+    assert_eq!(record["status"], "success");
+    assert_eq!(record["usage"]["input_tokens"], 4);
+    assert_eq!(record["usage"]["output_tokens"], 3);
+    assert_eq!(record["target"]["protocol"], "openai_responses");
+    assert_eq!(record["attempts"].as_array().expect("attempts").len(), 1);
+
+    // `run_id` is a real UUID (v7, time-ordered) — not a placeholder or
+    // reused-across-runs string.
+    let run_id = record["run_id"].as_str().expect("run_id string");
+    uuid::Uuid::parse_str(run_id).expect("run_id parses as a UUID");
+
+    // Single-user setups always tag `owner` as `"local"` — same default the
+    // non-streaming path writes.
+    assert_eq!(record["owner"], "local");
+
+    // `task_digest` is lower-case hex, truncated to the documented 16-char
+    // window (`vyane_kernel::digest::DIGEST_HEX_LEN`), not the full SHA-256.
+    let digest = record["task_digest"].as_str().expect("task_digest string");
+    assert_eq!(digest.len(), 16);
+    assert!(
+        digest.chars().all(|c| c.is_ascii_hexdigit()),
+        "task_digest must be hex: {digest}"
     );
+
+    // `output_chars` matches the char count of the answer the client actually
+    // streamed and printed ("streamed answer" — the two deltas concatenated),
+    // not e.g. a byte count or the raw SSE payload size.
+    assert_eq!(record["output_chars"], "streamed answer".chars().count());
+
+    // Labels supplied on the CLI round-trip onto the streaming `RunRecord`
+    // exactly like they do for a non-streaming dispatch.
+    assert_eq!(record["labels"]["purpose"], "acceptance-test");
 
     // `--stream --json` mirrors the non-streaming `--json` shape exactly.
     let output = vyane()
@@ -326,6 +359,46 @@ async fn dispatch_stream_prints_deltas_and_writes_ledger() {
     let parsed: Value = serde_json::from_slice(&output).expect("json stream dispatch output");
     assert_eq!(parsed["record"]["status"], "success");
     assert_eq!(parsed["output"], "streamed answer");
+}
+
+#[tokio::test]
+async fn dispatch_stream_on_failover_chain_falls_back_and_records_both_attempts() {
+    let primary = MockServer::start().await;
+    let backup = MockServer::start().await;
+    mock_openai(&primary, 500, "").await;
+    mock_openai(&backup, 200, "backup answer").await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &failover_config(&primary, &backup));
+
+    // `resilient` resolves to a two-element chain (primary + backup) —
+    // `streamable_target` only accepts a single-target `DirectHttp` chain, so
+    // `--stream` here must fall back to the ordinary non-streaming
+    // `Dispatcher::dispatch` path, which is what actually exercises failover.
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["dispatch", "fail over", "--target", "resilient", "--stream"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("backup answer"))
+        .stderr(predicate::str::contains(
+            "--stream only applies to a single direct-HTTP target",
+        ));
+
+    // The fallback went through the full non-streaming dispatch path, so both
+    // chain attempts (failed primary, successful backup) are visible on the
+    // one recorded `RunRecord` — streaming's fallback must never truncate the
+    // failover chain it hands off.
+    let records = ledger_records(data_dir.path());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["status"], "success");
+    let attempts = records[0]["attempts"].as_array().expect("attempts");
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["target"]["provider"], "primary");
+    assert_eq!(attempts[1]["target"]["provider"], "backup");
 }
 
 #[tokio::test]
