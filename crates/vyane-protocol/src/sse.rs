@@ -15,6 +15,7 @@ use crate::wire;
 pub(crate) enum StreamProtocol {
     OpenAiChat,
     Anthropic,
+    OpenAiResponses,
 }
 
 pub(crate) fn response_to_stream(
@@ -98,6 +99,7 @@ impl SseDecoder {
         let parsed = match protocol {
             StreamProtocol::OpenAiChat => parse_openai_chat(&data),
             StreamProtocol::Anthropic => parse_anthropic(&data),
+            StreamProtocol::OpenAiResponses => parse_openai_responses(&data),
         };
         match parsed {
             Ok(events) => {
@@ -298,6 +300,97 @@ fn parse_anthropic_message_delta(value: Value) -> Result<Vec<StreamEvent>> {
     Ok(events)
 }
 
+/// Parse one OpenAI Responses SSE frame.
+///
+/// Responses streaming uses named events (`event: <type>` + `data: {...}`),
+/// but the API duplicates the event name into the payload's own `"type"`
+/// field, so the `event:` line itself never needs parsing — [`collect_data_lines`]
+/// already keeps only the `data:` lines, and this function reads `type` out of
+/// that JSON like `parse_anthropic` does.
+///
+/// Unrecognized event types (`response.created`, `response.in_progress`,
+/// `response.output_item.*`, `response.content_part.*`, …) are ignored,
+/// mirroring how `parse_anthropic`'s catch-all arm treats unknown types: they
+/// are half of a long, evolving event vocabulary that is not needed to
+/// produce `StreamEvent`s.
+fn parse_openai_responses(data: &str) -> Result<Vec<StreamEvent>> {
+    let value: Value = serde_json::from_str(data).map_err(|e| {
+        VyaneError::with_source(
+            ErrorKind::Protocol,
+            "malformed OpenAI Responses SSE JSON",
+            e,
+        )
+    })?;
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match kind {
+        "response.output_text.delta" => Ok(responses_text_delta(&value, StreamEvent::Delta)),
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            Ok(responses_text_delta(&value, StreamEvent::ReasoningDelta))
+        }
+        "response.completed" => Ok(responses_completed(value)),
+        "response.incomplete" => Ok(vec![StreamEvent::Done {
+            finish_reason: responses_incomplete_reason(&value),
+        }]),
+        "response.failed" | "error" => Err(VyaneError::new(
+            ErrorKind::Protocol,
+            "OpenAI Responses stream returned a failure event",
+        )),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Extract the `delta` string field shared by every `response.*.delta` event
+/// and wrap it in the given `StreamEvent` constructor. An empty/missing delta
+/// yields no event (nothing to emit).
+fn responses_text_delta(value: &Value, make: impl Fn(String) -> StreamEvent) -> Vec<StreamEvent> {
+    let text = value
+        .get("delta")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![make(text.to_string())]
+    }
+}
+
+/// `response.completed` carries the full `Response` object under `"response"`,
+/// including `usage` when reported. Usage (if present) is emitted before the
+/// terminal `Done` — same ordering as the Chat/Anthropic parsers.
+fn responses_completed(value: Value) -> Vec<StreamEvent> {
+    let mut events = Vec::new();
+    let usage = value
+        .get("response")
+        .and_then(|response| response.get("usage"))
+        .cloned();
+    if let Some(usage) = usage {
+        if let Ok(usage) = serde_json::from_value::<wire::openai_responses::UsageResponse>(usage) {
+            events.push(StreamEvent::Usage(
+                wire::openai_responses::usage_from_response(usage),
+            ));
+        }
+    }
+    events.push(StreamEvent::Done {
+        finish_reason: None,
+    });
+    events
+}
+
+/// `response.incomplete` carries `response.incomplete_details.reason`,
+/// mirroring the non-streaming `ChatOutcome::finish_reason` mapping in
+/// `wire::openai_responses::TryFrom<Response>`.
+fn responses_incomplete_reason(value: &Value) -> Option<String> {
+    value
+        .get("response")
+        .and_then(|response| response.get("incomplete_details"))
+        .and_then(|details| details.get("reason"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 fn stream_transport_error(error: reqwest::Error) -> VyaneError {
     let kind = reqwest_error_kind(&error);
     VyaneError::with_source(kind, "stream transport error", error)
@@ -387,6 +480,67 @@ data: [DONE]
     fn malformed_openai_json_is_protocol_error() {
         let mut decoder = SseDecoder::default();
         let events = decoder.push(b"data: {nope}\n\n", StreamProtocol::OpenAiChat);
+        let error = events.into_iter().next().unwrap().unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+    }
+
+    #[test]
+    fn responses_split_frames_are_reassembled() {
+        let mut decoder = SseDecoder::default();
+        // First chunk ends mid-frame (no blank-line terminator yet).
+        let mut events = decoder.push(
+            br#"data: {"type":"response.output_text.delta","delta":"hel"}"#,
+            StreamProtocol::OpenAiResponses,
+        );
+        assert!(events.is_empty());
+        // Second chunk completes the first frame and adds two more, including
+        // a `response.completed` carrying usage.
+        events.extend(decoder.push(
+            br#"
+
+data: {"type":"response.output_text.delta","delta":"lo"}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}}
+
+"#,
+            StreamProtocol::OpenAiResponses,
+        ));
+        let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "hel"));
+        assert!(matches!(&events[1], StreamEvent::Delta(text) if text == "lo"));
+        assert!(matches!(
+            &events[2],
+            StreamEvent::Usage(Usage {
+                input_tokens: 3,
+                output_tokens: 2,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &events[3],
+            StreamEvent::Done {
+                finish_reason: None
+            }
+        ));
+    }
+
+    #[test]
+    fn responses_unknown_event_type_is_ignored() {
+        let mut decoder = SseDecoder::default();
+        let events = decoder.push(
+            br#"data: {"type":"response.in_progress"}
+
+"#,
+            StreamProtocol::OpenAiResponses,
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn malformed_responses_json_is_protocol_error() {
+        let mut decoder = SseDecoder::default();
+        let events = decoder.push(b"data: {nope}\n\n", StreamProtocol::OpenAiResponses);
         let error = events.into_iter().next().unwrap().unwrap_err();
         assert_eq!(error.kind, ErrorKind::Protocol);
     }

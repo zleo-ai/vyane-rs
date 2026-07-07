@@ -1,7 +1,9 @@
 use async_trait::async_trait;
-use vyane_core::{ChatClient, ChatOutcome, ChatRequest, Endpoint, Protocol, Result};
+use futures::stream::BoxStream;
+use vyane_core::{ChatClient, ChatOutcome, ChatRequest, Endpoint, Protocol, Result, StreamEvent};
 
 use crate::http::{ClientOptions, HttpClient};
+use crate::sse::{StreamProtocol, response_to_stream};
 use crate::wire;
 
 const PATH: &str = "/v1/responses";
@@ -34,5 +36,17 @@ impl ChatClient for OpenAiResponsesClient {
         let response: wire::openai_responses::Response =
             self.http.post_json(PATH, body, |request| request).await?;
         response.try_into()
+    }
+
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<StreamEvent>>> {
+        let mut body = wire::openai_responses::Request::from(&req);
+        body.extra
+            .entry("stream".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+        let response = self.http.post_stream(PATH, body, |request| request).await?;
+        Ok(response_to_stream(
+            response,
+            StreamProtocol::OpenAiResponses,
+        ))
     }
 }

@@ -433,7 +433,7 @@ pub(crate) mod openai_responses {
         }
     }
 
-    fn usage_from_response(usage: UsageResponse) -> Usage {
+    pub(crate) fn usage_from_response(usage: UsageResponse) -> Usage {
         Usage {
             input_tokens: usage.input_tokens.unwrap_or(0),
             output_tokens: usage.output_tokens.unwrap_or(0),

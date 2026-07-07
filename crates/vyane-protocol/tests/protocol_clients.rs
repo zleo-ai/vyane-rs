@@ -474,16 +474,259 @@ async fn malformed_stream_json_maps_to_protocol() {
 
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
-async fn responses_streaming_is_unsupported() {
+async fn responses_stream_normalizes_events_split_across_chunks() {
     let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
     let client =
         OpenAiResponsesClient::with_options(bearer_endpoint(server.uri()), client_options(1))
             .unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
 
-    let error = match client.stream(request()).await {
-        Ok(_) => panic!("Responses streaming unexpectedly succeeded"),
-        Err(error) => error,
-    };
+    // The frame above arrives whole (chunking across the wire is exercised in
+    // the SSE decoder's own unit test), but the client must still reassemble
+    // it into the normalized event plus a synthesized Done at EOF, proving the
+    // Responses stream never requires reasoning traffic to terminate cleanly.
+    assert_eq!(events.len(), 2);
+    assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "hel"));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::Done {
+            finish_reason: None
+        }
+    ));
 
-    assert_eq!(error.kind, ErrorKind::Unsupported);
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = requests[0].body_json().unwrap();
+    assert_eq!(body["stream"], true);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn responses_stream_has_no_reasoning_events_but_still_completes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "data: {\"type\":\"response.created\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":8,\"output_tokens\":6}}}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiResponsesClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+    // `response.created` is a known-but-ignored event; the stream must be live
+    // (produce a Delta and terminate) with zero reasoning traffic at all —
+    // liveness never depends on reasoning deltas.
+    assert_eq!(events.len(), 3);
+    assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "answer"));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::Usage(Usage {
+            input_tokens: 8,
+            output_tokens: 6,
+            ..
+        })
+    ));
+    assert!(matches!(
+        &events[2],
+        StreamEvent::Done {
+            finish_reason: None
+        }
+    ));
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn responses_stream_reasoning_delta_is_normalized_when_present() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiResponsesClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+    assert_eq!(events.len(), 3);
+    assert!(matches!(
+        &events[0],
+        StreamEvent::ReasoningDelta(text) if text == "thinking"
+    ));
+    assert!(matches!(&events[1], StreamEvent::Delta(text) if text == "answer"));
+    assert!(matches!(
+        &events[2],
+        StreamEvent::Done {
+            finish_reason: None
+        }
+    ));
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn responses_stream_incomplete_carries_finish_reason() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+                "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiResponsesClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+    assert_eq!(events.len(), 2);
+    assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "partial"));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::Done {
+            finish_reason: Some(reason)
+        } if reason == "max_output_tokens"
+    ));
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn responses_stream_malformed_event_maps_to_protocol_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw("data: {not-json}\n\n", "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiResponsesClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let mut stream = client.stream(request()).await.unwrap();
+    let error = stream.next().await.unwrap().unwrap_err();
+
+    assert_eq!(error.kind, ErrorKind::Protocol);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn responses_stream_failed_event_maps_to_protocol_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+                "data: {\"type\":\"response.failed\",\"response\":{}}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiResponsesClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let mut stream = client.stream(request()).await.unwrap();
+
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(matches!(&first, StreamEvent::Delta(text) if text == "partial"));
+    let error = stream.next().await.unwrap().unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Protocol);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn responses_stream_eof_without_completed_synthesizes_done() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"cut off\"}\n\n",
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiResponsesClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+    // No `response.completed`/`response.incomplete` ever arrived — the
+    // transport just closed. This must behave exactly like the Chat/Anthropic
+    // clients' EOF handling: synthesize a terminal Done rather than leaving
+    // the stream hanging or silently dropping the last delta.
+    assert_eq!(events.len(), 2);
+    assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "cut off"));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::Done {
+            finish_reason: None
+        }
+    ));
 }
