@@ -9,6 +9,7 @@ members = [
     "crates/vyane-kernel",
     "crates/vyane-ledger",
     "crates/vyane-router",
+    "crates/vyane-workflow",
     "crates/vyane-cli",
 ]
 
@@ -29,6 +30,7 @@ vyane-harness = { path = "crates/vyane-harness" }
 vyane-kernel = { path = "crates/vyane-kernel" }
 vyane-ledger = { path = "crates/vyane-ledger" }
 vyane-router = { path = "crates/vyane-router" }
+vyane-workflow = { path = "crates/vyane-workflow" }
 
 # async runtime & io
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "io-util", "signal", "fs"] }

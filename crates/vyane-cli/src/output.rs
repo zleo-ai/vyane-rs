@@ -1,5 +1,6 @@
 use serde::Serialize;
 use vyane_core::{RunRecord, RunStatus, SessionRecord};
+use vyane_workflow::{WorkflowJournalSummary, WorkflowOutcome, WorkflowRunStatus};
 
 #[derive(Debug, Serialize)]
 pub struct RunJson {
@@ -99,5 +100,74 @@ pub fn print_broadcast_table(rows: &[BroadcastRow]) {
                 row.error.as_deref().unwrap_or("")
             ),
         }
+    }
+}
+
+pub fn workflow_status_name(status: WorkflowRunStatus) -> &'static str {
+    match status {
+        WorkflowRunStatus::Running => "running",
+        WorkflowRunStatus::Completed => "completed",
+        WorkflowRunStatus::CompletedWithFailures => "completed_with_failures",
+        WorkflowRunStatus::Failed => "failed",
+        WorkflowRunStatus::Cancelled => "cancelled",
+    }
+}
+
+pub fn print_workflow_summary(outcome: &WorkflowOutcome) {
+    println!(
+        "workflow {} {}",
+        outcome.wf_run_id,
+        workflow_status_name(outcome.status)
+    );
+    println!("{}", outcome.journal_path.display());
+    println!("{:<24} {:<10} runs output", "step", "status");
+    for (id, step) in &outcome.journal.steps {
+        let output = step
+            .output
+            .as_deref()
+            .or_else(|| {
+                step.outputs.as_ref().and_then(|outputs| {
+                    outputs
+                        .iter()
+                        .find(|output| output.ok)
+                        .and_then(|output| output.output.as_deref())
+                })
+            })
+            .map(Some)
+            .unwrap_or_else(|| step.error.as_deref());
+        println!(
+            "{:<24} {:<10} {:>4} {}",
+            id,
+            format!("{:?}", step.status).to_lowercase(),
+            step.run_ids.len(),
+            first_line(output)
+        );
+    }
+}
+
+pub fn print_workflow_list(rows: &[WorkflowJournalSummary]) {
+    println!(
+        "{:<36} {:<24} {:<24} {:<10} steps",
+        "id", "started_at", "name", "status"
+    );
+    for row in rows {
+        let counts = &row.steps;
+        println!(
+            "{:<36} {:<24} {:<24} {:<10} {}/{} ok, {} failed, {} skipped, {} cancelled",
+            row.id,
+            row.started_at.to_rfc3339(),
+            row.name,
+            workflow_status_name(row.status),
+            counts.success,
+            counts.pending
+                + counts.running
+                + counts.success
+                + counts.failed
+                + counts.skipped
+                + counts.cancelled,
+            counts.failed,
+            counts.skipped,
+            counts.cancelled
+        );
     }
 }
