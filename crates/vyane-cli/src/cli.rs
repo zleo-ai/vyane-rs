@@ -40,6 +40,8 @@ pub enum Command {
     Task(TaskCommand),
     /// Start the HTTP API server.
     Serve(ServeArgs),
+    /// Run the MCP server over stdio (for use as an MCP tool server).
+    Mcp,
     /// Internal: execute a detached run. Not for direct use.
     #[command(name = "__worker", hide = true)]
     Worker(WorkerArgs),

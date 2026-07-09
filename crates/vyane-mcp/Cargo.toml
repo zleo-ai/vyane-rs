@@ -1,0 +1,21 @@
+[package]
+name = "vyane-mcp"
+description = "MCP server exposing vyane dispatch/broadcast/history/sessions as tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vyane-core = { workspace = true }
+vyane-service = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }

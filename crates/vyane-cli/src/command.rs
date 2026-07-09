@@ -58,6 +58,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         },
         Command::Task(task) => run_task(task).await,
         Command::Serve(args) => run_serve(cli.config, args).await,
+        Command::Mcp => run_mcp(cli.config).await,
         Command::Worker(args) => run_worker(cli.config, args).await,
     }
 }
@@ -75,6 +76,15 @@ async fn run_serve(config_path: Option<PathBuf>, args: ServeArgs) -> Result<Exit
     let addr: SocketAddr = args.addr.parse().context("invalid --addr")?;
     eprintln!("vyane serve listening on {addr}");
     crate::api::run_server(service, addr).await?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Run the MCP server over stdio. The server speaks JSON-RPC on stdin/stdout,
+/// so any client output (status lines, errors) belongs on stderr to keep the
+/// transport stream clean.
+async fn run_mcp(config_path: Option<PathBuf>) -> Result<ExitCode> {
+    let service = VyaneService::load(config_path.as_deref())?;
+    vyane_mcp::run_stdio(service).await?;
     Ok(ExitCode::SUCCESS)
 }
 
