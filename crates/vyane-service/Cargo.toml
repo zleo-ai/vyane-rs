@@ -1,0 +1,27 @@
+[package]
+name = "vyane-service"
+description = "Shared service layer: config loading, selector resolution, and high-level dispatch/broadcast/query operations reused by the CLI, REST API, and MCP server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vyane-core = { workspace = true }
+vyane-config = { workspace = true }
+vyane-protocol = { workspace = true }
+vyane-harness = { workspace = true }
+vyane-kernel = { workspace = true }
+vyane-ledger = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+# `unsafe_code` stays denied — the service layer never touches raw process control.

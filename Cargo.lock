@@ -1916,6 +1916,7 @@ dependencies = [
  "vyane-kernel",
  "vyane-ledger",
  "vyane-protocol",
+ "vyane-service",
  "vyane-workflow",
  "wiremock",
 ]
@@ -2027,6 +2028,26 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "vyane-core",
+]
+
+[[package]]
+name = "vyane-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "vyane-config",
+ "vyane-core",
+ "vyane-harness",
+ "vyane-kernel",
+ "vyane-ledger",
+ "vyane-protocol",
 ]
 
 [[package]]
