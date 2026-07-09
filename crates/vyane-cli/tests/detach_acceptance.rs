@@ -86,8 +86,12 @@ fn ledger_records(data_dir: &Path) -> Vec<Value> {
         .collect()
 }
 
-/// Read `task status --json` for `id`, returning the parsed JSON.
-fn task_status_json(data_dir: &Path, id: &str) -> Value {
+/// Read `task status --json` for `id`, returning the parsed JSON. Returns
+/// `None` when the status file does not exist yet (the detached worker has not
+/// written its initial `status.json`). This is expected during the brief window
+/// between `--detach` returning and the worker process writing its status file;
+/// callers that poll should treat `None` as "not ready yet".
+fn task_status_json(data_dir: &Path, id: &str) -> Option<Value> {
     let out = vyane()
         .env("VYANE_DATA_DIR", data_dir)
         .args(["task", "status", id, "--json"])
@@ -95,22 +99,30 @@ fn task_status_json(data_dir: &Path, id: &str) -> Value {
         .get_output()
         .stdout
         .clone();
-    serde_json::from_slice(&out).expect("task status json")
+    if out.is_empty() {
+        return None;
+    }
+    serde_json::from_slice(&out).ok()
 }
 
 /// Poll `task status --json` until its `state` is terminal (not `running`) or
 /// `budget` elapses. Returns the final parsed status. Panics on timeout so a
-/// hung worker fails loudly rather than silently.
+/// hung worker fails loudly rather than silently. Handles the race where the
+/// status file does not exist yet by treating it as `running`.
 fn poll_until_terminal(data_dir: &Path, id: &str, budget: Duration) -> Value {
     let deadline = Instant::now() + budget;
+    let mut last_state = "(no status file yet)".to_string();
     loop {
-        let status = task_status_json(data_dir, id);
-        let state = status["state"].as_str().unwrap_or("");
-        if state != "running" {
-            return status;
+        if let Some(status) = task_status_json(data_dir, id) {
+            let state = status["state"].as_str().unwrap_or("").to_string();
+            if state != "running" {
+                return status;
+            }
+            last_state = state;
         }
+        // No status file yet or still running — wait and retry.
         if Instant::now() >= deadline {
-            panic!("run {id} did not finish within {budget:?}; last state = {state}");
+            panic!("run {id} did not finish within {budget:?}; last state = {last_state}");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -439,7 +451,8 @@ async fn cancel_finalizes_cancelled_and_kills_group() {
         v["state"] == "running" && v["pid"].as_i64().unwrap_or(0) > 0
     });
     assert!(running, "worker never reached running with a pid");
-    let running_status = task_status_json(data_dir.path(), &id);
+    let running_status =
+        task_status_json(data_dir.path(), &id).expect("status exists (already confirmed running)");
     let pid = running_status["pid"].as_i64().expect("pid") as i32;
     // The worker's own process group (setsid → pgid == worker pid). `task
     // cancel` group-signals THIS pgid; we assert the whole group is gone after.
@@ -456,7 +469,7 @@ async fn cancel_finalizes_cancelled_and_kills_group() {
         .stdout(predicate::str::contains("cancelled"));
 
     // status.json is cancelled.
-    let status = task_status_json(data_dir.path(), &id);
+    let status = task_status_json(data_dir.path(), &id).expect("status exists after cancel");
     assert_eq!(status["state"], "cancelled");
     let ledger_run_id = status["ledger_run_id"]
         .as_str()
