@@ -32,6 +32,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 use vyane_core::RunStatus;
 use vyane_service::{BroadcastParams, DispatchParams, HistoryFilter, VyaneService};
 
@@ -141,6 +142,7 @@ impl VyaneMcpServer {
     async fn vyane_dispatch(
         &self,
         Parameters(args): Parameters<DispatchArgs>,
+        cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let params = DispatchParams {
             task: args.task,
@@ -152,11 +154,7 @@ impl VyaneMcpServer {
             timeout_secs: args.timeout_secs,
             labels: Vec::new(),
         };
-        match self
-            .service
-            .dispatch(params, vyane_core::CancellationToken::new())
-            .await
-        {
+        match self.service.dispatch(params, cancel).await {
             Ok(outcome) => Ok(success_json(serde_json::json!({
                 "record": outcome.record,
                 "output": outcome.output,
@@ -174,6 +172,7 @@ impl VyaneMcpServer {
     async fn vyane_broadcast(
         &self,
         Parameters(args): Parameters<BroadcastArgs>,
+        cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let params = BroadcastParams {
             task: args.task,
@@ -184,11 +183,7 @@ impl VyaneMcpServer {
             timeout_secs: args.timeout_secs,
             labels: Vec::new(),
         };
-        match self
-            .service
-            .broadcast(params, vyane_core::CancellationToken::new())
-            .await
-        {
+        match self.service.broadcast(params, cancel).await {
             Ok(results) => {
                 let items: Vec<_> = results
                     .into_iter()
@@ -243,7 +238,7 @@ impl VyaneMcpServer {
 impl rmcp::ServerHandler for VyaneMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
+            protocol_version: ProtocolVersion::LATEST,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {
                 name: "vyane".into(),

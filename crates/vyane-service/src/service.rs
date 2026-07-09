@@ -147,6 +147,13 @@ impl VyaneService {
     /// Each comma-separated target is resolved into its own chain, then all
     /// chains are dispatched under the kernel's concurrency semaphore. Results
     /// are returned in input order, paired with their raw selector.
+    ///
+    /// A target that fails to **resolve** (unknown profile, missing provider)
+    /// becomes a per-target `Err` in the result vector — it does NOT abort the
+    /// whole broadcast. This matches the kernel's own partial-failure contract
+    /// for `Dispatcher::broadcast`: the good targets still run, the bad ones
+    /// surface their resolution error in their slot. Only a failure in task-spec
+    /// construction or target-list parsing (caller-fault input) aborts early.
     pub async fn broadcast(
         &self,
         params: BroadcastParams,
@@ -162,22 +169,61 @@ impl VyaneService {
             params.labels,
         )?;
 
-        let mut chains = Vec::with_capacity(targets.len());
+        // Resolve each target independently: a resolution failure on one
+        // target is a per-target error, not a broadcast-wide abort.
+        let mut chains: Vec<Option<Vec<BoundTarget>>> = Vec::with_capacity(targets.len());
+        let mut resolve_errors: Vec<Option<anyhow::Error>> = Vec::with_capacity(targets.len());
         for target in &targets {
-            chains.push(resolve_target_chain(&self.loaded, target)?);
+            match resolve_target_chain(&self.loaded, target) {
+                Ok(chain) => {
+                    chains.push(Some(chain));
+                    resolve_errors.push(None);
+                }
+                Err(e) => {
+                    chains.push(None);
+                    resolve_errors.push(Some(e));
+                }
+            }
         }
 
-        let results = self
-            .runtime
-            .dispatcher
-            .broadcast(&task, chains, cancel)
-            .await;
+        // Only dispatch the targets that resolved; pad the results to match the
+        // full target list so zip alignment is preserved.
+        let resolved_indices: Vec<usize> = chains
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| c.as_ref().map(|_| i))
+            .collect();
+        let resolved_chains: Vec<Vec<BoundTarget>> = chains.into_iter().flatten().collect();
 
-        Ok(targets
-            .into_iter()
-            .zip(results)
-            .map(|(selector, result)| (selector, result.map_err(anyhow::Error::from)))
-            .collect())
+        let dispatch_results = if resolved_chains.is_empty() {
+            Vec::new()
+        } else {
+            self.runtime
+                .dispatcher
+                .broadcast(&task, resolved_chains, cancel)
+                .await
+        };
+
+        // Reassemble: resolved targets get their dispatch result, unresolved
+        // targets get their resolution error — both in input order.
+        let mut merged = Vec::with_capacity(targets.len());
+        let mut dispatch_iter = dispatch_results.into_iter();
+        for (i, selector) in targets.into_iter().enumerate() {
+            if resolved_indices.contains(&i) {
+                let result = dispatch_iter
+                    .next()
+                    .map(|r| r.map_err(anyhow::Error::from))
+                    .unwrap_or_else(|| Err(anyhow::anyhow!("missing dispatch result")));
+                merged.push((selector, result));
+            } else {
+                let err = resolve_errors[i]
+                    .take()
+                    .unwrap_or_else(|| anyhow::anyhow!("resolution failed"));
+                merged.push((selector, Err(err)));
+            }
+        }
+
+        Ok(merged)
     }
 
     /// Query the run ledger (read-only).

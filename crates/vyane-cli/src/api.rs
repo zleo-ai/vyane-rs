@@ -21,7 +21,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{DefaultBodyLimit, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -84,6 +84,7 @@ pub struct BroadcastRequest {
 /// Query params for `GET /v1/runs`.
 #[derive(Debug, Default, Deserialize)]
 pub struct RunsQuery {
+    /// Max records to return. `None` defaults to 100. `0` is rejected as 400.
     #[serde(default)]
     pub limit: Option<usize>,
     /// `success` | `error` | `timeout` | `cancelled`.
@@ -92,6 +93,10 @@ pub struct RunsQuery {
     #[serde(default)]
     pub provider: Option<String>,
 }
+
+/// Default and max record limits for `GET /v1/runs`.
+const DEFAULT_RUN_LIMIT: usize = 100;
+const MAX_RUN_LIMIT: usize = 10_000;
 
 /// One row in a `{"items":[...]}` envelope. Mirrors the CLI's `BroadcastJson`
 /// shape so a broadcast result is identical over HTTP and `--json`.
@@ -144,6 +149,39 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    /// Classify a service error: config/resolution/label-parsing failures are
+    /// caller faults (400), everything else is a server fault (500).
+    ///
+    /// The error chain is logged server-side (stderr) for debugging; only a
+    /// generic message reaches the client to avoid leaking internal paths,
+    /// endpoint URLs, or secret-resolution details.
+    fn from_service_error(e: anyhow::Error) -> Self {
+        let msg = e.to_string();
+        let display = format!("{e:#}");
+        eprintln!("dispatch/broadcast error: {display}");
+        if is_caller_fault(&msg) {
+            Self::bad_request(msg)
+        } else {
+            Self::internal("internal error")
+        }
+    }
+}
+
+/// Heuristic: a resolution/config error message mentions profiles, providers,
+/// endpoints, labels, or "not found" — all caller-input problems. A genuine
+/// server fault (transport, auth upstream, spawn) does not.
+fn is_caller_fault(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("profile")
+        || lower.contains("provider")
+        || lower.contains("endpoint")
+        || lower.contains("label")
+        || lower.contains("not found")
+        || lower.contains("no such")
+        || lower.contains("missing")
+        || lower.contains("invalid")
+        || lower.contains("targets must")
 }
 
 impl IntoResponse for ApiError {
@@ -158,6 +196,10 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Maximum request body size (16 MiB). Large enough for substantial task/system
+/// prompts, small enough to prevent a single client from OOMing the process.
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Build the axum router for the v1 API. The service is held in shared state so
 /// config is loaded exactly once at startup.
 pub fn build_router(service: VyaneService) -> Router {
@@ -171,6 +213,7 @@ pub fn build_router(service: VyaneService) -> Router {
         .route("/v1/broadcast", post(broadcast))
         .route("/v1/runs", get(runs))
         .route("/v1/sessions", get(sessions))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -248,7 +291,7 @@ async fn dispatch(
         .service
         .dispatch(params, cancel)
         .await
-        .map_err(|e| ApiError::internal(format!("{e:#}")))?;
+        .map_err(ApiError::from_service_error)?;
     Ok(Json(outcome))
 }
 
@@ -271,11 +314,13 @@ async fn broadcast(
     };
 
     let cancel = CancellationToken::new();
-    let results = state
-        .service
-        .broadcast(params, cancel)
-        .await
-        .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+    let results = state.service.broadcast(params, cancel).await.map_err(|e| {
+        // Only caller-fault errors (bad targets list, bad labels, bad task
+        // spec) reach here — per-target resolution errors are already in
+        // the per-item results.
+        eprintln!("broadcast setup error: {e:#}");
+        ApiError::bad_request(e.to_string())
+    })?;
 
     let items = results
         .into_iter()
@@ -286,12 +331,17 @@ async fn broadcast(
                 output: outcome.output,
                 error: None,
             },
-            Err(e) => BroadcastItem {
-                target,
-                record: None,
-                output: None,
-                error: Some(format!("{e:#}")),
-            },
+            Err(e) => {
+                // Per-target error: log the full chain server-side, surface a
+                // concise message to the client.
+                eprintln!("broadcast target `{target}` error: {e:#}");
+                BroadcastItem {
+                    target,
+                    record: None,
+                    output: None,
+                    error: Some(e.to_string()),
+                }
+            }
         })
         .collect();
 
@@ -307,8 +357,23 @@ async fn runs(
         None => None,
     };
 
+    let limit = match query.limit {
+        Some(0) => {
+            return Err(ApiError::bad_request(
+                "limit must be greater than 0 (omit for default, or use a positive number)",
+            ));
+        }
+        Some(n) if n > MAX_RUN_LIMIT => {
+            return Err(ApiError::bad_request(format!(
+                "limit {n} exceeds maximum of {MAX_RUN_LIMIT}"
+            )));
+        }
+        Some(n) => Some(n),
+        None => Some(DEFAULT_RUN_LIMIT),
+    };
+
     let filter = HistoryFilter {
-        limit: query.limit,
+        limit,
         status,
         provider: query.provider,
     };
