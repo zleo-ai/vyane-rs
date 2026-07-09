@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -15,12 +16,12 @@ use vyane_core::{
     Usage, VyaneError,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
-use vyane_service::{resolve_target_chain, split_targets};
+use vyane_service::{VyaneService, resolve_target_chain, split_targets};
 use vyane_workflow::{StepEvent, TargetResolver, Workflow, WorkflowEngine, WorkflowError};
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{
-    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, TaskCancelArgs, TaskCommand,
+    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, ServeArgs, TaskCancelArgs, TaskCommand,
     TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCommand, WorkflowResumeArgs, WorkflowRunArgs,
 };
 use crate::factory::direct_http_client;
@@ -56,6 +57,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             WorkflowCommand::List(args) => list_workflows(args).await,
         },
         Command::Task(task) => run_task(task).await,
+        Command::Serve(args) => run_serve(cli.config, args).await,
         Command::Worker(args) => run_worker(cli.config, args).await,
     }
 }
@@ -66,6 +68,14 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
         TaskCommand::Status(args) => run_task_status(args).await,
         TaskCommand::Cancel(args) => run_task_cancel(args).await,
     }
+}
+
+async fn run_serve(config_path: Option<PathBuf>, args: ServeArgs) -> Result<ExitCode> {
+    let service = VyaneService::load(config_path.as_deref())?;
+    let addr: SocketAddr = args.addr.parse().context("invalid --addr")?;
+    eprintln!("vyane serve listening on {addr}");
+    crate::api::run_server(service, addr).await?;
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {

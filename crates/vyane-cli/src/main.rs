@@ -1,6 +1,7 @@
 //! The `vyane` binary: the assembler that wires config, protocol clients,
 //! harnesses, kernel orchestration and local persistence behind a CLI.
 
+mod api;
 mod app;
 mod cli;
 mod command;

@@ -42,6 +42,9 @@ async-trait = "0.1"
 
 # http
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
 
 # serialization & config
 serde = { version = "1", features = ["derive"] }

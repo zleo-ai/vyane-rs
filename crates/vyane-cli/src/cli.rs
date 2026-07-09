@@ -38,6 +38,8 @@ pub enum Command {
     /// Inspect and manage detached background runs.
     #[command(subcommand)]
     Task(TaskCommand),
+    /// Start the HTTP API server.
+    Serve(ServeArgs),
     /// Internal: execute a detached run. Not for direct use.
     #[command(name = "__worker", hide = true)]
     Worker(WorkerArgs),
@@ -92,6 +94,13 @@ pub struct TaskCancelArgs {
 pub struct WorkerArgs {
     /// The detached run id whose job spec to execute.
     pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Listen address.
+    #[arg(long, default_value = "127.0.0.1:9721")]
+    pub addr: String,
 }
 
 #[derive(Debug, Args)]
