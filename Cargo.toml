@@ -10,6 +10,8 @@ members = [
     "crates/vyane-ledger",
     "crates/vyane-router",
     "crates/vyane-workflow",
+    "crates/vyane-service",
+    "crates/vyane-mcp",
     "crates/vyane-cli",
 ]
 
@@ -31,6 +33,8 @@ vyane-kernel = { path = "crates/vyane-kernel" }
 vyane-ledger = { path = "crates/vyane-ledger" }
 vyane-router = { path = "crates/vyane-router" }
 vyane-workflow = { path = "crates/vyane-workflow" }
+vyane-service = { path = "crates/vyane-service" }
+vyane-mcp = { path = "crates/vyane-mcp" }
 
 # async runtime & io
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "io-util", "signal", "fs"] }
@@ -40,11 +44,18 @@ async-trait = "0.1"
 
 # http
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
 
 # serialization & config
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+
+# mcp server
+rmcp = { version = "0.5", features = ["server", "macros", "transport-io"] }
+schemars = "1"
 
 # errors
 thiserror = "2"

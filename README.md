@@ -54,45 +54,65 @@ model that wrote it.
 
 ## Status
 
-**v0.1 surface complete end-to-end. APIs are still unstable pre-release and
-will change without notice.** Every crate below is implemented and covered by
-tests; the CLI runs real dispatch/broadcast/failover today.
+**v0.1 + v0.2 surface complete end-to-end; v0.3 protocol front-ends (REST API +
+MCP) delivered. APIs are still unstable pre-release and will change without
+notice.** Every crate is implemented and covered by tests; the CLI runs real
+dispatch/broadcast/failover today.
 
 | capability | crate | state |
 |------------|-------|-------|
 | core type system (four-layer model, traits, errors, env policy) | `vyane-core` | [x] |
 | config & profiles | `vyane-config` | [x] |
-| OpenAI-Chat + Anthropic-Messages clients (Responses non-streaming) | `vyane-protocol` | [x] |
+| OpenAI-Chat + Responses + Anthropic-Messages clients | `vyane-protocol` | [x] |
 | Claude Code + Codex CLI harnesses | `vyane-harness` | [x] |
 | dispatch / broadcast / failover kernel | `vyane-kernel` | [x] |
 | JSONL ledger & sessions | `vyane-ledger` | [x] |
-| CLI (check / dispatch / broadcast / history / sessions) | `vyane-cli` | [x] |
-| workflow engine | — | [ ] (v0.2) |
-| daemon & async tasks | — | [ ] (v0.2) |
-| MCP server | — | [ ] (v0.3) |
+| declarative workflow engine (DAG + journal/resume) | `vyane-workflow` | [x] |
+| detached background runs (`--detach` + `task` commands) | `vyane-cli` | [x] |
+| CLI (check / dispatch / broadcast / history / sessions / workflow / task) | `vyane-cli` | [x] |
+| shared service layer | `vyane-service` | [x] |
+| **REST API** (`vyane serve` — dispatch/broadcast/runs/sessions/health) | `vyane-cli` + `axum` | [x] |
+| **MCP server** (`vyane mcp` — dispatch/broadcast/history/sessions tools) | `vyane-mcp` + `rmcp` | [x] |
+| pluggable routing | `vyane-router` | [ ] (v0.3, remaining) |
+
+### Protocol entry points
+
+Vyane supports three interchangeable front-ends, all sharing the same
+`vyane-service` layer so dispatch semantics are identical:
+
+| protocol | command | use case |
+|----------|---------|----------|
+| **CLI** | `vyane dispatch --target prod "task"` | interactive / scripted one-shot runs |
+| **REST API** | `vyane serve --addr 127.0.0.1:9721` | programmatic access from any HTTP client |
+| **MCP** | `vyane mcp` | let other agents (Claude, Codex, …) call vyane as a tool |
 
 ## Architecture
 
 ```
-                        caller (CLI / library)
-                                 │
-                                 ▼
-                          ┌─────────────┐
-                          │   kernel    │  resolve target chain,
-                          │  dispatch / │  attempt loop, failover,
-                          │  broadcast  │  assemble RunRecord
-                          └──────┬──────┘
-                    ┌────────────┴────────────┐
-                    ▼                         ▼
-          direct-http protocol         cli-wrap harnesses
-          clients (ChatClient)         (Harness, scrubbed env)
-          OpenAI Chat / Responses,     Claude Code, Codex CLI, …
-          Anthropic Messages                    │
-                    └────────────┬──────────────┘
-                                 ▼
-                     append-only JSONL ledger
-                      (digests, attempt trail)
-                        + session store
+       CLI              REST API           MCP
+   vyane dispatch     vyane serve       vyane mcp
+        │                  │                  │
+        └──────────┬───────┴──────────┬───────┘
+                   ▼                  ▼
+              vyane-service (shared facade)
+                   │
+                   ▼
+            ┌─────────────┐
+            │   kernel    │  resolve target chain,
+            │  dispatch / │  attempt loop, failover,
+            │  broadcast  │  assemble RunRecord
+            └──────┬──────┘
+      ┌────────────┴────────────┐
+      ▼                         ▼
+direct-http protocol         cli-wrap harnesses
+clients (ChatClient)         (Harness, scrubbed env)
+OpenAI Chat / Responses,     Claude Code, Codex CLI, …
+Anthropic Messages                    │
+      └────────────┬──────────────┘
+                   ▼
+       append-only JSONL ledger
+        (digests, attempt trail)
+          + session store
 ```
 
 The kernel depends only on the traits and types in `vyane-core`; the concrete

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use serde::Serialize;
 use vyane_core::{
     AdapterTransport, Attempt, AttemptOutcome, BoundTarget, CancellationToken, ChatMessage,
     ChatRequest, EnvPolicy, ErrorKind, HarnessJob, Ledger, Result, RunRecord, RunStatus,
@@ -54,7 +55,7 @@ pub struct Dispatcher {
 
 /// Result of a completed dispatch: the persisted run record plus successful
 /// answer text when the run produced one.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DispatchOutcome {
     pub record: RunRecord,
     pub output: Option<String>,

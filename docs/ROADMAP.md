@@ -35,6 +35,8 @@ traits, the wave-1 packages are largely parallel — assembly happens at M6.
 
 | milestone | scope |
 |-----------|-------|
-| **MCP server** | expose dispatch / broadcast / status as an MCP server so other agents can drive Vyane as a tool. |
+| ~~**MCP server**~~ | ✅ expose dispatch / broadcast / history / sessions as MCP tools (`vyane mcp`, rmcp SDK, stdio transport). |
+| ~~**REST API**~~ | ✅ HTTP JSON API (`vyane serve`, axum): `/v1/dispatch`, `/v1/broadcast`, `/v1/runs`, `/v1/sessions`, `/v1/health`. |
+| ~~**shared service layer**~~ | ✅ `vyane-service` crate: one `VyaneService` facade shared by CLI, REST, and MCP front-ends. |
 | **review pipeline** | a built-in multi-model review workflow (independent reviewers, cross-model comparison) on top of the workflow engine. |
 | **pluggable routing** | policy-driven target selection in `vyane-router` — cost- and capability-aware routing behind a swappable interface. |

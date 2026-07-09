@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -8,18 +9,19 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use futures::StreamExt;
-use vyane_config::{ConfigLayers, ResolvedConfig};
+use vyane_config::ResolvedConfig;
 use vyane_core::{
     AdapterTransport, Attempt, AttemptOutcome, BoundTarget, CancellationToken, ErrorKind, Harness,
     HarnessKind, ProviderId, RunQuery, RunRecord, RunStatus, SessionRef, StreamEvent, TaskSpec,
     Usage, VyaneError,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
+use vyane_service::{VyaneService, resolve_target_chain, split_targets};
 use vyane_workflow::{StepEvent, TargetResolver, Workflow, WorkflowEngine, WorkflowError};
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{
-    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, TaskCancelArgs, TaskCommand,
+    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, ServeArgs, TaskCancelArgs, TaskCommand,
     TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCommand, WorkflowResumeArgs, WorkflowRunArgs,
 };
 use crate::factory::direct_http_client;
@@ -55,6 +57,8 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             WorkflowCommand::List(args) => list_workflows(args).await,
         },
         Command::Task(task) => run_task(task).await,
+        Command::Serve(args) => run_serve(cli.config, args).await,
+        Command::Mcp => run_mcp(cli.config).await,
         Command::Worker(args) => run_worker(cli.config, args).await,
     }
 }
@@ -65,6 +69,23 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
         TaskCommand::Status(args) => run_task_status(args).await,
         TaskCommand::Cancel(args) => run_task_cancel(args).await,
     }
+}
+
+async fn run_serve(config_path: Option<PathBuf>, args: ServeArgs) -> Result<ExitCode> {
+    let service = VyaneService::load(config_path.as_deref())?;
+    let addr: SocketAddr = args.addr.parse().context("invalid --addr")?;
+    eprintln!("vyane serve listening on {addr}");
+    crate::api::run_server(service, addr).await?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Run the MCP server over stdio. The server speaks JSON-RPC on stdin/stdout,
+/// so any client output (status lines, errors) belongs on stderr to keep the
+/// transport stream clean.
+async fn run_mcp(config_path: Option<PathBuf>) -> Result<ExitCode> {
+    let service = VyaneService::load(config_path.as_deref())?;
+    vyane_mcp::run_stdio(service).await?;
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
@@ -609,7 +630,7 @@ fn print_stream_result(json: bool, record: &RunRecord, output: Option<&str>) -> 
 /// exited 2 before we get here); we re-serialize the raw selector string into
 /// the job so the worker re-resolves it identically.
 fn spawn_detached_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
-    let paths_root = StoragePaths::resolve()?;
+    let (_paths_root, tasks_dir) = crate::app::resolve_paths_with_tasks()?;
     let run_id = uuid::Uuid::now_v7().to_string();
     let job = JobSpec {
         run_id: run_id.clone(),
@@ -623,7 +644,7 @@ fn spawn_detached_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> 
         session: args.session,
         config: config_path,
     };
-    let paths = TaskPaths::new(&paths_root.tasks_dir, &run_id);
+    let paths = TaskPaths::new(&tasks_dir, &run_id);
     crate::task::spawn::spawn_detached(&paths, &job)?;
 
     if args.json {
@@ -662,8 +683,8 @@ fn spawn_detached_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> 
 ///    `status.json` (keyed by the worker's own run id, with the message), so a
 ///    reader always sees a definitive terminal state, not a stuck `running`.
 async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<ExitCode> {
-    let storage = StoragePaths::resolve()?;
-    let paths = TaskPaths::new(&storage.tasks_dir, &args.id);
+    let (_storage, tasks_dir) = crate::app::resolve_paths_with_tasks()?;
+    let paths = TaskPaths::new(&tasks_dir, &args.id);
 
     // Invariant (1): arm the cancellation handler BEFORE running any body that
     // could publish `running`. See the doc comment above.
@@ -767,8 +788,8 @@ async fn worker_body(
 }
 
 async fn run_task_list(args: TaskListArgs) -> Result<ExitCode> {
-    let storage = StoragePaths::resolve()?;
-    let rows = list_tasks(&storage.tasks_dir, &identity_probe);
+    let (_storage, tasks_dir) = crate::app::resolve_paths_with_tasks()?;
+    let rows = list_tasks(&tasks_dir, &identity_probe);
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -781,8 +802,8 @@ async fn run_task_list(args: TaskListArgs) -> Result<ExitCode> {
 }
 
 async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
-    let storage = StoragePaths::resolve()?;
-    let paths = TaskPaths::new(&storage.tasks_dir, &args.id);
+    let (_storage, tasks_dir) = crate::app::resolve_paths_with_tasks()?;
+    let paths = TaskPaths::new(&tasks_dir, &args.id);
 
     let status = match paths.read_status() {
         Ok(status) => status,
@@ -846,8 +867,8 @@ async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
 }
 
 async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
-    let storage = StoragePaths::resolve()?;
-    let paths = TaskPaths::new(&storage.tasks_dir, &args.id);
+    let (_storage, tasks_dir) = crate::app::resolve_paths_with_tasks()?;
+    let paths = TaskPaths::new(&tasks_dir, &args.id);
 
     let status = match paths.read_status() {
         Ok(status) => status,
@@ -1289,73 +1310,6 @@ fn task_base(
     task.timeout = timeout_secs.map(Duration::from_secs);
     task.labels = parse_labels(labels)?;
     Ok(task)
-}
-
-fn resolve_target_chain(loaded: &LoadedConfig, raw: &str) -> Result<Vec<BoundTarget>> {
-    if let Some((provider, model)) = parse_provider_model(raw) {
-        let root = provider_model_config(&loaded.config, provider, model)?;
-        return resolve_temp_profile(root, "__cli_target", loaded);
-    }
-    Ok(loaded
-        .config
-        .resolve_failover_with(raw, &|key| loaded.env_lookup(key))?)
-}
-
-fn provider_model_config(
-    config: &ResolvedConfig,
-    provider: &str,
-    model: &str,
-) -> Result<vyane_config::RawRoot> {
-    let provider_config = config.providers.get(provider)?;
-    let profile = vyane_config::ProfilePatch {
-        provider: Some(provider.to_string()),
-        protocol: Some(provider_config.protocol),
-        harness: Some("none".to_string()),
-        model: Some(vyane_core::ModelId::new(model)),
-        sandbox: None,
-        params: None,
-        failover: None,
-    };
-    let mut profiles = BTreeMap::new();
-    profiles.insert("__cli_target".to_string(), profile);
-    Ok(vyane_config::RawRoot {
-        providers: BTreeMap::new(),
-        profiles,
-    })
-}
-
-fn resolve_temp_profile(
-    root: vyane_config::RawRoot,
-    profile: &str,
-    loaded: &LoadedConfig,
-) -> Result<Vec<BoundTarget>> {
-    let mut layers = ConfigLayers {
-        providers: loaded.config.providers.clone(),
-        profiles: loaded.config.profiles.clone(),
-    };
-    layers.merge(&root)?;
-    let config: ResolvedConfig = layers.into();
-    Ok(vec![config.resolve_profile_with(profile, &|key| {
-        loaded.env_lookup(key)
-    })?])
-}
-
-fn parse_provider_model(raw: &str) -> Option<(&str, &str)> {
-    let (provider, model) = raw.split_once('/')?;
-    (!provider.is_empty() && !model.is_empty()).then_some((provider, model))
-}
-
-fn split_targets(raw: &str) -> Result<Vec<String>> {
-    let targets = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    if targets.is_empty() {
-        bail!("--targets must include at least one target");
-    }
-    Ok(targets)
 }
 
 fn parse_labels(raw: Vec<String>) -> Result<BTreeMap<String, String>> {
