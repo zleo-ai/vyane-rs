@@ -15,7 +15,7 @@ use vyane_core::{
     Usage, VyaneError,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
-use vyane_service::{resolve_target_chain, split_targets};
+use vyane_service::{VyaneService, resolve_target_chain, split_targets};
 use vyane_workflow::{StepEvent, TargetResolver, Workflow, WorkflowEngine, WorkflowError};
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
@@ -56,6 +56,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             WorkflowCommand::List(args) => list_workflows(args).await,
         },
         Command::Task(task) => run_task(task).await,
+        Command::Mcp => run_mcp(cli.config).await,
         Command::Worker(args) => run_worker(cli.config, args).await,
     }
 }
@@ -66,6 +67,15 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
         TaskCommand::Status(args) => run_task_status(args).await,
         TaskCommand::Cancel(args) => run_task_cancel(args).await,
     }
+}
+
+/// Run the MCP server over stdio. The server speaks JSON-RPC on stdin/stdout,
+/// so any client output (status lines, errors) belongs on stderr to keep the
+/// transport stream clean.
+async fn run_mcp(config_path: Option<PathBuf>) -> Result<ExitCode> {
+    let service = VyaneService::load(config_path.as_deref())?;
+    vyane_mcp::run_stdio(service).await?;
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
