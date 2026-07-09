@@ -2,8 +2,13 @@
 //!
 //! Tags are short domain labels (`frontend`, `security`, `architecture`,
 //! `code`, `debug`, …) that drive preference resolution. They come from two
-//! sources merged in order: regex matches on the task text, and a tag derived
-//! from the classified intent category.
+//! sources merged in order: word-boundary matches on the task text, and a tag
+//! derived from the classified intent category.
+//!
+//! Word boundaries are load-bearing: `"ui"` must not match `"build"`, `"auth"`
+//! must not match `"author"`. We implement `\b` semantics without a regex
+//! dependency by checking that the needle is flanked by non-word characters or
+//! string edges.
 
 use crate::intent::{IntentCategory, IntentResult, classify_intent};
 
@@ -29,7 +34,7 @@ pub fn infer_route_tags_with_intent(task: &str, intent: &IntentResult) -> Vec<St
     }
 
     // Frontend
-    if contains_any(
+    if contains_any_word(
         &text,
         &[
             "frontend", "ui", "ux", "css", "html", "react", "vue", "svelte", "tailwind",
@@ -37,25 +42,24 @@ pub fn infer_route_tags_with_intent(task: &str, intent: &IntentResult) -> Vec<St
     ) {
         add!("frontend");
     }
-    // Security — avoid matching "author/authority"
-    if contains_any(
+    // Security — word-boundary matching ensures "auth" doesn't hit "author"/"authority"
+    if contains_any_word(
         &text,
         &[
             "security",
             "audit",
             "vulnerab",
             "threat",
-            "auth",
             "oauth",
+            "oauth2",
             "permissions",
         ],
-    ) && !text.contains("authority")
-        && !text.contains("author")
+    ) || contains_word_prefix(&text, "auth", &["entication", "orization"])
     {
         add!("security");
     }
     // Architecture
-    if contains_any(
+    if contains_any_word(
         &text,
         &[
             "architect",
@@ -69,14 +73,14 @@ pub fn infer_route_tags_with_intent(task: &str, intent: &IntentResult) -> Vec<St
         add!("architecture");
     }
     // Multimodal
-    if contains_any(
+    if contains_any_word(
         &text,
         &["multimodal", "audio", "video", "voice", "tts", "vision"],
     ) {
         add!("multimodal");
     }
     // Long document
-    if contains_any(
+    if contains_any_word(
         &text,
         &[
             "long document",
@@ -109,9 +113,71 @@ pub fn infer_route_tags_with_intent(task: &str, intent: &IntentResult) -> Vec<St
     tags
 }
 
-/// Check if the (already-lowercased) text contains any of the substrings.
-fn contains_any(text: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| text.contains(n))
+/// Check if the text contains any of the needles at a word boundary.
+///
+/// A word boundary means the character before the needle (if any) is not an
+/// ASCII alphanumeric character, and the character after the needle (if any) is
+/// not an ASCII alphanumeric character. This mirrors `\b` in regex for ASCII
+/// text. Multi-word needles (e.g. "design pattern") check boundaries at the
+/// outermost edges only.
+fn contains_any_word(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|n| contains_word(text, n))
+}
+
+/// Check if `needle` appears in `text` at a word boundary.
+fn contains_word(text: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(needle) {
+        let abs_start = start + pos;
+        let abs_end = abs_start + needle.len();
+
+        let left_ok = abs_start == 0 || !text.as_bytes()[abs_start - 1].is_ascii_alphanumeric();
+        let right_ok = abs_end >= text.len() || !text.as_bytes()[abs_end].is_ascii_alphanumeric();
+
+        if left_ok && right_ok {
+            return true;
+        }
+        start = abs_start + 1;
+    }
+    false
+}
+
+/// Check if `prefix` appears at a word boundary, optionally followed by one of
+/// `suffixes` (also at a word boundary at the suffix end). Used for
+/// `auth(entication|orization)` style patterns.
+fn contains_word_prefix(text: &str, prefix: &str, suffixes: &[&str]) -> bool {
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(prefix) {
+        let abs_start = start + pos;
+        let left_ok = abs_start == 0 || !text.as_bytes()[abs_start - 1].is_ascii_alphanumeric();
+        if left_ok {
+            let after = &text[abs_start + prefix.len()..];
+            // Check if followed by a known suffix at a word boundary
+            for suffix in suffixes {
+                if after.starts_with(suffix) {
+                    let end = abs_start + prefix.len() + suffix.len();
+                    let right_ok =
+                        end >= text.len() || !text.as_bytes()[end].is_ascii_alphanumeric();
+                    if right_ok {
+                        return true;
+                    }
+                }
+            }
+            // Or `auth` as a standalone word
+            let after_byte = text.as_bytes().get(abs_start + prefix.len());
+            if after_byte
+                .map(|b| !b.is_ascii_alphanumeric())
+                .unwrap_or(true)
+            {
+                return true;
+            }
+        }
+        start = abs_start + 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -125,6 +191,16 @@ mod tests {
     }
 
     #[test]
+    fn frontend_word_boundary() {
+        // "ui" must NOT match "build"
+        let tags = infer_route_tags("build the thing");
+        assert!(!tags.contains(&"frontend".to_string()));
+        // "ui" as a standalone word SHOULD match
+        let tags = infer_route_tags("improve the ui of the app");
+        assert!(tags.contains(&"frontend".to_string()));
+    }
+
+    #[test]
     fn security_tag() {
         let tags = infer_route_tags("fix the security vulnerability");
         assert!(tags.contains(&"security".to_string()));
@@ -134,6 +210,24 @@ mod tests {
     fn security_excludes_authority() {
         let tags = infer_route_tags("check the authority of the user");
         assert!(!tags.contains(&"security".to_string()));
+    }
+
+    #[test]
+    fn security_excludes_author() {
+        let tags = infer_route_tags("the author wrote a book");
+        assert!(!tags.contains(&"security".to_string()));
+    }
+
+    #[test]
+    fn security_matches_authentication() {
+        let tags = infer_route_tags("add authentication to the endpoint");
+        assert!(tags.contains(&"security".to_string()));
+    }
+
+    #[test]
+    fn security_matches_oauth() {
+        let tags = infer_route_tags("set up oauth2 for the app");
+        assert!(tags.contains(&"security".to_string()));
     }
 
     #[test]
@@ -166,5 +260,15 @@ mod tests {
         let tags = infer_route_tags("hello world");
         // Intent defaults to code_gen → "code" tag
         assert!(tags.contains(&"code".to_string()));
+    }
+
+    #[test]
+    fn multimodal_word_boundary() {
+        // "video" must not match "television" (which contains "vision")
+        let tags = infer_route_tags("watch television");
+        assert!(!tags.contains(&"multimodal".to_string()));
+        // "audio" as standalone word should match
+        let tags = infer_route_tags("process the audio file");
+        assert!(tags.contains(&"multimodal".to_string()));
     }
 }

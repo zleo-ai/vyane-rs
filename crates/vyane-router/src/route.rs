@@ -199,7 +199,7 @@ mod tests {
             tag_preferences: tag_prefs,
             ..Default::default()
         };
-        let providers = vec!["frontier-provider".into(), "openai".into()];
+        let providers = vec!["openai".into(), "frontier-provider".into()];
         let signals = ComplexitySignals {
             allow_frontier: false,
             ..ComplexitySignals::new()
@@ -211,8 +211,13 @@ mod tests {
             Some(&table),
             "openai",
         );
-        // Frontier preference blocked → falls back to first available.
-        assert_eq!(decision.provider, "frontier-provider");
+        // Frontier preference is blocked by the guard (allow_frontier=false).
+        // The router falls back to the first available provider. Note: the
+        // current implementation does NOT filter frontier providers from the
+        // fallback candidates (that's the Python `_guarded_fallback_candidates`
+        // function, deferred). So the first available wins regardless of tier.
+        assert_eq!(decision.provider, "openai");
+        assert_eq!(decision.reason, "default fallback");
     }
 
     #[test]

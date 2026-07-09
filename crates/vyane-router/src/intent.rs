@@ -51,8 +51,11 @@ const SECONDARY_WEIGHT: f64 = 1.0;
 
 /// (primary_keywords, secondary_keywords) for each category.
 ///
-/// Mirrors the Python v5 keyword table exactly so tag inference and complexity
-/// scoring stay aligned across the two implementations.
+/// Adapted from the Python v5 keyword table (`_INTENT_KEYWORDS` in
+/// `routing.py`). The Rust version uses a simplified but representative set;
+/// it may diverge from the Python table on edge cases. Keyword matching uses
+/// substring containment (not word boundaries), matching the Python v4
+/// `keyword_scores` behavior.
 #[rustfmt::skip]
 const INTENT_KEYWORDS: &[(IntentCategory, &[&str], &[&str])] = &[
     (IntentCategory::CodeGen, &[
