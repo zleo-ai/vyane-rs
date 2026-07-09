@@ -37,6 +37,8 @@ pub enum Command {
     Workflow(WorkflowCommand),
     /// Run a built-in multi-model review pipeline (implement → review → synthesize).
     Review(ReviewArgs),
+    /// Show what the router would pick for a task (dry-run, no dispatch).
+    Route(RouteArgs),
     /// Inspect and manage detached background runs.
     #[command(subcommand)]
     Task(TaskCommand),
@@ -250,6 +252,37 @@ pub struct ReviewArgs {
     /// Per-attempt timeout in seconds.
     #[arg(long, value_name = "SECS")]
     pub timeout_secs: Option<u64>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for the `vyane route` dry-run command.
+#[derive(Debug, Args)]
+pub struct RouteArgs {
+    /// Task text to analyze.
+    pub task: String,
+    /// Override the routing stage (e.g. "plan", "review", "architecture").
+    #[arg(long, value_name = "STAGE")]
+    pub stage: Option<String>,
+    /// Override the tier directly: economy, mainline, or frontier.
+    #[arg(long, value_name = "TIER")]
+    pub tier: Option<String>,
+    /// Extra tags beyond what's inferred from the task text (comma-separated).
+    #[arg(long, value_name = "a,b,c")]
+    pub tags: Option<String>,
+    /// Restrict routing to these profile names only (comma-separated).
+    #[arg(long, value_name = "a,b,c")]
+    pub candidates: Option<String>,
+    /// Number of changed files (routing signal).
+    #[arg(long, value_name = "N")]
+    pub changed_files: Option<usize>,
+    /// Number of cross-file dependency edges (routing signal).
+    #[arg(long, value_name = "N")]
+    pub dependency_edges: Option<usize>,
+    /// Retry count — how many times this task has been retried (routing signal).
+    #[arg(long, value_name = "N")]
+    pub retry_count: Option<usize>,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,

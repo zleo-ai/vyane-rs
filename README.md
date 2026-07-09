@@ -73,7 +73,8 @@ dispatch/broadcast/failover today.
 | shared service layer | `vyane-service` | [x] |
 | **REST API** (`vyane serve` — dispatch/broadcast/runs/sessions/health) | `vyane-cli` + `axum` | [x] |
 | **MCP server** (`vyane mcp` — dispatch/broadcast/history/sessions tools) | `vyane-mcp` + `rmcp` | [x] |
-| pluggable routing | `vyane-router` | [ ] (v0.3, remaining) |
+| pluggable routing | `vyane-router` | [x] |
+| multi-model review pipeline | `vyane-cli` (review module) | [x] |
 
 ### Protocol entry points
 
@@ -85,6 +86,31 @@ Vyane supports three interchangeable front-ends, all sharing the same
 | **CLI** | `vyane dispatch --target prod "task"` | interactive / scripted one-shot runs |
 | **REST API** | `vyane serve --addr 127.0.0.1:9721` | programmatic access from any HTTP client |
 | **MCP** | `vyane mcp` | let other agents (Claude, Codex, …) call vyane as a tool |
+
+### Smart routing
+
+`vyane route "task text"` shows what the router would pick — without
+dispatching. The router scores task complexity from structural signals
+(changed files, dependency edges, retry count, prompt length, inferred
+tags) and maps to an economy / mainline / frontier tier, then resolves
+a preference based on profile `tier` and `tags` metadata:
+
+```
+vyane route "write an ADR for the system architecture" --changed-files 20
+vyane route "simple task" --tier frontier
+```
+
+### Review pipeline
+
+`vyane review` runs a three-step multi-model pipeline on the existing
+workflow engine: implement → fan-out review → synthesize:
+
+```
+vyane review 'implement a sorting function' \
+  --implementer sonnet \
+  --reviewers opus,gpt \
+  --synthesizer opus
+```
 
 ## Architecture
 

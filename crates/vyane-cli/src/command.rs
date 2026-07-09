@@ -21,9 +21,9 @@ use vyane_workflow::{StepEvent, TargetResolver, Workflow, WorkflowEngine, Workfl
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{
-    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, ReviewArgs, ServeArgs, TaskCancelArgs,
-    TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCommand, WorkflowResumeArgs,
-    WorkflowRunArgs,
+    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, ReviewArgs, RouteArgs, ServeArgs,
+    TaskCancelArgs, TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCommand,
+    WorkflowResumeArgs, WorkflowRunArgs,
 };
 use crate::factory::direct_http_client;
 use crate::output::{BroadcastJson, BroadcastRow, RunJson};
@@ -58,6 +58,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             WorkflowCommand::List(args) => list_workflows(args).await,
         },
         Command::Review(args) => run_review_command(cli.config, args).await,
+        Command::Route(args) => run_route_command(cli.config, args).await,
         Command::Task(task) => run_task(task).await,
         Command::Serve(args) => run_serve(cli.config, args).await,
         Command::Mcp => run_mcp(cli.config).await,
@@ -1316,6 +1317,73 @@ async fn run_review_command(config_path: Option<PathBuf>, args: ReviewArgs) -> R
     } else {
         ExitCode::from(1)
     })
+}
+
+async fn run_route_command(config_path: Option<PathBuf>, args: RouteArgs) -> Result<ExitCode> {
+    let loaded = match load_config(config_path.as_deref()) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("config error: {error:#}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+
+    let extra_tags = args
+        .tags
+        .as_deref()
+        .map(|t| {
+            t.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let candidate_profiles = args
+        .candidates
+        .as_deref()
+        .map(|c| {
+            c.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let route_params = vyane_service::RouteParams {
+        task: args.task,
+        stage: args.stage,
+        explicit_tier: args.tier,
+        extra_tags,
+        changed_files: args.changed_files,
+        dependency_edges: args.dependency_edges,
+        retry_count: args.retry_count,
+        candidate_profiles,
+    };
+
+    let result = match vyane_service::route_task(&loaded.config, route_params) {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            return Ok(ExitCode::from(1));
+        }
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&result.decision)?);
+    } else {
+        println!("profile:     {}", result.profile);
+        println!("provider:    {}", result.decision.provider);
+        println!("model:       {}", result.decision.model);
+        println!("tier:        {}", result.decision.tier.as_str());
+        println!("effort:      {}", result.decision.effort.as_str());
+        println!("score:       {:.3}", result.decision.complexity_score);
+        println!("tag:         {}", result.decision.tag);
+        println!("intent:      {}", result.decision.intent);
+        println!("reason:      {}", result.decision.reason);
+    }
+
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn list_workflows(args: crate::cli::WorkflowListArgs) -> Result<ExitCode> {
