@@ -2285,6 +2285,7 @@ dependencies = [
  "vyane-kernel",
  "vyane-ledger",
  "vyane-protocol",
+ "vyane-router",
 ]
 
 [[package]]

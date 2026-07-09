@@ -149,6 +149,14 @@ pub struct ProfilePatch {
     pub params: Option<GenParamsPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failover: Option<Vec<RawFailoverElement>>,
+    /// Routing tier: `"economy"`, `"mainline"`, or `"frontier"`. Used by
+    /// `vyane-router` to classify this profile when routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Routing tags for this profile (e.g. `["frontend", "code"]`). Used by
+    /// `vyane-router` for tag-based preference resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
 }
 
 impl ProfilePatch {
@@ -192,6 +200,12 @@ impl ProfilePatch {
         }
         if self.failover.is_some() {
             base.failover = self.failover.clone();
+        }
+        if self.tier.is_some() {
+            base.tier = self.tier.clone();
+        }
+        if self.tags.is_some() {
+            base.tags = self.tags.clone();
         }
     }
 }
