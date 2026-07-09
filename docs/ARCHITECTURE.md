@@ -69,10 +69,17 @@ record even by accident.
         │              │         │           │   (traits only)
         └──────┬───────┴─────────┴───────────┴────────┘
                ▼
-           vyane-cli   ──── (assembler: constructs concrete
-       (+ vyane-router)      clients/harnesses/ledger and injects
-                             them into the kernel via a factory)
+        vyane-service   ── (shared facade: config loading, selector
+                             resolution, dispatch/broadcast/history/sessions)
+          ▲           ▲
+          │           │
+   vyane-mcp     vyane-cli      (front-ends: MCP server, REST API,
+   (rmcp tools)  (+ axum API)    CLI — all consume vyane-service)
+                 (+ vyane-router)
 ```
+
+The load-bearing rule: **the kernel depends only on `vyane-core` traits.** It
+never names a concrete protocol client, harness, or ledger. Concrete types are
 
 The load-bearing rule: **the kernel depends only on `vyane-core` traits.** It
 never names a concrete protocol client, harness, or ledger. Concrete types are
@@ -98,7 +105,9 @@ Two consequences:
 | `vyane-kernel` | — (traits only) | dispatch / broadcast / failover state machine |
 | `vyane-ledger` | — | JSONL `Ledger`, filesystem `SessionStore`, cost table |
 | `vyane-router` | `vyane-core` | target selection / routing policy |
-| `vyane-cli` | all of the above | assembler + command-line entry point |
+| `vyane-service` | `vyane-kernel`, `vyane-config`, `vyane-ledger` | shared facade: config loading, selector resolution, `VyaneService::dispatch`/`broadcast`/`history`/`sessions` |
+| `vyane-mcp` | `vyane-service`, `rmcp` | MCP server: dispatch/broadcast/history/sessions as MCP tools over stdio |
+| `vyane-cli` | `vyane-service`, `vyane-mcp`, `axum` | front-end: CLI + REST API (`vyane serve`) + MCP launcher (`vyane mcp`) |
 
 ## Dispatch lifecycle
 
@@ -274,15 +283,21 @@ record also carries `owner`, `created_at` / `updated_at`, and a `run_count`.
 
 ## Non-goals for v0.1
 
-Explicitly out of scope for the first release, to keep the core honest:
+Explicitly out of scope for the current release, to keep the core honest:
 
-- **No daemon.** v0.1 is one-shot CLI + library only. (Long-running daemon and
-  an async task registry are v0.2.)
+- **No daemon.** Vyane runs as one-shot CLI, REST server (`vyane serve`), or
+  MCP stdio server (`vyane mcp`). There is no resident daemon process managing
+  a persistent task registry. (Detached background runs via `--detach` cover
+  the "fire and check later" use case without a daemon.)
 - **No learned routing.** Target selection is explicit configuration, not a
-  model that decides for you. (Pluggable routing is v0.3.)
-- **No gateway / proxy server.** Vyane spawns and calls; it does not sit in
-  front of your models as an HTTP gateway.
-- **No GUI.** CLI and library only.
+  model that decides for you. (Pluggable routing is the remaining v0.3 item.)
+- **No model proxy.** Vyane dispatches to providers and harnesses; the REST
+  API is a control surface for dispatch/broadcast/query, not a transparent
+  HTTP proxy in front of your model endpoints.
+- **No GUI.** CLI, REST API, and MCP only.
+- **No auth on the REST API.** `vyane serve` binds to `127.0.0.1` by default
+  and trusts the local caller. Public exposure requires a reverse proxy with
+  authentication in front.
 
 ## Roadmap
 
