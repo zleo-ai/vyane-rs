@@ -2265,7 +2265,6 @@ name = "vyane-router"
 version = "0.1.0"
 dependencies = [
  "serde",
- "vyane-core",
 ]
 
 [[package]]
