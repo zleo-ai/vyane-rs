@@ -35,11 +35,12 @@ pub const SIGKILL: i32 = 9;
 /// time refer to the same instant to within a small skew. `ps` reports elapsed
 /// time only to whole-second resolution, and there is a brief gap between the
 /// kernel starting the process and the worker taking the `Utc::now()` stamp, so
-/// a few seconds of slack is expected; ±10s is comfortably wider than that skew
-/// yet far tighter than any realistic pid-reuse interval (a reused pid would
-/// have a start time differing by minutes/hours, not seconds).
+/// a few seconds of slack is expected; ±30s is comfortably wider than CI runner
+/// scheduling jitter and process-start skew, yet far tighter than any realistic
+/// pid-reuse interval (a reused pid would have a start time differing by
+/// minutes/hours, not seconds).
 #[cfg(unix)]
-pub const IDENTITY_START_TOLERANCE_SECS: i64 = 10;
+pub const IDENTITY_START_TOLERANCE_SECS: i64 = 30;
 
 #[cfg(unix)]
 unsafe extern "C" {
