@@ -7,6 +7,7 @@ mod cli;
 mod command;
 mod factory;
 mod output;
+mod review;
 mod task;
 
 use std::process::ExitCode;

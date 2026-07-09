@@ -21,8 +21,9 @@ use vyane_workflow::{StepEvent, TargetResolver, Workflow, WorkflowEngine, Workfl
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{
-    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, ServeArgs, TaskCancelArgs, TaskCommand,
-    TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCommand, WorkflowResumeArgs, WorkflowRunArgs,
+    BroadcastArgs, Cli, Command, DispatchArgs, HistoryArgs, ReviewArgs, ServeArgs, TaskCancelArgs,
+    TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCommand, WorkflowResumeArgs,
+    WorkflowRunArgs,
 };
 use crate::factory::direct_http_client;
 use crate::output::{BroadcastJson, BroadcastRow, RunJson};
@@ -56,6 +57,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             WorkflowCommand::Resume(args) => resume_workflow(cli.config, args).await,
             WorkflowCommand::List(args) => list_workflows(args).await,
         },
+        Command::Review(args) => run_review_command(cli.config, args).await,
         Command::Task(task) => run_task(task).await,
         Command::Serve(args) => run_serve(cli.config, args).await,
         Command::Mcp => run_mcp(cli.config).await,
@@ -1248,6 +1250,63 @@ async fn resume_workflow(
         }
     };
     if args.json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        crate::output::print_workflow_summary(&outcome);
+    }
+    Ok(if outcome.status.is_success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+async fn run_review_command(config_path: Option<PathBuf>, args: ReviewArgs) -> Result<ExitCode> {
+    let reviewers = crate::review::ReviewArgs::parse_reviewers(&args.reviewers);
+    if reviewers.len() < 2 {
+        eprintln!("config error: --reviewers needs at least 2 targets for independent review");
+        return Ok(ExitCode::from(2));
+    }
+
+    let loaded = match load_config(config_path.as_deref()) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("config error: {error:#}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+
+    let paths = StoragePaths::resolve()?;
+    let runtime = Runtime::new(loaded.config.clone(), paths.clone())?;
+    let resolver = Arc::new(CliWorkflowResolver { loaded });
+    let json = args.json;
+
+    let review_args = crate::review::ReviewArgs {
+        task: args.task,
+        implementer: args.implementer,
+        reviewers,
+        synthesizer: args.synthesizer,
+        workdir: args.workdir,
+        timeout_secs: args.timeout_secs,
+    };
+
+    let outcome = match crate::review::run_review(
+        review_args,
+        Arc::new(runtime.dispatcher.clone()),
+        resolver,
+        paths.workflows_dir.clone(),
+        cancellation_token(),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            return Ok(ExitCode::from(1));
+        }
+    };
+
+    if json {
         println!("{}", serde_json::to_string_pretty(&outcome)?);
     } else {
         crate::output::print_workflow_summary(&outcome);

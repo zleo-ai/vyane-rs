@@ -35,6 +35,8 @@ pub enum Command {
     /// Run, resume, and list declarative workflows.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
+    /// Run a built-in multi-model review pipeline (implement → review → synthesize).
+    Review(ReviewArgs),
     /// Inspect and manage detached background runs.
     #[command(subcommand)]
     Task(TaskCommand),
@@ -223,6 +225,31 @@ pub struct WorkflowResumeArgs {
 
 #[derive(Debug, Args)]
 pub struct WorkflowListArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for the built-in review pipeline.
+#[derive(Debug, Args)]
+pub struct ReviewArgs {
+    /// Task / prompt text to implement and review.
+    pub task: String,
+    /// Target profile for the implementation step.
+    #[arg(long, value_name = "TARGET")]
+    pub implementer: String,
+    /// Comma-separated reviewer target profiles (e.g. "opus,gpt,sonnet").
+    #[arg(long, value_name = "a,b,c")]
+    pub reviewers: String,
+    /// Target profile for the synthesis step.
+    #[arg(long, value_name = "TARGET")]
+    pub synthesizer: String,
+    /// Working directory for harness runs.
+    #[arg(long, value_name = "PATH")]
+    pub workdir: Option<PathBuf>,
+    /// Per-attempt timeout in seconds.
+    #[arg(long, value_name = "SECS")]
+    pub timeout_secs: Option<u64>,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
