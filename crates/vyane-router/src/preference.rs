@@ -70,9 +70,12 @@ impl RoutePreferenceTable {
     }
 }
 
-/// Normalize a key for lookup: lowercase, collapse non-alphanumeric to hyphens,
-/// trim. Mirrors the Python `_normalize_route_key`.
-fn normalize_key(value: &str) -> String {
+/// Normalize a key for lookup and insertion: lowercase, collapse non-alphanumeric
+/// to hyphens, trim. Mirrors the Python `_normalize_route_key`.
+///
+/// Must be called on BOTH insertion (when building the table from config) and
+/// lookup (when resolving) so mixed-case tags like `"Front-End"` match.
+pub fn normalize_key(value: &str) -> String {
     value
         .trim()
         .to_ascii_lowercase()

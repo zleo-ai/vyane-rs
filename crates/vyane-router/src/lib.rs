@@ -27,7 +27,7 @@ mod tags;
 
 pub use decision::{RouteDecision, RouteEffort, RouteTier};
 pub use intent::{IntentCategory, IntentResult, classify_intent};
-pub use preference::{RoutePreferenceTable, RouteTargetPreference};
+pub use preference::{RoutePreferenceTable, RouteTargetPreference, normalize_key};
 pub use route::route_task;
 pub use score::{ComplexitySignals, complexity_score, effort_for_tier, tier_for_score};
 pub use tags::infer_route_tags;

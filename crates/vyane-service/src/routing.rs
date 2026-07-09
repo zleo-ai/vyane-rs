@@ -55,7 +55,7 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
     };
 
     // Collect candidate profiles and their metadata.
-    let candidates: Vec<(&String, &vyane_config::ProfilePatch)> =
+    let mut candidates: Vec<(&String, &vyane_config::ProfilePatch)> =
         if params.candidate_profiles.is_empty() {
             config.profiles.iter().collect()
         } else {
@@ -69,6 +69,17 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
     if candidates.is_empty() {
         anyhow::bail!("no candidate profiles available for routing");
     }
+
+    // Sort candidates by tier so the default fallback prefers cheaper profiles
+    // (economy < mainline < frontier). This avoids accidentally defaulting to
+    // a frontier model when a cheaper one is available — the old alphabetical
+    // order was purely a naming accident.
+    candidates.sort_by_key(|(_, patch)| match patch.tier.as_deref() {
+        Some("economy") => 0,
+        Some("mainline") => 1,
+        Some("frontier") => 2,
+        _ => 3,
+    });
 
     // Build the preference table from profile tier/tags.
     let mut tag_preferences: BTreeMap<String, RouteTargetPreference> = BTreeMap::new();
@@ -93,15 +104,20 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
             tier: patch.tier.clone().unwrap_or_default(),
         };
 
-        // Tag → this profile.
+        // Tag → this profile. Keys are normalized so mixed-case tags in config
+        // ("Front-End") match the normalized lookup in RoutePreferenceTable::resolve.
         if let Some(tags) = &patch.tags {
             for tag in tags {
-                tag_preferences.entry(tag.clone()).or_insert(pref.clone());
+                tag_preferences
+                    .entry(vyane_router::normalize_key(tag))
+                    .or_insert(pref.clone());
             }
         }
-        // Tier → this profile (first profile with that tier wins).
+        // Tier → this profile (lowercased to match RouteTier::as_str lookup).
         if let Some(tier) = &patch.tier {
-            tier_preferences.entry(tier.clone()).or_insert(pref.clone());
+            tier_preferences
+                .entry(tier.to_ascii_lowercase())
+                .or_insert(pref.clone());
         }
     }
 
@@ -171,7 +187,11 @@ pub fn route_params_from_labels(task: String, labels: &BTreeMap<String, String>)
         params.explicit_tier = Some(tier.clone());
     }
     if let Some(tags) = labels.get("tags") {
-        params.extra_tags = tags.split(',').map(|s| s.trim().to_string()).collect();
+        params.extra_tags = tags
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
     }
     params
 }
@@ -260,5 +280,20 @@ mod tests {
             ..Default::default()
         };
         assert!(route_task(&config, params).is_err());
+    }
+
+    #[test]
+    fn mixed_case_tag_matches() {
+        // Regression test for BLOCKER: tags must be normalized on insertion so
+        // mixed-case config values like "Architecture" still match.
+        let config = make_config();
+        let params = RouteParams {
+            task: "write an ADR".into(),
+            explicit_tier: Some("frontier".into()),
+            ..Default::default()
+        };
+        let result = route_task(&config, params).unwrap();
+        // frontier-model has tag "architecture" — should be selected.
+        assert_eq!(result.profile, "frontier-model");
     }
 }
