@@ -239,4 +239,152 @@ mod tests {
         assert_eq!(decision.effort, RouteEffort::High);
         assert!(decision.complexity_score >= 0.70);
     }
+
+    #[test]
+    fn frontier_guard_via_frontier_providers_list() {
+        // A preference whose provider is in frontier_providers should be
+        // blocked when allow_frontier=false — even without tier="frontier"
+        // on the preference itself.
+        let mut tag_prefs = BTreeMap::new();
+        tag_prefs.insert(
+            "code".into(),
+            RouteTargetPreference {
+                provider: "expensive-model".into(),
+                tier: String::new(), // no explicit tier on the pref
+                ..Default::default()
+            },
+        );
+        let table = RoutePreferenceTable {
+            tag_preferences: tag_prefs,
+            ..Default::default()
+        };
+        let signals = ComplexitySignals {
+            allow_frontier: false,
+            frontier_providers: vec!["expensive-model".into()],
+            ..ComplexitySignals::new()
+        };
+        let decision = route_task(
+            "implement the function",
+            &["openai".into(), "expensive-model".into()],
+            Some(&signals),
+            Some(&table),
+            "openai",
+        );
+        // Frontier provider blocked → falls back to first available.
+        assert_eq!(decision.provider, "openai");
+        assert_eq!(decision.reason, "default fallback");
+    }
+
+    #[test]
+    fn frontier_allowed_when_explicitly_enabled() {
+        let mut tag_prefs = BTreeMap::new();
+        tag_prefs.insert(
+            "architecture".into(),
+            RouteTargetPreference {
+                provider: "frontier-prov".into(),
+                tier: "frontier".into(),
+                ..Default::default()
+            },
+        );
+        let table = RoutePreferenceTable {
+            tag_preferences: tag_prefs,
+            ..Default::default()
+        };
+        let signals = ComplexitySignals {
+            allow_frontier: true,
+            ..ComplexitySignals::new()
+        };
+        let decision = route_task(
+            "write an ADR for system design",
+            &["openai".into(), "frontier-prov".into()],
+            Some(&signals),
+            Some(&table),
+            "openai",
+        );
+        // allow_frontier=true → preference is honored.
+        assert_eq!(decision.provider, "frontier-prov");
+        assert_ne!(decision.reason, "default fallback");
+    }
+
+    #[test]
+    fn preference_effort_override() {
+        let mut tier_prefs = BTreeMap::new();
+        tier_prefs.insert(
+            "mainline".into(),
+            RouteTargetPreference {
+                provider: "mainline-prov".into(),
+                effort: "xhigh".into(),
+                tier: "mainline".into(),
+                model: String::new(),
+            },
+        );
+        let table = RoutePreferenceTable {
+            tier_preferences: tier_prefs,
+            ..Default::default()
+        };
+        // Score must land in mainline range (0.16–0.69).
+        // changed_files=5 → +0.15, prompt ≥1200 → +0.10, total = 0.25 → mainline.
+        let signals = ComplexitySignals {
+            changed_files: 5,
+            ..ComplexitySignals::new()
+        };
+        let long_task = "x".repeat(1200);
+        let decision = route_task(
+            &long_task,
+            &["mainline-prov".into()],
+            Some(&signals),
+            Some(&table),
+            "mainline-prov",
+        );
+        // Score should be 0.10 (length) + 0.15 (5 files) = 0.25 → mainline.
+        assert_eq!(decision.tier, RouteTier::Mainline);
+        assert_eq!(decision.provider, "mainline-prov");
+        // The preference overrides effort to xhigh.
+        assert_eq!(decision.effort, RouteEffort::Xhigh);
+    }
+
+    #[test]
+    fn stage_preference_highest_precedence() {
+        let mut stage_prefs = BTreeMap::new();
+        stage_prefs.insert(
+            "review".into(),
+            RouteTargetPreference {
+                provider: "review-prov".into(),
+                ..Default::default()
+            },
+        );
+        let mut tag_prefs = BTreeMap::new();
+        tag_prefs.insert(
+            "code".into(),
+            RouteTargetPreference {
+                provider: "code-prov".into(),
+                ..Default::default()
+            },
+        );
+        let table = RoutePreferenceTable {
+            stage_preferences: stage_prefs,
+            tag_preferences: tag_prefs,
+            ..Default::default()
+        };
+        let signals = ComplexitySignals {
+            stage: "review".into(),
+            ..ComplexitySignals::new()
+        };
+        let decision = route_task(
+            "implement and review the code",
+            &["review-prov".into(), "code-prov".into()],
+            Some(&signals),
+            Some(&table),
+            "review-prov",
+        );
+        // Stage wins over tag.
+        assert_eq!(decision.provider, "review-prov");
+    }
+
+    #[test]
+    fn empty_available_providers_uses_default() {
+        let decision = route_task("hello", &[], None, None, "fallback");
+        assert_eq!(decision.provider, "fallback");
+        assert_eq!(decision.reason, "default fallback");
+    }
 }
