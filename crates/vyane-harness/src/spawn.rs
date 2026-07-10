@@ -24,7 +24,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -242,6 +242,152 @@ async fn wait_for_post_exit_drains(
 async fn captured_string(output: &SharedOutput) -> String {
     let bytes = output.lock().await.clone();
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Spawn `program` with `args` in its own process group and a scrubbed
+/// environment, reading stdout **line-by-line** and calling `on_line` for each
+/// line as it arrives — while still capturing the full stdout for post-run
+/// parsing.
+///
+/// This is the streaming counterpart to [`run_capture`]. The process-group,
+/// cancellation, timeout, and post-exit drain logic are identical. The only
+/// difference is that stdout is read line-by-line in a background task, and
+/// each line is passed to `on_line` before being appended to the capture
+/// buffer.
+///
+/// `on_line` receives each **complete line** (without the trailing newline).
+/// Partial lines (no newline before EOF) are also delivered. Lines are
+/// delivered in arrival order; the callback is called from a tokio task so it
+/// must be `Send + Sync`.
+#[allow(dead_code)] // used by ClaudeCode/CodexCli run_stream (WP-36 steps 3-4)
+pub(crate) async fn run_stream_capture(
+    program: &str,
+    args: &[String],
+    cwd: Option<&std::path::Path>,
+    env: &BTreeMap<String, String>,
+    cancel: &CancellationToken,
+    timeout: Option<Duration>,
+    on_line: Box<dyn FnMut(&str) + Send + Sync>,
+) -> Result<RunResult> {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    cmd.env_clear();
+    cmd.envs(env);
+
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+
+    install_process_group(&mut cmd);
+
+    let started = Instant::now();
+    let mut child = cmd.spawn().map_err(|e| {
+        VyaneError::with_source(
+            ErrorKind::SpawnFailed,
+            format!("failed to spawn `{program}`: {e}"),
+            e,
+        )
+    })?;
+
+    let pgid = child.id().map(|id| id as i32);
+
+    // stdout is read line-by-line with callback; stderr is captured normally.
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::new()));
+    let drain_out = spawn_line_drain(child.stdout.take(), Arc::clone(&stdout_buf), on_line);
+    let drain_err = spawn_drain(child.stderr.take(), Arc::clone(&stderr_buf));
+
+    // Same race: normal exit vs. cancellation vs. timeout.
+    let termination = {
+        let wait_child = child.wait();
+        tokio::pin!(wait_child);
+        let timeout_fut = async {
+            match timeout {
+                Some(d) => tokio::time::sleep(d).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(timeout_fut);
+
+        tokio::select! {
+            status = &mut wait_child => {
+                let code = status.map(exit_code_of).unwrap_or(-1);
+                Termination::Exited(code)
+            }
+            _ = cancel.cancelled() => {
+                kill_group(pgid).await;
+                let _ = (&mut wait_child).await;
+                Termination::Cancelled
+            }
+            _ = &mut timeout_fut => {
+                kill_group(pgid).await;
+                let _ = (&mut wait_child).await;
+                Termination::TimedOut
+            }
+        }
+    };
+
+    wait_for_post_exit_drains(drain_out, drain_err, pgid).await;
+    let stdout = captured_string(&stdout_buf).await;
+    let stderr = captured_string(&stderr_buf).await;
+
+    Ok(RunResult {
+        termination,
+        stdout,
+        stderr,
+        duration: started.elapsed(),
+    })
+}
+
+/// Line-by-line stdout reader: reads complete lines from the child's stdout
+/// pipe, calls `on_line` for each, and appends to the capture buffer.
+#[allow(dead_code)] // used by run_stream_capture → ClaudeCode/CodexCli (WP-36 steps 3-4)
+fn spawn_line_drain<R>(
+    reader: Option<R>,
+    output: SharedOutput,
+    mut on_line: Box<dyn FnMut(&str) + Send + Sync>,
+) -> JoinHandle<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let Some(reader) = reader else { return };
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut partial = String::new();
+        let mut buf = Vec::<u8>::new();
+
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    // Append to capture buffer.
+                    output.lock().await.extend_from_slice(&buf);
+
+                    // Convert to string (lossy for safety).
+                    let text = String::from_utf8_lossy(&buf);
+                    partial.push_str(&text);
+
+                    // Deliver complete lines (ending with \n).
+                    while let Some(pos) = partial.find('\n') {
+                        let line = partial[..pos].to_string();
+                        on_line(&line);
+                        partial = partial[pos + 1..].to_string();
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Deliver any remaining partial line (no trailing newline at EOF).
+        if !partial.is_empty() {
+            on_line(partial.trim_end_matches(['\r', '\n']));
+        }
+    })
 }
 
 /// Extract a faithful exit code from an `ExitStatus`. On Unix a process killed
