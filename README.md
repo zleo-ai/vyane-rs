@@ -2,7 +2,9 @@
 
 **A multi-model agent-orchestration kernel, in Rust.**
 
+[![CI](https://github.com/zleo-ai/vyane-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/zleo-ai/vyane-rs/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 &nbsp;·&nbsp; [简体中文](README.zh-CN.md)
 
 Vyane is one kernel — and one CLI over it — for dispatching, broadcasting and

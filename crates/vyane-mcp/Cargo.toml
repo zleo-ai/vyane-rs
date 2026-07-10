@@ -1,6 +1,8 @@
 [package]
 name = "vyane-mcp"
 description = "MCP server exposing vyane dispatch/broadcast/history/sessions as tools"
+keywords = ["ai", "llm", "orchestration", "mcp", "model-context-protocol"]
+categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true

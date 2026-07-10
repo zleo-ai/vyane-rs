@@ -1,6 +1,8 @@
 [package]
 name = "vyane-ledger"
 description = "Append-only JSONL run ledger, session store, cost estimation"
+keywords = ["ai", "llm", "orchestration", "ledger", "jsonl"]
+categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true

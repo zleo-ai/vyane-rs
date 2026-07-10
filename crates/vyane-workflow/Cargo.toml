@@ -1,6 +1,8 @@
 [package]
 name = "vyane-workflow"
 description = "Declarative multi-step workflow execution for Vyane"
+keywords = ["ai", "llm", "orchestration", "workflow", "pipeline"]
+categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true

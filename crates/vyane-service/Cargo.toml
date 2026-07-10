@@ -1,6 +1,8 @@
 [package]
 name = "vyane-service"
 description = "Shared service layer: config loading, selector resolution, and high-level dispatch/broadcast/query operations reused by the CLI, REST API, and MCP server"
+keywords = ["ai", "llm", "orchestration", "service", "api"]
+categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true

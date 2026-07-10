@@ -1,6 +1,8 @@
 [package]
 name = "vyane-core"
 description = "Core types and traits for the Vyane multi-model orchestration kernel"
+keywords = ["ai", "llm", "orchestration", "types", "traits"]
+categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
