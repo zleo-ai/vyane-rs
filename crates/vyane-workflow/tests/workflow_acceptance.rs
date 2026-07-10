@@ -746,3 +746,203 @@ async fn resume_skips_successes_reruns_failed_and_refuses_changed_hash() {
         .unwrap_err();
     assert!(err.to_string().contains("workflow file hash changed"));
 }
+
+/// Helper: a MockFactory that returns "OK" for any model.
+fn factory_ok() -> MockFactory {
+    MockFactory::new().on("ok", Behaviour::Succeed("OK".into()))
+}
+
+/// A single-step workflow runs to completion and records its output.
+#[tokio::test]
+async fn single_step_workflow_completes() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = TempDir::new().unwrap();
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "single"
+
+        [[step]]
+        id = "only"
+        target = "ok"
+        prompt = "just do it"
+        "#,
+    );
+    let (engine, _probe) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        journal_dir.path(),
+    );
+
+    let outcome = engine
+        .run(&wf, BTreeMap::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, WorkflowRunStatus::Completed);
+    assert!(outcome.journal.steps.contains_key("only"));
+    assert_eq!(outcome.journal.steps["only"].output.as_deref(), Some("OK"));
+}
+
+/// A linear two-step workflow passes output via template substitution.
+#[tokio::test]
+async fn linear_two_step_passes_output_via_template() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = TempDir::new().unwrap();
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "linear"
+
+        [[step]]
+        id = "first"
+        target = "ok"
+        prompt = "step one"
+
+        [[step]]
+        id = "second"
+        needs = ["first"]
+        target = "ok"
+        prompt = "got: {{steps.first.output}}"
+        "#,
+    );
+    let (engine, probe) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        journal_dir.path(),
+    );
+
+    let outcome = engine
+        .run(&wf, BTreeMap::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, WorkflowRunStatus::Completed);
+
+    let prompts = probe.prompts();
+    assert!(prompts.len() >= 2);
+    assert!(
+        prompts.iter().any(|p| p.contains("got: OK")),
+        "second step received first output"
+    );
+}
+
+/// With max_concurrency = 1, parallel-capable steps run strictly sequentially.
+#[tokio::test]
+async fn max_concurrency_1_runs_strictly_sequential() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = TempDir::new().unwrap();
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "serial"
+        max_concurrency = 1
+
+        [[step]]
+        id = "a"
+        target = "ok"
+        prompt = "a"
+
+        [[step]]
+        id = "b"
+        target = "ok"
+        prompt = "b"
+
+        [[step]]
+        id = "c"
+        target = "ok"
+        prompt = "c"
+        "#,
+    );
+    let (engine, probe) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        journal_dir.path(),
+    );
+
+    let outcome = engine
+        .run(&wf, BTreeMap::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, WorkflowRunStatus::Completed);
+    assert_eq!(probe.max_concurrent(), 1, "no two steps ran concurrently");
+}
+
+/// Workflow variables are substituted into prompts.
+#[tokio::test]
+async fn workflow_variables_substitute_in_prompts() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = TempDir::new().unwrap();
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "vars-test"
+
+        [[step]]
+        id = "step1"
+        target = "ok"
+        prompt = "do {{vars.action}} on {{vars.target}}"
+        "#,
+    );
+    let (engine, probe) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        journal_dir.path(),
+    );
+
+    let mut vars = BTreeMap::new();
+    vars.insert("action".into(), "deploy".into());
+    vars.insert("target".into(), "production".into());
+
+    engine
+        .run(&wf, vars, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let prompts = probe.prompts();
+    assert!(
+        prompts
+            .iter()
+            .any(|p| p.contains("deploy") && p.contains("production")),
+        "variables were substituted: {:?}",
+        prompts
+    );
+}
+
+/// `{{workflow.name}}` placeholder resolves to the workflow's name.
+#[tokio::test]
+async fn workflow_name_placeholder_resolves() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = TempDir::new().unwrap();
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "my-pipeline"
+
+        [[step]]
+        id = "s"
+        target = "ok"
+        prompt = "running {{workflow.name}}"
+        "#,
+    );
+    let (engine, probe) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        journal_dir.path(),
+    );
+
+    engine
+        .run(&wf, BTreeMap::new(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let prompts = probe.prompts();
+    assert!(
+        prompts.iter().any(|p| p.contains("running my-pipeline")),
+        "workflow name was substituted: {:?}",
+        prompts
+    );
+}
