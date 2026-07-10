@@ -556,3 +556,175 @@ async fn dispatch_stream_with_session_falls_back() {
     assert_eq!(records[0]["status"], "success");
     assert_eq!(records[0]["session_id"], "s1");
 }
+
+// ---------------------------------------------------------------------------
+// New command smoke tests (serve / mcp / review / route)
+// ---------------------------------------------------------------------------
+
+/// `vyane route` with no config profiles produces a clean error (exit 1),
+/// not a crash.
+#[tokio::test]
+async fn route_with_empty_config_errors_cleanly() {
+    let config_dir = TempDir::new().expect("config tempdir");
+    let config = config_dir.path().join("config.toml");
+    fs::write(&config, "# empty config\n").expect("write config");
+
+    vyane()
+        .arg("--config")
+        .arg(&config)
+        .args(["route", "hello world"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no candidate profiles"));
+}
+
+/// `vyane route` with tier-configured profiles routes a simple task to economy.
+#[tokio::test]
+async fn route_simple_task_to_economy() {
+    let config_dir = TempDir::new().expect("config tempdir");
+    let config = config_dir.path().join("config.toml");
+    fs::write(
+        &config,
+        r#"
+        [providers.test]
+        base_url = "http://localhost"
+        api_key_env = "KEY"
+        auth_style = "bearer"
+        protocol = "openai_chat"
+        default_model = "cheap"
+
+        [profiles.cheap]
+        provider = "test"
+        protocol = "openai_chat"
+        harness = "none"
+        model = "cheap"
+        tier = "economy"
+
+        [profiles.expensive]
+        provider = "test"
+        protocol = "openai_chat"
+        harness = "none"
+        model = "powerful"
+        tier = "frontier"
+        "#,
+    )
+    .expect("write config");
+
+    vyane()
+        .arg("--config")
+        .arg(&config)
+        .args(["route", "say hello", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("economy"));
+}
+
+/// `vyane route --tier frontier` overrides to the frontier profile.
+#[tokio::test]
+async fn route_explicit_tier_override() {
+    let config_dir = TempDir::new().expect("config tempdir");
+    let config = config_dir.path().join("config.toml");
+    fs::write(
+        &config,
+        r#"
+        [providers.test]
+        base_url = "http://localhost"
+        api_key_env = "KEY"
+        auth_style = "bearer"
+        protocol = "openai_chat"
+        default_model = "cheap"
+
+        [profiles.cheap]
+        provider = "test"
+        protocol = "openai_chat"
+        harness = "none"
+        model = "cheap"
+        tier = "economy"
+
+        [profiles.expensive]
+        provider = "test"
+        protocol = "openai_chat"
+        harness = "none"
+        model = "powerful"
+        tier = "frontier"
+        "#,
+    )
+    .expect("write config");
+
+    vyane()
+        .arg("--config")
+        .arg(&config)
+        .args(["route", "simple", "--tier", "frontier", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("frontier"));
+}
+
+/// `vyane review` with fewer than 2 reviewers exits with a config error.
+#[tokio::test]
+async fn review_with_one_reviewer_exits_two() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let config = config_dir.path().join("config.toml");
+    fs::write(&config, config_for(&server)).expect("write config");
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "review",
+            "do the thing",
+            "--implementer",
+            "review",
+            "--reviewers",
+            "review", // only 1 reviewer
+            "--synthesizer",
+            "review",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("at least 2"));
+}
+
+/// `vyane serve --help` exits successfully and shows the addr option.
+#[test]
+fn serve_help_shows_addr() {
+    vyane()
+        .args(["serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--addr"))
+        .stdout(predicate::str::contains("127.0.0.1:9721"));
+}
+
+/// `vyane mcp --help` exits successfully.
+#[test]
+fn mcp_help_works() {
+    vyane().args(["mcp", "--help"]).assert().success();
+}
+
+/// `vyane --help` lists all commands including review and route.
+#[test]
+fn help_lists_all_commands() {
+    let output = vyane()
+        .args(["--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).expect("utf8");
+    for cmd in &[
+        "dispatch",
+        "broadcast",
+        "workflow",
+        "review",
+        "route",
+        "serve",
+        "mcp",
+        "task",
+    ] {
+        assert!(help.contains(cmd), "help text must list command '{cmd}'");
+    }
+}
