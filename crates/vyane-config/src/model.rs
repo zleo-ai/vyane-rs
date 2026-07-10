@@ -157,6 +157,11 @@ pub struct ProfilePatch {
     /// `vyane-router` for tag-based preference resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// Routing stage for this profile (e.g. `"plan"`, `"review"`, `"architecture"`).
+    /// Used by `vyane-router` for stage-based preference resolution (highest
+    /// precedence after explicit tier override).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 
 impl ProfilePatch {
@@ -206,6 +211,9 @@ impl ProfilePatch {
         }
         if self.tags.is_some() {
             base.tags = self.tags.clone();
+        }
+        if self.stage.is_some() {
+            base.stage = self.stage.clone();
         }
     }
 }

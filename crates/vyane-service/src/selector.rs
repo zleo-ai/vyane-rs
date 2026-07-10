@@ -66,6 +66,7 @@ fn provider_model_config(config: &ResolvedConfig, provider: &str, model: &str) -
         failover: None,
         tier: None,
         tags: None,
+        stage: None,
     };
     let mut profiles = BTreeMap::new();
     profiles.insert("__cli_target".to_string(), profile);

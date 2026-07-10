@@ -42,18 +42,6 @@ pub struct RouteResult {
 /// Route a task using the configured profiles. Builds a preference table from
 /// profile tier/tags, calls the router, and maps the decision back to a profile.
 pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteResult> {
-    // Build signals from params.
-    let signals = ComplexitySignals {
-        explicit_tier: params.explicit_tier,
-        stage: params.stage.unwrap_or_default(),
-        task_tags: params.extra_tags,
-        changed_files: params.changed_files.unwrap_or(0),
-        dependency_edges: params.dependency_edges.unwrap_or(0),
-        retry_count: params.retry_count.unwrap_or(0),
-        allow_frontier: true,
-        ..Default::default()
-    };
-
     // Collect candidate profiles and their metadata.
     let mut candidates: Vec<(&String, &vyane_config::ProfilePatch)> =
         if params.candidate_profiles.is_empty() {
@@ -81,9 +69,12 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
         _ => 3,
     });
 
-    // Build the preference table from profile tier/tags.
+    // Build the preference table from profile tier/tags/stage.
     let mut tag_preferences: BTreeMap<String, RouteTargetPreference> = BTreeMap::new();
     let mut tier_preferences: BTreeMap<String, RouteTargetPreference> = BTreeMap::new();
+    let mut stage_preferences: BTreeMap<String, RouteTargetPreference> = BTreeMap::new();
+    let mut frontier_providers: Vec<String> = Vec::new();
+    let mut frontier_models: Vec<String> = Vec::new();
     // The router's `available_providers` and preference `provider` fields use
     // profile names (not underlying provider ids), so the decision maps directly
     // back to a profile the dispatch path can resolve.
@@ -118,11 +109,27 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
             tier_preferences
                 .entry(tier.to_ascii_lowercase())
                 .or_insert(pref.clone());
+            // Collect frontier providers/models for the frontier guard.
+            if tier.eq_ignore_ascii_case("frontier") {
+                if let Some(provider) = &patch.provider {
+                    frontier_providers.push(provider.clone());
+                }
+                if let Some(model) = &patch.model {
+                    frontier_models.push(model.as_str().to_string());
+                }
+            }
+        }
+        // Stage → this profile (normalized, highest precedence in resolution).
+        if let Some(stage) = &patch.stage {
+            stage_preferences
+                .entry(vyane_router::normalize_key(stage))
+                .or_insert(pref.clone());
         }
     }
 
     let table = RoutePreferenceTable {
         tag_preferences,
+        stage_preferences,
         tier_preferences,
         default: candidates
             .first()
@@ -135,7 +142,21 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
                     .unwrap_or_default(),
                 ..Default::default()
             }),
-        ..Default::default()
+    };
+
+    // Build signals from params, now including frontier providers/models
+    // collected from tier="frontier" profiles (so the frontier guard has
+    // real signal to act on, not empty lists).
+    let signals = ComplexitySignals {
+        explicit_tier: params.explicit_tier,
+        stage: params.stage.unwrap_or_default(),
+        task_tags: params.extra_tags,
+        changed_files: params.changed_files.unwrap_or(0),
+        dependency_edges: params.dependency_edges.unwrap_or(0),
+        retry_count: params.retry_count.unwrap_or(0),
+        allow_frontier: true,
+        frontier_providers,
+        frontier_models,
     };
 
     // Call the router.
@@ -295,5 +316,65 @@ mod tests {
         let result = route_task(&config, params).unwrap();
         // frontier-model has tag "architecture" — should be selected.
         assert_eq!(result.profile, "frontier-model");
+    }
+
+    #[test]
+    fn stage_routes_to_matching_profile() {
+        // A profile with stage="review" should be selected when the task's
+        // stage signal is "review", even if it's not the economy default.
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default-model".into(),
+            ProfilePatch {
+                provider: Some("openai".into()),
+                protocol: Some(vyane_core::Protocol::OpenaiChat),
+                harness: Some("none".into()),
+                model: Some(ModelId::new("gpt-4o-mini")),
+                tier: Some("economy".into()),
+                ..Default::default()
+            },
+        );
+        profiles.insert(
+            "review-model".into(),
+            ProfilePatch {
+                provider: Some("anthropic".into()),
+                protocol: Some(vyane_core::Protocol::AnthropicMessages),
+                harness: Some("none".into()),
+                model: Some(ModelId::new("claude-sonnet")),
+                tier: Some("mainline".into()),
+                stage: Some("review".into()),
+                ..Default::default()
+            },
+        );
+        let config = ResolvedConfig {
+            providers: Default::default(),
+            profiles,
+        };
+        let params = RouteParams {
+            task: "check the code".into(),
+            stage: Some("review".into()),
+            ..Default::default()
+        };
+        let result = route_task(&config, params).unwrap();
+        // Stage has highest precedence — review-model should win over default.
+        assert_eq!(result.profile, "review-model");
+    }
+
+    #[test]
+    fn frontier_guard_blocks_frontier_preference() {
+        // When allow_frontier=false, a frontier-tier preference should be blocked
+        // and fall back. This tests that frontier_providers/models are populated
+        // from tier="frontier" profiles (MINOR #7 fix).
+        let config = make_config();
+        let params = RouteParams {
+            task: "write an ADR for system architecture".into(),
+            explicit_tier: Some("frontier".into()),
+            ..Default::default()
+        };
+        let result = route_task(&config, params).unwrap();
+        // With allow_frontier=true (default), frontier-model should be selected.
+        assert_eq!(result.profile, "frontier-model");
+        // Verify the decision reached frontier tier.
+        assert_eq!(result.decision.tier, vyane_router::RouteTier::Frontier);
     }
 }
