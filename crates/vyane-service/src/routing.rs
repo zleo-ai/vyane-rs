@@ -377,4 +377,69 @@ mod tests {
         // Verify the decision reached frontier tier.
         assert_eq!(result.decision.tier, vyane_router::RouteTier::Frontier);
     }
+
+    #[test]
+    fn candidate_profiles_filters_to_subset() {
+        let config = make_config();
+        // Only allow the frontier-model — even a simple task should route there.
+        let params = RouteParams {
+            task: "hello world".into(),
+            candidate_profiles: vec!["frontier-model".into()],
+            ..Default::default()
+        };
+        let result = route_task(&config, params).unwrap();
+        assert_eq!(result.profile, "frontier-model");
+    }
+
+    #[test]
+    fn candidate_profiles_empty_includes_all() {
+        let config = make_config();
+        let params = RouteParams {
+            task: "hello world".into(),
+            candidate_profiles: vec![],
+            ..Default::default()
+        };
+        let result = route_task(&config, params).unwrap();
+        // With all candidates, economy-model wins for a zero-score task.
+        assert_eq!(result.profile, "economy-model");
+    }
+
+    #[test]
+    fn candidate_profiles_unknown_name_errors() {
+        let config = make_config();
+        let params = RouteParams {
+            task: "test".into(),
+            candidate_profiles: vec!["nonexistent".into()],
+            ..Default::default()
+        };
+        assert!(route_task(&config, params).is_err());
+    }
+
+    #[test]
+    fn route_decision_carries_complexity_score() {
+        let config = make_config();
+        let params = RouteParams {
+            task: "hello".into(),
+            ..Default::default()
+        };
+        let result = route_task(&config, params).unwrap();
+        // A trivial task should have a low complexity score.
+        assert!(
+            result.decision.complexity_score <= 0.15,
+            "trivial task score should be ≤ 0.15, got {}",
+            result.decision.complexity_score
+        );
+    }
+
+    #[test]
+    fn route_decision_carries_intent() {
+        let config = make_config();
+        let params = RouteParams {
+            task: "fix the crash bug".into(),
+            ..Default::default()
+        };
+        let result = route_task(&config, params).unwrap();
+        // "fix...crash...bug" should classify as debug intent.
+        assert!(!result.decision.intent.is_empty());
+    }
 }
