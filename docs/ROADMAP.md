@@ -39,4 +39,16 @@ traits, the wave-1 packages are largely parallel — assembly happens at M6.
 | ~~**REST API**~~ | ✅ HTTP JSON API (`vyane serve`, axum): `/v1/dispatch`, `/v1/broadcast`, `/v1/runs`, `/v1/sessions`, `/v1/health`. |
 | ~~**shared service layer**~~ | ✅ `vyane-service` crate: one `VyaneService` facade shared by CLI, REST, and MCP front-ends. |
 | ~~**review pipeline**~~ | ✅ built-in `vyane review` command: three-step workflow (implement → fan-out review → synthesize) on the existing engine. |
-| ~~**pluggable routing**~~ | ✅ `vyane-router` crate: deterministic complexity scoring, tag inference, tier mapping, preference resolution. Wired into `vyane-service` via `RoutePreferenceTable` built from profile `tier`/`tags` metadata. |
+| ~~**pluggable routing**~~ | ✅ `vyane-router` crate: deterministic complexity scoring, tag inference, tier mapping, preference resolution. Wired into `vyane-service` via `RoutePreferenceTable` built from profile `tier`/`tags`/`stage` metadata. |
+
+## v0.4 — streaming, daemon, and publish readiness
+
+| milestone | scope |
+|-----------|-------|
+| ~~**kernel streaming API**~~ | ✅ `Dispatcher::dispatch_stream` — callback-based streaming with kernel-owned record assembly, timeout/cancellation. Eliminates CLI streaming duplication (WP-18). |
+| ~~**SSE streaming endpoint**~~ | ✅ `POST /v1/dispatch/stream` — Server-Sent Events for real-time delta delivery over HTTP (WP-19). |
+| ~~**async task registry**~~ | ✅ `POST/GET /v1/tasks` + cancel — in-memory daemon-style task management: submit async, poll for result (WP-21). |
+| ~~**crates.io publish readiness**~~ | ✅ 12-crate metadata complete, publish workflow on tag, workspace path deps versioned (WP-20). |
+| **harness streaming** | Extend `dispatch_stream` to harness targets (Claude Code / Codex CLI stdout streaming). Requires `Harness` trait evolution. |
+| **crates.io publish** | Set `CARGO_REGISTRY_TOKEN` secret + tag `v0.1.0` to trigger the publish workflow. |
+| **daemon (resident process)** | A persistent `vyane daemon` that survives client disconnects, with durable task state. The async task registry is the in-process precursor. |

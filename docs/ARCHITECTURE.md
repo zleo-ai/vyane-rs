@@ -234,6 +234,38 @@ fully-resolved targets. Each element carries its own provider *and* its own
 model id together, so moving to the next target never carries a model id across
 a provider boundary.
 
+## Streaming dispatch
+
+`Dispatcher::dispatch_stream` is the streaming counterpart to
+`Dispatcher::dispatch`. It is scoped to a single direct-HTTP target (no
+failover, no session) — the same constraint the CLI's `--stream` flag uses. The
+method takes a callback for delta events and returns the assembled,
+ledger-appended `DispatchOutcome` when the stream completes:
+
+```rust
+pub async fn dispatch_stream<F>(
+    &self,
+    task: &TaskSpec,
+    bound: &BoundTarget,
+    cancel: CancellationToken,
+    on_event: F,
+) -> Result<Option<DispatchOutcome>>
+where F: FnMut(StreamDispatchEvent) + Send;
+```
+
+- Returns `Ok(None)` when the client itself declines streaming
+  (`ErrorKind::Unsupported`) — the caller should fall back to `dispatch`.
+- Returns `Ok(Some(outcome))` with the ledger-appended `RunRecord`.
+- Timeout and cancellation are handled by the same biased `select!` pattern as
+  `drive` — cancel wins ties.
+- Record assembly (digest, attempt shape, status mapping, best-effort ledger
+  append) is kernel-owned. Front-ends (CLI `--stream`, REST `/v1/dispatch/stream`
+  SSE) call this method and must not duplicate the logic.
+
+The REST API's `POST /v1/dispatch/stream` bridges the callback to SSE via a
+`tokio::sync::mpsc` channel, yielding `delta` / `reasoning_delta` / `finished` /
+`unsupported` events.
+
 ## Ledger record schema
 
 Every dispatch appends exactly one `RunRecord`. Fields mirror
@@ -281,20 +313,26 @@ A single `SessionRecord` can carry both, so one logical session id can hop
 between a harness target and a direct-chat target while staying coherent. Each
 record also carries `owner`, `created_at` / `updated_at`, and a `run_count`.
 
-## Non-goals for v0.1
+## Non-goals
 
 Explicitly out of scope for the current release, to keep the core honest:
 
-- **No daemon.** Vyane runs as one-shot CLI, REST server (`vyane serve`), or
-  MCP stdio server (`vyane mcp`). There is no resident daemon process managing
-  a persistent task registry. (Detached background runs via `--detach` cover
-  the "fire and check later" use case without a daemon.)
-- **No learned routing.** Target selection is explicit configuration, not a
-  model that decides for you. (Pluggable routing is the remaining v0.3 item.)
+- **No resident daemon.** `vyane serve` runs a long-lived HTTP server with an
+  in-memory async task registry, but there is no persistent daemon process
+  with durable task state across restarts. Detached background runs (`--detach`)
+  and the REST task registry (`/v1/tasks`) cover most "fire and check later"
+  use cases.
+- **No learned routing.** Target selection is deterministic (complexity
+  scoring + tag/tier/stage preferences), not adaptive. History-based or
+  feedback-driven routing is a future direction.
 - **No model proxy.** Vyane dispatches to providers and harnesses; the REST
   API is a control surface for dispatch/broadcast/query, not a transparent
   HTTP proxy in front of your model endpoints.
 - **No GUI.** CLI, REST API, and MCP only.
+- **No harness streaming.** `dispatch_stream` supports direct-HTTP targets
+  only. Harness targets (Claude Code, Codex CLI) fall back to non-streaming
+  `dispatch`. Extending streaming to harnesses requires `Harness` trait
+  evolution.
 - **No auth on the REST API.** `vyane serve` binds to `127.0.0.1` by default
   and trusts the local caller. Public exposure requires a reverse proxy with
   authentication in front.
