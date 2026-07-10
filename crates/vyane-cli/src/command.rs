@@ -4,16 +4,13 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::Utc;
-use futures::StreamExt;
 use vyane_config::ResolvedConfig;
 use vyane_core::{
-    AdapterTransport, Attempt, AttemptOutcome, BoundTarget, CancellationToken, ErrorKind, Harness,
-    HarnessKind, ProviderId, RunQuery, RunRecord, RunStatus, SessionRef, StreamEvent, TaskSpec,
-    Usage, VyaneError,
+    AdapterTransport, BoundTarget, CancellationToken, Harness, HarnessKind, ProviderId, RunQuery,
+    RunStatus, SessionRef, TaskSpec,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 use vyane_service::{VyaneService, resolve_target_chain, split_targets};
@@ -25,7 +22,6 @@ use crate::cli::{
     TaskCancelArgs, TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCommand,
     WorkflowResumeArgs, WorkflowRunArgs,
 };
-use crate::factory::direct_http_client;
 use crate::output::{BroadcastJson, BroadcastRow, RunJson};
 use crate::task::proc::{
     IdentityCheck, SIGKILL, SIGTERM, pgid_of, pid_alive, signal_group, verify_identity,
@@ -38,12 +34,6 @@ use crate::task::store::{JobSpec, StatusFile, TaskPaths, TaskState, interpret_st
 fn identity_probe(pid: i32, pgid: i32, started_at: chrono::DateTime<chrono::Utc>) -> IdentityCheck {
     verify_identity(pid, pgid, started_at)
 }
-
-/// First [`TASK_PREVIEW_CHARS`] characters of the prompt kept as a
-/// human-scannable preview on the hand-built streaming `RunRecord`. Mirrors
-/// `vyane-kernel::dispatch`'s own constant so a streaming and non-streaming
-/// run of the same prompt preview identically in `vyane history`.
-const TASK_PREVIEW_CHARS: usize = 120;
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
@@ -275,31 +265,14 @@ fn streamable_target<'a>(chain: &'a [BoundTarget], task: &TaskSpec) -> Option<&'
     }
 }
 
-/// Drive the single-target streaming path: build the protocol client via the
-/// same mapping `AssemblerFactory` uses, stream deltas to stdout (flushed per
-/// delta), then append one `RunRecord` through the same `Ledger` the
-/// non-streaming path uses.
+/// Drive the single-target streaming path via the kernel's `dispatch_stream`
+/// method. Deltas are printed to stdout as they arrive; the assembled
+/// `RunRecord` is ledger-appended by the kernel (no CLI-side duplication).
 ///
-/// Returns `Ok(Some(exit_code))` when the run was handled here (streamed
-/// successfully, or failed after already starting to stream — either way a
-/// `RunRecord` was recorded and the caller returns immediately). Returns
-/// `Ok(None)` only when the client itself declined streaming
-/// (`ErrorKind::Unsupported`, no HTTP call attempted yet) so the caller can
-/// fall back to `Dispatcher::dispatch` on the untouched chain.
-///
-/// `task.timeout` and `cancel` are honored exactly the way
-/// `vyane_kernel::dispatch`'s `drive` helper honors them for a non-streaming
-/// attempt: cancellation is checked up front (a pre-cancelled token never
-/// calls the client), and the client-construction-through-event-loop future is
-/// raced against the caller-specified timeout and the cancellation token via a
-/// biased `tokio::select!` (cancel wins ties). Either outcome still produces
-/// exactly one recorded `RunRecord` — the invariant this whole function
-/// exists to uphold.
-///
-/// This duplicates a slice of `vyane-kernel::dispatch`'s record-assembly
-/// logic (digest, attempt shape, status mapping) because the kernel has no
-/// streaming entry point and is frozen for this work package — see
-/// `docs/plan/WP-09.md`'s "known seam" section and `docs/plan/feedback-wp09.md`.
+/// Returns `Ok(Some(exit_code))` when the run was handled (success or failure,
+/// a `RunRecord` was recorded). Returns `Ok(None)` when the client itself
+/// declined streaming (`ErrorKind::Unsupported`) so the caller can fall back
+/// to non-streaming `Dispatcher::dispatch`.
 async fn run_dispatch_streaming(
     runtime: &Runtime,
     task: &TaskSpec,
@@ -307,323 +280,53 @@ async fn run_dispatch_streaming(
     json: bool,
     cancel: CancellationToken,
 ) -> Result<Option<ExitCode>> {
-    let started_at = Utc::now();
-    let attempt_start = Instant::now();
-
-    // Mirrors `vyane_kernel::dispatch::drive`'s "check before doing anything"
-    // rule: an already-cancelled token never builds the client or calls the
-    // network, and yields a deterministic `Cancelled` record.
-    if cancel.is_cancelled() {
-        let record = build_stream_record(
-            task,
-            bound,
-            started_at,
-            attempt_start,
-            Err(&VyaneError::cancelled()),
-        );
-        append_ledger(runtime, &record).await;
-        print_stream_result(json, &record, None)?;
-        return Ok(Some(exit_code_for(record.status)));
-    }
-
-    let attempt = stream_attempt(runtime, task, bound, json, started_at, attempt_start);
-    tokio::pin!(attempt);
-
-    let outcome = match task.timeout {
-        Some(duration) => {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => StreamAttemptOutcome::Cancelled,
-                _ = tokio::time::sleep(duration) => StreamAttemptOutcome::TimedOut,
-                result = &mut attempt => result,
-            }
-        }
-        None => {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => StreamAttemptOutcome::Cancelled,
-                result = &mut attempt => result,
-            }
-        }
-    };
-
-    match outcome {
-        StreamAttemptOutcome::Unsupported => Ok(None),
-        StreamAttemptOutcome::Recorded(code) => Ok(Some(code)),
-        StreamAttemptOutcome::TimedOut | StreamAttemptOutcome::Cancelled => {
-            let error = match outcome {
-                StreamAttemptOutcome::TimedOut => VyaneError::new(
-                    ErrorKind::Timeout,
-                    format!(
-                        "attempt exceeded timeout of {}ms",
-                        task.timeout.unwrap_or_default().as_millis()
-                    ),
-                ),
-                _ => VyaneError::cancelled(),
-            };
-            let record = build_stream_record(task, bound, started_at, attempt_start, Err(&error));
-            append_ledger(runtime, &record).await;
-            print_stream_result(json, &record, None)?;
-            Ok(Some(exit_code_for(record.status)))
-        }
-    }
-}
-
-/// Outcome of racing [`stream_attempt`] against timeout/cancellation in
-/// [`run_dispatch_streaming`]. `TimedOut`/`Cancelled` are produced by the
-/// *other* arms of the `select!`, never by `stream_attempt` itself — it has no
-/// way to observe either condition mid-flight, which is exactly why the
-/// `select!` exists one level up.
-enum StreamAttemptOutcome {
-    /// The client declined streaming outright (`ErrorKind::Unsupported`, no
-    /// HTTP call attempted) — caller falls back to non-streaming dispatch.
-    Unsupported,
-    /// A `RunRecord` was already built, ledger-appended, and printed; carries
-    /// the exit code to return.
-    Recorded(ExitCode),
-    TimedOut,
-    Cancelled,
-}
-
-/// Build the client, run the request, and consume the event stream to
-/// completion — the part of the streaming attempt that the outer
-/// `tokio::select!` can preempt for timeout/cancellation. Every path that
-/// reaches a terminal state *other than* `Unsupported` here already appends
-/// the `RunRecord` and prints the result before returning, including a
-/// failure to construct the client itself.
-async fn stream_attempt(
-    runtime: &Runtime,
-    task: &TaskSpec,
-    bound: &BoundTarget,
-    json: bool,
-    started_at: chrono::DateTime<Utc>,
-    attempt_start: Instant,
-) -> StreamAttemptOutcome {
-    let client = match direct_http_client(bound) {
-        Ok(client) => client,
-        Err(error) if error.kind == ErrorKind::Unsupported => {
-            return StreamAttemptOutcome::Unsupported;
-        }
-        Err(error) => {
-            // Constructing the client failed for a reason other than
-            // "unsupported" (e.g. a malformed endpoint) — this is a real
-            // attempt failure, not a signal to fall back silently, so it gets
-            // the same recorded-attempt treatment as a failed HTTP call.
-            let record = build_stream_record(task, bound, started_at, attempt_start, Err(&error));
-            append_ledger(runtime, &record).await;
-            let _ = print_stream_result(json, &record, None);
-            return StreamAttemptOutcome::Recorded(exit_code_for(record.status));
-        }
-    };
-
-    // Direct-chat message shape: system (if any) then the current user
-    // message — same assembly `vyane_kernel::dispatch` uses for a fresh
-    // (non-session) direct-chat attempt. The streaming CLI path carries no
-    // `--session` continuity (see WP-09.md's non-goals), so there is no prior
-    // transcript to replay here.
-    let mut messages = Vec::new();
-    if let Some(system) = task.system.as_ref() {
-        messages.push(vyane_core::ChatMessage::system(system.clone()));
-    }
-    messages.push(vyane_core::ChatMessage::user(task.prompt.clone()));
-    let req = vyane_core::ChatRequest {
-        model: bound.target.model.clone(),
-        messages,
-        params: bound.params.clone(),
-    };
-
-    let mut stream = match client.stream(req).await {
-        Ok(stream) => stream,
-        Err(error) if error.kind == ErrorKind::Unsupported => {
-            return StreamAttemptOutcome::Unsupported;
-        }
-        Err(error) => {
-            let record = build_stream_record(task, bound, started_at, attempt_start, Err(&error));
-            append_ledger(runtime, &record).await;
-            let _ = print_stream_result(json, &record, None);
-            return StreamAttemptOutcome::Recorded(exit_code_for(record.status));
-        }
-    };
-
-    let mut text = String::new();
-    let mut usage: Option<Usage> = None;
-    let stdout_is_human = !json;
-    let mut stream_error = None;
-
-    loop {
-        match stream.next().await {
-            Some(Ok(StreamEvent::Delta(delta))) => {
-                text.push_str(&delta);
-                if stdout_is_human {
+    let outcome = runtime
+        .dispatcher
+        .dispatch_stream(task, bound, cancel, |event| match event {
+            vyane_kernel::StreamDispatchEvent::Delta(delta) => {
+                if !json {
                     print!("{delta}");
-                    // Flush per delta so a human watching the terminal sees
-                    // text arrive live rather than buffered in bursts.
                     let _ = std::io::stdout().flush();
                 }
             }
-            Some(Ok(StreamEvent::ReasoningDelta(_))) => {
-                // Reasoning deltas are not part of the recorded answer text
-                // and may be entirely absent — never required for liveness.
+            vyane_kernel::StreamDispatchEvent::ReasoningDelta(_) => {
+                // Reasoning deltas are not printed to stdout.
             }
-            Some(Ok(StreamEvent::Usage(u))) => {
-                usage.get_or_insert_with(Usage::default).add(&u);
+        })
+        .await?;
+
+    match outcome {
+        None => {
+            // Client declined streaming — caller falls back to non-streaming.
+            Ok(None)
+        }
+        Some(outcome) => {
+            if !json {
+                // Trailing newline if any deltas were printed (i.e. the run
+                // produced output text).
+                if outcome.output.is_some() {
+                    println!();
+                }
             }
-            Some(Ok(StreamEvent::Done { .. })) => break,
-            Some(Err(error)) => {
-                stream_error = Some(error);
-                break;
+            let record = outcome.record;
+            let output = outcome.output;
+            let success = record.status == RunStatus::Success;
+
+            if json {
+                print_run_json(record, output)?;
+            } else if !success {
+                if let Some(error) = &record.error {
+                    eprintln!("{error}");
+                }
             }
-            None => break,
+
+            Ok(Some(if success {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }))
         }
     }
-    if stdout_is_human && !text.is_empty() {
-        println!();
-    }
-
-    let record = match stream_error {
-        Some(error) => build_stream_record(task, bound, started_at, attempt_start, Err(&error)),
-        None => build_stream_record(
-            task,
-            bound,
-            started_at,
-            attempt_start,
-            Ok((text.clone(), usage)),
-        ),
-    };
-    append_ledger(runtime, &record).await;
-    let output = if record.status == RunStatus::Success {
-        Some(text)
-    } else {
-        None
-    };
-    let _ = print_stream_result(json, &record, output.as_deref());
-    StreamAttemptOutcome::Recorded(exit_code_for(record.status))
-}
-
-/// Assemble one `RunRecord` for the streaming path — single attempt, no
-/// failover chain (the caller already restricted itself to a one-target
-/// chain). Field-for-field, this matches what
-/// `vyane_kernel::dispatch::Dispatcher::dispatch` would have produced for the
-/// same single-attempt outcome (see that module's `RunRecord` construction).
-fn build_stream_record(
-    task: &TaskSpec,
-    bound: &BoundTarget,
-    started_at: chrono::DateTime<Utc>,
-    attempt_start: Instant,
-    outcome: std::result::Result<(String, Option<Usage>), &vyane_core::VyaneError>,
-) -> RunRecord {
-    let duration_ms = attempt_start.elapsed().as_millis() as u64;
-    let finished_at = Utc::now();
-    let workdir = task
-        .workdir
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
-    let session_id = task.session.as_ref().map(|s| s.as_str().to_string());
-
-    let (status, usage, output_chars, error_msg, attempt_outcome) = match outcome {
-        Ok((text, usage)) => (
-            RunStatus::Success,
-            usage,
-            Some(text.chars().count() as u64),
-            None,
-            AttemptOutcome::Ok,
-        ),
-        Err(error) => (
-            status_for_error(error.kind),
-            None,
-            None,
-            Some(error.to_string()),
-            AttemptOutcome::Err {
-                kind: error.kind,
-                message: error.message.clone(),
-                // Single-attempt path: there is no next target to fail over
-                // to, so this is always `false` regardless of eligibility.
-                failed_over: false,
-            },
-        ),
-    };
-
-    RunRecord {
-        run_id: uuid::Uuid::now_v7().to_string(),
-        owner: "local".to_string(),
-        started_at,
-        finished_at,
-        task_digest: vyane_kernel::task_digest(&task.prompt),
-        task_preview: Some(task_preview(&task.prompt)),
-        workdir,
-        sandbox: task.sandbox,
-        target: bound.target.clone(),
-        transport: bound.transport,
-        attempts: vec![Attempt {
-            target: bound.target.clone(),
-            transport: bound.transport,
-            started_at,
-            duration_ms,
-            outcome: attempt_outcome,
-        }],
-        status,
-        usage,
-        cost_usd: None,
-        session_id,
-        output_chars,
-        error: error_msg,
-        labels: task.labels.clone(),
-    }
-}
-
-/// Map a terminal error kind onto a run status, mirroring
-/// `vyane_kernel::dispatch::status_for_error` (private to the kernel, so this
-/// is a deliberate, minimal duplication for the streaming shortcut).
-fn status_for_error(kind: ErrorKind) -> RunStatus {
-    match kind {
-        ErrorKind::Timeout => RunStatus::Timeout,
-        ErrorKind::Cancelled => RunStatus::Cancelled,
-        _ => RunStatus::Error,
-    }
-}
-
-/// First [`TASK_PREVIEW_CHARS`] characters of the prompt, on a char boundary
-/// — mirrors `vyane_kernel::dispatch::task_preview` (private to the kernel).
-fn task_preview(prompt: &str) -> String {
-    prompt.chars().take(TASK_PREVIEW_CHARS).collect()
-}
-
-/// Best-effort ledger append — matches `Dispatcher::dispatch`'s rule that a
-/// completed run is never demoted to a caller-visible failure by a ledger
-/// write failure.
-async fn append_ledger(runtime: &Runtime, record: &RunRecord) {
-    if let Err(e) = runtime.ledger.append(record).await {
-        tracing::warn!(
-            run_id = %record.run_id,
-            error = %e,
-            "ledger append failed after streaming run completed; returning run anyway"
-        );
-    }
-}
-
-fn exit_code_for(status: RunStatus) -> ExitCode {
-    if status == RunStatus::Success {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    }
-}
-
-/// Print the streaming run's result. In JSON mode this matches
-/// `print_run_json`'s shape exactly (`{ "record", "output" }`) so `--stream
-/// --json` output is a drop-in replacement for the non-streaming JSON output.
-/// In human mode the deltas already printed live to stdout during the run;
-/// this only prints an error line on failure (mirroring the non-streaming
-/// path's `eprintln!(&record.error)` branch).
-fn print_stream_result(json: bool, record: &RunRecord, output: Option<&str>) -> Result<()> {
-    if json {
-        print_run_json(record.clone(), output.map(ToString::to_string))?;
-    } else if record.status != RunStatus::Success {
-        if let Some(error) = &record.error {
-            eprintln!("{error}");
-        }
-    }
-    Ok(())
 }
 
 /// Freeze the dispatch request into a task directory and spawn a detached

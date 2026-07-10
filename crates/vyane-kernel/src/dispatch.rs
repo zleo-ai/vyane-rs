@@ -61,6 +61,18 @@ pub struct DispatchOutcome {
     pub output: Option<String>,
 }
 
+/// A live event during a streaming dispatch. The callback receives these as
+/// the stream progresses; the method returns the final [`DispatchOutcome`]
+/// once the run completes (or `None` when the client declined streaming and
+/// the caller should fall back to non-streaming `dispatch`).
+#[derive(Debug, Clone)]
+pub enum StreamDispatchEvent {
+    /// A fragment of the answer text.
+    Delta(String),
+    /// A fragment of reasoning/thinking output.
+    ReasoningDelta(String),
+}
+
 /// The successful product of a single attempt, before it becomes an `Attempt`.
 struct AttemptOk {
     text: String,
@@ -340,6 +352,263 @@ impl Dispatcher {
         }
 
         Ok(DispatchOutcome { record, output })
+    }
+
+    /// Stream a single direct-HTTP attempt, calling `on_event` for each delta
+    /// as it arrives and returning the assembled, ledger-appended
+    /// [`DispatchOutcome`] when done.
+    ///
+    /// Returns `Ok(None)` when the client itself declines streaming
+    /// (`ErrorKind::Unsupported`) — the caller should fall back to
+    /// [`Dispatcher::dispatch`]. No `RunRecord` is appended in that case.
+    ///
+    /// Scoped to a single direct-HTTP target with no session — the same
+    /// constraint the CLI's previous hand-rolled streaming path used. Harness
+    /// targets or `CliWrap` transports are not supported (returns `None` so the
+    /// caller falls back to non-streaming).
+    pub async fn dispatch_stream<F>(
+        &self,
+        task: &TaskSpec,
+        bound: &BoundTarget,
+        cancel: CancellationToken,
+        mut on_event: F,
+    ) -> Result<Option<DispatchOutcome>>
+    where
+        F: FnMut(StreamDispatchEvent) + Send,
+    {
+        use futures::StreamExt as _;
+        use vyane_core::StreamEvent;
+
+        // Pre-cancel check: a token that is already cancelled never builds the
+        // client or calls the network. Same rule as `drive`.
+        if cancel.is_cancelled() {
+            let started_at = Utc::now();
+            let attempt_start = Instant::now();
+            let record = self
+                .assemble_stream_record(
+                    task,
+                    bound,
+                    started_at,
+                    attempt_start,
+                    Err(&VyaneError::cancelled()),
+                )
+                .await;
+            return Ok(Some(DispatchOutcome {
+                record,
+                output: None,
+            }));
+        }
+
+        // Build the executor via the same factory seam `dispatch` uses.
+        let executor = self.factory.make(bound)?;
+        let client = match executor {
+            Executor::Chat(c) => c,
+            // Harness target — not supported in streaming mode.
+            Executor::Agent(_) => return Ok(None),
+        };
+
+        // Assemble the request: system (if any) + user. No transcript replay
+        // (streaming does not support sessions — same as the old CLI path).
+        let mut messages = Vec::new();
+        if let Some(system) = task.system.as_ref() {
+            messages.push(ChatMessage::system(system.clone()));
+        }
+        messages.push(ChatMessage::user(task.prompt.clone()));
+        let req = ChatRequest {
+            model: bound.target.model.clone(),
+            messages,
+            params: bound.params.clone(),
+        };
+
+        let started_at = Utc::now();
+        let attempt_start = Instant::now();
+
+        // Call client.stream — may itself return Unsupported before any HTTP call.
+        let mut stream = match client.stream(req).await {
+            Ok(s) => s,
+            Err(e) if e.kind == ErrorKind::Unsupported => return Ok(None),
+            Err(e) => {
+                let record = self
+                    .assemble_stream_record(task, bound, started_at, attempt_start, Err(&e))
+                    .await;
+                return Ok(Some(DispatchOutcome {
+                    record,
+                    output: None,
+                }));
+            }
+        };
+
+        // Consume the event stream, accumulating text and usage, calling
+        // `on_event` for each delta. The loop is raced against timeout +
+        // cancellation via the same biased select pattern `drive` uses.
+        let mut text = String::new();
+        let mut usage: Option<Usage> = None;
+        let mut stream_error: Option<VyaneError> = None;
+
+        let timeout = task.timeout;
+        let cancel_for_select = cancel.clone();
+
+        let event_loop = async {
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(StreamEvent::Delta(delta)) => {
+                        text.push_str(&delta);
+                        on_event(StreamDispatchEvent::Delta(delta));
+                    }
+                    Ok(StreamEvent::ReasoningDelta(delta)) => {
+                        on_event(StreamDispatchEvent::ReasoningDelta(delta));
+                    }
+                    Ok(StreamEvent::Usage(u)) => {
+                        usage.get_or_insert_with(Usage::default).add(&u);
+                    }
+                    Ok(StreamEvent::Done { .. }) => break,
+                    Err(e) => {
+                        stream_error = Some(e);
+                        break;
+                    }
+                }
+            }
+        };
+
+        tokio::pin!(event_loop);
+
+        match timeout {
+            Some(d) => {
+                tokio::select! {
+                    biased;
+                    _ = cancel_for_select.cancelled() => {
+                        let e = VyaneError::cancelled();
+                        let record = self.assemble_stream_record(
+                            task, bound, started_at, attempt_start, Err(&e),
+                        ).await;
+                        return Ok(Some(DispatchOutcome { record, output: None }));
+                    }
+                    _ = tokio::time::sleep(d) => {
+                        let e = VyaneError::new(
+                            ErrorKind::Timeout,
+                            format!("attempt exceeded timeout of {}ms", d.as_millis()),
+                        );
+                        let record = self.assemble_stream_record(
+                            task, bound, started_at, attempt_start, Err(&e),
+                        ).await;
+                        return Ok(Some(DispatchOutcome { record, output: None }));
+                    }
+                    _ = &mut event_loop => {}
+                }
+            }
+            None => {
+                tokio::select! {
+                    biased;
+                    _ = cancel_for_select.cancelled() => {
+                        let e = VyaneError::cancelled();
+                        let record = self.assemble_stream_record(
+                            task, bound, started_at, attempt_start, Err(&e),
+                        ).await;
+                        return Ok(Some(DispatchOutcome { record, output: None }));
+                    }
+                    _ = &mut event_loop => {}
+                }
+            }
+        }
+
+        // Event loop completed (or broke on error / Done).
+        let result: std::result::Result<(String, Option<Usage>), VyaneError> = match stream_error {
+            Some(e) => Err(e),
+            None => Ok((text.clone(), usage)),
+        };
+        let result_ref: std::result::Result<&(String, Option<Usage>), &VyaneError> = match &result {
+            Ok(v) => Ok(v),
+            Err(e) => Err(e),
+        };
+        let record = self
+            .assemble_stream_record(task, bound, started_at, attempt_start, result_ref)
+            .await;
+        let output = if record.status == RunStatus::Success {
+            Some(text)
+        } else {
+            None
+        };
+        Ok(Some(DispatchOutcome { record, output }))
+    }
+
+    /// Assemble a single-attempt [`RunRecord`] for a streaming run and append
+    /// it to the ledger (best-effort). This is the kernel-owned replacement
+    /// for the CLI's former hand-rolled `build_stream_record` — same fields,
+    /// same status mapping, same best-effort append rule, but no duplication.
+    async fn assemble_stream_record(
+        &self,
+        task: &TaskSpec,
+        bound: &BoundTarget,
+        started_at: chrono::DateTime<Utc>,
+        attempt_start: Instant,
+        result: std::result::Result<&(String, Option<Usage>), &VyaneError>,
+    ) -> RunRecord {
+        let now = Utc::now();
+        let duration_ms = attempt_start.elapsed().as_millis() as u64;
+
+        let (status, usage, output_chars, error_msg, outcome) = match result {
+            Ok((text, usage)) => (
+                RunStatus::Success,
+                *usage,
+                Some(text.chars().count() as u64),
+                None,
+                AttemptOutcome::Ok,
+            ),
+            Err(e) => {
+                let kind = e.kind;
+                (
+                    status_for_error(kind),
+                    None,
+                    None,
+                    Some(e.to_string()),
+                    AttemptOutcome::Err {
+                        kind,
+                        message: e.to_string(),
+                        failed_over: false,
+                    },
+                )
+            }
+        };
+
+        let record = RunRecord {
+            run_id: uuid::Uuid::now_v7().to_string(),
+            owner: self.owner.clone(),
+            started_at,
+            finished_at: now,
+            task_digest: task_digest(&task.prompt),
+            task_preview: Some(task_preview(&task.prompt)),
+            workdir: task
+                .workdir
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            sandbox: task.sandbox,
+            target: bound.target.clone(),
+            transport: bound.transport,
+            attempts: vec![Attempt {
+                target: bound.target.clone(),
+                transport: bound.transport,
+                started_at,
+                duration_ms,
+                outcome,
+            }],
+            status,
+            usage,
+            cost_usd: None,
+            session_id: task.session.as_ref().map(|s| s.as_str().to_string()),
+            output_chars,
+            error: error_msg,
+            labels: task.labels.clone(),
+        };
+
+        if let Err(e) = self.ledger.append(&record).await {
+            tracing::warn!(
+                run_id = %record.run_id,
+                error = %e,
+                "ledger append failed after streaming run completed; returning run anyway"
+            );
+        }
+
+        record
     }
 
     /// Load the session continuity context for `task`, if it names a session.
