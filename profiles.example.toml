@@ -80,6 +80,50 @@ model    = "a-capable-openai-model"
 sandbox  = "read-only"
 
 # ---------------------------------------------------------------------------
+# routing metadata (optional) — tier, tags, and stage fields on profiles feed
+# vyane-router's deterministic target selection. Use `vyane route` to see what
+# the router picks for a given task without dispatching.
+#
+# tier:     "economy" | "mainline" | "frontier"
+# tags:     domain labels matched against inferred tags (frontend, security,
+#           architecture, code, debug, review, ...)
+# stage:    workflow stage label (plan, review, architecture, verify, ...)
+#
+# Resolution precedence: stage → tag → tier → default.
+# ---------------------------------------------------------------------------
+
+# Economy-tier profile: cheap and fast, used for simple tasks.
+[profiles.fast-chat]
+provider = "openai"
+protocol = "openai_chat"
+harness  = "none"
+model    = "a-fast-openai-model"
+tier     = "economy"
+tags     = ["code", "docs"]
+
+# Frontier-tier profile: strongest and most expensive, used for complex tasks.
+[profiles.frontier]
+provider = "anthropic"
+protocol = "anthropic_messages"
+harness  = "none"
+model    = "a-capable-anthropic-model"
+tier     = "frontier"
+tags     = ["architecture", "security"]
+
+# Stage-specific profile: used when the task's stage signal is "review".
+[profiles.reviewer]
+provider = "anthropic"
+protocol = "anthropic_messages"
+harness  = "none"
+model    = "a-capable-anthropic-model"
+tier     = "mainline"
+stage    = "review"
+
+# Example: `vyane route "review the PR" --stage review` → selects "reviewer"
+# Example: `vyane route "write an ADR" --changed-files 20` → selects "frontier"
+# Example: `vyane route "fix a typo"` → selects "fast-chat" (economy default)
+
+# ---------------------------------------------------------------------------
 # failover — an ordered chain tried left to right. Each element is resolved
 # independently and fully: either a profile name, or a "provider/model" pair.
 # A model id is only ever paired with the provider written next to it, so a
