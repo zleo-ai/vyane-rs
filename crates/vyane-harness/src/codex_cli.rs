@@ -41,10 +41,13 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use vyane_core::error::{ErrorKind, Result, VyaneError};
 use vyane_core::target::{Endpoint, HarnessKind, Protocol, Sandbox};
-use vyane_core::traits::{Harness, HarnessJob, HarnessOutcome};
+use vyane_core::traits::{Harness, HarnessJob, HarnessOutcome, HarnessStreamEvent};
 
 use crate::parse::{combine_codex, parse_codex_events};
-use crate::spawn::{Termination, env_key_list, materialize_env, parent_env_snapshot, run_capture};
+use crate::spawn::{
+    RunResult, Termination, env_key_list, materialize_env, parent_env_snapshot, run_capture,
+    run_stream_capture,
+};
 
 /// The Codex binary name (resolved via `PATH` at spawn time).
 const BIN: &str = "codex";
@@ -302,6 +305,142 @@ impl Harness for CodexCliHarness {
                     // A zero exit without it is a harness failure, not an empty
                     // successful answer.
                     let last = tokio::fs::read_to_string(last_message_path.as_path())
+                        .await
+                        .map_err(|e| {
+                            VyaneError::with_source(
+                                ErrorKind::HarnessFailed,
+                                format!(
+                                    "codex-cli exited successfully but expected last-message file `{}` was not readable: {e}",
+                                    last_message_path.display()
+                                ),
+                                e,
+                            )
+                        })?;
+                    let parsed = combine_codex(&last, events);
+                    Ok(HarnessOutcome {
+                        text: parsed.text,
+                        native_session_id: parsed.native_session_id,
+                        usage: parsed.usage,
+                        exit_code: code,
+                        duration: result.duration,
+                    })
+                } else {
+                    Err(VyaneError::new(
+                        ErrorKind::HarnessFailed,
+                        format!(
+                            "codex-cli exited with code {code}: {}",
+                            stderr_tail(&result.stderr)
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+
+    async fn run_stream(
+        &self,
+        job: HarnessJob,
+        cancel: CancellationToken,
+        on_event: Box<dyn FnMut(HarnessStreamEvent) + Send + Sync>,
+    ) -> Result<HarnessOutcome> {
+        let tmp = RunTempDir::create("vyane-codex-")?;
+        let last_message_path = tmp.path().join("last-message.txt");
+        let last_message_str = last_message_path.to_string_lossy().to_string();
+
+        let argv = build_argv(&job, &last_message_str, job.protocol)?;
+        let resuming = job.resume.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
+        let process_cwd = if resuming {
+            None
+        } else {
+            job.workdir.as_deref()
+        };
+
+        let mut policy = job.env.clone();
+        for (k, v) in endpoint_injections(job.endpoint.as_ref()) {
+            policy.inject.insert(k, v);
+        }
+        let env = materialize_env(&policy, parent_env_snapshot());
+
+        tracing::debug!(
+            harness = "codex-cli",
+            mode = "stream",
+            argc = argv.len(),
+            env_keys = %env_key_list(&env),
+            "spawning codex-cli harness (streaming)"
+        );
+
+        // Wrap on_event in Arc<Mutex> so the line callback can call it.
+        let on_event = std::sync::Arc::new(tokio::sync::Mutex::new(on_event));
+
+        let result =
+            run_stream_capture(&self.bin, &argv, process_cwd, &env, &cancel, job.timeout, {
+                let on_event = std::sync::Arc::clone(&on_event);
+                Box::new(move |line: &str| {
+                    // Parse each NDJSON line for delta events.
+                    let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
+                        return;
+                    };
+                    let event_type = json["type"].as_str().unwrap_or("");
+                    let events: Vec<HarnessStreamEvent> = match event_type {
+                        "item" | "message" => {
+                            // Codex emits item events with content deltas.
+                            // The 'content' or 'text' field may carry incremental text.
+                            let mut deltas = Vec::new();
+                            if let Some(text) = json["content"].as_str() {
+                                if !text.is_empty() {
+                                    deltas.push(HarnessStreamEvent::Delta(text.to_string()));
+                                }
+                            }
+                            if let Some(text) = json["text"].as_str() {
+                                if !text.is_empty() {
+                                    deltas.push(HarnessStreamEvent::Delta(text.to_string()));
+                                }
+                            }
+                            deltas
+                        }
+                        "function_call" | "tool_call" => {
+                            vec![HarnessStreamEvent::ToolUse {
+                                name: json["name"].as_str().unwrap_or("unknown").to_string(),
+                                summary: json["arguments"]
+                                    .as_str()
+                                    .map(String::from)
+                                    .unwrap_or_else(|| json["arguments"].to_string()),
+                            }]
+                        }
+                        _ => vec![],
+                    };
+                    if !events.is_empty() {
+                        if let Ok(mut cb) = on_event.try_lock() {
+                            for event in events {
+                                cb(event);
+                            }
+                        }
+                    }
+                })
+            })
+            .await?;
+
+        self.classify_result(result, &last_message_path).await
+    }
+}
+
+impl CodexCliHarness {
+    /// Classify a RunResult (shared by run + run_stream).
+    async fn classify_result(
+        &self,
+        result: RunResult,
+        last_message_path: &std::path::Path,
+    ) -> Result<HarnessOutcome> {
+        match result.termination {
+            Termination::Cancelled => Err(VyaneError::cancelled()),
+            Termination::TimedOut => Err(VyaneError::new(
+                ErrorKind::Timeout,
+                "codex-cli harness timed out",
+            )),
+            Termination::Exited(code) => {
+                if code == 0 {
+                    let events = parse_codex_events(&result.stdout);
+                    let last = tokio::fs::read_to_string(last_message_path)
                         .await
                         .map_err(|e| {
                             VyaneError::with_source(
