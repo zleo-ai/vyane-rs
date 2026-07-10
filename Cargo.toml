@@ -23,18 +23,18 @@ repository = "https://github.com/zleo-ai/vyane-rs"
 rust-version = "1.85"
 
 [workspace.dependencies]
-# intra-workspace
-vyane-core = { path = "crates/vyane-core" }
-vyane-config = { path = "crates/vyane-config" }
-vyane-provider = { path = "crates/vyane-provider" }
-vyane-protocol = { path = "crates/vyane-protocol" }
-vyane-harness = { path = "crates/vyane-harness" }
-vyane-kernel = { path = "crates/vyane-kernel" }
-vyane-ledger = { path = "crates/vyane-ledger" }
-vyane-router = { path = "crates/vyane-router" }
-vyane-workflow = { path = "crates/vyane-workflow" }
-vyane-service = { path = "crates/vyane-service" }
-vyane-mcp = { path = "crates/vyane-mcp" }
+# intra-workspace — version required for crates.io publish (path stripped on publish)
+vyane-core = { path = "crates/vyane-core", version = "0.1.0" }
+vyane-config = { path = "crates/vyane-config", version = "0.1.0" }
+vyane-provider = { path = "crates/vyane-provider", version = "0.1.0" }
+vyane-protocol = { path = "crates/vyane-protocol", version = "0.1.0" }
+vyane-harness = { path = "crates/vyane-harness", version = "0.1.0" }
+vyane-kernel = { path = "crates/vyane-kernel", version = "0.1.0" }
+vyane-ledger = { path = "crates/vyane-ledger", version = "0.1.0" }
+vyane-router = { path = "crates/vyane-router", version = "0.1.0" }
+vyane-workflow = { path = "crates/vyane-workflow", version = "0.1.0" }
+vyane-service = { path = "crates/vyane-service", version = "0.1.0" }
+vyane-mcp = { path = "crates/vyane-mcp", version = "0.1.0" }
 
 # async runtime & io
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "io-util", "signal", "fs"] }
