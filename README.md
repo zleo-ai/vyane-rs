@@ -89,6 +89,48 @@ Vyane supports three interchangeable front-ends, all sharing the same
 | **REST API** | `vyane serve --addr 127.0.0.1:9721` | programmatic access from any HTTP client |
 | **MCP** | `vyane mcp` | let other agents (Claude, Codex, …) call vyane as a tool |
 
+### REST API
+
+`vyane serve` exposes a JSON HTTP API with streaming (SSE) and async task
+support:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/v1/health` | health check |
+| `POST` | `/v1/dispatch` | dispatch a task (synchronous, blocks until done) |
+| `POST` | `/v1/dispatch/stream` | dispatch with SSE streaming (deltas as they arrive) |
+| `POST` | `/v1/broadcast` | fan out to multiple targets concurrently |
+| `POST` | `/v1/tasks` | submit async dispatch, returns task id immediately |
+| `GET` | `/v1/tasks` | list all tasks in the registry |
+| `GET` | `/v1/tasks/:id` | get one task's status and result |
+| `POST` | `/v1/tasks/:id/cancel` | cancel a running task |
+| `GET` | `/v1/runs` | query the run ledger (filter by status/provider) |
+| `GET` | `/v1/sessions` | list saved sessions |
+
+SSE streaming events (`POST /v1/dispatch/stream`):
+
+```
+data: {"type":"delta","text":"Here is "}
+
+data: {"type":"delta","text":"a function..."}
+
+data: {"type":"finished","record":{...},"output":"Here is a function..."}
+```
+
+Async task lifecycle (`POST /v1/tasks` → poll `GET /v1/tasks/:id`):
+
+```bash
+# Submit
+curl -X POST http://localhost:9721/v1/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"task":"write tests","target":"openai/gpt-4o"}'
+# → {"id":"0195...","status":"running",...}
+
+# Poll
+curl http://localhost:9721/v1/tasks/0195...
+# → {"id":"0195...","status":"completed","outcome":{"record":{...},"output":"..."}}
+```
+
 ### Smart routing
 
 `vyane route "task text"` shows what the router would pick — without
