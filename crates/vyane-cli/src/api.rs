@@ -869,4 +869,136 @@ mod tests {
         let json = serde_json::to_string(&HealthResponse { status: "ok" }).unwrap();
         assert_eq!(json, r#"{"status":"ok"}"#);
     }
+
+    // --- Task registry ----------------------------------------------------
+
+    #[test]
+    fn task_entry_running_serializes() {
+        let entry = TaskEntry {
+            id: "test-1".into(),
+            task: "write code".into(),
+            target: "openai/gpt-4o".into(),
+            status: TaskStatus::Running,
+            created_at: chrono::Utc::now(),
+            outcome: None,
+            error: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"status\":\"running\""));
+        assert!(json.contains("\"id\":\"test-1\""));
+        assert!(!json.contains("outcome")); // skip_serializing_if
+        assert!(!json.contains("error"));
+    }
+
+    #[test]
+    fn task_entry_completed_serializes_with_outcome() {
+        let entry = TaskEntry {
+            id: "test-2".into(),
+            task: "hello".into(),
+            target: "default".into(),
+            status: TaskStatus::Completed,
+            created_at: chrono::Utc::now(),
+            outcome: Some(DispatchOutcome {
+                record: vyane_core::RunRecord {
+                    run_id: "abc".into(),
+                    owner: "local".into(),
+                    started_at: chrono::Utc::now(),
+                    finished_at: chrono::Utc::now(),
+                    task_digest: "deadbeef".into(),
+                    task_preview: None,
+                    workdir: None,
+                    sandbox: Sandbox::ReadOnly,
+                    target: vyane_core::Target {
+                        provider: vyane_core::ProviderId::new("openai"),
+                        protocol: vyane_core::Protocol::OpenaiChat,
+                        harness: None,
+                        model: vyane_core::ModelId::new("gpt-4o"),
+                    },
+                    transport: vyane_core::AdapterTransport::DirectHttp,
+                    attempts: vec![],
+                    status: RunStatus::Success,
+                    usage: None,
+                    cost_usd: None,
+                    session_id: None,
+                    output_chars: Some(5),
+                    error: None,
+                    labels: Default::default(),
+                },
+                output: Some("hello".into()),
+            }),
+            error: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"status\":\"completed\""));
+        assert!(json.contains("\"outcome\""));
+        assert!(json.contains("\"output\":\"hello\""));
+    }
+
+    #[test]
+    fn task_status_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&TaskStatus::Running).unwrap(),
+            "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskStatus::Completed).unwrap(),
+            "\"completed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskStatus::Failed).unwrap(),
+            "\"failed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskStatus::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
+    }
+
+    #[test]
+    fn task_list_envelope_serializes() {
+        let env = ItemsEnvelope {
+            items: vec![TaskEntry {
+                id: "t1".into(),
+                task: "task 1".into(),
+                target: "openai".into(),
+                status: TaskStatus::Running,
+                created_at: chrono::Utc::now(),
+                outcome: None,
+                error: None,
+            }],
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.starts_with("{\"items\":["));
+        assert!(json.contains("\"id\":\"t1\""));
+    }
+
+    // --- SSE payload serialization ----------------------------------------
+
+    #[test]
+    fn sse_delta_serializes() {
+        let payload = SsePayload::Delta {
+            text: "hello".into(),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert_eq!(json, r#"{"type":"delta","text":"hello"}"#);
+    }
+
+    #[test]
+    fn sse_finished_serializes() {
+        let payload = SsePayload::Unsupported;
+        let json = serde_json::to_string(&payload).unwrap();
+        assert_eq!(json, r#"{"type":"unsupported"}"#);
+    }
+
+    // --- Error classification ---------------------------------------------
+
+    #[test]
+    fn caller_fault_detection() {
+        assert!(is_caller_fault("profile not found"));
+        assert!(is_caller_fault("provider openai missing"));
+        assert!(is_caller_fault("invalid target"));
+        assert!(is_caller_fault("endpoint has no key"));
+        assert!(!is_caller_fault("connection refused"));
+        assert!(!is_caller_fault("internal panic"));
+    }
 }
