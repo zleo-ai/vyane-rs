@@ -23,14 +23,22 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
+use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tower_http::cors::CorsLayer;
 use vyane_core::{CancellationToken, RunStatus, Sandbox, SessionRecord};
-use vyane_kernel::DispatchOutcome;
-use vyane_service::{BroadcastParams, DispatchParams, HistoryFilter, VyaneService, parse_labels};
+use vyane_kernel::{DispatchOutcome, StreamDispatchEvent};
+use vyane_service::{
+    BroadcastParams, DispatchParams, HistoryFilter, VyaneService, parse_labels,
+    resolve_target_chain,
+};
 
 /// Shared service state. [`VyaneService`] is already cheap to clone (all `Arc`
 /// internally), but wrapping it once avoids even the atomic bump per request.
@@ -210,6 +218,7 @@ pub fn build_router(service: VyaneService) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/dispatch", post(dispatch))
+        .route("/v1/dispatch/stream", post(dispatch_stream))
         .route("/v1/broadcast", post(broadcast))
         .route("/v1/runs", get(runs))
         .route("/v1/sessions", get(sessions))
@@ -293,6 +302,145 @@ async fn dispatch(
         .await
         .map_err(ApiError::from_service_error)?;
     Ok(Json(outcome))
+}
+
+/// SSE event type sent over the streaming endpoint.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SsePayload {
+    Delta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
+    Finished {
+        record: Box<vyane_core::RunRecord>,
+        output: Option<String>,
+    },
+    Unsupported,
+}
+
+/// `POST /v1/dispatch/stream` — dispatch a task and stream deltas as
+/// Server-Sent Events. Each event's `data` field is a JSON object with a
+/// `type` discriminator: `delta`, `reasoning_delta`, `finished`, or
+/// `unsupported`.
+///
+/// Only works for single direct-HTTP targets (no harness, no failover). When
+/// the client declines streaming, an `unsupported` event is sent and the
+/// caller should retry with the non-streaming `/v1/dispatch` endpoint.
+async fn dispatch_stream(
+    State(state): State<ApiState>,
+    Json(req): Json<DispatchRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
+    let sandbox = parse_sandbox(req.sandbox.as_deref())?;
+    let labels = req.labels.unwrap_or_default();
+    let _ = parse_labels(labels.clone()).map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+
+    // Resolve the target chain up front so we can validate the selector and
+    // extract the single bound target for streaming.
+    let loaded = state.service.config();
+    let chain = resolve_target_chain(loaded, &req.target)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    // Streaming only works for a single direct-HTTP target.
+    let bound = match chain.as_slice() {
+        [b] if b.transport == vyane_core::AdapterTransport::DirectHttp => b.clone(),
+        _ => {
+            return Err(ApiError::bad_request(
+                "streaming requires a single direct-HTTP target (no harness, no failover)",
+            ));
+        }
+    };
+
+    let task = vyane_service::build_task_spec(
+        req.task,
+        req.workdir.map(PathBuf::from),
+        sandbox,
+        req.system,
+        req.timeout_secs,
+        labels,
+    )
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    // Sessions are not supported on the streaming path (same as CLI --stream).
+    let task = if let Some(session) = req.session {
+        let mut t = task;
+        t.session = Some(vyane_core::SessionRef::new(session));
+        t
+    } else {
+        task
+    };
+
+    let cancel = CancellationToken::new();
+    let dispatcher = state.service.runtime().dispatcher.clone();
+
+    // Bridge the callback-based dispatch_stream to an SSE stream via a channel.
+    let (tx, mut rx) = mpsc::channel::<SsePayload>(64);
+
+    tokio::spawn(async move {
+        let tx = tx;
+        let outcome = dispatcher
+            .dispatch_stream(&task, &bound, cancel, |event| {
+                let payload = match event {
+                    StreamDispatchEvent::Delta(text) => SsePayload::Delta { text },
+                    StreamDispatchEvent::ReasoningDelta(text) => {
+                        SsePayload::ReasoningDelta { text }
+                    }
+                };
+                // Best-effort send: if the client disconnected (receiver dropped),
+                // the error is silently ignored — the dispatch continues and the
+                // RunRecord is still ledger-appended by the kernel.
+                let _ = tx.try_send(payload);
+            })
+            .await;
+
+        let final_payload = match outcome {
+            Ok(None) => SsePayload::Unsupported,
+            Ok(Some(outcome)) => SsePayload::Finished {
+                record: Box::new(outcome.record),
+                output: outcome.output,
+            },
+            Err(e) => {
+                eprintln!("dispatch_stream error: {e:#}");
+                SsePayload::Finished {
+                    record: Box::new(vyane_core::RunRecord {
+                        run_id: String::new(),
+                        owner: "local".into(),
+                        started_at: chrono::Utc::now(),
+                        finished_at: chrono::Utc::now(),
+                        task_digest: String::new(),
+                        task_preview: None,
+                        workdir: None,
+                        sandbox: task.sandbox,
+                        target: bound.target.clone(),
+                        transport: bound.transport,
+                        attempts: vec![],
+                        status: RunStatus::Error,
+                        usage: None,
+                        cost_usd: None,
+                        session_id: None,
+                        output_chars: None,
+                        error: Some(e.to_string()),
+                        labels: task.labels.clone(),
+                    }),
+                    output: None,
+                }
+            }
+        };
+        let _ = tx.try_send(final_payload);
+    });
+
+    // Convert the receiver into a futures::Stream of SSE Events.
+    let stream = async_stream::stream! {
+        while let Some(payload) = rx.recv().await {
+            let json = serde_json::to_string(&payload).unwrap_or_else(|_| {
+                r#"{"type":"delta","text":"(serialization error)"}"#.to_string()
+            });
+            yield Ok::<Event, std::convert::Infallible>(Event::default().data(json));
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn broadcast(
