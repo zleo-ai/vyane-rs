@@ -26,6 +26,7 @@ serde = { workspace = true }
 # `test-util` adds the paused-clock helpers (`start_paused`, time advance) the
 # acceptance suite uses to drive delayed mocks and timeouts deterministically.
 tokio = { workspace = true, features = ["test-util"] }
+async-stream = "0.3"
 
 [lints]
 workspace = true

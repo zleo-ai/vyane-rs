@@ -1928,3 +1928,228 @@ async fn ledger_failure_on_a_failed_run_still_returns_the_error_record() {
     assert!(rec.record.error.is_some());
     assert_eq!(ledger.append_calls(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// dispatch_stream tests (WP-18 kernel streaming API)
+// ---------------------------------------------------------------------------
+
+/// A streaming mock ChatClient that emits a vector of StreamEvents.
+struct StreamingChat {
+    events: Vec<vyane_core::StreamEvent>,
+    probe: Arc<Probe>,
+}
+
+#[async_trait]
+impl ChatClient for StreamingChat {
+    fn protocol(&self) -> Protocol {
+        Protocol::OpenaiChat
+    }
+
+    async fn complete(&self, _req: ChatRequest) -> Result<ChatOutcome> {
+        unreachable!("streaming tests should call stream(), not complete()")
+    }
+
+    async fn stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<futures::stream::BoxStream<'static, Result<vyane_core::StreamEvent>>> {
+        self.probe.chat_requests.lock().unwrap().push(req);
+        let _guard = self.probe.enter();
+        let events = self.events.clone();
+        let stream = async_stream::stream! {
+            for event in events {
+                yield Ok(event);
+            }
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+/// Factory variant that produces streaming chat clients.
+struct StreamingFactory {
+    events: Vec<vyane_core::StreamEvent>,
+}
+
+impl ExecutorFactory for StreamingFactory {
+    fn make(&self, _target: &BoundTarget) -> Result<Executor> {
+        Ok(Executor::Chat(Arc::new(StreamingChat {
+            events: self.events.clone(),
+            probe: Probe::new(),
+        })))
+    }
+}
+
+/// `dispatch_stream` with a successful stream produces a Success RunRecord
+/// and delivers all delta events through the callback.
+#[tokio::test]
+async fn dispatch_stream_success_delivers_deltas_and_records() {
+    let factory = Arc::new(StreamingFactory {
+        events: vec![
+            vyane_core::StreamEvent::Delta("Hello ".into()),
+            vyane_core::StreamEvent::Delta("world".into()),
+            vyane_core::StreamEvent::Usage(Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+                reasoning_tokens: None,
+                cached_input_tokens: None,
+            }),
+            vyane_core::StreamEvent::Done {
+                finish_reason: Some("stop".into()),
+            },
+        ],
+    });
+    let ledger = MockLedger::default();
+    let sessions = MockSessions::new();
+    let d = Dispatcher::new(factory, Arc::new(ledger), Arc::new(sessions));
+
+    let mut collected = Vec::new();
+    let outcome = d
+        .dispatch_stream(
+            &TaskSpec::new("say hello"),
+            &http_target("test", "streaming-model"),
+            CancellationToken::new(),
+            |event| {
+                if let vyane_kernel::StreamDispatchEvent::Delta(text) = event {
+                    collected.push(text);
+                }
+            },
+        )
+        .await
+        .expect("dispatch_stream succeeds");
+
+    let outcome = outcome.expect("streaming was supported");
+    assert_eq!(outcome.record.status, RunStatus::Success);
+    assert_eq!(outcome.output.as_deref(), Some("Hello world"));
+    assert_eq!(collected, vec!["Hello ".to_string(), "world".to_string()]);
+}
+
+/// `dispatch_stream` returns Ok(None) when the ChatClient returns
+/// ErrorKind::Unsupported from stream().
+#[tokio::test]
+async fn dispatch_stream_unsupported_returns_none() {
+    struct UnsupportedChat;
+    #[async_trait]
+    impl ChatClient for UnsupportedChat {
+        fn protocol(&self) -> Protocol {
+            Protocol::OpenaiChat
+        }
+        async fn complete(&self, _req: ChatRequest) -> Result<ChatOutcome> {
+            unreachable!()
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<futures::stream::BoxStream<'static, Result<vyane_core::StreamEvent>>> {
+            Err(VyaneError::unsupported("no streaming"))
+        }
+    }
+
+    struct UnsupportedFactory;
+    impl ExecutorFactory for UnsupportedFactory {
+        fn make(&self, _target: &BoundTarget) -> Result<Executor> {
+            Ok(Executor::Chat(Arc::new(UnsupportedChat)))
+        }
+    }
+
+    let d = dispatcher(
+        Arc::new(UnsupportedFactory),
+        MockLedger::default(),
+        MockSessions::new(),
+    );
+
+    let outcome = d
+        .dispatch_stream(
+            &TaskSpec::new("test"),
+            &http_target("p", "m"),
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect("no kernel error");
+
+    assert!(outcome.is_none(), "Unsupported → Ok(None)");
+}
+
+/// `dispatch_stream` with a pre-cancelled token produces a Cancelled record
+/// without calling the client.
+#[tokio::test]
+async fn dispatch_stream_pre_cancelled_produces_cancelled_record() {
+    let factory = Arc::new(StreamingFactory {
+        events: vec![
+            vyane_core::StreamEvent::Delta("should not see this".into()),
+            vyane_core::StreamEvent::Done {
+                finish_reason: None,
+            },
+        ],
+    });
+    let ledger = MockLedger::default();
+    let d = Dispatcher::new(factory, Arc::new(ledger), Arc::new(MockSessions::new()));
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let outcome = d
+        .dispatch_stream(
+            &TaskSpec::new("test"),
+            &http_target("p", "m"),
+            cancel,
+            |_| {},
+        )
+        .await
+        .expect("no kernel error");
+
+    let outcome = outcome.expect("pre-cancelled still produces a record");
+    assert_eq!(outcome.record.status, RunStatus::Cancelled);
+}
+
+/// `dispatch_stream` with a mid-stream error produces an Error record.
+#[tokio::test]
+async fn dispatch_stream_mid_stream_error_produces_error_record() {
+    struct ErrorChat;
+    #[async_trait]
+    impl ChatClient for ErrorChat {
+        fn protocol(&self) -> Protocol {
+            Protocol::OpenaiChat
+        }
+        async fn complete(&self, _req: ChatRequest) -> Result<ChatOutcome> {
+            unreachable!()
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<futures::stream::BoxStream<'static, Result<vyane_core::StreamEvent>>> {
+            let stream = async_stream::stream! {
+                yield Ok(vyane_core::StreamEvent::Delta("partial".into()));
+                yield Err(VyaneError::new(ErrorKind::Protocol, "stream broke"));
+            };
+            Ok(Box::pin(stream))
+        }
+    }
+
+    struct ErrorFactory;
+    impl ExecutorFactory for ErrorFactory {
+        fn make(&self, _target: &BoundTarget) -> Result<Executor> {
+            Ok(Executor::Chat(Arc::new(ErrorChat)))
+        }
+    }
+
+    let d = dispatcher(
+        Arc::new(ErrorFactory),
+        MockLedger::default(),
+        MockSessions::new(),
+    );
+
+    let outcome = d
+        .dispatch_stream(
+            &TaskSpec::new("test"),
+            &http_target("p", "m"),
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect("no kernel error");
+
+    let outcome = outcome.expect("error stream still produces a record");
+    assert_eq!(outcome.record.status, RunStatus::Error);
+    assert!(outcome.record.error.is_some());
+}
