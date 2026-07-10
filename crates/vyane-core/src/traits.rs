@@ -79,6 +79,18 @@ pub struct HarnessOutcome {
     pub duration: Duration,
 }
 
+/// A live event during a streaming harness run. Implementations that override
+/// [`Harness::run_stream`] emit these as the CLI's stdout arrives, so the
+/// caller can display incremental output to the user.
+#[derive(Debug, Clone)]
+pub enum HarnessStreamEvent {
+    /// A fragment of the answer text (from the CLI's stdout).
+    Delta(String),
+    /// A tool-use notification — the agent invoked a tool (file edit, command,
+    /// etc.). Optional: implementations may emit these for observability.
+    ToolUse { name: String, summary: String },
+}
+
 /// An execution shell that runs jobs as a subprocess.
 #[async_trait]
 pub trait Harness: Send + Sync {
@@ -94,6 +106,29 @@ pub trait Harness: Send + Sync {
     /// `job.timeout` when set, and classify failures onto
     /// [`crate::ErrorKind`] faithfully.
     async fn run(&self, job: HarnessJob, cancel: CancellationToken) -> Result<HarnessOutcome>;
+
+    /// Run a job with streaming output. Default: unsupported.
+    ///
+    /// Implementations that support streaming should call `on_event` for each
+    /// text fragment as it arrives, then return the final [`HarnessOutcome`].
+    /// The returned outcome is identical in shape to what [`run`](Self::run)
+    /// would produce — streaming only changes *when* intermediate output is
+    /// observed, not the final result.
+    ///
+    /// When this method returns [`ErrorKind::Unsupported`], the caller should
+    /// fall back to [`run`](Self::run).
+    async fn run_stream(
+        &self,
+        job: HarnessJob,
+        cancel: CancellationToken,
+        on_event: Box<dyn FnMut(HarnessStreamEvent) + Send + Sync>,
+    ) -> Result<HarnessOutcome> {
+        let _ = (job, cancel, on_event);
+        Err(crate::error::VyaneError::unsupported(format!(
+            "{} does not support streaming",
+            self.kind()
+        )))
+    }
 }
 
 /// Append-only run accounting.

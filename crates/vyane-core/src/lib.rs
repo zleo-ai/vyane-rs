@@ -41,7 +41,9 @@ pub use target::{
     Protocol, ProviderId, Sandbox, Secret, Target,
 };
 pub use task::{Effort, GenParams, TaskSpec};
-pub use traits::{ChatClient, Harness, HarnessJob, HarnessOutcome, Ledger, SessionStore};
+pub use traits::{
+    ChatClient, Harness, HarnessJob, HarnessOutcome, HarnessStreamEvent, Ledger, SessionStore,
+};
 
 /// Re-exported so downstream crates use the same cancellation primitive.
 pub use tokio_util::sync::CancellationToken;
