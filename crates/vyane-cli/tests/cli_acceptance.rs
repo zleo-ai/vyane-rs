@@ -728,3 +728,103 @@ fn help_lists_all_commands() {
         assert!(help.contains(cmd), "help text must list command '{cmd}'");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Review pipeline end-to-end
+// ---------------------------------------------------------------------------
+
+/// Mock that returns different answers based on which step the request is for.
+/// The review pipeline sends 3 types of prompts:
+/// 1. implement: the raw task text
+/// 2. review: contains "Review this implementation"
+/// 3. synthesize: contains "Synthesize these independent"
+async fn mock_review_pipeline(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(|req: &Request| {
+            let body = String::from_utf8_lossy(&req.body);
+            let answer = if body.contains("Synthesize") {
+                "APPROVE: implementation looks correct"
+            } else if body.contains("Review this implementation") {
+                "No issues found"
+            } else {
+                "def sort(arr): return sorted(arr)"
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-review",
+                "model": "test-model",
+                "choices": [{
+                    "message": { "role": "assistant", "content": answer },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+            }))
+        })
+        .mount(server)
+        .await;
+}
+
+/// `vyane review` runs the full three-step pipeline (implement → review →
+/// synthesize) and produces a completed workflow outcome.
+#[tokio::test]
+async fn review_pipeline_runs_three_steps_end_to_end() {
+    let server = MockServer::start().await;
+    mock_review_pipeline(&server).await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &config_for(&server));
+
+    let output = vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "review",
+            "implement a sorting function",
+            "--implementer",
+            "review",
+            "--reviewers",
+            "review,review", // 2 reviewers (same profile, different identity)
+            "--synthesizer",
+            "review",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let outcome: Value = serde_json::from_slice(&output).expect("review outcome json");
+    assert_eq!(outcome["status"], "completed");
+
+    // All three steps must be present in the journal.
+    let steps = &outcome["journal"]["steps"];
+    assert!(steps.get("implement").is_some(), "implement step exists");
+    assert!(steps.get("review").is_some(), "review step exists");
+    assert!(steps.get("synthesize").is_some(), "synthesize step exists");
+
+    // The synthesize step should have output.
+    let synth_output = steps["synthesize"]["output"]
+        .as_str()
+        .or_else(|| {
+            steps["synthesize"]["outputs"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|item| item["output"].as_str())
+        })
+        .unwrap_or("");
+    assert!(
+        synth_output.contains("APPROVE") || !synth_output.is_empty(),
+        "synthesize produced output"
+    );
+
+    // A workflow journal should have been written.
+    let wf_run_id = outcome["wf_run_id"].as_str().expect("wf_run_id");
+    let journal_path = data_dir
+        .path()
+        .join("workflows")
+        .join(format!("{wf_run_id}.json"));
+    assert!(journal_path.exists(), "review workflow journal exists");
+}
