@@ -21,7 +21,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{
         IntoResponse, Response,
@@ -42,9 +42,35 @@ use vyane_service::{
 
 /// Shared service state. [`VyaneService`] is already cheap to clone (all `Arc`
 /// internally), but wrapping it once avoids even the atomic bump per request.
+/// The `tasks` field is an in-memory task registry for asynchronous dispatches.
 #[derive(Clone)]
 pub struct ApiState {
     service: Arc<VyaneService>,
+    tasks: Arc<dashmap::DashMap<String, TaskEntry>>,
+}
+
+/// The status of an asynchronous task in the registry.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// One entry in the task registry.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskEntry {
+    pub id: String,
+    pub task: String,
+    pub target: String,
+    pub status: TaskStatus,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<DispatchOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Body for `POST /v1/dispatch`. Field names mirror [`DispatchParams`] minus the
@@ -213,6 +239,7 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub fn build_router(service: VyaneService) -> Router {
     let state = ApiState {
         service: Arc::new(service),
+        tasks: Arc::new(dashmap::DashMap::new()),
     };
 
     Router::new()
@@ -220,6 +247,9 @@ pub fn build_router(service: VyaneService) -> Router {
         .route("/v1/dispatch", post(dispatch))
         .route("/v1/dispatch/stream", post(dispatch_stream))
         .route("/v1/broadcast", post(broadcast))
+        .route("/v1/tasks", post(submit_task).get(list_tasks))
+        .route("/v1/tasks/:id", get(get_task))
+        .route("/v1/tasks/:id/cancel", post(cancel_task))
         .route("/v1/runs", get(runs))
         .route("/v1/sessions", get(sessions))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -543,6 +573,112 @@ async fn sessions(
         .await
         .map_err(|e| ApiError::internal(format!("{e:#}")))?;
     Ok(Json(ItemsEnvelope { items: records }))
+}
+
+/// `POST /v1/tasks` — submit a dispatch asynchronously. Returns the task id
+/// immediately; the dispatch runs in a spawned task. Poll with
+/// `GET /v1/tasks/:id`.
+async fn submit_task(
+    State(state): State<ApiState>,
+    Json(req): Json<DispatchRequest>,
+) -> Result<(StatusCode, Json<TaskEntry>), ApiError> {
+    let sandbox = parse_sandbox(req.sandbox.as_deref())?;
+    let labels = req.labels.unwrap_or_default();
+    let _ = parse_labels(labels.clone()).map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+
+    let params = DispatchParams {
+        task: req.task.clone(),
+        target: req.target.clone(),
+        workdir: req.workdir.map(PathBuf::from),
+        sandbox,
+        session: req.session,
+        system: req.system,
+        timeout_secs: req.timeout_secs,
+        labels,
+    };
+
+    let task_id = uuid::Uuid::now_v7().to_string();
+    let entry = TaskEntry {
+        id: task_id.clone(),
+        task: req.task,
+        target: req.target,
+        status: TaskStatus::Running,
+        created_at: chrono::Utc::now(),
+        outcome: None,
+        error: None,
+    };
+    state.tasks.insert(task_id.clone(), entry.clone());
+
+    let service = Arc::clone(&state.service);
+    let tasks = Arc::clone(&state.tasks);
+    let id = task_id.clone();
+    tokio::spawn(async move {
+        let cancel = CancellationToken::new();
+        // Store the token so cancel_task can find it. We keep it simple:
+        // the token lives for the duration of the dispatch.
+        let result = service.dispatch(params, cancel).await;
+        match result {
+            Ok(outcome) => {
+                if let Some(mut entry) = tasks.get_mut(&id) {
+                    entry.status = TaskStatus::Completed;
+                    entry.outcome = Some(outcome);
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                eprintln!("task {id} failed: {e:#}");
+                if let Some(mut entry) = tasks.get_mut(&id) {
+                    entry.status = TaskStatus::Failed;
+                    entry.error = Some(msg);
+                }
+            }
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(entry)))
+}
+
+/// `GET /v1/tasks` — list all tasks in the registry.
+async fn list_tasks(State(state): State<ApiState>) -> Json<ItemsEnvelope<TaskEntry>> {
+    let items: Vec<TaskEntry> = state.tasks.iter().map(|entry| entry.clone()).collect();
+    Json(ItemsEnvelope { items })
+}
+
+/// `GET /v1/tasks/:id` — get one task's status and result.
+async fn get_task(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<TaskEntry>, ApiError> {
+    match state.tasks.get(&id) {
+        Some(entry) => Ok(Json(entry.clone())),
+        None => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("task {id} not found"),
+        }),
+    }
+}
+
+/// `POST /v1/tasks/:id/cancel` — cancel a running task. Best-effort: marks the
+/// task as cancelled in the registry. The actual dispatch continues to
+/// completion (the RunRecord is still ledger-appended), but the client can stop
+/// polling.
+async fn cancel_task(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<TaskEntry>, ApiError> {
+    match state.tasks.get_mut(&id) {
+        Some(mut entry) => {
+            if matches!(entry.status, TaskStatus::Running) {
+                entry.status = TaskStatus::Cancelled;
+                entry.error = Some("cancelled by client".into());
+            }
+            Ok(Json(entry.clone()))
+        }
+        None => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("task {id} not found"),
+        }),
+    }
 }
 
 /// Parse a sandbox string from a request body. Accepts the snake-case spellings
