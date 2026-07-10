@@ -17,14 +17,19 @@
 //! * Endpoint injection is via env (Claude Code reads these): base URL, an
 //!   auth-token or api-key var chosen by [`AuthStyle`], and a model var.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use vyane_core::error::{ErrorKind, Result, VyaneError};
 use vyane_core::target::{AuthStyle, Endpoint, HarnessKind, Sandbox};
-use vyane_core::traits::{Harness, HarnessJob, HarnessOutcome};
+use vyane_core::traits::{Harness, HarnessJob, HarnessOutcome, HarnessStreamEvent};
 
 use crate::parse::parse_claude_json;
-use crate::spawn::{Termination, env_key_list, materialize_env, parent_env_snapshot, run_capture};
+use crate::spawn::{
+    RunResult, Termination, env_key_list, materialize_env, parent_env_snapshot, run_capture,
+    run_stream_capture,
+};
 
 /// Environment variables Claude Code reads for a custom endpoint. Public Claude
 /// Code documentation names these; see the crate-level notes.
@@ -73,6 +78,67 @@ impl ClaudeCodeHarness {
         Self {
             bin: bin.into(),
             parent_env: Some(parent_env),
+        }
+    }
+
+    /// Build the materialized child environment for a job (shared by run + run_stream).
+    fn build_env(&self, job: &HarnessJob) -> BTreeMap<String, String> {
+        let mut policy = job.env.clone();
+        for (k, v) in endpoint_injections(job.endpoint.as_ref()) {
+            policy.inject.insert(k, v);
+        }
+        if !job.model.as_str().is_empty() && job.endpoint.is_some() {
+            policy
+                .inject
+                .entry(ENV_MODEL.into())
+                .or_insert_with(|| job.model.as_str().to_string());
+        }
+        let parent_env = self.parent_env.clone().unwrap_or_else(parent_env_snapshot);
+        materialize_env(&policy, parent_env)
+    }
+
+    /// Classify a RunResult into a HarnessOutcome or error (shared by run + run_stream).
+    fn classify_result(&self, result: RunResult) -> Result<HarnessOutcome> {
+        match result.termination {
+            Termination::Cancelled => Err(VyaneError::cancelled()),
+            Termination::TimedOut => Err(VyaneError::new(
+                ErrorKind::Timeout,
+                "claude-code harness timed out",
+            )),
+            Termination::Exited(code) => {
+                if code == 0 {
+                    let parsed = parse_claude_json(&result.stdout);
+                    if parsed.is_error {
+                        return Err(VyaneError::new(
+                            ErrorKind::HarnessFailed,
+                            format!(
+                                "claude-code returned error envelope{}: {}",
+                                parsed
+                                    .subtype
+                                    .as_deref()
+                                    .map(|s| format!(" ({s})"))
+                                    .unwrap_or_default(),
+                                parsed.text
+                            ),
+                        ));
+                    }
+                    Ok(HarnessOutcome {
+                        text: parsed.text,
+                        native_session_id: parsed.native_session_id,
+                        usage: parsed.usage,
+                        exit_code: code,
+                        duration: result.duration,
+                    })
+                } else {
+                    Err(VyaneError::new(
+                        ErrorKind::HarnessFailed,
+                        format!(
+                            "claude-code exited with code {code}: {}",
+                            stderr_tail(&result.stderr)
+                        ),
+                    ))
+                }
+            }
         }
     }
 }
@@ -151,6 +217,39 @@ pub(crate) fn build_argv(job: &HarnessJob) -> Vec<String> {
     args
 }
 
+/// Build argv for streaming mode: identical to [`build_argv`] but uses
+/// `--output-format stream-json` instead of `json`, so the CLI emits NDJSON
+/// events (one per line) instead of a single JSON object.
+pub(crate) fn build_stream_argv(job: &HarnessJob) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-p".into(),
+        job.prompt.clone(),
+        "--output-format".into(),
+        "stream-json".into(),
+    ];
+
+    if !job.model.as_str().is_empty() {
+        args.push("--model".into());
+        args.push(job.model.as_str().to_string());
+    }
+
+    args.extend(sandbox_args(job.sandbox));
+
+    if let Some(dir) = &job.workdir {
+        args.push("--add-dir".into());
+        args.push(dir.display().to_string());
+    }
+
+    if let Some(id) = &job.resume {
+        if !id.is_empty() {
+            args.push("--resume".into());
+            args.push(id.clone());
+        }
+    }
+
+    args
+}
+
 /// Compute endpoint env-var injections for Claude Code from `job.endpoint`.
 ///
 /// Returns `(key, value)` pairs to layer onto the [`EnvPolicy`] inject set.
@@ -187,27 +286,8 @@ impl Harness for ClaudeCodeHarness {
 
     async fn run(&self, job: HarnessJob, cancel: CancellationToken) -> Result<HarnessOutcome> {
         let argv = build_argv(&job);
+        let env = self.build_env(&job);
 
-        // Materialize the child env: scrubbed baseline + policy inject, then the
-        // endpoint injections (base URL / auth / model). Injection wins; we do
-        // NOT hand the parent env through — that's the whole point of the scrub.
-        let mut policy = job.env.clone();
-        for (k, v) in endpoint_injections(job.endpoint.as_ref()) {
-            policy.inject.insert(k, v);
-        }
-        // Also surface the model to the CLI via env when a model id is present
-        // (belt-and-suspenders alongside `--model`; harmless if unused).
-        if !job.model.as_str().is_empty() && job.endpoint.is_some() {
-            policy
-                .inject
-                .entry(ENV_MODEL.into())
-                .or_insert_with(|| job.model.as_str().to_string());
-        }
-
-        let parent_env = self.parent_env.clone().unwrap_or_else(parent_env_snapshot);
-        let env = materialize_env(&policy, parent_env);
-
-        // Log argv + env KEYS only — never the prompt or any injected value.
         tracing::debug!(
             harness = "claude-code",
             argc = argv.len(),
@@ -225,49 +305,85 @@ impl Harness for ClaudeCodeHarness {
         )
         .await?;
 
-        match result.termination {
-            Termination::Cancelled => Err(VyaneError::cancelled()),
-            Termination::TimedOut => Err(VyaneError::new(
-                ErrorKind::Timeout,
-                "claude-code harness timed out",
-            )),
-            Termination::Exited(code) => {
-                if code == 0 {
-                    let parsed = parse_claude_json(&result.stdout);
-                    if parsed.is_error {
-                        return Err(VyaneError::new(
-                            ErrorKind::HarnessFailed,
-                            format!(
-                                "claude-code returned error envelope{}: {}",
-                                parsed
-                                    .subtype
-                                    .as_deref()
-                                    .map(|s| format!(" ({s})"))
-                                    .unwrap_or_default(),
-                                parsed.text
-                            ),
-                        ));
+        self.classify_result(result)
+    }
+
+    async fn run_stream(
+        &self,
+        job: HarnessJob,
+        cancel: CancellationToken,
+        on_event: Box<dyn FnMut(HarnessStreamEvent) + Send + Sync>,
+    ) -> Result<HarnessOutcome> {
+        let argv = build_stream_argv(&job);
+        let env = self.build_env(&job);
+
+        tracing::debug!(
+            harness = "claude-code",
+            mode = "stream",
+            argc = argv.len(),
+            env_keys = %env_key_list(&env),
+            "spawning claude-code harness (streaming)"
+        );
+
+        // Wrap on_event in Arc<Mutex> so the line callback can call it.
+        let on_event = std::sync::Arc::new(tokio::sync::Mutex::new(on_event));
+
+        let result = run_stream_capture(
+            &self.bin,
+            &argv,
+            job.workdir.as_deref(),
+            &env,
+            &cancel,
+            job.timeout,
+            {
+                let on_event = std::sync::Arc::clone(&on_event);
+                Box::new(move |line: &str| {
+                    let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
+                        return;
+                    };
+                    let event_type = json["type"].as_str().unwrap_or("");
+                    let events: Vec<HarnessStreamEvent> = match event_type {
+                        "assistant" => {
+                            let mut deltas = Vec::new();
+                            if let Some(content) = json["message"]["content"].as_array() {
+                                for block in content {
+                                    if block["type"] == "text" {
+                                        if let Some(text) = block["text"].as_str() {
+                                            if !text.is_empty() {
+                                                deltas.push(HarnessStreamEvent::Delta(
+                                                    text.to_string(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            deltas
+                        }
+                        "tool_use" => {
+                            vec![HarnessStreamEvent::ToolUse {
+                                name: json["name"].as_str().unwrap_or("unknown").to_string(),
+                                summary: json["input"]
+                                    .as_str()
+                                    .map(String::from)
+                                    .unwrap_or_else(|| json["input"].to_string()),
+                            }]
+                        }
+                        _ => vec![],
+                    };
+                    if !events.is_empty() {
+                        if let Ok(mut cb) = on_event.try_lock() {
+                            for event in events {
+                                cb(event);
+                            }
+                        }
                     }
-                    Ok(HarnessOutcome {
-                        text: parsed.text,
-                        native_session_id: parsed.native_session_id,
-                        usage: parsed.usage,
-                        exit_code: code,
-                        duration: result.duration,
-                    })
-                } else {
-                    // Ran but exited non-zero → HarnessFailed. Include a short,
-                    // value-free stderr tail for diagnosis.
-                    Err(VyaneError::new(
-                        ErrorKind::HarnessFailed,
-                        format!(
-                            "claude-code exited with code {code}: {}",
-                            stderr_tail(&result.stderr)
-                        ),
-                    ))
-                }
-            }
-        }
+                })
+            },
+        )
+        .await?;
+
+        self.classify_result(result)
     }
 }
 
