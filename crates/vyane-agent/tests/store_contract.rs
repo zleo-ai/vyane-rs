@@ -45,10 +45,6 @@ fn digest(byte: char) -> String {
     std::iter::repeat_n(byte, 64).collect()
 }
 
-fn private_tempdir() -> TempDir {
-    TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
-}
-
 fn worker(id: &str, logical_session_id: Option<&str>) -> NewWorker {
     NewWorker {
         id: id.into(),
@@ -111,7 +107,7 @@ fn complete(store: &dyn AgentStore, owner: &str, claimed: &vyane_agent::ClaimedR
 }
 
 fn store() -> (TempDir, Arc<TestClock>, SqliteAgentStore) {
-    let directory = private_tempdir();
+    let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(TestClock::new());
     let store =
         SqliteAgentStore::open_with_clock(directory.path().join("agent.sqlite"), clock.clone())
@@ -1549,7 +1545,7 @@ fn clock_rollback_never_regresses_records_events_or_projection_time() {
 fn database_files_are_private_without_mutating_existing_parent() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let directory = private_tempdir();
+    let directory = TempDir::new().unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
     let path = directory.path().join("agent.sqlite");
     let store = SqliteAgentStore::open(&path).unwrap();
@@ -1593,7 +1589,7 @@ fn database_files_are_private_without_mutating_existing_parent() {
 fn database_and_sidecar_symlinks_fail_closed() {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-    let directory = private_tempdir();
+    let directory = TempDir::new().unwrap();
     let victim = directory.path().join("victim");
     std::fs::write(&victim, b"unchanged").unwrap();
     let database_link = directory.path().join("linked.sqlite");
@@ -1636,7 +1632,7 @@ fn database_and_sidecar_symlinks_fail_closed() {
 fn existing_database_files_with_permissive_modes_fail_closed() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let directory = private_tempdir();
+    let directory = TempDir::new().unwrap();
     let database = directory.path().join("agent.sqlite");
     drop(SqliteAgentStore::open(&database).unwrap());
 
