@@ -61,17 +61,13 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: |
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            # Several CLI fixtures exercise process-global POSIX locking from
-            # independent Tokio runtimes. Keep each fixture's internal
-            # concurrency, but do not overlap separate CLI fixtures on macOS.
-            # Other packages retain normal scheduling (including paused-time
-            # tests that rely on Tokio's automatic clock advancement).
-            cargo test --workspace --exclude vyane-cli
-            cargo test -p vyane-cli -- --test-threads=1
-          else
-            cargo test --workspace
-          fi
+          # Several CLI fixtures exercise process-global POSIX locking from
+          # independent Tokio runtimes. Keep each fixture's internal
+          # concurrency, but do not overlap separate CLI fixtures. Other
+          # packages retain normal scheduling (including paused-time tests
+          # that rely on Tokio's automatic clock advancement).
+          cargo test --workspace --exclude vyane-cli
+          cargo test -p vyane-cli -- --test-threads=1
 
   coverage:
     runs-on: ubuntu-latest
@@ -91,4 +87,8 @@ jobs:
 
       # Measurement only for now: report the summary, no threshold gate.
       - name: Coverage summary
-        run: cargo llvm-cov --workspace --summary-only
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report --workspace --exclude vyane-cli
+          cargo llvm-cov --no-report -p vyane-cli -- --test-threads=1
+          cargo llvm-cov report --summary-only
