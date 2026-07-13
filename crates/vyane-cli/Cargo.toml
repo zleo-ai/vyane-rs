@@ -24,6 +24,7 @@ vyane-ledger = { workspace = true }
 vyane-workflow = { workspace = true }
 vyane-service = { workspace = true }
 vyane-mcp = { workspace = true }
+vyane-message = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

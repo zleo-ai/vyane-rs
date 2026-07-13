@@ -9,8 +9,8 @@ use serde_json::json;
 use tempfile::TempDir;
 use vyane_message::{
     ClaimQuery, DeliveryMailbox, DeliveryStatus, EndpointKind, EndpointRef, IdempotencyKey,
-    LeaseRequest, MessageClock, MessageDirection, MessagePublicationStatus, MessageStore,
-    MessageStoreError, NackDisposition, NewDelivery, NewMessage, NewTransportReceipt,
+    LeaseRequest, MailboxQuery, MessageClock, MessageDirection, MessagePublicationStatus,
+    MessageStore, MessageStoreError, NackDisposition, NewDelivery, NewMessage, NewTransportReceipt,
     SqliteMessageStore,
 };
 
@@ -128,6 +128,13 @@ fn claim_one(
         .unwrap()
 }
 
+fn exact_lease(consumer: &str) -> LeaseRequest {
+    LeaseRequest {
+        consumer: consumer.into(),
+        lease_seconds: 30,
+    }
+}
+
 #[test]
 fn enqueue_restart_dedupe_and_body_free_events() {
     let (directory, _clock, store) = test_store();
@@ -161,6 +168,156 @@ fn enqueue_restart_dedupe_and_body_free_events() {
     assert!(!serde_json::to_string(&events).unwrap().contains(canary));
     let raw = std::fs::read(directory.path().join("messages.sqlite3")).unwrap();
     assert!(String::from_utf8_lossy(&raw).contains(canary));
+}
+
+#[test]
+fn mailbox_listing_is_owner_target_due_and_limit_scoped() {
+    let (_directory, _clock, store) = test_store();
+    let first = store
+        .enqueue("alice", &message("first", "first body", "worker-a"))
+        .unwrap();
+    let second = store
+        .enqueue("alice", &message("second", "second body", "worker-a"))
+        .unwrap();
+    store
+        .enqueue("alice", &message("other-mailbox", "hidden", "worker-b"))
+        .unwrap();
+    store
+        .enqueue("bob", &message("other-owner", "hidden", "worker-a"))
+        .unwrap();
+    let mut future = message("future", "future body", "worker-a");
+    future.deliveries[0].available_at = Some(timestamp(60));
+    let future = store.enqueue("alice", &future).unwrap();
+
+    let page = store
+        .list_mailbox(
+            "alice",
+            &mailbox("worker-a"),
+            &MailboxQuery {
+                limit: 1,
+                ..MailboxQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert!(page.has_more);
+    assert_eq!(page.items[0].message.id, first.bundle.message.id);
+
+    let all_due = store
+        .list_mailbox("alice", &mailbox("worker-a"), &MailboxQuery::default())
+        .unwrap();
+    assert_eq!(
+        all_due
+            .items
+            .iter()
+            .map(|item| item.message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            first.bundle.message.id.as_str(),
+            second.bundle.message.id.as_str()
+        ]
+    );
+
+    let with_future = store
+        .list_mailbox(
+            "alice",
+            &mailbox("worker-a"),
+            &MailboxQuery {
+                include_future: true,
+                ..MailboxQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(with_future.items.len(), 3);
+    assert_eq!(with_future.items[2].message.id, future.bundle.message.id);
+    let bob = store
+        .list_mailbox("bob", &mailbox("worker-a"), &MailboxQuery::default())
+        .unwrap();
+    assert_eq!(bob.items.len(), 1);
+    assert_eq!(bob.items[0].message.owner, "bob");
+}
+
+#[test]
+fn exact_claim_fails_closed_and_acknowledged_messages_are_opt_in() {
+    let (_directory, _clock, store) = test_store();
+    let sent = store
+        .enqueue("alice", &message("exact", "body", "worker-a"))
+        .unwrap();
+    let message_id = &sent.bundle.message.id;
+
+    assert!(
+        store
+            .claim_message(
+                "alice",
+                &mailbox("worker-b"),
+                message_id,
+                &exact_lease("reader")
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .claim_message(
+                "bob",
+                &mailbox("worker-a"),
+                message_id,
+                &exact_lease("reader")
+            )
+            .unwrap()
+            .is_none()
+    );
+
+    let claimed = store
+        .claim_message(
+            "alice",
+            &mailbox("worker-a"),
+            message_id,
+            &exact_lease("reader"),
+        )
+        .unwrap()
+        .unwrap();
+    store
+        .mark_delivered("alice", &mailbox("worker-a"), &claimed.receipt)
+        .unwrap();
+    let acknowledged = store
+        .acknowledge("alice", &mailbox("worker-a"), &claimed.receipt)
+        .unwrap();
+    assert_eq!(acknowledged.status, DeliveryStatus::Acknowledged);
+    assert!(
+        store
+            .claim_message(
+                "alice",
+                &mailbox("worker-a"),
+                message_id,
+                &exact_lease("reader")
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .list_mailbox("alice", &mailbox("worker-a"), &MailboxQuery::default())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let history = store
+        .list_mailbox(
+            "alice",
+            &mailbox("worker-a"),
+            &MailboxQuery {
+                include_acknowledged: true,
+                ..MailboxQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(history.items.len(), 1);
+    assert_eq!(history.items[0].message.id, *message_id);
+    assert_eq!(
+        history.items[0].delivery.status,
+        DeliveryStatus::Acknowledged
+    );
 }
 
 #[test]

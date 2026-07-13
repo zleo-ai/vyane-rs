@@ -847,6 +847,48 @@ pub struct MessagePage {
     pub next_cursor: Option<MessageCursor>,
 }
 
+/// Bounded filters for one exact delivery mailbox.
+///
+/// Terminal failures and cancelled or expired deliveries are never returned.
+/// Acknowledged deliveries and not-yet-due deliveries are opt-in so the
+/// ordinary inbox remains an actionable view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxQuery {
+    pub include_acknowledged: bool,
+    pub include_future: bool,
+    pub limit: usize,
+}
+
+impl Default for MailboxQuery {
+    fn default() -> Self {
+        Self {
+            include_acknowledged: false,
+            include_future: false,
+            limit: 100,
+        }
+    }
+}
+
+impl MailboxQuery {
+    pub(crate) fn validate(&self) -> Result<()> {
+        validate_limit(self.limit, "mailbox page limit")
+    }
+}
+
+/// One immutable message paired with its mailbox-specific delivery state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailboxMessage {
+    pub message: MessageRecord,
+    pub delivery: DeliveryRecord,
+}
+
+/// A stable, bounded mailbox page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailboxPage {
+    pub items: Vec<MailboxMessage>,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageEvent {
     pub sequence: u64,

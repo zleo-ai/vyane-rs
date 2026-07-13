@@ -51,11 +51,93 @@ pub enum Command {
     /// Run and control the authenticated local workflow daemon.
     #[command(subcommand)]
     Daemon(DaemonCommand),
+    /// Use a local SQLite inbox; this is not authenticated A2A protocol transport.
+    #[command(subcommand)]
+    A2a(A2aCommand),
     /// Run the MCP server over stdio (for use as an MCP tool server).
     Mcp,
     /// Internal: execute a detached run. Not for direct use.
     #[command(name = "__worker", hide = true)]
     Worker(WorkerArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum A2aCommand {
+    /// Queue one local message for an agent mailbox.
+    Send(A2aSendArgs),
+    /// List one local agent mailbox without changing delivery state.
+    Inbox(A2aInboxArgs),
+    /// Deliver one exact mailbox message, then acknowledge after stdout flushes.
+    Read(A2aReadArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct A2aCommonArgs {
+    /// SQLite message database; defaults to the standard Vyane data directory.
+    #[arg(long, value_name = "PATH")]
+    pub db: Option<PathBuf>,
+    /// Caller-selected local storage scope; not authenticated authority.
+    #[arg(long, alias = "owner-user-id", default_value = "local")]
+    pub owner: String,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct A2aSendArgs {
+    #[command(flatten)]
+    pub common: A2aCommonArgs,
+    /// Recipient agent mailbox id.
+    pub to: String,
+    /// Message body words; stdin is read when omitted.
+    #[arg(num_args = 0..)]
+    pub body: Vec<String>,
+    /// Caller-supplied sender label; not an authenticated identity.
+    #[arg(long = "from", alias = "from-code", value_name = "AGENT")]
+    pub from: String,
+    /// Message kind, such as message, handoff, or review.
+    #[arg(long, default_value = "message")]
+    pub kind: String,
+    /// Delay delivery by this many whole seconds.
+    #[arg(long, value_name = "SECONDS")]
+    pub delay_seconds: Option<u64>,
+    /// Optional conversation/thread id.
+    #[arg(long = "thread-id", alias = "conversation", value_name = "ID")]
+    pub thread_id: Option<String>,
+    /// Optional trace id.
+    #[arg(long, value_name = "ID")]
+    pub trace_id: Option<String>,
+    /// Payload item as KEY=VALUE or a JSON object; repeatable.
+    #[arg(long, value_name = "ITEM")]
+    pub payload: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct A2aInboxArgs {
+    #[command(flatten)]
+    pub common: A2aCommonArgs,
+    /// Recipient agent mailbox id.
+    pub to: String,
+    /// Include acknowledged messages.
+    #[arg(long)]
+    pub include_read: bool,
+    /// Include messages whose availability time is still in the future.
+    #[arg(long)]
+    pub include_future: bool,
+    /// Maximum number of rows to return.
+    #[arg(long, default_value_t = 100)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct A2aReadArgs {
+    #[command(flatten)]
+    pub common: A2aCommonArgs,
+    /// Recipient agent mailbox id. Required to prevent cross-mailbox reads.
+    pub to: String,
+    /// Exact message id to acknowledge.
+    pub message_id: String,
 }
 
 #[derive(Debug, Subcommand)]

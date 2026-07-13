@@ -101,12 +101,12 @@ reference implementation.
 | replayable owner-scoped event store | `vyane-ledger` | [~] storage/cursors, bounded message and AgentRun lifecycle projection, explicit owner-bound projection-only service assembly, and an unwired resident broker driver now exist; dispatch/workflow producers, subscription, retention and a unified timeline remain |
 | durable, secret-free task metadata | `vyane-task` | [x] schema v2 keys snapshots, events and CAS by `(owner,id)` with transactional v1 migration; built-in frontends still select explicit `local` |
 | durable owner-scoped AgentRun queue, worker topology and recovery truth | `vyane-agent` | [~] exact leases/deadlines, logical/native-session-id and policy-digest-fenced resume, non-serializable active permits, atomic native-scope revalidation, bounded tree cancel, body-free completion receipts/outbox, durable projection deferral/quarantine, and a three-loop in-process resident supervisor exist; no concrete product operation, production host, Process/Remote integration or public execution API exists |
-| owner-scoped transactional message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO, delayed/idempotent delivery, fenced leases, TTL, ack/nack, body-free outbox, external-receipt reconciliation, and hidden staged completion publication exist |
-| bounded replay-safe delivery broker + body-free EventLog projectors | `vyane-broker` | [~] fake-adapter contracts, message/AgentRun lifecycle projection with stable source event IDs, and the explicit non-`Clone` `ResidentBrokerSupervisor` library driver exist; no service/CLI/daemon production assembly, worker/message glue, or A2A/Channels adapters exist yet |
+| owner-scoped transactional message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO, delayed/idempotent delivery, fenced leases, TTL, ack/nack, body-free outbox, external-receipt reconciliation, hidden staged completion publication, bounded mailbox pages, and exact mailbox claim exist |
+| bounded replay-safe delivery broker + body-free EventLog projectors | `vyane-broker` | [~] fake-adapter contracts, message/AgentRun lifecycle projection with stable source event IDs, and the explicit non-`Clone` `ResidentBrokerSupervisor` library driver exist; no service/daemon production assembly, worker/message glue, or remote A2A/Channels adapters exist yet |
 | declarative workflow engine (DAG + journal/resume/replay) | `vyane-workflow` | [x] exact-plan replay creates a new run and reuses a journal-recorded all-success prefix |
 | resident workflow daemon (authenticated local submit/status/cancel) | `vyane-cli` | [x] |
 | detached background runs (`--detach` + `task` commands) | `vyane-cli` | [x] |
-| CLI (check / dispatch / broadcast / history / session / sessions / workflow / task / daemon) | `vyane-cli` | [x] revision-aware `session list/inspect/reset-native`; legacy `sessions` remains compatible |
+| CLI (check / dispatch / broadcast / history / session / sessions / workflow / task / daemon / a2a) | `vyane-cli` | [x] revision-aware `session list/inspect/reset-native`, plus local `a2a send/inbox/read`; legacy `sessions` remains compatible |
 | shared service layer | `vyane-service` | [x] `OwnerContextFactory` authenticates and resolves a reserved-local-safe authority; `OwnerScopedService` freezes dispatch/stream/query/session/reset. Optional AgentRun components include a paired in-process backend, exact message-completion sink, and resident execution/recovery/publication supervisor; ordinary dispatch starts none of them |
 | **REST API** (`vyane serve` — dispatch/broadcast/runs/sessions/health) | `vyane-cli` + `axum` | [x] per-start bearer capability, loopback Host/Origin enforcement, non-loopback bind rejection, allowlisted views, and one assembly-frozen local service scope; the bearer still is not a distinct principal or hostile same-UID/multi-user boundary |
 | **MCP server** (`vyane mcp` — six tools) | `vyane-mcp` + `rmcp` | [x] dispatch/broadcast/history/sessions plus two bounded diagnostics: `route` preview and static-only `check`; generic success output has a 1 MiB cap |
@@ -318,6 +318,35 @@ uniform field-level input budgets. If execution completed but detail exceeded
 the ceiling, dispatch/broadcast returns bounded run receipts with
 `operation_status="completed"` and `detail_omitted=true`; callers must not retry
 those receipts as though execution failed.
+
+### Local A2A inbox
+
+The CLI exposes the transactional message store as a same-machine durable
+inbox:
+
+```sh
+vyane a2a send reviewer --from builder --kind review "ready for review" --json
+vyane a2a inbox reviewer --json
+vyane a2a read reviewer <message-id> --json
+```
+
+`inbox` is non-mutating. `read` requires the recipient mailbox as well as the
+message id, then uses the existing fenced claim → delivered → acknowledged
+state machine. It writes and flushes the full response before acknowledging;
+write failure remains reclaimable, while a crash after flush can produce a
+duplicate instead of message loss. Its JSON payload is therefore a pre-ack
+`delivered` snapshot; exit status zero confirms the subsequent acknowledgement.
+`--delay-seconds`, `--include-future`, `--include-read`,
+`--limit`, `--owner` (alias `--owner-user-id`), and `--db` provide explicit
+local control. The default database is the standard `messages.sqlite3` below
+the Vyane data directory.
+
+This is not an A2A HTTP implementation. It has no Agent Card, discovery,
+remote send/get/cancel, SSE, push, or Channels adapter. `--owner` and `--from`
+are supplied by the caller: the former is a logical storage scope and the
+latter is only a sender label, not authenticated principal authority or
+identity. Do not expose this CLI directly as a hostile multi-user service.
+See [WP-59](docs/plan/WP-59.md) for the exact boundary.
 
 ### REST API
 
