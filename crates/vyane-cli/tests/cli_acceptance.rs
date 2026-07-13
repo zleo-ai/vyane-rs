@@ -653,6 +653,96 @@ async fn workflow_run_and_list_work_end_to_end() {
 }
 
 #[tokio::test]
+async fn workflow_replay_creates_a_new_run_without_reexecuting_recorded_successes() {
+    let server = MockServer::start().await;
+    mock_openai_workflow(&server).await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &config_for(&server));
+    let workflow = write_workflow(
+        &config_dir,
+        r#"
+        [workflow]
+        name = "replay-cli"
+
+        [[step]]
+        id = "draft"
+        target = "review"
+        prompt = "draft"
+
+        [[step]]
+        id = "review"
+        needs = ["draft"]
+        target = "review"
+        prompt = "review {{steps.draft.output}}"
+        "#,
+    );
+
+    let first = vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["workflow", "run"])
+        .arg(&workflow)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first: Value = serde_json::from_slice(&first).expect("first workflow json");
+    let source_id = first["wf_run_id"].as_str().expect("source id");
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded source workflow requests")
+            .len(),
+        2
+    );
+
+    let replay_output = vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["workflow", "replay", source_id, "--file"])
+        .arg(&workflow)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let replay: Value =
+        serde_json::from_slice(&replay_output.stdout).expect("replay workflow json");
+    let replay_event: Value =
+        serde_json::from_slice(&replay_output.stderr).expect("replay id event");
+    assert_eq!(replay_event["event"], "workflow_replay_id");
+    assert_eq!(replay_event["source_workflow_run_id"], first["wf_run_id"]);
+    assert_eq!(replay_event["workflow_run_id"], replay["wf_run_id"]);
+    assert_eq!(replay["status"], "completed");
+    assert_ne!(replay["wf_run_id"], first["wf_run_id"]);
+    assert_eq!(
+        replay["journal"]["replay"]["source_wf_run_id"],
+        first["wf_run_id"]
+    );
+    assert_eq!(
+        replay["journal"]["replay"]["reused_step_ids"],
+        json!(["draft", "review"])
+    );
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded replay workflow requests")
+            .len(),
+        2,
+        "replay must not repeat journal-recorded all-success calls"
+    );
+}
+
+#[tokio::test]
 async fn workflow_auto_target_resolves_after_render_and_records_route() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "workflow auto").await;

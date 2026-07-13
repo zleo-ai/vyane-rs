@@ -800,6 +800,209 @@ async fn programmatic_workflow_split_continuations_use_derived_source_digest() {
 }
 
 #[tokio::test]
+async fn replay_creates_new_run_and_reuses_only_dependency_closed_successful_prefix() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "exact-replay"
+
+        [[step]]
+        id = "a"
+        target = "a"
+        prompt = "a"
+
+        [[step]]
+        id = "b"
+        needs = ["a"]
+        target = "b"
+        prompt = "b {{steps.a.output}}"
+        on_error = "continue"
+
+        [[step]]
+        id = "c"
+        needs = ["b"]
+        target = "c"
+        prompt = "c"
+        "#,
+    );
+    let source_factory = MockFactory::new()
+        .on("a", Behaviour::Succeed("A".into()))
+        .on("b", Behaviour::Fail(ErrorKind::Protocol))
+        .on("c", Behaviour::Succeed("C".into()));
+    let (source_engine, source_probe) = workflow_engine(
+        source_factory,
+        MockResolver::with_targets(&["a", "b", "c"]),
+        &journal_dir,
+    );
+    let source = source_engine
+        .run(&wf, BTreeMap::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(source.status, WorkflowRunStatus::CompletedWithFailures);
+    assert_eq!(source_probe.call_count("a"), 1);
+    assert_eq!(source_probe.call_count("b"), 1);
+    assert_eq!(source_probe.call_count("c"), 0);
+    let source_bytes = std::fs::read(&source.journal_path).unwrap();
+
+    let replay_factory = MockFactory::new()
+        .on("b", Behaviour::Succeed("B".into()))
+        .on("c", Behaviour::Succeed("C".into()));
+    let (replay_engine, replay_probe) = workflow_engine(
+        replay_factory,
+        MockResolver::with_targets(&["a", "b", "c"]),
+        &journal_dir,
+    );
+    let replay = replay_engine
+        .replay(source.wf_run_id.as_str(), &wf, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(replay.status, WorkflowRunStatus::Completed);
+    assert_ne!(replay.wf_run_id, source.wf_run_id);
+    assert_eq!(std::fs::read(&source.journal_path).unwrap(), source_bytes);
+    assert_eq!(replay_probe.call_count("a"), 0);
+    assert_eq!(replay_probe.call_count("b"), 1);
+    assert_eq!(replay_probe.call_count("c"), 1);
+    assert_eq!(replay.journal.steps["a"].output.as_deref(), Some("A"));
+    let provenance = replay.journal.replay.as_ref().unwrap();
+    assert_eq!(provenance.source_wf_run_id, source.wf_run_id);
+    assert_eq!(provenance.reused_step_ids, ["a"]);
+    assert_eq!(provenance.reused_steps_sha256.len(), 64);
+}
+
+#[tokio::test]
+async fn replay_rejects_digest_drift_and_existing_identity_before_resolution_or_dispatch() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "replay-gates"
+        [[step]]
+        id = "only"
+        target = "ok"
+        prompt = "run"
+        "#,
+    );
+    let (source_engine, _) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        &journal_dir,
+    );
+    let source = source_engine
+        .run(&wf, BTreeMap::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    let source_bytes = std::fs::read(&source.journal_path).unwrap();
+
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let factory = factory_ok();
+    let probe = factory.probe();
+    let engine = WorkflowEngine::new(
+        dispatcher(factory.into_arc()),
+        Arc::new(CountingResolver {
+            calls: Arc::clone(&resolver_calls),
+            inner: MockResolver::with_targets(&["ok"]),
+        }),
+        journal_dir.clone(),
+    );
+    let mut changed = wf.compile_plan().unwrap();
+    changed.plan_sha256 = "0".repeat(64);
+    let error = engine
+        .replay_plan(
+            source.wf_run_id.as_str(),
+            &changed,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("digest does not match"));
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.call_count("ok"), 0);
+
+    let error = engine
+        .replay_with_id(
+            source.wf_run_id.clone(),
+            source.wf_run_id.as_str(),
+            &wf,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("new run identity"));
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read(&source.journal_path).unwrap(), source_bytes);
+}
+
+#[tokio::test]
+async fn replay_reruns_a_fan_out_step_when_any_recorded_target_failed() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "fan-out-replay"
+        [[step]]
+        id = "fan"
+        fan_out = ["good", "bad"]
+        prompt = "fan"
+        "#,
+    );
+    let source_factory = MockFactory::new()
+        .on("good", Behaviour::Succeed("G".into()))
+        .on("bad", Behaviour::Fail(ErrorKind::Protocol));
+    let (source_engine, _) = workflow_engine(
+        source_factory,
+        MockResolver::with_targets(&["good", "bad"]),
+        &journal_dir,
+    );
+    let source = source_engine
+        .run(&wf, BTreeMap::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(source.status, WorkflowRunStatus::Completed);
+    assert!(
+        source.journal.steps["fan"]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|output| !output.ok)
+    );
+
+    let replay_factory = MockFactory::new()
+        .on("good", Behaviour::Succeed("G2".into()))
+        .on("bad", Behaviour::Succeed("B2".into()));
+    let (replay_engine, replay_probe) = workflow_engine(
+        replay_factory,
+        MockResolver::with_targets(&["good", "bad"]),
+        &journal_dir,
+    );
+    let replay = replay_engine
+        .replay(source.wf_run_id.as_str(), &wf, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(replay.status, WorkflowRunStatus::Completed);
+    assert_eq!(replay_probe.call_count("good"), 1);
+    assert_eq!(replay_probe.call_count("bad"), 1);
+    assert!(
+        replay
+            .journal
+            .replay
+            .as_ref()
+            .unwrap()
+            .reused_step_ids
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn workflow_run_preserves_prepare_and_execute_validation_phases() {
     let dir = TempDir::new().unwrap();
     let wf = workflow_from(

@@ -30,8 +30,8 @@ bounded graph, source-digest and recovery properties. Calling both operations
 3. Continuation has two named operations:
    - **resume** keeps the same run identity and journal, requires an exact
      versioned source bundle, and reruns only admissible non-successful work;
-   - **replay/fork** creates a new run identity and may reuse a verified matching
-     prefix from a prior run before continuing live.
+   - **replay/fork** creates a new run identity and may reuse an accepted
+     journal-recorded matching prefix from a prior run before continuing live.
 4. Daemon restart does not imply either operation. Automatic payload replay
    remains fail-closed until a separate encrypted/retained payload policy and
    explicit admission contract exist.
@@ -49,8 +49,12 @@ bounded graph, source-digest and recovery properties. Calling both operations
   arbitrary JavaScript is declarative TOML.
 - Existing same-journal resume remains valid, while original prefix replay gets
   an unambiguous new-run operation.
-- EXE-06 and CON-03 remain `different` until the shared plan and compatibility
-  acceptance scenarios are implemented.
+- [WP-58](../plan/WP-58.md) implements the first exact-plan replay/fork slice:
+  a terminal source produces a new UUIDv7 journal and reuses only its
+  dependency-closed, journal-recorded all-success prefix. Changed-plan call matching and the
+  compatibility frontend remain open.
+- EXE-06 and CON-03 remain `different` until the remaining compatibility and
+  cross-implementation acceptance scenarios are implemented.
 - The repository-local effort contract is delivered, but it does not establish
   cross-implementation parity or a production-complete model-tier policy.
 
@@ -62,6 +66,6 @@ bounded graph, source-digest and recovery properties. Calling both operations
   fixtures either produce equivalent plans/results or an explicit unsupported
   report.
 - Resume tests cover source, prompt-file, policy and target drift plus concurrent
-  CAS; replay tests prove a new run id and verified call-prefix reuse.
+  CAS; replay tests prove a new run id and journal-recorded call-prefix reuse.
 - No restart path persists or replays prompt/source payload merely because a
   metadata row is queued or interrupted.

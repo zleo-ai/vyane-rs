@@ -500,8 +500,14 @@ the caller, prove provenance, or grant authority. The embedded capability
 manifest is only a requested pre-resolution summary and must not replace target
 resolution or runtime admission.
 
+[WP-58](plan/WP-58.md) adds exact-plan replay/fork as a distinct new-run
+operation. A terminal source journal is read-only; a create-only UUIDv7 journal
+copies its dependency-closed, journal-recorded all-success prefix and then
+executes the remaining suffix live. This is explicit foreground continuation, never daemon
+restart replay.
+
 Dynamic control flow, nested workflows, shared budgets, a compatibility
-frontend, replay/fork, public CLI/REST/MCP plan transport, sanitized
+frontend, changed-plan call matching, public CLI/REST/MCP plan transport, sanitized
 cross-implementation route fixtures, and a production-complete model-tier
 policy remain open.
 

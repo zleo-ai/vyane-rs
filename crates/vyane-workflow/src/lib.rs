@@ -18,7 +18,7 @@ pub use engine::{StepEvent, WorkflowEngine, WorkflowObserver};
 pub use error::{ValidationReport, WorkflowError, WorkflowResult};
 pub use journal::{
     JournalStep, JournalStepStatus, JournalTargetOutput, WorkflowJournal, WorkflowJournalSummary,
-    WorkflowRunId, WorkflowRunIdError, list_journals, read_journal,
+    WorkflowReplayProvenance, WorkflowRunId, WorkflowRunIdError, list_journals, read_journal,
 };
 pub use model::{
     OnError, StepTargets, Workflow, WorkflowOutcome, WorkflowRouteHints, WorkflowRunStatus,
