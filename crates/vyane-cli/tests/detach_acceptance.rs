@@ -14,7 +14,9 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+#[cfg(target_os = "linux")]
 use vyane_core::{HarnessKind, ModelId, Protocol, ProviderId, SessionRecord, SessionStore, Target};
+#[cfg(target_os = "linux")]
 use vyane_ledger::FsSessionStore;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -96,6 +98,7 @@ fn guarded_auto_config_for(server: &MockServer) -> String {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn harness_config() -> String {
     r#"
         [providers.native]
@@ -1759,7 +1762,7 @@ fn unix_pid_alive(pid: i32) -> bool {
     result.is_ok() || matches!(result, Err(rustix::io::Errno::PERM))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn unix_signal_pid(pid: i32, signal: i32) {
     let pid = rustix::process::Pid::from_raw(pid).expect("positive worker pid");
     let signal = rustix::process::Signal::from_named_raw(signal).expect("named signal");
