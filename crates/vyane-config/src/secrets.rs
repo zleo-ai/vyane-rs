@@ -87,11 +87,11 @@ mod tests {
 
     #[test]
     fn parses_key_value_lines_ignoring_blanks_and_comments() {
-        let text = "\n# a comment\nFOO_KEY=bar\n\nBAZ_KEY=qux=with-equals\n";
+        let text = "\n# a comment\nFOO_SETTING=bar\n\nBAZ_SETTING=qux=with-equals\n";
         let parsed = parse_secrets(text, Path::new("secrets.env")).unwrap();
-        assert_eq!(parsed.get("FOO_KEY").map(String::as_str), Some("bar"));
+        assert_eq!(parsed.get("FOO_SETTING").map(String::as_str), Some("bar"));
         assert_eq!(
-            parsed.get("BAZ_KEY").map(String::as_str),
+            parsed.get("BAZ_SETTING").map(String::as_str),
             Some("qux=with-equals")
         );
         assert_eq!(parsed.len(), 2);

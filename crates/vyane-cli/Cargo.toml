@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 vyane-core = { workspace = true }
+vyane-task = { workspace = true }
 vyane-config = { workspace = true }
 vyane-protocol = { workspace = true }
 vyane-harness = { workspace = true }
@@ -29,33 +30,34 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 futures = { workspace = true }
+fs4 = { workspace = true }
+getrandom = { workspace = true }
 async-stream = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 axum = { workspace = true }
+reqwest = { workspace = true }
 tower = { workspace = true }
-tower-http = { workspace = true }
 dashmap = "6"
+
+[target.'cfg(unix)'.dependencies]
+command-fds = { workspace = true }
+nix = { version = "=0.28.0", default-features = false, features = ["fs"] }
+process-wrap = { version = "=8.0.2", default-features = false, features = ["std", "tokio1", "process-session"] }
+rustix = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
+vyane-provider = { workspace = true }
+vyane-router = { workspace = true }
 wiremock = { workspace = true }
 
-# Crate-local lints: the workspace denies `unsafe_code`, but vyane-cli — like
-# vyane-harness — is pre-approved to use `unsafe` strictly for detached-worker
-# process control: the `setsid(2)` `pre_exec` hook that puts each worker in its
-# own process group, and the `kill(2)` calls that group-signal a worker on
-# `task cancel` and probe worker liveness for orphan detection. These are the
-# only `unsafe` blocks in the crate; every one carries a SAFETY comment. All
-# other lints mirror the workspace configuration.
-[lints.rust]
-unsafe_code = "allow"
-
-[lints.clippy]
-unwrap_used = "warn"
+[lints]
+workspace = true

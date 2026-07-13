@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
 use serde_json::{Value, json};
 use vyane_core::{
-    AuthMaterial, AuthStyle, ChatClient, ChatMessage, ChatRequest, Effort, Endpoint, ErrorKind,
-    GenParams, ModelId, Secret, StreamEvent, Usage,
+    AssistantContentPart, AssistantToolTurn, AuthMaterial, AuthStyle, ChatClient, ChatMessage,
+    ChatRequest, Effort, Endpoint, ErrorKind, GenParams, ModelId, ModelToolCall, Secret,
+    StreamEvent, ToolCallArguments, ToolChatLimits, ToolChatMessage, ToolChatRequest, ToolChoice,
+    ToolDefinition, ToolResultMessage, Usage,
 };
 use vyane_protocol::{
     AnthropicMessagesClient, ClientOptions, OpenAiChatClient, OpenAiResponsesClient, RetryConfig,
@@ -42,6 +45,45 @@ fn request() -> ChatRequest {
             temperature: Some(0.2),
             top_p: Some(0.9),
             max_output_tokens: Some(32),
+            effort: Some(Effort::Low),
+            extra: serde_json::Map::new(),
+        },
+    }
+}
+
+fn tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "read_file".into(),
+        description: "Read one workspace file".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]
+        }),
+    }
+}
+
+fn prior_tool_call(id: &str) -> ModelToolCall {
+    ModelToolCall {
+        id: id.into(),
+        name: "read_file".into(),
+        arguments: ToolCallArguments::Object(BTreeMap::from([(
+            "path".into(),
+            Value::String("README.md".into()),
+        )])),
+    }
+}
+
+fn tool_request(messages: Vec<ToolChatMessage>) -> ToolChatRequest {
+    ToolChatRequest {
+        model: ModelId::new("model-example"),
+        messages,
+        tools: vec![tool_definition()],
+        tool_choice: ToolChoice::Auto,
+        params: GenParams {
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+            max_output_tokens: Some(64),
             effort: Some(Effort::Low),
             extra: serde_json::Map::new(),
         },
@@ -103,6 +145,644 @@ async fn openai_chat_complete_success_parses_outcome_and_request() {
     assert_eq!(body["messages"][0]["content"], "system prompt");
     assert_eq!(body["max_tokens"], 32);
     assert_eq!(body["reasoning_effort"], "low");
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_chat_complete_rejects_top_level_refusal_in_legacy_text_mode() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "refusal": "policy refusal"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+    let error = client.complete(request()).await.unwrap_err();
+
+    assert_eq!(error.kind, ErrorKind::Protocol);
+    assert_eq!(
+        error.message,
+        "OpenAI chat response contained a refusal that legacy text cannot represent"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_chat_complete_rejects_refusal_content_part_in_legacy_text_mode() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "refusal", "refusal": "policy refusal"}]
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+    let error = client.complete(request()).await.unwrap_err();
+
+    assert_eq!(error.kind, ErrorKind::Protocol);
+    assert_eq!(
+        error.message,
+        "OpenAI chat response contained a refusal that legacy text cannot represent"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_chat_complete_keeps_plain_text_content_parts_working() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "plain "},
+                        {"type": "text", "text": "answer"}
+                    ]
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+    let outcome = client.complete(request()).await.unwrap();
+
+    assert_eq!(outcome.text, "plain answer");
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_wires_definitions_choice_and_exact_history() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "model-echo",
+            "choices": [{
+                "message": {"role": "assistant", "content": "finished"},
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+    let mut req = tool_request(vec![
+        ToolChatMessage::system("system prompt"),
+        ToolChatMessage::user("inspect"),
+        ToolChatMessage::Assistant(AssistantToolTurn {
+            text: String::new(),
+            content_parts: Vec::new(),
+            reasoning: Some("need the file".into()),
+            refusal: None,
+            tool_calls: vec![prior_tool_call("call-1")],
+        }),
+        ToolChatMessage::ToolResult(ToolResultMessage {
+            tool_call_id: "call-1".into(),
+            content: "file body".into(),
+            is_error: false,
+        }),
+    ]);
+    req.tool_choice = ToolChoice::Named("read_file".into());
+
+    let outcome = client.complete_turn(req).await.unwrap();
+    assert_eq!(outcome.assistant.text, "finished");
+    assert!(outcome.assistant.tool_calls.is_empty());
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: Value = requests[0].body_json().unwrap();
+    assert_eq!(body["tools"][0]["type"], "function");
+    assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+    assert_eq!(
+        body["tools"][0]["function"]["parameters"]["required"][0],
+        "path"
+    );
+    assert_eq!(body["tool_choice"]["type"], "function");
+    assert_eq!(body["tool_choice"]["function"]["name"], "read_file");
+    assert_eq!(body["messages"][2]["role"], "assistant");
+    assert!(body["messages"][2]["content"].is_null());
+    assert_eq!(body["messages"][2]["reasoning_content"], "need the file");
+    assert_eq!(body["messages"][2]["tool_calls"][0]["id"], "call-1");
+    assert_eq!(
+        body["messages"][2]["tool_calls"][0]["function"]["arguments"],
+        r#"{"path":"README.md"}"#
+    );
+    assert_eq!(body["messages"][3]["role"], "tool");
+    assert_eq!(body["messages"][3]["tool_call_id"], "call-1");
+    assert_eq!(body["max_tokens"], 64);
+    assert_eq!(body["reasoning_effort"], "low");
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_parses_text_reasoning_multi_calls_and_invalid_json() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "model-echo",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "working",
+                    "reasoning_content": "need two reads",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"README.md\"}"
+                            }
+                        },
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{not-json"
+                            }
+                        },
+                        {
+                            "id": "call-3",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"first\",\"path\":\"second\"}"
+                            }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7}
+        })))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+    let outcome = client
+        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.assistant.text, "working");
+    assert_eq!(
+        outcome.assistant.reasoning.as_deref(),
+        Some("need two reads")
+    );
+    assert_eq!(outcome.assistant.tool_calls.len(), 3);
+    assert!(matches!(
+        &outcome.assistant.tool_calls[0].arguments,
+        ToolCallArguments::Object(arguments)
+            if arguments.get("path") == Some(&Value::String("README.md".into()))
+    ));
+    assert!(matches!(
+        &outcome.assistant.tool_calls[1].arguments,
+        ToolCallArguments::InvalidJson { raw } if raw == "{not-json"
+    ));
+    assert!(matches!(
+        &outcome.assistant.tool_calls[2].arguments,
+        ToolCallArguments::InvalidJson { raw }
+            if raw == "{\"path\":\"first\",\"path\":\"second\"}"
+    ));
+    assert_eq!(outcome.finish_reason.as_deref(), Some("tool_calls"));
+    assert_eq!(outcome.usage.unwrap().input_tokens, 11);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_rejects_missing_duplicate_and_oversized_call_ids() {
+    let invalid_ids = vec![
+        vec![json!({
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"}
+        })],
+        vec![
+            json!({
+                "id": "same",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"}
+            }),
+            json!({
+                "id": "same",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"}
+            }),
+        ],
+        vec![json!({
+            "id": "x".repeat(257),
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"}
+        })],
+    ];
+
+    for tool_calls in invalid_ids {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": tool_calls
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let client =
+            OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+                .unwrap();
+        let error = client
+            .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn invalid_tool_conversation_fails_before_any_http_request() {
+    let server = MockServer::start().await;
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+    let request = tool_request(vec![
+        ToolChatMessage::user("inspect"),
+        ToolChatMessage::ToolResult(ToolResultMessage {
+            tool_call_id: "orphan".into(),
+            content: "no call".into(),
+            is_error: true,
+        }),
+    ]);
+
+    let error = client.complete_turn(request).await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_preserves_and_replays_structured_refusals() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "model-echo",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "cannot "},
+                        {"type": "refusal", "refusal": "policy block"},
+                        {"type": "text", "text": "comply"}
+                    ],
+                    "refusal": "top-level refusal"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+    let outcome = client
+        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.assistant.text, "cannot comply");
+    assert_eq!(
+        outcome.assistant.content_parts,
+        vec![
+            AssistantContentPart::Text {
+                text: "cannot ".into()
+            },
+            AssistantContentPart::Refusal {
+                refusal: "policy block".into()
+            },
+            AssistantContentPart::Text {
+                text: "comply".into()
+            }
+        ]
+    );
+    assert_eq!(
+        outcome.assistant.refusal.as_deref(),
+        Some("top-level refusal")
+    );
+    assert!(outcome.assistant.has_refusal());
+
+    client
+        .complete_turn(tool_request(vec![
+            ToolChatMessage::user("inspect"),
+            ToolChatMessage::Assistant(outcome.assistant),
+            ToolChatMessage::user("continue"),
+        ]))
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let replay: Value = requests[1].body_json().unwrap();
+    assert_eq!(
+        replay["messages"][1]["content"],
+        json!([
+            {"type": "text", "text": "cannot "},
+            {"type": "refusal", "refusal": "policy block"},
+            {"type": "text", "text": "comply"}
+        ])
+    );
+    assert_eq!(replay["messages"][1]["refusal"], "top-level refusal");
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_rejects_bounded_sequences_before_normalization() {
+    let choices = vec![
+        json!({
+            "message": {"role": "assistant", "content": "ok"},
+            "finish_reason": "stop"
+        });
+        9
+    ];
+    let calls = (0..=ToolChatLimits::CALLS_PER_TURN)
+        .map(|index| {
+            json!({
+                "id": format!("call-{index}"),
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"}
+            })
+        })
+        .collect::<Vec<_>>();
+    let parts = vec![json!({"type": "text", "text": ""}); ToolChatLimits::CONTENT_PARTS + 1];
+    let bodies = vec![
+        json!({"choices": choices}),
+        json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": calls
+                }
+            }]
+        }),
+        json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": parts}
+            }]
+        }),
+    ];
+
+    for body in bodies {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let client =
+            OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+                .unwrap();
+
+        let error = client
+            .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_rejects_oversized_and_deep_arguments() {
+    let nesting = ToolChatLimits::JSON_DEPTH + 2;
+    let nested = format!("{}null{}", "[".repeat(nesting), "]".repeat(nesting));
+    let deep_arguments = format!(r#"{{"value":{nested}}}"#);
+    let argument_strings = [
+        "x".repeat(ToolChatLimits::ARGUMENT_BYTES + 1),
+        deep_arguments,
+    ];
+
+    for arguments in argument_strings {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": arguments}
+                        }]
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let client =
+            OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+                .unwrap();
+
+        let error = client
+            .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_shares_the_argument_node_budget_across_calls() {
+    let large_array = std::iter::repeat_n("null", 4_200)
+        .collect::<Vec<_>>()
+        .join(",");
+    let arguments = format!(r#"{{"values":[{large_array}]}}"#);
+    let calls = (0..ToolChatLimits::CALLS_PER_TURN)
+        .map(|index| {
+            json!({
+                "id": format!("call-{index}"),
+                "type": "function",
+                "function": {"name": "read_file", "arguments": arguments}
+            })
+        })
+        .collect::<Vec<_>>();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": calls
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+
+    let error = client
+        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Protocol);
+    assert!(error.message.contains("structural limits"));
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_reserved_extra_cannot_override_canonical_limits() {
+    let server = MockServer::start().await;
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+    let mut request = tool_request(vec![ToolChatMessage::user("inspect")]);
+    assert_eq!(request.params.max_output_tokens, Some(64));
+    request
+        .params
+        .extra
+        .insert("max_tokens".into(), json!(1_000_000));
+
+    let error = client.complete_turn(request).await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_remote_type_errors_do_not_echo_untrusted_input() {
+    let server = MockServer::start().await;
+    let untrusted_type = "bad\u{1}remote-type";
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": untrusted_type,
+                        "function": {"name": "read_file", "arguments": "{}"}
+                    }]
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+
+    let error = client
+        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Protocol);
+    assert_eq!(
+        error.message,
+        "OpenAI tool-chat response contained an unsupported tool-call type"
+    );
+    assert!(!error.message.contains(untrusted_type));
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_accepts_compatible_missing_tool_call_type() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+
+    let outcome = client
+        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .await
+        .unwrap();
+    assert_eq!(outcome.assistant.tool_calls.len(), 1);
+    assert_eq!(outcome.assistant.tool_calls[0].id, "call-1");
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn openai_tool_chat_rejects_a_present_non_assistant_role() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {"role": "tool", "content": "not an assistant"}
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+
+    let error = client
+        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Protocol);
+    assert_eq!(
+        error.message,
+        "OpenAI tool-chat response had a non-assistant message role"
+    );
 }
 
 #[tokio::test]

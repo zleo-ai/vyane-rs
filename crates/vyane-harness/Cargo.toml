@@ -1,6 +1,6 @@
 [package]
 name = "vyane-harness"
-description = "CLI harness adapters: Claude Code, Codex CLI — clean-env subprocess execution"
+description = "Clean-env coding CLI adapters and native permission-gated tool execution"
 keywords = ["ai", "llm", "orchestration", "cli", "process"]
 categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
@@ -14,21 +14,21 @@ vyane-core = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+regex = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-
-[dev-dependencies]
 tempfile = { workspace = true }
 
-# Crate-local lints: the workspace denies `unsafe_code`, but vyane-harness is
-# pre-approved by the orchestrator to use `unsafe` strictly for the
-# process-group `pre_exec` setup (`setsid`) needed to spawn each child in its
-# own group and kill the whole group on cancel/timeout. This is the ONLY
-# sanctioned `unsafe` in the workspace; every `unsafe` block carries a SAFETY
-# comment. All other lints mirror the workspace configuration.
-[lints.rust]
-unsafe_code = "allow"
+[target.'cfg(unix)'.dependencies]
+command-fds = { workspace = true }
+rustix = { workspace = true }
 
-[lints.clippy]
-unwrap_used = "warn"
+[dev-dependencies]
+serde = { workspace = true }
+static_assertions = { workspace = true }
+
+[lints]
+workspace = true

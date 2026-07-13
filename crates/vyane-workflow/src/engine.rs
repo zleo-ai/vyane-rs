@@ -5,17 +5,18 @@ use std::time::Duration;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Semaphore;
-use vyane_core::{CancellationToken, RunStatus, TaskSpec};
+use vyane_core::{CancellationToken, HarnessLifecycleReporter, RunStatus, TaskSpec};
 use vyane_kernel::Dispatcher;
 
 use crate::error::{WorkflowError, WorkflowResult};
 use crate::journal::{
-    JournalStep, JournalStepStatus, JournalTargetOutput, WorkflowJournal, journal_path,
-    read_journal, write_journal_atomic,
+    JournalStep, JournalStepStatus, JournalTargetOutput, WorkflowJournal, WorkflowRunId,
+    journal_path, read_journal, write_journal_atomic, write_journal_create_atomic,
 };
 use crate::model::{OnError, Workflow, WorkflowOutcome, WorkflowRunStatus};
+use crate::plan::{WorkflowPlan, WorkflowPlanStep};
 use crate::template::render_template_inner;
-use crate::validate::{ResolvedStepTargets, TargetResolver, ValidatedWorkflow, validate_workflow};
+use crate::validate::{ResolvedStepTargets, TargetResolver, ValidatedWorkflow, validate_plan};
 
 #[derive(Debug, Clone)]
 pub enum StepEvent {
@@ -51,6 +52,7 @@ pub struct WorkflowEngine {
     resolver: Arc<dyn TargetResolver>,
     journal_dir: PathBuf,
     observer: Option<Arc<dyn WorkflowObserver>>,
+    harness_lifecycle_reporter: Option<HarnessLifecycleReporter>,
 }
 
 impl WorkflowEngine {
@@ -64,11 +66,20 @@ impl WorkflowEngine {
             resolver,
             journal_dir,
             observer: None,
+            harness_lifecycle_reporter: None,
         }
     }
 
     pub fn with_observer(mut self, observer: Arc<dyn WorkflowObserver>) -> Self {
         self.observer = Some(observer);
+        self
+    }
+
+    /// Publish every CLI-harness sentinel owned by this workflow before its
+    /// start gate is released. Direct-HTTP steps carry the reporter harmlessly
+    /// but never invoke it.
+    pub fn with_harness_lifecycle_reporter(mut self, reporter: HarnessLifecycleReporter) -> Self {
+        self.harness_lifecycle_reporter = Some(reporter);
         self
     }
 
@@ -78,10 +89,132 @@ impl WorkflowEngine {
         vars: BTreeMap<String, String>,
         cancel: CancellationToken,
     ) -> WorkflowResult<WorkflowOutcome> {
-        let validated = validate_workflow(wf, &vars, self.resolver.as_ref())?;
-        let mut journal = WorkflowJournal::new(wf, vars);
-        write_journal_atomic(&self.journal_dir, &mut journal)?;
-        self.execute(wf, &validated, journal, cancel).await
+        let plan = wf.compile_plan()?;
+        self.run_plan(&plan, vars, cancel).await
+    }
+
+    pub async fn run_plan(
+        &self,
+        plan: &WorkflowPlan,
+        vars: BTreeMap<String, String>,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        self.run_plan_with_id(WorkflowRunId::generate(), plan, vars, cancel)
+            .await
+    }
+
+    /// Starts a workflow with an identity allocated by the caller.
+    ///
+    /// The supplied identity is also the journal identity, allowing a durable
+    /// task owner to allocate one UUIDv7 and use it end-to-end.
+    pub async fn run_with_id(
+        &self,
+        wf_run_id: WorkflowRunId,
+        wf: &Workflow,
+        vars: BTreeMap<String, String>,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        let plan = wf.compile_plan()?;
+        self.run_plan_with_id(wf_run_id, &plan, vars, cancel).await
+    }
+
+    pub async fn run_plan_with_id(
+        &self,
+        wf_run_id: WorkflowRunId,
+        plan: &WorkflowPlan,
+        vars: BTreeMap<String, String>,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        self.prepare_plan_with_id(wf_run_id.clone(), plan, vars)?;
+        self.run_prepared_plan(wf_run_id, plan, cancel).await
+    }
+
+    /// Validate a caller-owned workflow and durably create its initial journal.
+    ///
+    /// Resident supervisors use this split phase to make the journal durable
+    /// before publishing and releasing a tracked execution future. Calling it
+    /// twice for the same id remains an error: prepared runs are never replayed
+    /// implicitly.
+    pub fn prepare_run_with_id(
+        &self,
+        wf_run_id: WorkflowRunId,
+        wf: &Workflow,
+        vars: BTreeMap<String, String>,
+    ) -> WorkflowResult<()> {
+        let plan = wf.compile_plan()?;
+        self.prepare_plan_with_id(wf_run_id, &plan, vars)
+    }
+
+    pub fn prepare_plan_with_id(
+        &self,
+        wf_run_id: WorkflowRunId,
+        plan: &WorkflowPlan,
+        vars: BTreeMap<String, String>,
+    ) -> WorkflowResult<()> {
+        validate_plan(plan, &vars, self.resolver.as_ref())?;
+        let mut journal = WorkflowJournal::new_with_plan(wf_run_id, plan, vars);
+        write_journal_create_atomic(&self.journal_dir, &mut journal)
+    }
+
+    /// Execute a pristine journal created by [`Self::prepare_run_with_id`].
+    ///
+    /// This is deliberately not a resume API. Exact identity, v1 source hash,
+    /// and pristine step state are revalidated before any target dispatch.
+    pub async fn run_prepared(
+        &self,
+        wf_run_id: WorkflowRunId,
+        wf: &Workflow,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        let plan = wf.compile_plan()?;
+        let mut journal = read_journal(&self.journal_dir, wf_run_id.as_str())?;
+        validate_and_migrate_resume_hash(&mut journal, &plan.source_sha256, wf)?;
+        migrate_or_validate_plan_binding(&mut journal, &plan)?;
+        self.run_prepared_plan_from_journal(journal, &plan, cancel)
+            .await
+    }
+
+    pub async fn run_prepared_plan(
+        &self,
+        wf_run_id: WorkflowRunId,
+        plan: &WorkflowPlan,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        let journal = read_journal(&self.journal_dir, wf_run_id.as_str())?;
+        validate_journal_plan_binding(&journal, plan)?;
+        self.run_prepared_plan_from_journal(journal, plan, cancel)
+            .await
+    }
+
+    async fn run_prepared_plan_from_journal(
+        &self,
+        journal: WorkflowJournal,
+        plan: &WorkflowPlan,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        let wf_run_id = &journal.wf_run_id;
+        let expected_steps = plan
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let pristine = journal.status == WorkflowRunStatus::Running
+            && journal.steps.len() == expected_steps.len()
+            && journal.steps.iter().all(|(id, step)| {
+                expected_steps.contains(id.as_str())
+                    && step.status == JournalStepStatus::Pending
+                    && step.run_ids.is_empty()
+                    && step.output.is_none()
+                    && step.outputs.is_none()
+                    && step.error.is_none()
+            });
+        if !pristine {
+            return Err(WorkflowError::validation(vec![format!(
+                "prepared workflow journal `{wf_run_id}` is not pristine"
+            )]));
+        }
+        let validated = validate_plan(plan, &journal.vars, self.resolver.as_ref())?;
+        self.execute(plan, &validated, journal, cancel).await
     }
 
     pub async fn resume(
@@ -91,30 +224,50 @@ impl WorkflowEngine {
         cancel: CancellationToken,
     ) -> WorkflowResult<WorkflowOutcome> {
         let mut journal = read_journal(&self.journal_dir, wf_run_id)?;
-        if journal.file_sha256 != wf.file_sha256 {
-            return Err(WorkflowError::WorkflowHashChanged {
-                expected: journal.file_sha256,
-                actual: wf.file_sha256.clone(),
-            });
-        }
-        let validated = validate_workflow(wf, &journal.vars, self.resolver.as_ref())?;
+        let plan = wf.compile_plan()?;
+        validate_and_migrate_resume_hash(&mut journal, &plan.source_sha256, wf)?;
+        // Legacy journals may predate plan digests. Once a source-identical
+        // plan is compiled, bind it atomically with the resume rewrite.
+        migrate_or_validate_plan_binding(&mut journal, &plan)?;
+        self.resume_plan_from_journal(journal, &plan, cancel).await
+    }
+
+    pub async fn resume_plan(
+        &self,
+        wf_run_id: &str,
+        plan: &WorkflowPlan,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        let journal = read_journal(&self.journal_dir, wf_run_id)?;
+        validate_journal_plan_binding(&journal, plan)?;
+        self.resume_plan_from_journal(journal, plan, cancel).await
+    }
+
+    async fn resume_plan_from_journal(
+        &self,
+        mut journal: WorkflowJournal,
+        plan: &WorkflowPlan,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        let validated = validate_plan(plan, &journal.vars, self.resolver.as_ref())?;
         journal.status = WorkflowRunStatus::Running;
         for step in journal.steps.values_mut() {
             step.reset_for_rerun();
         }
-        for step in &wf.steps {
+        for step in &plan.steps {
             journal
                 .steps
                 .entry(step.id.clone())
                 .or_insert_with(JournalStep::pending);
         }
+        journal.plan_sha256 = Some(plan.plan_sha256.clone());
         write_journal_atomic(&self.journal_dir, &mut journal)?;
-        self.execute(wf, &validated, journal, cancel).await
+        self.execute(plan, &validated, journal, cancel).await
     }
 
     async fn execute(
         &self,
-        wf: &Workflow,
+        wf: &WorkflowPlan,
         validated: &ValidatedWorkflow,
         mut journal: WorkflowJournal,
         cancel: CancellationToken,
@@ -152,7 +305,7 @@ impl WorkflowEngine {
                     | JournalStepStatus::Cancelled
             )
         });
-        let semaphore = Arc::new(Semaphore::new(wf.max_concurrency.max(1)));
+        let semaphore = Arc::new(Semaphore::new(wf.max_concurrency.max(1) as usize));
         let mut futures = FuturesUnordered::new();
 
         loop {
@@ -190,7 +343,7 @@ impl WorkflowEngine {
                         .expect("validated step target should exist")
                         .clone();
                     let prompt = render_template_inner(
-                        step.prompt_template.as_deref().unwrap_or_default(),
+                        &step.prompt_template,
                         &wf.name,
                         &journal.vars,
                         &journal.steps,
@@ -206,18 +359,20 @@ impl WorkflowEngine {
                     running.insert(step_id.clone());
 
                     let dispatcher = Arc::clone(&self.dispatcher);
+                    let resolver = Arc::clone(&self.resolver);
                     let cancel = cancel.clone();
-                    let task = task_for_step(step, prompt);
-                    futures.push(tokio::spawn(async move {
+                    let task = task_for_step(step, prompt, self.harness_lifecycle_reporter.clone());
+                    futures.push(async move {
                         let _permit = permit;
                         let started = std::time::Instant::now();
-                        let result = run_step_dispatch(dispatcher, task, resolved, cancel).await;
+                        let result =
+                            run_step_dispatch(dispatcher, resolver, task, resolved, cancel).await;
                         FinishedStep {
                             step_id,
                             duration: started.elapsed(),
                             result,
                         }
-                    }));
+                    });
                 }
             }
 
@@ -225,22 +380,8 @@ impl WorkflowEngine {
                 break;
             }
 
-            let Some(joined) = futures.next().await else {
+            let Some(finished) = futures.next().await else {
                 break;
-            };
-            let finished = match joined {
-                Ok(finished) => finished,
-                Err(error) => FinishedStep {
-                    step_id: "<join-error>".to_string(),
-                    duration: Duration::ZERO,
-                    result: StepDispatchResult::Failed {
-                        run_ids: Vec::new(),
-                        output: None,
-                        outputs: None,
-                        error: format!("workflow step task join failed: {error}"),
-                        cancelled: false,
-                    },
-                },
             };
             running.remove(&finished.step_id);
 
@@ -449,6 +590,70 @@ impl WorkflowEngine {
     }
 }
 
+fn validate_and_migrate_resume_hash(
+    journal: &mut WorkflowJournal,
+    expected_source_sha256: &str,
+    workflow: &Workflow,
+) -> WorkflowResult<()> {
+    let matches_v1 = journal.file_sha256 == expected_source_sha256;
+    let matches_legacy = workflow
+        .legacy_file_sha256
+        .as_deref()
+        .is_some_and(|legacy| journal.file_sha256 == legacy);
+    if !matches_v1 && !matches_legacy {
+        return Err(WorkflowError::WorkflowHashChanged {
+            expected: journal.file_sha256.clone(),
+            actual: expected_source_sha256.to_string(),
+        });
+    }
+    // A legacy hash is accepted only after exact comparison. The caller writes
+    // this mutation with the first atomic resume rewrite; new journals always
+    // start on v1.
+    journal.file_sha256 = expected_source_sha256.to_string();
+    Ok(())
+}
+
+fn validate_journal_plan_binding(
+    journal: &WorkflowJournal,
+    plan: &WorkflowPlan,
+) -> WorkflowResult<()> {
+    plan.verify()?;
+    if journal.file_sha256 != plan.source_sha256 {
+        return Err(WorkflowError::WorkflowHashChanged {
+            expected: journal.file_sha256.clone(),
+            actual: plan.source_sha256.clone(),
+        });
+    }
+    let Some(expected) = journal.plan_sha256.as_deref() else {
+        return Err(WorkflowError::validation(vec![
+            "workflow journal is not bound to a plan digest".into(),
+        ]));
+    };
+    if expected != plan.plan_sha256 {
+        return Err(WorkflowError::validation(vec![
+            "workflow plan digest changed for continuation".into(),
+        ]));
+    }
+    Ok(())
+}
+
+fn migrate_or_validate_plan_binding(
+    journal: &mut WorkflowJournal,
+    plan: &WorkflowPlan,
+) -> WorkflowResult<()> {
+    plan.verify()?;
+    match journal.plan_sha256.as_deref() {
+        Some(expected) if expected != plan.plan_sha256 => Err(WorkflowError::validation(vec![
+            "workflow plan digest changed for continuation".into(),
+        ])),
+        Some(_) => Ok(()),
+        None => {
+            journal.plan_sha256 = Some(plan.plan_sha256.clone());
+            Ok(())
+        }
+    }
+}
+
 struct FinishedStep {
     step_id: String,
     duration: Duration,
@@ -472,12 +677,37 @@ enum StepDispatchResult {
 
 async fn run_step_dispatch(
     dispatcher: Arc<Dispatcher>,
-    task: TaskSpec,
+    resolver: Arc<dyn TargetResolver>,
+    mut task: TaskSpec,
     resolved: ResolvedStepTargets,
     cancel: CancellationToken,
 ) -> StepDispatchResult {
     match resolved {
-        ResolvedStepTargets::Single { chain, .. } => {
+        ResolvedStepTargets::Single { target, chain } => {
+            let chain = match chain {
+                Some(chain) => chain,
+                None => match resolver.resolve_for_task(&target, &mut task) {
+                    Ok(chain) if !chain.is_empty() => chain,
+                    Ok(_) => {
+                        return StepDispatchResult::Failed {
+                            run_ids: Vec::new(),
+                            output: None,
+                            outputs: None,
+                            error: format!("deferred target `{target}` resolved to an empty chain"),
+                            cancelled: false,
+                        };
+                    }
+                    Err(error) => {
+                        return StepDispatchResult::Failed {
+                            run_ids: Vec::new(),
+                            output: None,
+                            outputs: None,
+                            error: error.to_string(),
+                            cancelled: error.kind == vyane_core::ErrorKind::Cancelled,
+                        };
+                    }
+                },
+            };
             match dispatcher.dispatch(&task, chain, cancel).await {
                 Ok(outcome) if outcome.record.status == RunStatus::Success => {
                     StepDispatchResult::Succeeded {
@@ -570,13 +800,19 @@ async fn run_step_dispatch(
     }
 }
 
-fn task_for_step(step: &crate::model::WorkflowStep, prompt: String) -> TaskSpec {
+fn task_for_step(
+    step: &WorkflowPlanStep,
+    prompt: String,
+    harness_lifecycle_reporter: Option<HarnessLifecycleReporter>,
+) -> TaskSpec {
     let mut task = TaskSpec::new(prompt).with_sandbox(step.sandbox);
     task.system = step.system.clone();
-    task.workdir = step.workdir.clone();
-    task.timeout = step.timeout;
+    task.workdir = step.workdir.as_ref().map(PathBuf::from);
+    task.timeout = step.timeout.and_then(|timeout| timeout.to_duration().ok());
+    task.harness_lifecycle_reporter = harness_lifecycle_reporter;
     task.labels
         .insert("workflow.step".to_string(), step.id.clone());
+    step.route.apply_to_labels(&mut task.labels);
     task
 }
 
@@ -631,4 +867,57 @@ fn skip_dependents(
         }
     }
     out
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn workflow(v1: &str, legacy: Option<&str>) -> Workflow {
+        Workflow {
+            name: "hash-migration".into(),
+            description: None,
+            max_concurrency: 1,
+            steps: Vec::new(),
+            file_path: PathBuf::from("workflow.toml"),
+            legacy_file_sha256: legacy.map(str::to_string),
+            file_sha256: v1.into(),
+        }
+    }
+
+    #[test]
+    fn exact_legacy_resume_hash_is_migrated_to_v1() {
+        let workflow = workflow("v1-hash", Some("legacy-hash"));
+        let directory = tempfile::tempdir().unwrap();
+        let run_id = WorkflowRunId::generate();
+        let mut journal = WorkflowJournal::new_with_id(run_id.clone(), &workflow, BTreeMap::new());
+        journal.file_sha256 = "legacy-hash".into();
+        write_journal_create_atomic(directory.path(), &mut journal).unwrap();
+
+        let mut journal = read_journal(directory.path(), run_id.as_str()).unwrap();
+
+        validate_and_migrate_resume_hash(&mut journal, "v1-hash", &workflow).unwrap();
+        write_journal_atomic(directory.path(), &mut journal).unwrap();
+        let persisted = read_journal(directory.path(), run_id.as_str()).unwrap();
+
+        assert_eq!(journal.file_sha256, "v1-hash");
+        assert_eq!(persisted.file_sha256, "v1-hash");
+    }
+
+    #[test]
+    fn resume_hash_never_accepts_an_unrelated_or_missing_legacy_hash() {
+        for legacy in [Some("different-legacy"), None] {
+            let workflow = workflow("v1-hash", legacy);
+            let mut journal =
+                WorkflowJournal::new_with_id(WorkflowRunId::generate(), &workflow, BTreeMap::new());
+            journal.file_sha256 = "old-journal-hash".into();
+
+            let error =
+                validate_and_migrate_resume_hash(&mut journal, "v1-hash", &workflow).unwrap_err();
+
+            assert!(matches!(error, WorkflowError::WorkflowHashChanged { .. }));
+            assert_eq!(journal.file_sha256, "old-journal-hash");
+        }
+    }
 }

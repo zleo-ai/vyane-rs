@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! codex --ask-for-approval never [--model M] --sandbox <mode> [-c ...]
+//!       [-c model_reasoning_effort="E"]
 //!       exec --json -o <last-message-file> --skip-git-repo-check
 //!       --ignore-user-config -C <workdir> -- <prompt>
 //! ```
@@ -41,12 +42,15 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use vyane_core::error::{ErrorKind, Result, VyaneError};
 use vyane_core::target::{Endpoint, HarnessKind, Protocol, Sandbox};
-use vyane_core::traits::{Harness, HarnessJob, HarnessOutcome, HarnessStreamEvent};
+use vyane_core::traits::{
+    Harness, HarnessExecutionContext, HarnessJob, HarnessOutcome, HarnessStreamEvent,
+};
+use vyane_core::{HarnessSpawnAuthority, PinnedWorkdir};
 
 use crate::parse::{combine_codex, parse_codex_events};
 use crate::spawn::{
-    RunResult, Termination, env_key_list, materialize_env, parent_env_snapshot, run_capture,
-    run_stream_capture,
+    PINNED_WORKDIR_CHILD_PATH, RunControl, RunResult, Termination, env_key_list, materialize_env,
+    parent_env_snapshot, run_capture_with_pinned, run_stream_capture_with_pinned,
 };
 
 /// The Codex binary name (resolved via `PATH` at spawn time).
@@ -172,10 +176,20 @@ pub(crate) fn provider_config_args(
 /// harness reads it back. `protocol` drives the custom-provider `wire_api`.
 ///
 /// Pure function so an argv-echo fake CLI can assert it exactly.
+#[cfg(test)]
 pub(crate) fn build_argv(
     job: &HarnessJob,
     last_message_path: &str,
     protocol: Protocol,
+) -> Result<Vec<String>> {
+    build_argv_scoped(job, last_message_path, protocol, None)
+}
+
+fn build_argv_scoped(
+    job: &HarnessJob,
+    last_message_path: &str,
+    protocol: Protocol,
+    pinned_workdir: Option<&PinnedWorkdir>,
 ) -> Result<Vec<String>> {
     let mut args: Vec<String> = Vec::new();
 
@@ -191,6 +205,14 @@ pub(crate) fn build_argv(
     if !job.model.as_str().is_empty() {
         args.push("--model".into());
         args.push(job.model.as_str().to_string());
+    }
+
+    // Codex reads reasoning effort from a TOML config override. `Effort` is a
+    // closed enum whose string forms contain no quoting characters, so this is
+    // both a valid TOML string and the exact two-token `-c <key=value>` shape.
+    if let Some(effort) = job.params.effort {
+        args.push("-c".into());
+        args.push(format!("model_reasoning_effort=\"{}\"", effort.as_str()));
     }
 
     args.push("--sandbox".into());
@@ -215,7 +237,12 @@ pub(crate) fn build_argv(
     // Working root. On a fresh run pass `-C <workdir>`; on resume Codex reuses
     // the recorded session cwd, so `-C` is omitted to avoid conflicting with it.
     if !resuming {
-        if let Some(dir) = &job.workdir {
+        let workdir = if pinned_workdir.is_some() {
+            Some(std::path::PathBuf::from(PINNED_WORKDIR_CHILD_PATH))
+        } else {
+            job.workdir.clone()
+        };
+        if let Some(dir) = workdir {
             args.push("-C".into());
             args.push(dir.display().to_string());
         }
@@ -248,6 +275,158 @@ pub(crate) fn endpoint_injections(endpoint: Option<&Endpoint>) -> Vec<(String, S
     out
 }
 
+fn json_summary(value: Option<&serde_json::Value>) -> String {
+    value
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn tool_event(name: &str, summary: Option<&serde_json::Value>) -> HarnessStreamEvent {
+    HarnessStreamEvent::ToolUse {
+        name: name.to_string(),
+        summary: json_summary(summary),
+    }
+}
+
+fn codex_item_events(item: &serde_json::Value) -> Vec<HarnessStreamEvent> {
+    match item.get("type").and_then(serde_json::Value::as_str) {
+        Some("agent_message") => item
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(|text| vec![HarnessStreamEvent::Delta(text.to_string())])
+            .unwrap_or_default(),
+        Some("command_execution") => vec![tool_event("command_execution", item.get("command"))],
+        Some("file_change") => vec![tool_event("file_change", item.get("changes"))],
+        Some("mcp_tool_call") => {
+            let name = item
+                .get("tool")
+                .or_else(|| item.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("mcp_tool_call");
+            vec![tool_event(
+                name,
+                item.get("arguments").or_else(|| item.get("input")),
+            )]
+        }
+        Some("web_search") => vec![tool_event("web_search", item.get("query"))],
+        Some("function_call") | Some("tool_call") | Some("custom_tool_call") => {
+            let name = item
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            vec![tool_event(
+                name,
+                item.get("arguments").or_else(|| item.get("input")),
+            )]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn response_item_events(payload: &serde_json::Value) -> Vec<HarnessStreamEvent> {
+    match payload.get("type").and_then(serde_json::Value::as_str) {
+        Some("message") => payload
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|part| {
+                matches!(
+                    part.get("type").and_then(serde_json::Value::as_str),
+                    Some("output_text" | "text")
+                )
+                .then(|| part.get("text").and_then(serde_json::Value::as_str))
+                .flatten()
+                .filter(|text| !text.is_empty())
+                .map(|text| HarnessStreamEvent::Delta(text.to_string()))
+            })
+            .collect(),
+        Some("function_call") | Some("custom_tool_call") | Some("tool_call") => {
+            let name = payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            vec![tool_event(
+                name,
+                payload.get("arguments").or_else(|| payload.get("input")),
+            )]
+        }
+        Some("web_search_call") => vec![tool_event(
+            "web_search",
+            payload.get("action").or_else(|| payload.get("query")),
+        )],
+        Some("tool_search_call") => vec![tool_event(
+            "tool_search",
+            payload.get("arguments").or_else(|| payload.get("query")),
+        )],
+        _ => Vec::new(),
+    }
+}
+
+/// Convert one Codex `exec --json` line into live harness events.
+///
+/// Current Codex emits completed items as `{ type: "item.completed", item:
+/// {...} }`. Compatibility arms cover older internal `event_msg` and
+/// `response_item` envelopes without changing the authoritative final-answer
+/// path (`--output-last-message`).
+fn parse_stream_line(line: &str) -> Vec<HarnessStreamEvent> {
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Vec::new();
+    };
+
+    match event.get("type").and_then(serde_json::Value::as_str) {
+        Some("item.completed") => event.get("item").map(codex_item_events).unwrap_or_default(),
+        Some("event_msg") => {
+            let Some(payload) = event.get("payload") else {
+                return Vec::new();
+            };
+            match payload.get("type").and_then(serde_json::Value::as_str) {
+                Some("agent_message") => payload
+                    .get("message")
+                    .or_else(|| payload.get("text"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| vec![HarnessStreamEvent::Delta(text.to_string())])
+                    .unwrap_or_default(),
+                Some("exec_command_begin") => {
+                    vec![tool_event("exec_command", payload.get("command"))]
+                }
+                Some("patch_apply_begin") => {
+                    vec![tool_event("apply_patch", payload.get("changes"))]
+                }
+                Some("function_call") | Some("tool_call") => {
+                    let name = payload
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    vec![tool_event(name, payload.get("arguments"))]
+                }
+                _ => Vec::new(),
+            }
+        }
+        Some("response_item") => event
+            .get("payload")
+            .map(response_item_events)
+            .unwrap_or_default(),
+        Some("function_call") | Some("tool_call") => {
+            let name = event
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            vec![tool_event(name, event.get("arguments"))]
+        }
+        // Compatibility with early emitters that exposed the item directly.
+        Some("item") | Some("message") => codex_item_events(&event),
+        _ => Vec::new(),
+    }
+}
+
 #[async_trait]
 impl Harness for CodexCliHarness {
     fn kind(&self) -> HarnessKind {
@@ -259,13 +438,68 @@ impl Harness for CodexCliHarness {
     }
 
     async fn run(&self, job: HarnessJob, cancel: CancellationToken) -> Result<HarnessOutcome> {
+        self.run_with_context(job, None, None, cancel).await
+    }
+
+    async fn run_scoped(
+        &self,
+        job: HarnessJob,
+        context: HarnessExecutionContext,
+        cancel: CancellationToken,
+    ) -> Result<HarnessOutcome> {
+        self.run_with_context(
+            job,
+            context.pinned_workdir(),
+            context.spawn_authority(),
+            cancel,
+        )
+        .await
+    }
+
+    async fn run_stream(
+        &self,
+        job: HarnessJob,
+        cancel: CancellationToken,
+        on_event: Box<dyn FnMut(HarnessStreamEvent) + Send + Sync>,
+    ) -> Result<HarnessOutcome> {
+        self.run_stream_with_context(job, None, None, cancel, on_event)
+            .await
+    }
+
+    async fn run_stream_scoped(
+        &self,
+        job: HarnessJob,
+        context: HarnessExecutionContext,
+        cancel: CancellationToken,
+        on_event: Box<dyn FnMut(HarnessStreamEvent) + Send + Sync>,
+    ) -> Result<HarnessOutcome> {
+        self.run_stream_with_context(
+            job,
+            context.pinned_workdir(),
+            context.spawn_authority(),
+            cancel,
+            on_event,
+        )
+        .await
+    }
+}
+
+impl CodexCliHarness {
+    async fn run_with_context(
+        &self,
+        job: HarnessJob,
+        pinned_workdir: Option<&PinnedWorkdir>,
+        spawn_authority: Option<&HarnessSpawnAuthority>,
+        cancel: CancellationToken,
+    ) -> Result<HarnessOutcome> {
+        reject_pinned_resume(&job, pinned_workdir)?;
         // Per-run temp dir for the `--output-last-message` file. It is
         // self-contained and never touches the user's global Codex config.
         let tmp = RunTempDir::create("vyane-codex-")?;
         let last_message_path = tmp.path().join("last-message.txt");
         let last_message_str = last_message_path.to_string_lossy().to_string();
 
-        let argv = build_argv(&job, &last_message_str, job.protocol)?;
+        let argv = build_argv_scoped(&job, &last_message_str, job.protocol, pinned_workdir)?;
         let resuming = job.resume.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
         // On resume, Codex restores the native session cwd. Do not also set the
         // process cwd from the new job, or runtime cwd may diverge from argv.
@@ -290,7 +524,16 @@ impl Harness for CodexCliHarness {
             "spawning codex-cli harness"
         );
 
-        let result = run_capture(&self.bin, &argv, process_cwd, &env, &cancel, job.timeout).await?;
+        let result = run_capture_with_pinned(
+            &self.bin,
+            &argv,
+            process_cwd,
+            pinned_workdir,
+            &env,
+            RunControl::new(cancel, job.timeout, job.harness_lifecycle_reporter.clone())
+                .with_spawn_authority(spawn_authority.cloned()),
+        )
+        .await?;
 
         match result.termination {
             Termination::Cancelled => Err(VyaneError::cancelled()),
@@ -337,17 +580,20 @@ impl Harness for CodexCliHarness {
         }
     }
 
-    async fn run_stream(
+    async fn run_stream_with_context(
         &self,
         job: HarnessJob,
+        pinned_workdir: Option<&PinnedWorkdir>,
+        spawn_authority: Option<&HarnessSpawnAuthority>,
         cancel: CancellationToken,
         on_event: Box<dyn FnMut(HarnessStreamEvent) + Send + Sync>,
     ) -> Result<HarnessOutcome> {
+        reject_pinned_resume(&job, pinned_workdir)?;
         let tmp = RunTempDir::create("vyane-codex-")?;
         let last_message_path = tmp.path().join("last-message.txt");
         let last_message_str = last_message_path.to_string_lossy().to_string();
 
-        let argv = build_argv(&job, &last_message_str, job.protocol)?;
+        let argv = build_argv_scoped(&job, &last_message_str, job.protocol, pinned_workdir)?;
         let resuming = job.resume.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
         let process_cwd = if resuming {
             None
@@ -369,59 +615,43 @@ impl Harness for CodexCliHarness {
             "spawning codex-cli harness (streaming)"
         );
 
-        // Wrap on_event in Arc<Mutex> so the line callback can call it.
-        let on_event = std::sync::Arc::new(tokio::sync::Mutex::new(on_event));
+        // The stdout drain owns this callback and invokes it sequentially, so
+        // no mutex or lossy try_lock bridge is needed.
+        let mut on_event = on_event;
 
-        let result =
-            run_stream_capture(&self.bin, &argv, process_cwd, &env, &cancel, job.timeout, {
-                let on_event = std::sync::Arc::clone(&on_event);
-                Box::new(move |line: &str| {
-                    // Parse each NDJSON line for delta events.
-                    let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
-                        return;
-                    };
-                    let event_type = json["type"].as_str().unwrap_or("");
-                    let events: Vec<HarnessStreamEvent> = match event_type {
-                        "item" | "message" => {
-                            // Codex emits item events with content deltas.
-                            // The 'content' or 'text' field may carry incremental text.
-                            let mut deltas = Vec::new();
-                            if let Some(text) = json["content"].as_str() {
-                                if !text.is_empty() {
-                                    deltas.push(HarnessStreamEvent::Delta(text.to_string()));
-                                }
-                            }
-                            if let Some(text) = json["text"].as_str() {
-                                if !text.is_empty() {
-                                    deltas.push(HarnessStreamEvent::Delta(text.to_string()));
-                                }
-                            }
-                            deltas
-                        }
-                        "function_call" | "tool_call" => {
-                            vec![HarnessStreamEvent::ToolUse {
-                                name: json["name"].as_str().unwrap_or("unknown").to_string(),
-                                summary: json["arguments"]
-                                    .as_str()
-                                    .map(String::from)
-                                    .unwrap_or_else(|| json["arguments"].to_string()),
-                            }]
-                        }
-                        _ => vec![],
-                    };
-                    if !events.is_empty() {
-                        if let Ok(mut cb) = on_event.try_lock() {
-                            for event in events {
-                                cb(event);
-                            }
-                        }
-                    }
-                })
-            })
-            .await?;
+        let result = run_stream_capture_with_pinned(
+            &self.bin,
+            &argv,
+            process_cwd,
+            pinned_workdir,
+            &env,
+            RunControl::new(cancel, job.timeout, job.harness_lifecycle_reporter.clone())
+                .with_spawn_authority(spawn_authority.cloned()),
+            Box::new(move |line: &str| {
+                for event in parse_stream_line(line) {
+                    on_event(event);
+                }
+            }),
+        )
+        .await?;
 
         self.classify_result(result, &last_message_path).await
     }
+}
+
+fn reject_pinned_resume(job: &HarnessJob, pinned_workdir: Option<&PinnedWorkdir>) -> Result<()> {
+    if pinned_workdir.is_some()
+        && job
+            .resume
+            .as_ref()
+            .is_some_and(|session| !session.is_empty())
+    {
+        return Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            "codex-cli mutating resume requires an exact NativeSessionDomain",
+        ));
+    }
+    Ok(())
 }
 
 impl CodexCliHarness {
@@ -561,7 +791,7 @@ mod tests {
     use super::*;
     use vyane_core::env::EnvPolicy;
     use vyane_core::target::{AuthMaterial, AuthStyle, ModelId, Secret};
-    use vyane_core::task::GenParams;
+    use vyane_core::task::{Effort, GenParams};
 
     fn job(prompt: &str) -> HarnessJob {
         HarnessJob {
@@ -575,6 +805,7 @@ mod tests {
             resume: None,
             env: EnvPolicy::scrubbed(),
             timeout: None,
+            harness_lifecycle_reporter: None,
         }
     }
 
@@ -635,6 +866,37 @@ mod tests {
         let a = build_argv(&j, "/tmp/lm", Protocol::OpenaiResponses).unwrap();
         assert!(a.windows(2).any(|w| w == ["-C", "/tmp/proj"]));
         assert!(a.windows(2).any(|w| w == ["--model", "gpt-5.5"]));
+    }
+
+    #[test]
+    fn argv_effort_maps_for_fresh_and_resume_before_exec() {
+        for (effort, expected) in [
+            (Effort::Low, r#"model_reasoning_effort="low""#),
+            (Effort::Medium, r#"model_reasoning_effort="medium""#),
+            (Effort::High, r#"model_reasoning_effort="high""#),
+            (Effort::Xhigh, r#"model_reasoning_effort="xhigh""#),
+        ] {
+            let mut fresh = job("go");
+            fresh.params.effort = Some(effort);
+            let fresh_argv = build_argv(&fresh, "/tmp/lm", Protocol::OpenaiResponses).unwrap();
+            let config_pos = fresh_argv
+                .windows(2)
+                .position(|window| window == ["-c", expected])
+                .expect("effort config override should be present");
+            let exec_pos = fresh_argv.iter().position(|arg| arg == "exec").unwrap();
+            assert!(config_pos < exec_pos);
+
+            let mut resumed = fresh.clone();
+            resumed.resume = Some("thread-77".into());
+            let resumed_argv = build_argv(&resumed, "/tmp/lm", Protocol::OpenaiResponses).unwrap();
+            let config_pos = resumed_argv
+                .windows(2)
+                .position(|window| window == ["-c", expected])
+                .expect("resume effort config override should be present");
+            let exec_pos = resumed_argv.iter().position(|arg| arg == "exec").unwrap();
+            assert!(config_pos < exec_pos);
+            assert_eq!(resumed_argv[exec_pos + 1], "resume");
+        }
     }
 
     #[test]
@@ -704,5 +966,46 @@ mod tests {
     #[test]
     fn endpoint_injection_none_is_empty() {
         assert!(endpoint_injections(None).is_empty());
+    }
+
+    #[test]
+    fn stream_line_reads_completed_agent_message() {
+        let events = parse_stream_line(
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"final text"}}"#,
+        );
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], HarnessStreamEvent::Delta(text) if text == "final text"));
+    }
+
+    #[test]
+    fn stream_line_reads_completed_command_as_tool_use() {
+        let events = parse_stream_line(
+            r#"{"type":"item.completed","item":{"type":"command_execution","command":"cargo test","exit_code":0}}"#,
+        );
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            HarnessStreamEvent::ToolUse { name, summary }
+                if name == "command_execution" && summary == "cargo test"
+        ));
+    }
+
+    #[test]
+    fn stream_line_supports_response_item_and_event_msg_envelopes() {
+        let response = parse_stream_line(
+            r#"{"type":"response_item","payload":{"type":"message","content":[{"type":"output_text","text":"hello"}]}}"#,
+        );
+        assert!(matches!(&response[..], [HarnessStreamEvent::Delta(text)] if text == "hello"));
+
+        let event_msg = parse_stream_line(
+            r#"{"type":"event_msg","payload":{"type":"exec_command_begin","command":"rg TODO"}}"#,
+        );
+        assert!(matches!(
+            &event_msg[..],
+            [HarnessStreamEvent::ToolUse { name, summary }]
+                if name == "exec_command" && summary == "rg TODO"
+        ));
     }
 }

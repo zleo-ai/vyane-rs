@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use vyane_core::{RunStatus, Sandbox};
+use vyane_workflow::WorkflowRunId;
 
 /// Dispatch, fan out, and inspect Vyane model runs.
 #[derive(Debug, Parser)]
@@ -24,7 +25,7 @@ pub struct Cli {
 pub enum Command {
     /// Validate configuration and show local readiness.
     Check,
-    /// Run one task against a profile or provider/model target.
+    /// Run one task against a profile, provider/model, or auto-routed target.
     Dispatch(DispatchArgs),
     /// Run one task against several targets concurrently.
     Broadcast(BroadcastArgs),
@@ -32,6 +33,9 @@ pub enum Command {
     History(HistoryArgs),
     /// List saved session records.
     Sessions(SessionsArgs),
+    /// Inspect and safely reset local continuity sessions.
+    #[command(subcommand)]
+    Session(SessionCommand),
     /// Run, resume, and list declarative workflows.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
@@ -42,8 +46,11 @@ pub enum Command {
     /// Inspect and manage detached background runs.
     #[command(subcommand)]
     Task(TaskCommand),
-    /// Start the HTTP API server.
+    /// Start the bearer-authenticated loopback HTTP API server.
     Serve(ServeArgs),
+    /// Run and control the authenticated local workflow daemon.
+    #[command(subcommand)]
+    Daemon(DaemonCommand),
     /// Run the MCP server over stdio (for use as an MCP tool server).
     Mcp,
     /// Internal: execute a detached run. Not for direct use.
@@ -55,6 +62,12 @@ pub enum Command {
 pub enum WorkflowCommand {
     /// Run a workflow TOML file.
     Run(WorkflowRunArgs),
+    /// Submit a workflow source bundle to the resident daemon.
+    Submit(WorkflowSubmitArgs),
+    /// Show one daemon-owned workflow task.
+    Status(WorkflowStatusArgs),
+    /// Request cancellation of one daemon-owned workflow task.
+    Cancel(WorkflowCancelArgs),
     /// Resume a workflow run from its journal.
     Resume(WorkflowResumeArgs),
     /// List workflow journals.
@@ -69,6 +82,28 @@ pub enum TaskCommand {
     Status(TaskStatusArgs),
     /// Terminate a detached run's process group.
     Cancel(TaskCancelArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCommand {
+    /// List redacted, revision-aware continuity sessions.
+    List(SessionsArgs),
+    /// Inspect one redacted continuity session.
+    Inspect(SessionInspectArgs),
+    /// Remove native harness continuity using revision-fenced compare-and-swap.
+    ResetNative(SessionResetNativeArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommand {
+    /// Run the daemon in the foreground.
+    Run(DaemonRunArgs),
+    /// Start the daemon in a detached session and wait for readiness.
+    Start(DaemonStartArgs),
+    /// Verify the recorded daemon process and authenticated health endpoint.
+    Status(DaemonStatusArgs),
+    /// Gracefully stop the exact recorded daemon process.
+    Stop,
 }
 
 #[derive(Debug, Args)]
@@ -104,16 +139,38 @@ pub struct WorkerArgs {
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
-    /// Listen address.
+    /// Loopback listen address. Non-loopback addresses are rejected.
     #[arg(long, default_value = "127.0.0.1:9721")]
     pub addr: String,
+}
+
+#[derive(Debug, Args)]
+pub struct DaemonRunArgs {
+    /// Loopback listen address. Port 0 selects an ephemeral port.
+    #[arg(long, default_value = "127.0.0.1:9722")]
+    pub addr: String,
+}
+
+#[derive(Debug, Args)]
+pub struct DaemonStartArgs {
+    /// Loopback listen address. Port 0 selects an ephemeral port.
+    #[arg(long, default_value = "127.0.0.1:9722")]
+    pub addr: String,
+}
+
+#[derive(Debug, Args)]
+pub struct DaemonStatusArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct DispatchArgs {
     /// Task text to submit.
     pub task: String,
-    /// Target profile name or provider/model pair.
+    /// Target profile, provider/model pair, or `auto`. Use `profile:auto` to
+    /// select a profile literally named `auto`.
     #[arg(long, value_name = "TARGET")]
     pub target: String,
     /// Working directory for harness runs.
@@ -131,9 +188,13 @@ pub struct DispatchArgs {
     /// Attempt timeout in seconds; absent means no timeout.
     #[arg(long, value_name = "SECS")]
     pub timeout: Option<u64>,
-    /// Label to store on the run record; repeatable as key=value.
+    /// Label to store on the run record; repeatable as key=value. Router output
+    /// fields such as routing.provider and routing.effort are reserved.
     #[arg(long, value_name = "k=v")]
     pub label: Vec<String>,
+    /// For `--target auto`, prohibit frontier-tier routing.
+    #[arg(long)]
+    pub no_frontier: bool,
     /// Run in the background: spawn a detached worker, print its id, and exit
     /// without waiting. Inspect it later with `vyane task`.
     #[arg(long)]
@@ -141,9 +202,8 @@ pub struct DispatchArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
-    /// Stream deltas to stdout as they arrive. Only meaningful for a
-    /// single-target direct-HTTP dispatch; falls back to non-streaming
-    /// (with a stderr notice) for harness targets or multi-target chains.
+    /// Stream deltas to stdout as they arrive for one direct-HTTP or CLI-harness
+    /// target; falls back to non-streaming for sessions or failover chains.
     #[arg(long)]
     pub stream: bool,
 }
@@ -199,12 +259,66 @@ pub struct SessionsArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct SessionInspectArgs {
+    /// Logical continuity session id.
+    pub id: String,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionResetNativeArgs {
+    /// Logical continuity session id.
+    pub id: String,
+    /// Exact revision returned by `session inspect` or `session list`.
+    #[arg(long, value_name = "REVISION")]
+    pub expected_revision: u64,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct WorkflowRunArgs {
     /// Workflow TOML file to run.
     pub file: PathBuf,
     /// Workflow variable; repeatable as key=value.
     #[arg(long = "var", value_name = "k=v")]
     pub vars: Vec<String>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowSubmitArgs {
+    /// Workflow TOML file whose bounded sources are sent to the daemon.
+    pub file: PathBuf,
+    /// Canonical lowercase UUIDv7 to reuse for an idempotent retry.
+    #[arg(long, value_name = "UUIDV7")]
+    pub id: Option<WorkflowRunId>,
+    /// Workflow variable; repeatable as key=value.
+    #[arg(long = "var", value_name = "k=v")]
+    pub vars: Vec<String>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowStatusArgs {
+    /// Canonical lowercase UUIDv7 workflow id.
+    pub wf_run_id: WorkflowRunId,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowCancelArgs {
+    /// Canonical lowercase UUIDv7 workflow id.
+    pub wf_run_id: WorkflowRunId,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
@@ -283,6 +397,9 @@ pub struct RouteArgs {
     /// Retry count — how many times this task has been retried (routing signal).
     #[arg(long, value_name = "N")]
     pub retry_count: Option<usize>,
+    /// Prohibit frontier-tier routing.
+    #[arg(long)]
+    pub no_frontier: bool,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
@@ -332,5 +449,155 @@ impl From<RunStatusArg> for RunStatus {
             RunStatusArg::Timeout => RunStatus::Timeout,
             RunStatusArg::Cancelled => RunStatus::Cancelled,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    const RUN_ID: &str = "01890f3e-7b7c-7cc2-98d2-3f9a2b6c7d8e";
+
+    #[test]
+    fn workflow_daemon_commands_parse_the_expected_surface() {
+        let submit = Cli::try_parse_from([
+            "vyane",
+            "workflow",
+            "submit",
+            "workflow.toml",
+            "--id",
+            RUN_ID,
+            "--var",
+            "topic=rust",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Workflow(WorkflowCommand::Submit(args)) = submit.command else {
+            panic!("expected workflow submit");
+        };
+        assert_eq!(args.file, PathBuf::from("workflow.toml"));
+        assert_eq!(args.id.as_ref().map(WorkflowRunId::as_str), Some(RUN_ID));
+        assert_eq!(args.vars, ["topic=rust"]);
+        assert!(args.json);
+
+        for command in ["status", "cancel"] {
+            assert!(Cli::try_parse_from(["vyane", "workflow", command, RUN_ID, "--json"]).is_ok());
+        }
+    }
+
+    #[test]
+    fn workflow_daemon_ids_are_validated_by_clap() {
+        for invalid in [
+            "../../not-a-run-id",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "01890F3E-7B7C-7CC2-98D2-3F9A2B6C7D8E",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "vyane",
+                    "workflow",
+                    "submit",
+                    "workflow.toml",
+                    "--id",
+                    invalid,
+                ])
+                .is_err()
+            );
+        }
+
+        for command in ["status", "cancel"] {
+            assert!(
+                Cli::try_parse_from(["vyane", "workflow", command, "../../not-a-run-id"]).is_err()
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "vyane",
+                    "workflow",
+                    command,
+                    "550e8400-e29b-41d4-a716-446655440000"
+                ])
+                .is_err()
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "vyane",
+                    "workflow",
+                    command,
+                    "01890F3E-7B7C-7CC2-98D2-3F9A2B6C7D8E"
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn session_control_surface_is_narrow_and_revision_fenced() {
+        let legacy = Cli::try_parse_from(["vyane", "sessions", "--json"]).unwrap();
+        let Command::Sessions(args) = legacy.command else {
+            panic!("expected legacy sessions command");
+        };
+        assert!(args.json);
+
+        let list = Cli::try_parse_from(["vyane", "session", "list", "--json"]).unwrap();
+        let Command::Session(SessionCommand::List(args)) = list.command else {
+            panic!("expected session list");
+        };
+        assert!(args.json);
+
+        let inspect =
+            Cli::try_parse_from(["vyane", "session", "inspect", "logical", "--json"]).unwrap();
+        let Command::Session(SessionCommand::Inspect(args)) = inspect.command else {
+            panic!("expected session inspect");
+        };
+        assert_eq!(args.id, "logical");
+        assert!(args.json);
+
+        let reset = Cli::try_parse_from([
+            "vyane",
+            "session",
+            "reset-native",
+            "logical",
+            "--expected-revision",
+            "7",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Session(SessionCommand::ResetNative(args)) = reset.command else {
+            panic!("expected session reset-native");
+        };
+        assert_eq!(args.id, "logical");
+        assert_eq!(args.expected_revision, 7);
+        assert!(args.json);
+
+        assert!(Cli::try_parse_from(["vyane", "session", "reset-native", "logical"]).is_err());
+        for forbidden in ["--owner", "--native-id", "--domain", "--digest"] {
+            assert!(
+                Cli::try_parse_from([
+                    "vyane",
+                    "session",
+                    "reset-native",
+                    "logical",
+                    "--expected-revision",
+                    "7",
+                    forbidden,
+                    "value",
+                ])
+                .is_err(),
+                "forbidden option {forbidden} parsed"
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "vyane",
+                "session",
+                "reset-native",
+                "logical",
+                "--expected-revision",
+                "7",
+                "--force",
+            ])
+            .is_err()
+        );
     }
 }

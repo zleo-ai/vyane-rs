@@ -36,9 +36,20 @@ pub enum ErrorKind {
     Unsupported,
     /// A referenced entity (session, profile, run) does not exist.
     NotFound,
+    /// Optimistic concurrency or ownership state changed since the caller's
+    /// observed revision. Reload authoritative state before deciding whether
+    /// to issue a new mutation.
+    Conflict,
     /// Local I/O failure (ledger, config files).
     Io,
-    /// Anything else.
+    /// A durable mutation crossed its publication point, but post-publication
+    /// confirmation failed. Callers must reload authoritative state before
+    /// deciding whether any retry is safe.
+    Indeterminate,
+    /// Anything else, including a future serialized kind unknown to this
+    /// reader. Keeping this as the Serde fallback makes persisted run records
+    /// forward-readable without treating an unknown failure as retryable.
+    #[serde(other)]
     Other,
 }
 
@@ -63,7 +74,9 @@ impl ErrorKind {
             | ErrorKind::Cancelled
             | ErrorKind::Unsupported
             | ErrorKind::NotFound
+            | ErrorKind::Conflict
             | ErrorKind::Io
+            | ErrorKind::Indeterminate
             | ErrorKind::Other => false,
         }
     }
@@ -130,5 +143,13 @@ mod tests {
     fn config_errors_do_not_fail_over() {
         assert!(!VyaneError::config("missing key").failover_eligible());
         assert!(VyaneError::new(ErrorKind::RateLimited, "429").failover_eligible());
+    }
+
+    #[test]
+    fn future_serialized_error_kinds_fail_closed_as_other() {
+        let kind: ErrorKind = serde_json::from_str(r#""future_failure_kind""#)
+            .expect("unknown unit variant should use the Other fallback");
+        assert_eq!(kind, ErrorKind::Other);
+        assert!(!kind.failover_eligible());
     }
 }

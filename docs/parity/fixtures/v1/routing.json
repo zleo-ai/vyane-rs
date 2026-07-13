@@ -1,0 +1,304 @@
+{
+  "schema_version": 1,
+  "suite": "routing",
+  "normalization": {
+    "intent_names": "lowercase; normalize Rust snake_case names to the oracle's hyphenated names",
+    "confidence": "multiply the public classifier confidence by 1000 and round to an integer",
+    "excluded_fields": "oracle signals are retained in oracle_raw_output but excluded from normalized equality; vyane-service route_task must still expose the classifier's primary intent"
+  },
+  "cases": [
+    {
+      "id": "routing.classify_intent.implement",
+      "oracle_locator": {
+        "fn": "classify_intent",
+        "args": {
+          "task": "implement"
+        }
+      },
+      "oracle_raw_output": {
+        "primary": "code-gen",
+        "confidence": 0.5,
+        "secondary": null,
+        "signals": [
+          "+implement"
+        ]
+      },
+      "normalized_oracle_output": {
+        "primary": "code-gen",
+        "confidence_millis": 500,
+        "secondary": null
+      },
+      "rust_input": {
+        "task": "implement"
+      },
+      "rust_output": {
+        "primary": "code-gen",
+        "confidence_millis": 500,
+        "secondary": null
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "routing.classify_intent.function",
+      "oracle_locator": {
+        "fn": "classify_intent",
+        "args": {
+          "task": "function"
+        }
+      },
+      "oracle_raw_output": {
+        "primary": "code-gen",
+        "confidence": 0.167,
+        "secondary": null,
+        "signals": [
+          "function"
+        ]
+      },
+      "normalized_oracle_output": {
+        "primary": "code-gen",
+        "confidence_millis": 167,
+        "secondary": null
+      },
+      "rust_input": {
+        "task": "function"
+      },
+      "rust_output": {
+        "primary": "code-gen",
+        "confidence_millis": 167,
+        "secondary": null
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "routing.classify_intent.unit-test",
+      "oracle_locator": {
+        "fn": "classify_intent",
+        "args": {
+          "task": "unit test"
+        }
+      },
+      "oracle_raw_output": {
+        "primary": "test",
+        "confidence": 0.667,
+        "secondary": null,
+        "signals": [
+          "+unit test",
+          "test"
+        ]
+      },
+      "normalized_oracle_output": {
+        "primary": "test",
+        "confidence_millis": 667,
+        "secondary": null
+      },
+      "rust_input": {
+        "task": "unit test"
+      },
+      "rust_output": {
+        "primary": "test",
+        "confidence_millis": 667,
+        "secondary": null
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "routing.classify_intent.implement-and-review",
+      "oracle_locator": {
+        "fn": "classify_intent",
+        "args": {
+          "task": "implement and review"
+        }
+      },
+      "oracle_raw_output": {
+        "primary": "code-gen",
+        "confidence": 0.25,
+        "secondary": "review",
+        "signals": [
+          "+implement"
+        ]
+      },
+      "normalized_oracle_output": {
+        "primary": "code-gen",
+        "confidence_millis": 250,
+        "secondary": "review"
+      },
+      "rust_input": {
+        "task": "implement and review"
+      },
+      "rust_output": {
+        "primary": "code-gen",
+        "confidence_millis": 250,
+        "secondary": "review"
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "routing.classify_intent.review-audit-implement",
+      "oracle_locator": {
+        "fn": "classify_intent",
+        "args": {
+          "task": "review audit implement"
+        }
+      },
+      "oracle_raw_output": {
+        "primary": "review",
+        "confidence": 0.75,
+        "secondary": "code-gen",
+        "signals": [
+          "+review",
+          "+audit"
+        ]
+      },
+      "normalized_oracle_output": {
+        "primary": "review",
+        "confidence_millis": 750,
+        "secondary": "code-gen"
+      },
+      "rust_input": {
+        "task": "review audit implement"
+      },
+      "rust_output": {
+        "primary": "review",
+        "confidence_millis": 750,
+        "secondary": "code-gen"
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "routing.classify_intent.debug-refactor",
+      "oracle_locator": {
+        "fn": "classify_intent",
+        "args": {
+          "task": "fix the bug and refactor the broken module"
+        }
+      },
+      "oracle_raw_output": {
+        "primary": "debug",
+        "confidence": 0.583,
+        "secondary": "refactor",
+        "signals": [
+          "+fix",
+          "bug",
+          "broken"
+        ]
+      },
+      "normalized_oracle_output": {
+        "primary": "debug",
+        "confidence_millis": 583,
+        "secondary": "refactor"
+      },
+      "rust_input": {
+        "task": "fix the bug and refactor the broken module"
+      },
+      "rust_output": {
+        "primary": "debug",
+        "confidence_millis": 583,
+        "secondary": "refactor"
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "routing.classify_intent.test-api-endpoint",
+      "oracle_locator": {
+        "fn": "classify_intent",
+        "args": {
+          "task": "test the api endpoint"
+        }
+      },
+      "oracle_raw_output": {
+        "primary": "code-gen",
+        "confidence": 0.25,
+        "secondary": "test",
+        "signals": [
+          "endpoint",
+          "api"
+        ]
+      },
+      "normalized_oracle_output": {
+        "primary": "code-gen",
+        "confidence_millis": 250,
+        "secondary": "test"
+      },
+      "rust_input": {
+        "task": "test the api endpoint"
+      },
+      "rust_output": {
+        "primary": "code-gen",
+        "confidence_millis": 250,
+        "secondary": "test"
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "routing.classify_intent.root-cause",
+      "oracle_locator": {
+        "fn": "classify_intent",
+        "args": {
+          "task": "root cause analysis"
+        }
+      },
+      "oracle_raw_output": {
+        "primary": "analysis",
+        "confidence": 0.167,
+        "secondary": null,
+        "signals": [
+          "root cause"
+        ]
+      },
+      "normalized_oracle_output": {
+        "primary": "analysis",
+        "confidence_millis": 167,
+        "secondary": null
+      },
+      "rust_input": {
+        "task": "root cause analysis"
+      },
+      "rust_output": {
+        "primary": "analysis",
+        "confidence_millis": 167,
+        "secondary": null
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "routing.classify_intent.bare-pr-confidence",
+      "oracle_locator": {
+        "fn": "classify_intent",
+        "args": {
+          "task": "Review The PR"
+        }
+      },
+      "oracle_raw_output": {
+        "primary": "review",
+        "confidence": 0.5,
+        "secondary": null,
+        "signals": [
+          "+review"
+        ]
+      },
+      "normalized_oracle_output": {
+        "primary": "review",
+        "confidence_millis": 500,
+        "secondary": null
+      },
+      "rust_input": {
+        "task": "Review The PR"
+      },
+      "rust_output": {
+        "primary": "review",
+        "confidence_millis": 500,
+        "secondary": null
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    }
+  ]
+}

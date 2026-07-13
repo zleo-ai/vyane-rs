@@ -17,13 +17,20 @@
 //! See `docs/plan/WP-04.md` for the work-package plan.
 
 mod broadcast;
+mod capability;
 mod digest;
 mod dispatch;
 mod executor;
 
 pub use broadcast::DEFAULT_BROADCAST_CONCURRENCY;
+pub use capability::{
+    AttemptScope, CapabilityAdmissionDecision, CapabilityAdmissionError,
+    CapabilityAdmissionEvidence, CapabilityManifest, CapabilityPlanSnapshot,
+    CapabilityRejectionReason, CapabilityTargetSnapshot, ExecutionScope, FilesystemCapability,
+    IsolationStrength,
+};
 pub use digest::task_digest;
-pub use dispatch::{DispatchOutcome, Dispatcher, StreamDispatchEvent};
+pub use dispatch::{DispatchOutcome, Dispatcher, PreparedDispatch, StreamDispatchEvent};
 pub use executor::{Executor, ExecutorFactory};
 
 // Re-export the cancellation primitive so callers driving the kernel use the

@@ -19,6 +19,10 @@ use crate::factory::AssemblerFactory;
 
 const APP_DIR_NAME: &str = "vyane";
 const SECRETS_FILE: &str = "secrets.env";
+const TASK_METADATA_DB_FILE: &str = "tasks.sqlite3";
+const AGENT_METADATA_DB_FILE: &str = "agent-runs.sqlite3";
+const MESSAGE_DB_FILE: &str = "messages.sqlite3";
+const EVENT_LOG_DIR: &str = "events";
 
 /// The loaded configuration plus the secrets needed to resolve endpoints.
 ///
@@ -39,6 +43,14 @@ impl LoadedConfig {
             .get(name)
             .cloned()
             .or_else(|| std::env::var(name).ok())
+    }
+
+    /// Check credential presence without cloning a secrets-file value or
+    /// converting a process value into a `String`. Static diagnostics use this
+    /// instead of constructing an authenticated endpoint, and never retain or
+    /// serialize the observed process value.
+    pub(crate) fn env_present(&self, name: &str) -> bool {
+        self.secrets.contains_key(name) || std::env::var_os(name).is_some()
     }
 }
 
@@ -127,6 +139,22 @@ pub struct StoragePaths {
 }
 
 impl StoragePaths {
+    /// Build every service storage path below an explicit data directory.
+    ///
+    /// This is the non-global construction path used by embedders and tests:
+    /// callers do not need to mutate `VYANE_DATA_DIR`, so independently running
+    /// services cannot race through process-wide environment state.
+    #[must_use]
+    pub fn from_data_dir(data_dir: impl Into<PathBuf>) -> Self {
+        let data_dir = data_dir.into();
+        Self {
+            ledger_path: data_dir.join("ledger.jsonl"),
+            sessions_dir: data_dir.join("sessions"),
+            workflows_dir: data_dir.join("workflows"),
+            data_dir,
+        }
+    }
+
     pub fn resolve() -> Result<Self> {
         let data_dir = match std::env::var_os("VYANE_DATA_DIR") {
             Some(raw) => PathBuf::from(raw),
@@ -134,11 +162,69 @@ impl StoragePaths {
                 .ok_or_else(|| anyhow!("could not determine platform data directory"))?
                 .join(APP_DIR_NAME),
         };
-        Ok(Self {
-            ledger_path: data_dir.join("ledger.jsonl"),
-            sessions_dir: data_dir.join("sessions"),
-            workflows_dir: data_dir.join("workflows"),
-            data_dir,
-        })
+        Ok(Self::from_data_dir(data_dir))
+    }
+
+    /// SQLite file containing secret-free durable task control metadata.
+    #[must_use]
+    pub fn task_metadata_db_path(&self) -> PathBuf {
+        self.data_dir.join(TASK_METADATA_DB_FILE)
+    }
+
+    /// SQLite source of truth for AgentRun and worker control metadata.
+    #[must_use]
+    pub fn agent_metadata_db_path(&self) -> PathBuf {
+        self.data_dir.join(AGENT_METADATA_DB_FILE)
+    }
+
+    /// SQLite source of truth for immutable messages and mutable deliveries.
+    #[must_use]
+    pub fn message_db_path(&self) -> PathBuf {
+        self.data_dir.join(MESSAGE_DB_FILE)
+    }
+
+    /// Owner-isolated EventLog projection root.
+    #[must_use]
+    pub fn event_log_dir(&self) -> PathBuf {
+        self.data_dir.join(EVENT_LOG_DIR)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_data_dir_derives_all_storage_paths_without_environment_state() {
+        let paths = StoragePaths::from_data_dir("/tmp/vyane-explicit-path-test");
+
+        assert_eq!(
+            paths.ledger_path,
+            PathBuf::from("/tmp/vyane-explicit-path-test/ledger.jsonl")
+        );
+        assert_eq!(
+            paths.sessions_dir,
+            PathBuf::from("/tmp/vyane-explicit-path-test/sessions")
+        );
+        assert_eq!(
+            paths.workflows_dir,
+            PathBuf::from("/tmp/vyane-explicit-path-test/workflows")
+        );
+        assert_eq!(
+            paths.task_metadata_db_path(),
+            PathBuf::from("/tmp/vyane-explicit-path-test/tasks.sqlite3")
+        );
+        assert_eq!(
+            paths.agent_metadata_db_path(),
+            PathBuf::from("/tmp/vyane-explicit-path-test/agent-runs.sqlite3")
+        );
+        assert_eq!(
+            paths.message_db_path(),
+            PathBuf::from("/tmp/vyane-explicit-path-test/messages.sqlite3")
+        );
+        assert_eq!(
+            paths.event_log_dir(),
+            PathBuf::from("/tmp/vyane-explicit-path-test/events")
+        );
     }
 }

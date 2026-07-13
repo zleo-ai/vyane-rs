@@ -5,10 +5,15 @@ mod api;
 mod app;
 mod cli;
 mod command;
+mod daemon;
+mod daemon_client;
+mod daemon_workflow;
 mod factory;
 mod output;
 mod review;
+mod supervisor;
 mod task;
+mod workflow_control;
 
 use std::process::ExitCode;
 

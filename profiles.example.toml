@@ -81,8 +81,8 @@ sandbox  = "read-only"
 
 # ---------------------------------------------------------------------------
 # routing metadata (optional) — tier, tags, and stage fields on profiles feed
-# vyane-router's deterministic target selection. Use `vyane route` to see what
-# the router picks for a given task without dispatching.
+# vyane-router's deterministic target selection. Use `vyane route` to preview
+# and `vyane dispatch "task" --target auto` to execute the decision.
 #
 # tier:     "economy" | "mainline" | "frontier"
 # tags:     domain labels matched against inferred tags (frontend, security,
@@ -122,6 +122,8 @@ stage    = "review"
 # Example: `vyane route "review the PR" --stage review` → selects "reviewer"
 # Example: `vyane route "write an ADR" --changed-files 20` → selects "frontier"
 # Example: `vyane route "fix a typo"` → selects "fast-chat" (economy default)
+# Example: `vyane dispatch "fix a typo" --target auto` → selects and dispatches
+#          "fast-chat", applying the route effort and recording routing labels.
 
 # ---------------------------------------------------------------------------
 # failover — an ordered chain tried left to right. Each element is resolved

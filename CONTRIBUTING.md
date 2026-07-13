@@ -20,6 +20,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+The workspace Cargo config caps libtest at four threads because process-control
+acceptance tests create and signal real child groups; unbounded host-core
+parallelism can make those tests interfere on large development machines.
+
+CI also runs `cargo check --workspace --all-targets --locked` on the exact
+workspace MSRV (`1.85.0`). Local stable-only checks do not prove MSRV
+compatibility.
+
 Clippy runs as an error gate. `unsafe_code` is denied workspace-wide and
 `unwrap_used` is warned — prefer explicit error handling over `unwrap`/`expect`
 in non-test code.
@@ -28,11 +36,13 @@ in non-test code.
 
 ```
 vyane-core        types, traits, errors, env policy — no runtime
+vyane-message     owner-safe transactional messages, deliveries, leases, outbox
+vyane-task        secret-free durable task lifecycle metadata
 vyane-provider    provider registry, endpoints, auth styles
 vyane-config      TOML parsing, profile + failover chain resolution
 vyane-protocol    ChatClient over HTTP (OpenAI Chat/Responses, Anthropic Messages)
-vyane-harness     Harness wrapping coding CLIs (Claude Code, Codex CLI)
-vyane-ledger      JSONL Ledger, SessionStore, cost table
+vyane-harness     coding-CLI Harnesses + native permission/tool execution seam
+vyane-ledger      run/event ledgers, owner-isolated SessionStore, cost table
 vyane-kernel      dispatch / broadcast / failover state machine + streaming
 vyane-router      deterministic routing: complexity scoring, tag inference, tier mapping
 vyane-workflow    declarative workflow engine (DAG + journal/resume)
@@ -48,8 +58,9 @@ constructed and wired together in `vyane-service` and injected through the
 
 ## Protocol entry points
 
-Vyane supports three interchangeable front-ends, all sharing the same
-`vyane-service` layer:
+Vyane has three front-ends for the shared service operations. Workflow and
+detached-task control are currently CLI/REST-specific surfaces rather than
+interchangeable operations:
 
 | protocol | command | new code location |
 |----------|---------|-------------------|
@@ -57,15 +68,19 @@ Vyane supports three interchangeable front-ends, all sharing the same
 | REST API | `vyane serve` (axum, 10 endpoints + SSE) | `vyane-cli/src/api.rs` |
 | MCP | `vyane mcp` (rmcp, 4 tools over stdio) | `vyane-mcp/src/lib.rs` |
 
-When adding a new operation, implement it in `vyane-service` (the shared layer)
-and expose it through each front-end. Do not duplicate logic across front-ends.
+When adding a shared operation, implement it in `vyane-service` and expose it
+through each applicable front-end. If an operation is intentionally
+front-end-specific, document that boundary and keep reusable execution logic in
+its owning crate; do not duplicate orchestration logic across front-ends.
 
 ## Streaming
 
 The kernel owns streaming via `Dispatcher::dispatch_stream`. It takes a callback
-for delta events and returns the assembled, ledger-appended `DispatchOutcome`.
-The CLI `--stream` flag and the REST `/v1/dispatch/stream` SSE endpoint both
-call this method — do not hand-roll streaming logic in front-ends.
+for text, reasoning, and harness tool-use events and returns the assembled,
+ledger-appended `DispatchOutcome`. Direct-HTTP clients and CLI harnesses meet at
+this API. The CLI `--stream` flag and REST `/v1/dispatch/stream` SSE endpoint both
+call it — do not hand-roll streaming logic in front-ends. Protocol fixtures must
+match real CLI event envelopes; a green compile alone is not an adapter test.
 
 ## Routing
 
@@ -74,7 +89,10 @@ deterministic target selection: complexity scoring, tag inference, tier mapping,
 and preference resolution. `vyane-service/src/routing.rs` is the adapter that
 builds a `RoutePreferenceTable` from configured profiles (tier/tags/stage
 metadata) and maps the router's decision back to a profile name. Use
-`vyane route` for dry-run testing.
+`vyane route` for dry-run testing and `vyane dispatch --target auto` for the
+executable path. `RouteDecision.provider` must always remain a real provider id;
+the selected config profile belongs in `RouteResult.profile`. New adapters must
+prove effort propagation through both direct-HTTP and CLI-harness fixtures.
 
 ## Tests accompany code
 
@@ -100,6 +118,42 @@ Test placement:
   process group on cancel`, `docs(architecture): clarify failover gate`.
 - **Keep the docs in sync.** If you change a public type or config shape, update
   the affected docs and `profiles.example.toml` in the same PR.
+
+## Releases
+
+Crates.io publication is manual and requires authority distinct from merging,
+creating a tag, or possessing a registry credential:
+
+1. Configure the GitHub environment named exactly `crates-io` with at least one
+   required reviewer, enable **Prevent self-review**, and store
+   `CARGO_REGISTRY_TOKEN` as an environment secret rather than a repository-wide
+   secret. Do not define a repository or organization secret with the same
+   name: GitHub's expression syntax does not let the workflow prove which
+   secret scope won precedence. The workflow refuses to proceed if reviewer
+   protections are absent or unreadable.
+2. Create the intended `vMAJOR.MINOR.PATCH` tag on the exact current `main`
+   commit only after separate publication authorization has been requested.
+3. Dispatch the Publish workflow from `main` and supply that existing tag as
+   the required `release_tag` input. A different dispatch ref, stale `main`,
+   dirty checkout, missing tag, or tag pointing anywhere else fails closed. The
+   token-free preflight runs all checks and package verification first.
+4. After preflight succeeds, a reviewer other than the dispatcher approves the
+   `crates-io` deployment. The publish job revalidates its environment and exact
+   source, then injects the registry token only into the final publish step.
+
+Do not use a tag push as a release trigger, and do not test this mechanism by
+performing a real upload. The hermetic authorization checks run with
+`bash .github/scripts/test-release-gate.sh`.
+
+## Branch model
+
+This repository uses GitHub Flow rather than Git Flow. `main` is the single
+integration branch and must remain releasable; there is no long-lived `dev`
+branch. Make changes on short-lived topic branches, open them for independent
+review, and delete them after a fast-forward or reviewed merge. Use a worktree
+only when parallel changes need filesystem isolation, then remove it when its
+branch is integrated. Release stability comes from the protected manual release
+gate and exact tags, not from keeping an empty or divergent production branch.
 
 ## Licensing
 

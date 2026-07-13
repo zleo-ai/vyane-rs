@@ -17,12 +17,33 @@ use crate::config::LoadedConfig;
 
 /// Resolve a raw selector into a `Vec<BoundTarget>` failover chain.
 ///
+/// - `profile:<name>` → force profile-name resolution. This is the escape hatch
+///   for a profile literally named `auto`, which otherwise selects routing.
+/// - `target:<provider>/<model>` → force provider/model resolution, including a
+///   provider id that itself begins with the reserved `profile:` prefix.
 /// - `provider/model` → a synthetic single direct-HTTP profile (no failover,
 ///   no harness — the CLI/API/MCP cannot guess which harness you meant).
 /// - anything else → treated as a profile name and resolved through
 ///   [`ResolvedConfig::resolve_failover_with`], expanding the profile's
 ///   declared failover legs.
 pub fn resolve_target_chain(loaded: &LoadedConfig, raw: &str) -> Result<Vec<BoundTarget>> {
+    if let Some(profile) = raw.strip_prefix("profile:") {
+        if profile.is_empty() {
+            bail!("profile selector must include a name after `profile:`");
+        }
+        return Ok(loaded
+            .config
+            .resolve_failover_with(profile, &|key| loaded.env_lookup(key))?);
+    }
+    if let Some(explicit) = raw.strip_prefix("target:") {
+        let (provider, model) = parse_provider_model(explicit).ok_or_else(|| {
+            anyhow::anyhow!(
+                "target selector must be `target:<provider>/<model>` with non-empty parts"
+            )
+        })?;
+        let root = provider_model_config(&loaded.config, provider, model)?;
+        return resolve_temp_profile(root, "__cli_target", loaded);
+    }
     if let Some((provider, model)) = parse_provider_model(raw) {
         let root = provider_model_config(&loaded.config, provider, model)?;
         return resolve_temp_profile(root, "__cli_target", loaded);
@@ -113,6 +134,19 @@ mod tests {
         assert_eq!(parse_provider_model("default"), None);
         // No slash at all.
         assert_eq!(parse_provider_model("my-profile"), None);
+    }
+
+    #[test]
+    fn profile_prefix_is_not_provider_model() {
+        assert_eq!(parse_provider_model("profile:auto"), None);
+    }
+
+    #[test]
+    fn target_prefix_can_escape_a_provider_starting_with_profile_prefix() {
+        assert_eq!(
+            parse_provider_model("profile:relay/model"),
+            Some(("profile:relay", "model"))
+        );
     }
 
     #[test]

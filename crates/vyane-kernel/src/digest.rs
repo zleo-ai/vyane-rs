@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 const DIGEST_HEX_LEN: usize = 16;
 
 /// Compute the `task_digest` for a prompt: SHA-256 of the UTF-8 bytes, encoded
-/// as lower-case hex, truncated to the first [`DIGEST_HEX_LEN`] characters.
+/// as lower-case hex, truncated to the first `DIGEST_HEX_LEN` characters.
 ///
 /// Deterministic and dependency-pinned so a given prompt always yields the same
 /// digest across machines and releases.

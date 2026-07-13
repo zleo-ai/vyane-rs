@@ -1,0 +1,5 @@
+# Several process-control acceptance tests intentionally stop, signal, and reap
+# real child groups. Bounding libtest concurrency keeps those tests independent
+# on high-core-count hosts while preserving useful parallelism in CI.
+[env]
+RUST_TEST_THREADS = { value = "4", force = false }

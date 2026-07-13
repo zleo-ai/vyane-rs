@@ -1,0 +1,28 @@
+[package]
+name = "vyane-agent"
+description = "Owner-safe durable AgentRun and worker topology state for Vyane"
+keywords = ["ai", "agents", "sqlite", "orchestration", "workers"]
+categories = ["database", "development-tools"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+fs4 = { workspace = true }
+getrandom = { workspace = true }
+libc = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+static_assertions = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

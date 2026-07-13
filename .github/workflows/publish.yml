@@ -1,43 +1,177 @@
 name: Publish
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing vMAJOR.MINOR.PATCH tag to publish from current main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Publishing two tags concurrently can race on the shared crates.io namespace.
+# Queue releases instead of cancelling an upload that may already have landed.
+concurrency:
+  group: crates-io-publish
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  preflight:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v4 (resolved from the official repository).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify exact main and release tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          python3 .github/scripts/release-gate.py verify-source \
+            --tag "$RELEASE_TAG" \
+            --event "$RELEASE_EVENT" \
+            --ref "$RELEASE_REF" \
+            --workflow-sha "$RELEASE_SHA"
+
+      - name: Test release authorization gate
+        run: bash .github/scripts/test-release-gate.sh
+
+      # dtolnay/rust-toolchain stable (resolved from the official repository).
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      # Swatinem/rust-cache v2 (dereferenced annotated tag from the official repository).
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
 
       - name: Format check
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --all-targets --locked
 
-      - name: Publish (dry run)
-        run: cargo publish --dry-run -p vyane-core
+      - name: Package and verify the full workspace
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: >-
+          bash .github/scripts/publish-workspace.sh preflight
+          --tag "$RELEASE_TAG"
+
+  publish:
+    needs: preflight
+    environment: crates-io
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      # An absent environment is auto-created without protection by GitHub.
+      # This job starts only after preflight and environment approval. Before
+      # checkout, verify that the approval boundary is actually protected.
+      - name: Verify protected release environment
+        env:
+          ENVIRONMENT_URL: >-
+            https://api.github.com/repos/${{ github.repository }}/environments/crates-io
+        run: |
+          set -euo pipefail
+          response="$(mktemp)"
+          status="$(curl --fail-with-body --silent --show-error --location \
+            --output "$response" --write-out '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$ENVIRONMENT_URL")"
+          test "$status" = 200
+          python3 - "$response" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          try:
+              document = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+              rules = document["protection_rules"]
+              required = [rule for rule in rules if rule.get("type") == "required_reviewers"]
+              valid = (
+                  document.get("name") == "crates-io"
+                  and len(required) == 1
+                  and isinstance(required[0].get("reviewers"), list)
+                  and len(required[0]["reviewers"]) > 0
+                  and all(
+                      isinstance(entry, dict)
+                      and entry.get("type") in {"User", "Team"}
+                      and isinstance(entry.get("reviewer"), dict)
+                      and bool(entry["reviewer"])
+                      for entry in required[0]["reviewers"]
+                  )
+                  and required[0].get("prevent_self_review") is True
+              )
+          except (
+              OSError,
+              UnicodeError,
+              json.JSONDecodeError,
+              AttributeError,
+              KeyError,
+              TypeError,
+          ):
+              valid = False
+          if not valid:
+              raise SystemExit(
+                  "release gate: crates-io must require reviewers and prevent self-review"
+              )
+          print("release gate: protected crates-io environment verified")
+          PY
+          echo "RELEASE_ENVIRONMENT_RESPONSE=$response" >>"$GITHUB_ENV"
+
+      # actions/checkout v4 (resolved from the official repository).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      # The protected job has a fresh runner, so rebuild and verify its exact
+      # local archives without exposing the registry token.
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+
+      - name: Rebuild and verify release archives
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: >-
+          bash .github/scripts/publish-workspace.sh preflight
+          --tag "$RELEASE_TAG"
+
+      # This is intentionally the last token-free step. Re-check the exact
+      # source after approval and immediately before registry credentials exist.
+      - name: Reverify protected environment and exact release source
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          python3 .github/scripts/release-gate.py verify-environment \
+            "$RELEASE_ENVIRONMENT_RESPONSE" --name crates-io
+          python3 .github/scripts/release-gate.py verify-source \
+            --tag "$RELEASE_TAG" \
+            --event "$RELEASE_EVENT" \
+            --ref "$RELEASE_REF" \
+            --workflow-sha "$RELEASE_SHA"
 
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        # Publish in dependency order. The workspace uses path dependencies,
-        # so `cargo publish` resolves them from the registry once published.
-        run: |
-          cargo publish -p vyane-core -p vyane-provider -p vyane-config || true
-          cargo publish -p vyane-protocol -p vyane-harness -p vyane-ledger || true
-          cargo publish -p vyane-kernel -p vyane-router || true
-          cargo publish -p vyane-service -p vyane-workflow || true
-          cargo publish -p vyane-mcp || true
-          cargo publish -p vyane-cli || true
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: >-
+          bash .github/scripts/publish-workspace.sh publish
+          --tag "$RELEASE_TAG"

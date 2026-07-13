@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "suite": "failover",
+  "normalization": {
+    "reason": "map Rust ErrorKind onto the closest oracle failover reason without parsing error-message text",
+    "scope": "reason taxonomy only; Rust failover_eligible is pinned independently as one-sided regression data and is not inferred from or compared with the oracle classifier fixture; production attempt behavior is outside this suite and requires separate EXE-02 cross-repository acceptance evidence"
+  },
+  "cases": [
+    {
+      "id": "failover.reason.timeout",
+      "oracle_locator": {
+        "fn": "classify_failover_reason",
+        "args": {
+          "status": "timeout",
+          "error": ""
+        }
+      },
+      "oracle_raw_output": "timeout",
+      "normalized_oracle_output": {
+        "reason": "timeout"
+      },
+      "rust_input": {
+        "error_kind": "timeout"
+      },
+      "rust_output": {
+        "reason": "timeout"
+      },
+      "rust_failover_eligible": true,
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "failover.reason.rate-limit",
+      "oracle_locator": {
+        "fn": "classify_failover_reason",
+        "args": {
+          "status": "",
+          "error": "HTTP 429 Too Many Requests"
+        }
+      },
+      "oracle_raw_output": "rate_limit",
+      "normalized_oracle_output": {
+        "reason": "rate_limit"
+      },
+      "rust_input": {
+        "error_kind": "rate_limited"
+      },
+      "rust_output": {
+        "reason": "rate_limit"
+      },
+      "rust_failover_eligible": true,
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "failover.reason.runtime-unavailable",
+      "oracle_locator": {
+        "fn": "classify_failover_reason",
+        "args": {
+          "status": "",
+          "error": "codex: command not found"
+        }
+      },
+      "oracle_raw_output": "runtime_unavailable",
+      "normalized_oracle_output": {
+        "reason": "runtime_unavailable"
+      },
+      "rust_input": {
+        "error_kind": "spawn_failed"
+      },
+      "rust_output": {
+        "reason": "runtime_unavailable"
+      },
+      "rust_failover_eligible": true,
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "failover.reason.execution-error",
+      "oracle_locator": {
+        "fn": "classify_failover_reason",
+        "args": {
+          "status": "weird-status",
+          "error": "another odd failure"
+        }
+      },
+      "oracle_raw_output": "execution_error",
+      "normalized_oracle_output": {
+        "reason": "execution_error"
+      },
+      "rust_input": {
+        "error_kind": "other"
+      },
+      "rust_output": {
+        "reason": "execution_error"
+      },
+      "rust_failover_eligible": false,
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "failover.reason.policy-blocked",
+      "oracle_locator": {
+        "fn": "classify_failover_reason",
+        "args": {
+          "status": "blocked",
+          "error": ""
+        }
+      },
+      "oracle_raw_output": "policy_blocked",
+      "normalized_oracle_output": {
+        "reason": "policy_blocked"
+      },
+      "rust_input": {
+        "error_kind": "unsupported"
+      },
+      "rust_output": {
+        "reason": "unsupported"
+      },
+      "rust_failover_eligible": false,
+      "disposition": "open_difference",
+      "blocker": "BLOCKER EXE-02/GOV-04: Rust has no dedicated policy-blocked ErrorKind; Unsupported is fail-closed but cannot be normalized as the oracle's policy_blocked reason without losing taxonomy truth."
+    },
+    {
+      "id": "failover.reason.quota-exhausted",
+      "oracle_locator": {
+        "fn": "classify_failover_reason",
+        "args": {
+          "status": "",
+          "error": "quota exhausted for this month"
+        }
+      },
+      "oracle_raw_output": "quota_exhausted",
+      "normalized_oracle_output": {
+        "reason": "quota_exhausted"
+      },
+      "rust_input": {
+        "error_kind": "rate_limited"
+      },
+      "rust_output": {
+        "reason": "rate_limit"
+      },
+      "rust_failover_eligible": true,
+      "disposition": "open_difference",
+      "blocker": "BLOCKER EXE-02: Rust intentionally combines rate limiting and quota exhaustion in ErrorKind::RateLimited; a taxonomy decision is required before these outputs can be accepted as equal."
+    }
+  ]
+}

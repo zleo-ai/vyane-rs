@@ -67,14 +67,14 @@ const INTENT_KEYWORDS: &[(IntentCategory, &[&str], &[&str])] = &[
     (IntentCategory::Review, &[
         "review", "audit", "inspect", "evaluate", "assess", "check",
     ], &[
-        "feedback", "comment", "approve", "reject", "merge", "pr", "pull request",
+        "feedback", "comment", "approve", "reject", "merge", "pr review", "pull request",
         "diff", "quality", "lint",
     ]),
     (IntentCategory::Analysis, &[
         "analyze", "analyse", "explain", "understand", "investigate", "trace",
     ], &[
         "why", "how does", "what does", "architecture", "design", "flow",
-        "behavior", "performance", "bottleneck", "profiling",
+        "behavior", "performance", "bottleneck", "profiling", "root cause",
     ]),
     (IntentCategory::Debug, &[
         "fix", "debug", "troubleshoot", "diagnose",
@@ -198,5 +198,21 @@ mod tests {
     fn review_detection() {
         let result = classify_intent("review the pull request and leave feedback");
         assert_eq!(result.primary, IntentCategory::Review);
+    }
+
+    #[test]
+    fn root_cause_is_analysis_secondary_keyword() {
+        let result = classify_intent("root cause analysis");
+        assert_eq!(result.primary, IntentCategory::Analysis);
+        assert_eq!(result.confidence, 0.167);
+        assert_eq!(result.secondary, None);
+    }
+
+    #[test]
+    fn bare_pr_does_not_inflate_review_confidence() {
+        let result = classify_intent("Review The PR");
+        assert_eq!(result.primary, IntentCategory::Review);
+        assert_eq!(result.confidence, 0.5);
+        assert_eq!(result.secondary, None);
     }
 }

@@ -3,7 +3,7 @@
 //! Command shape (verified against `claude --help`, CLI 2.1.x):
 //!
 //! ```text
-//! claude -p <prompt> --output-format json [--model M]
+//! claude -p <prompt> --output-format json [--model M] [--effort E]
 //!        [--permission-mode acceptEdits | --dangerously-skip-permissions]
 //!        [--add-dir <workdir>] [--resume <session-id>]
 //! ```
@@ -23,12 +23,15 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use vyane_core::error::{ErrorKind, Result, VyaneError};
 use vyane_core::target::{AuthStyle, Endpoint, HarnessKind, Sandbox};
-use vyane_core::traits::{Harness, HarnessJob, HarnessOutcome, HarnessStreamEvent};
+use vyane_core::traits::{
+    Harness, HarnessExecutionContext, HarnessJob, HarnessOutcome, HarnessStreamEvent,
+};
+use vyane_core::{HarnessSpawnAuthority, PinnedWorkdir};
 
-use crate::parse::parse_claude_json;
+use crate::parse::{parse_claude_json, parse_claude_stream_json};
 use crate::spawn::{
-    RunResult, Termination, env_key_list, materialize_env, parent_env_snapshot, run_capture,
-    run_stream_capture,
+    PINNED_WORKDIR_CHILD_PATH, RunControl, RunResult, Termination, env_key_list, materialize_env,
+    parent_env_snapshot, run_capture_with_pinned, run_stream_capture_with_pinned,
 };
 
 /// Environment variables Claude Code reads for a custom endpoint. Public Claude
@@ -97,8 +100,9 @@ impl ClaudeCodeHarness {
         materialize_env(&policy, parent_env)
     }
 
-    /// Classify a RunResult into a HarnessOutcome or error (shared by run + run_stream).
-    fn classify_result(&self, result: RunResult) -> Result<HarnessOutcome> {
+    /// Classify a captured run. Stream mode is NDJSON, while the one-shot path
+    /// is a single JSON object; both share the same termination/error mapping.
+    fn classify_result(&self, result: RunResult, stream: bool) -> Result<HarnessOutcome> {
         match result.termination {
             Termination::Cancelled => Err(VyaneError::cancelled()),
             Termination::TimedOut => Err(VyaneError::new(
@@ -107,7 +111,11 @@ impl ClaudeCodeHarness {
             )),
             Termination::Exited(code) => {
                 if code == 0 {
-                    let parsed = parse_claude_json(&result.stdout);
+                    let parsed = if stream {
+                        parse_claude_stream_json(&result.stdout)
+                    } else {
+                        parse_claude_json(&result.stdout)
+                    };
                     if parsed.is_error {
                         return Err(VyaneError::new(
                             ErrorKind::HarnessFailed,
@@ -181,7 +189,12 @@ fn sandbox_args(sandbox: Sandbox) -> Vec<String> {
 /// Construct the full Claude Code argv (excluding the program name) for a job.
 ///
 /// Kept as a pure function so an argv-echo fake CLI can assert it exactly.
+#[cfg(test)]
 pub(crate) fn build_argv(job: &HarnessJob) -> Vec<String> {
+    build_argv_scoped(job, None)
+}
+
+fn build_argv_scoped(job: &HarnessJob, pinned_workdir: Option<&PinnedWorkdir>) -> Vec<String> {
     // Non-interactive print mode + machine-readable output.
     let mut args: Vec<String> = vec![
         "-p".into(),
@@ -196,12 +209,23 @@ pub(crate) fn build_argv(job: &HarnessJob) -> Vec<String> {
         args.push(job.model.as_str().to_string());
     }
 
+    // Normalized reasoning effort maps directly to Claude Code's CLI flag.
+    if let Some(effort) = job.params.effort {
+        args.push("--effort".into());
+        args.push(effort.as_str().to_string());
+    }
+
     // Sandbox → permission flags.
     args.extend(sandbox_args(job.sandbox));
 
     // Grant tool access to the working directory when one is set. The cwd is set
     // on the process separately (see run); `--add-dir` widens tool reach to it.
-    if let Some(dir) = &job.workdir {
+    let workdir = if pinned_workdir.is_some() {
+        Some(std::path::PathBuf::from(PINNED_WORKDIR_CHILD_PATH))
+    } else {
+        job.workdir.clone()
+    };
+    if let Some(dir) = workdir {
         args.push("--add-dir".into());
         args.push(dir.display().to_string());
     }
@@ -220,12 +244,22 @@ pub(crate) fn build_argv(job: &HarnessJob) -> Vec<String> {
 /// Build argv for streaming mode: identical to [`build_argv`] but uses
 /// `--output-format stream-json` instead of `json`, so the CLI emits NDJSON
 /// events (one per line) instead of a single JSON object.
+#[cfg(test)]
 pub(crate) fn build_stream_argv(job: &HarnessJob) -> Vec<String> {
+    build_stream_argv_scoped(job, None)
+}
+
+fn build_stream_argv_scoped(
+    job: &HarnessJob,
+    pinned_workdir: Option<&PinnedWorkdir>,
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-p".into(),
         job.prompt.clone(),
         "--output-format".into(),
         "stream-json".into(),
+        // Claude Code requires verbose mode for stream-json in print mode.
+        "--verbose".into(),
     ];
 
     if !job.model.as_str().is_empty() {
@@ -233,9 +267,19 @@ pub(crate) fn build_stream_argv(job: &HarnessJob) -> Vec<String> {
         args.push(job.model.as_str().to_string());
     }
 
+    if let Some(effort) = job.params.effort {
+        args.push("--effort".into());
+        args.push(effort.as_str().to_string());
+    }
+
     args.extend(sandbox_args(job.sandbox));
 
-    if let Some(dir) = &job.workdir {
+    let workdir = if pinned_workdir.is_some() {
+        Some(std::path::PathBuf::from(PINNED_WORKDIR_CHILD_PATH))
+    } else {
+        job.workdir.clone()
+    };
+    if let Some(dir) = workdir {
         args.push("--add-dir".into());
         args.push(dir.display().to_string());
     }
@@ -248,6 +292,62 @@ pub(crate) fn build_stream_argv(job: &HarnessJob) -> Vec<String> {
     }
 
     args
+}
+
+fn json_summary(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
+/// Convert one Claude Code stream-json line into live harness events.
+///
+/// Tool-use blocks are nested inside an `assistant.message.content` array in
+/// the real CLI schema. A top-level `tool_use` arm is retained for older or
+/// relay-specific emitters.
+fn parse_stream_line(line: &str) -> Vec<HarnessStreamEvent> {
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Vec::new();
+    };
+
+    match event.get("type").and_then(serde_json::Value::as_str) {
+        Some("assistant") => event
+            .pointer("/message/content")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(
+                |block| match block.get("type").and_then(serde_json::Value::as_str) {
+                    Some("text") => block
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| !text.is_empty())
+                        .map(|text| HarnessStreamEvent::Delta(text.to_string())),
+                    Some("tool_use") => Some(HarnessStreamEvent::ToolUse {
+                        name: block
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        summary: json_summary(
+                            block.get("input").unwrap_or(&serde_json::Value::Null),
+                        ),
+                    }),
+                    _ => None,
+                },
+            )
+            .collect(),
+        Some("tool_use") => vec![HarnessStreamEvent::ToolUse {
+            name: event
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            summary: json_summary(event.get("input").unwrap_or(&serde_json::Value::Null)),
+        }],
+        _ => Vec::new(),
+    }
 }
 
 /// Compute endpoint env-var injections for Claude Code from `job.endpoint`.
@@ -285,7 +385,62 @@ impl Harness for ClaudeCodeHarness {
     }
 
     async fn run(&self, job: HarnessJob, cancel: CancellationToken) -> Result<HarnessOutcome> {
-        let argv = build_argv(&job);
+        self.run_with_context(job, None, None, cancel).await
+    }
+
+    async fn run_scoped(
+        &self,
+        job: HarnessJob,
+        context: HarnessExecutionContext,
+        cancel: CancellationToken,
+    ) -> Result<HarnessOutcome> {
+        self.run_with_context(
+            job,
+            context.pinned_workdir(),
+            context.spawn_authority(),
+            cancel,
+        )
+        .await
+    }
+
+    async fn run_stream(
+        &self,
+        job: HarnessJob,
+        cancel: CancellationToken,
+        on_event: Box<dyn FnMut(HarnessStreamEvent) + Send + Sync>,
+    ) -> Result<HarnessOutcome> {
+        self.run_stream_with_context(job, None, None, cancel, on_event)
+            .await
+    }
+
+    async fn run_stream_scoped(
+        &self,
+        job: HarnessJob,
+        context: HarnessExecutionContext,
+        cancel: CancellationToken,
+        on_event: Box<dyn FnMut(HarnessStreamEvent) + Send + Sync>,
+    ) -> Result<HarnessOutcome> {
+        self.run_stream_with_context(
+            job,
+            context.pinned_workdir(),
+            context.spawn_authority(),
+            cancel,
+            on_event,
+        )
+        .await
+    }
+}
+
+impl ClaudeCodeHarness {
+    async fn run_with_context(
+        &self,
+        job: HarnessJob,
+        pinned_workdir: Option<&PinnedWorkdir>,
+        spawn_authority: Option<&HarnessSpawnAuthority>,
+        cancel: CancellationToken,
+    ) -> Result<HarnessOutcome> {
+        reject_pinned_resume(&job, pinned_workdir)?;
+        let argv = build_argv_scoped(&job, pinned_workdir);
         let env = self.build_env(&job);
 
         tracing::debug!(
@@ -295,26 +450,30 @@ impl Harness for ClaudeCodeHarness {
             "spawning claude-code harness"
         );
 
-        let result = run_capture(
+        let result = run_capture_with_pinned(
             &self.bin,
             &argv,
             job.workdir.as_deref(),
+            pinned_workdir,
             &env,
-            &cancel,
-            job.timeout,
+            RunControl::new(cancel, job.timeout, job.harness_lifecycle_reporter.clone())
+                .with_spawn_authority(spawn_authority.cloned()),
         )
         .await?;
 
-        self.classify_result(result)
+        self.classify_result(result, false)
     }
 
-    async fn run_stream(
+    async fn run_stream_with_context(
         &self,
         job: HarnessJob,
+        pinned_workdir: Option<&PinnedWorkdir>,
+        spawn_authority: Option<&HarnessSpawnAuthority>,
         cancel: CancellationToken,
         on_event: Box<dyn FnMut(HarnessStreamEvent) + Send + Sync>,
     ) -> Result<HarnessOutcome> {
-        let argv = build_stream_argv(&job);
+        reject_pinned_resume(&job, pinned_workdir)?;
+        let argv = build_stream_argv_scoped(&job, pinned_workdir);
         let env = self.build_env(&job);
 
         tracing::debug!(
@@ -325,66 +484,43 @@ impl Harness for ClaudeCodeHarness {
             "spawning claude-code harness (streaming)"
         );
 
-        // Wrap on_event in Arc<Mutex> so the line callback can call it.
-        let on_event = std::sync::Arc::new(tokio::sync::Mutex::new(on_event));
+        // The stdout drain owns this callback and invokes it sequentially, so
+        // no mutex or lossy try_lock bridge is needed.
+        let mut on_event = on_event;
 
-        let result = run_stream_capture(
+        let result = run_stream_capture_with_pinned(
             &self.bin,
             &argv,
             job.workdir.as_deref(),
+            pinned_workdir,
             &env,
-            &cancel,
-            job.timeout,
-            {
-                let on_event = std::sync::Arc::clone(&on_event);
-                Box::new(move |line: &str| {
-                    let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
-                        return;
-                    };
-                    let event_type = json["type"].as_str().unwrap_or("");
-                    let events: Vec<HarnessStreamEvent> = match event_type {
-                        "assistant" => {
-                            let mut deltas = Vec::new();
-                            if let Some(content) = json["message"]["content"].as_array() {
-                                for block in content {
-                                    if block["type"] == "text" {
-                                        if let Some(text) = block["text"].as_str() {
-                                            if !text.is_empty() {
-                                                deltas.push(HarnessStreamEvent::Delta(
-                                                    text.to_string(),
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            deltas
-                        }
-                        "tool_use" => {
-                            vec![HarnessStreamEvent::ToolUse {
-                                name: json["name"].as_str().unwrap_or("unknown").to_string(),
-                                summary: json["input"]
-                                    .as_str()
-                                    .map(String::from)
-                                    .unwrap_or_else(|| json["input"].to_string()),
-                            }]
-                        }
-                        _ => vec![],
-                    };
-                    if !events.is_empty() {
-                        if let Ok(mut cb) = on_event.try_lock() {
-                            for event in events {
-                                cb(event);
-                            }
-                        }
-                    }
-                })
-            },
+            RunControl::new(cancel, job.timeout, job.harness_lifecycle_reporter.clone())
+                .with_spawn_authority(spawn_authority.cloned()),
+            Box::new(move |line: &str| {
+                for event in parse_stream_line(line) {
+                    on_event(event);
+                }
+            }),
         )
         .await?;
 
-        self.classify_result(result)
+        self.classify_result(result, true)
     }
+}
+
+fn reject_pinned_resume(job: &HarnessJob, pinned_workdir: Option<&PinnedWorkdir>) -> Result<()> {
+    if pinned_workdir.is_some()
+        && job
+            .resume
+            .as_ref()
+            .is_some_and(|session| !session.is_empty())
+    {
+        return Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            "claude-code mutating resume requires an exact NativeSessionDomain",
+        ));
+    }
+    Ok(())
 }
 
 /// Last ~200 chars of stderr, single-lined, for an error message. Prompt text
@@ -412,7 +548,7 @@ mod tests {
     use super::*;
     use vyane_core::env::EnvPolicy;
     use vyane_core::target::{AuthMaterial, ModelId, Secret};
-    use vyane_core::task::GenParams;
+    use vyane_core::task::{Effort, GenParams};
 
     fn job(prompt: &str) -> HarnessJob {
         HarnessJob {
@@ -426,6 +562,7 @@ mod tests {
             resume: None,
             env: EnvPolicy::scrubbed(),
             timeout: None,
+            harness_lifecycle_reporter: None,
         }
     }
 
@@ -475,6 +612,76 @@ mod tests {
         j.resume = Some(String::new());
         let a = build_argv(&j);
         assert!(!a.iter().any(|x| x == "--resume"));
+    }
+
+    #[test]
+    fn argv_effort_maps_for_fresh_resume_and_stream() {
+        for (effort, expected) in [
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Xhigh, "xhigh"),
+        ] {
+            let mut fresh = job("go");
+            fresh.params.effort = Some(effort);
+            assert!(
+                build_argv(&fresh)
+                    .windows(2)
+                    .any(|window| window == ["--effort", expected])
+            );
+
+            let mut resumed = fresh.clone();
+            resumed.resume = Some("session-1".into());
+            let resumed_argv = build_argv(&resumed);
+            assert!(
+                resumed_argv
+                    .windows(2)
+                    .any(|window| window == ["--effort", expected])
+            );
+            assert!(
+                resumed_argv
+                    .windows(2)
+                    .any(|window| window == ["--resume", "session-1"])
+            );
+
+            assert!(
+                build_stream_argv(&fresh)
+                    .windows(2)
+                    .any(|window| window == ["--effort", expected])
+            );
+        }
+    }
+
+    #[test]
+    fn stream_argv_uses_stream_json_and_verbose() {
+        let a = build_stream_argv(&job("hello"));
+        assert!(
+            a.windows(2)
+                .any(|w| w == ["--output-format", "stream-json"])
+        );
+        assert!(a.iter().any(|arg| arg == "--verbose"));
+    }
+
+    #[test]
+    fn stream_line_emits_nested_text_and_tool_use_in_order() {
+        let line = r#"{
+            "type":"assistant",
+            "message":{"content":[
+                {"type":"text","text":"working"},
+                {"type":"tool_use","name":"Read","input":{"path":"src/lib.rs"}},
+                {"type":"text","text":"done"}
+            ]}
+        }"#;
+
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], HarnessStreamEvent::Delta(text) if text == "working"));
+        assert!(matches!(
+            &events[1],
+            HarnessStreamEvent::ToolUse { name, summary }
+                if name == "Read" && summary == r#"{"path":"src/lib.rs"}"#
+        ));
+        assert!(matches!(&events[2], HarnessStreamEvent::Delta(text) if text == "done"));
     }
 
     #[test]

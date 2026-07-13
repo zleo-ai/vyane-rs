@@ -1,6 +1,6 @@
 [package]
 name = "vyane-ledger"
-description = "Append-only JSONL run ledger, session store, cost estimation"
+description = "Append-only run and event ledgers, session store, cost estimation"
 keywords = ["ai", "llm", "orchestration", "ledger", "jsonl"]
 categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
@@ -17,6 +17,8 @@ chrono = { workspace = true }
 fs4 = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

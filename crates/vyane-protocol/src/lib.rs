@@ -13,7 +13,7 @@ mod sse;
 mod wire;
 
 pub use anthropic_messages::AnthropicMessagesClient;
-pub use http::ClientOptions;
+pub use http::{ClientOptions, endpoint_routing_digest, validate_http_base_url};
 pub use openai_chat::OpenAiChatClient;
 pub use openai_responses::OpenAiResponsesClient;
 pub use retry::RetryConfig;

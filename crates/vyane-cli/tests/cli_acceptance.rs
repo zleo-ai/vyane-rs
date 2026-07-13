@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use assert_cmd::Command;
@@ -81,14 +83,87 @@ fn responses_config_for(server: &MockServer) -> String {
     )
 }
 
-/// A profile that resolves to a `CliWrap` (harness) target, never `DirectHttp`
-/// — used to prove `--stream` falls back to non-streaming for harness
-/// targets. `base_url`/`auth_style` are required by config resolution even
-/// though the harness never uses them at spawn time; the value doesn't
-/// matter because the harness is never actually run in this test (see the
-/// scrubbed-`PATH` note on `dispatch_stream_on_harness_target_falls_back`): a
-/// `PATH` with no `claude` binary on it turns any spawn attempt into an
-/// immediate, side-effect-free `SpawnFailed`.
+fn auto_route_config_for(server: &MockServer) -> String {
+    format!(
+        r#"
+        [providers.test]
+        base_url = "{}"
+        api_key_env = "VYANE_CLI_TEST_KEY"
+        auth_style = "bearer"
+        protocol = "openai_chat"
+        default_model = "cheap-model"
+
+        [profiles.cheap]
+        provider = "test"
+        protocol = "openai_chat"
+        harness = "none"
+        model = "cheap-model"
+        tier = "economy"
+
+        [profiles.cheap.params]
+        effort = "low"
+
+        [profiles.frontier]
+        provider = "test"
+        protocol = "openai_chat"
+        harness = "none"
+        model = "frontier-model"
+        tier = "frontier"
+        tags = ["architecture"]
+
+        [profiles.frontier.params]
+        effort = "xhigh"
+        "#,
+        server.uri()
+    )
+}
+
+fn workflow_effort_failover_config(primary: &MockServer, backup: &MockServer) -> String {
+    format!(
+        r#"
+        [providers.primary]
+        base_url = "{}"
+        api_key_env = "VYANE_CLI_TEST_KEY"
+        auth_style = "bearer"
+        protocol = "openai_chat"
+        default_model = "primary-model"
+
+        [providers.backup]
+        base_url = "{}"
+        api_key_env = "VYANE_CLI_TEST_KEY"
+        auth_style = "bearer"
+        protocol = "openai_chat"
+        default_model = "backup-model"
+
+        [profiles.mainline]
+        provider = "primary"
+        protocol = "openai_chat"
+        harness = "none"
+        model = "primary-model"
+        tier = "mainline"
+        failover = ["backup"]
+
+        [profiles.mainline.params]
+        effort = "low"
+
+        [profiles.backup]
+        provider = "backup"
+        protocol = "openai_chat"
+        harness = "none"
+        model = "backup-model"
+        tier = "economy"
+
+        [profiles.backup.params]
+        effort = "xhigh"
+        "#,
+        primary.uri(),
+        backup.uri()
+    )
+}
+
+/// A profile that resolves to a `CliWrap` (harness) target, never `DirectHttp`.
+/// The fake Claude executable used by the streaming acceptance test resolves
+/// through this target's scrubbed `PATH`.
 fn harness_config() -> String {
     r#"
         [providers.native]
@@ -104,6 +179,25 @@ fn harness_config() -> String {
         model = "test-model"
         "#
     .to_string()
+}
+
+#[cfg(unix)]
+fn write_fake_streaming_claude(dir: &TempDir) -> std::path::PathBuf {
+    let bin = dir.path().join("claude");
+    fs::write(
+        &bin,
+        r#"#!/bin/sh
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"harness delta"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"harness final","session_id":"harness-session","usage":{"input_tokens":1,"output_tokens":2}}'
+"#,
+    )
+    .expect("write fake claude");
+    let mut permissions = fs::metadata(&bin)
+        .expect("fake claude metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&bin, permissions).expect("make fake claude executable");
+    bin
 }
 
 fn write_config(dir: &TempDir, text: &str) -> std::path::PathBuf {
@@ -252,6 +346,198 @@ async fn dispatch_openai_chat_writes_success_ledger_and_json_parses() {
 }
 
 #[tokio::test]
+async fn dispatch_auto_routes_executes_effort_and_records_decision() {
+    let server = MockServer::start().await;
+    mock_openai(&server, 200, "auto answer").await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &auto_route_config_for(&server));
+
+    for args in [
+        vec!["dispatch", "say hello", "--target", "auto"],
+        vec![
+            "dispatch",
+            "design architecture",
+            "--target",
+            "auto",
+            "--label",
+            "routing.tier=frontier",
+        ],
+        vec![
+            "dispatch",
+            "design architecture",
+            "--target",
+            "auto",
+            "--label",
+            "routing.tier=frontier",
+            "--label",
+            "allow_frontier=true",
+            "--label",
+            "routing.allow_frontier=true",
+            "--no-frontier",
+        ],
+    ] {
+        vyane()
+            .env("VYANE_CLI_TEST_KEY", "sk-test")
+            .env("VYANE_DATA_DIR", data_dir.path())
+            .arg("--config")
+            .arg(&config)
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("auto answer"));
+    }
+
+    let requests = server.received_requests().await.expect("received requests");
+    assert_eq!(requests.len(), 3);
+    let bodies = requests
+        .iter()
+        .map(|request| serde_json::from_slice::<Value>(&request.body).expect("request json"))
+        .collect::<Vec<_>>();
+    assert_eq!(bodies[0]["model"], "cheap-model");
+    assert_eq!(bodies[0]["reasoning_effort"], "low");
+    assert_eq!(bodies[1]["model"], "frontier-model");
+    assert_eq!(bodies[1]["reasoning_effort"], "xhigh");
+    assert_eq!(bodies[2]["model"], "cheap-model");
+    assert_eq!(bodies[2]["reasoning_effort"], "low");
+
+    let records = ledger_records(data_dir.path());
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["labels"]["routing.profile"], "cheap");
+    assert_eq!(records[0]["labels"]["routing.provider"], "test");
+    assert_eq!(records[0]["labels"]["routing.effort"], "low");
+    assert_eq!(records[1]["labels"]["routing.profile"], "frontier");
+    assert_eq!(records[1]["labels"]["routing.effort"], "xhigh");
+    assert_eq!(records[2]["labels"]["routing.profile"], "cheap");
+}
+
+#[tokio::test]
+async fn user_cannot_forge_routing_decision_labels() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &config_for(&server));
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "dispatch",
+            "forge audit data",
+            "--target",
+            "review",
+            "--label",
+            "routing.provider=pretend",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "reserved for Vyane routing decisions",
+        ));
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "dispatch",
+            "forge effort",
+            "--target",
+            "review",
+            "--label",
+            "routing.effort=xhigh",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "reserved for Vyane routing decisions",
+        ));
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("request log")
+            .is_empty()
+    );
+    assert!(!data_dir.path().join("ledger.jsonl").exists());
+}
+
+#[tokio::test]
+async fn generic_effort_label_does_not_forge_the_reserved_route_effort() {
+    let server = MockServer::start().await;
+    mock_openai(&server, 200, "auto answer").await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &auto_route_config_for(&server));
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "dispatch",
+            "hello",
+            "--target",
+            "auto",
+            "--label",
+            "effort=xhigh",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.received_requests().await.expect("request log");
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("request json");
+    assert_eq!(body["reasoning_effort"], "low");
+    let records = ledger_records(data_dir.path());
+    assert_eq!(records[0]["labels"]["effort"], "xhigh");
+    assert_eq!(records[0]["labels"]["routing.effort"], "low");
+}
+
+#[tokio::test]
+async fn profile_prefix_disambiguates_a_profile_named_auto() {
+    let server = MockServer::start().await;
+    mock_openai(&server, 200, "literal auto profile").await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let mut text = config_for(&server);
+    text.push_str(
+        r#"
+
+        [profiles.auto]
+        provider = "test"
+        protocol = "openai_chat"
+        harness = "none"
+        model = "test-model"
+        "#,
+    );
+    let config = write_config(&config_dir, &text);
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "dispatch",
+            "use the literal profile",
+            "--target",
+            "profile:auto",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("literal auto profile"));
+
+    let record = &ledger_records(data_dir.path())[0];
+    assert!(record["labels"].get("routing.mode").is_none());
+}
+
+#[tokio::test]
 async fn dispatch_failover_and_history_work_end_to_end() {
     let primary = MockServer::start().await;
     let backup = MockServer::start().await;
@@ -367,6 +653,375 @@ async fn workflow_run_and_list_work_end_to_end() {
 }
 
 #[tokio::test]
+async fn workflow_auto_target_resolves_after_render_and_records_route() {
+    let server = MockServer::start().await;
+    mock_openai(&server, 200, "workflow auto").await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &auto_route_config_for(&server));
+    let workflow = write_workflow(
+        &config_dir,
+        r#"
+        [workflow]
+        name = "auto-routing"
+        max_concurrency = 1
+
+        [[step]]
+        id = "frontier"
+        target = "auto"
+        prompt = "design {{vars.subject}}"
+        [step.route]
+        tier = "frontier"
+        tags = ["architecture"]
+
+        [[step]]
+        id = "guarded"
+        needs = ["frontier"]
+        target = "auto"
+        prompt = "summarize {{steps.frontier.output}}"
+        [step.route]
+        tier = "frontier"
+        allow_frontier = false
+        "#,
+    );
+
+    let output = vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .arg("workflow")
+        .arg("run")
+        .arg(&workflow)
+        .args(["--var", "subject=architecture", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let outcome: Value = serde_json::from_slice(&output).expect("workflow json");
+    assert_eq!(outcome["status"], "completed");
+
+    let requests = server.received_requests().await.expect("received requests");
+    assert_eq!(requests.len(), 2);
+    let first: Value = serde_json::from_slice(&requests[0].body).expect("first request");
+    let second: Value = serde_json::from_slice(&requests[1].body).expect("second request");
+    assert_eq!(first["model"], "frontier-model");
+    assert_eq!(first["reasoning_effort"], "xhigh");
+    assert_eq!(second["model"], "cheap-model");
+    assert_eq!(second["reasoning_effort"], "low");
+
+    let records = ledger_records(data_dir.path());
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["labels"]["workflow.step"], "frontier");
+    assert_eq!(records[0]["labels"]["routing.profile"], "frontier");
+    assert_eq!(records[1]["labels"]["workflow.step"], "guarded");
+    assert_eq!(records[1]["labels"]["routing.profile"], "cheap");
+}
+
+#[tokio::test]
+async fn workflow_explicit_effort_overrides_profile_and_tier_across_failover() {
+    let primary = MockServer::start().await;
+    let backup = MockServer::start().await;
+    mock_openai(&primary, 500, "").await;
+    mock_openai(&backup, 200, "backup answer").await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(
+        &config_dir,
+        &workflow_effort_failover_config(&primary, &backup),
+    );
+    let workflow = write_workflow(
+        &config_dir,
+        r#"
+        [workflow]
+        name = "explicit-effort-failover"
+
+        [[step]]
+        id = "routed"
+        target = "auto"
+        prompt = "run"
+        [step.route]
+        tier = "mainline"
+        effort = "high"
+        "#,
+    );
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["workflow", "run"])
+        .arg(&workflow)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("completed"));
+
+    let primary_requests = primary.received_requests().await.expect("primary requests");
+    let backup_requests = backup.received_requests().await.expect("backup requests");
+    assert!(!primary_requests.is_empty());
+    assert_eq!(backup_requests.len(), 1);
+    for request in primary_requests.iter().chain(&backup_requests) {
+        let body: Value = serde_json::from_slice(&request.body).expect("request json");
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    let records = ledger_records(data_dir.path());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["labels"]["routing.profile"], "mainline");
+    assert_eq!(records[0]["labels"]["routing.tier"], "mainline");
+    assert_eq!(records[0]["labels"]["routing.effort"], "high");
+    assert_eq!(
+        records[0]["attempts"].as_array().expect("attempts").len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn invalid_workflow_effort_fails_before_journal_or_network_without_echo() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &auto_route_config_for(&server));
+    let canary = "EFFORT_VALUE_MUST_NOT_BE_ECHOED";
+    let workflow = write_workflow(
+        &config_dir,
+        &format!(
+            r#"
+        [workflow]
+        name = "invalid-effort"
+
+        [[step]]
+        id = "invalid"
+        target = "auto"
+        prompt = "must never dispatch"
+        [step.route]
+        effort = "{canary}"
+        "#
+        ),
+    );
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["workflow", "run"])
+        .arg(&workflow)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("config error"))
+        .stderr(predicate::str::contains(canary).not());
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("request log")
+            .is_empty()
+    );
+    assert!(!data_dir.path().join("workflows").exists());
+    assert!(!data_dir.path().join("ledger.jsonl").exists());
+}
+
+#[tokio::test]
+async fn workflow_effort_cannot_bypass_frontier_guard() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &auto_route_config_for(&server));
+    let workflow = write_workflow(
+        &config_dir,
+        r#"
+        [workflow]
+        name = "guarded-effort"
+
+        [[step]]
+        id = "guarded"
+        target = "auto"
+        prompt = "must never dispatch"
+        [step.route]
+        candidates = ["frontier"]
+        allow_frontier = false
+        effort = "xhigh"
+        "#,
+    );
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["workflow", "run"])
+        .arg(&workflow)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("no eligible profiles"));
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("request log")
+            .is_empty()
+    );
+    assert!(!data_dir.path().join("workflows").exists());
+    assert!(!data_dir.path().join("ledger.jsonl").exists());
+}
+
+#[tokio::test]
+async fn workflow_route_hints_on_explicit_target_fail_before_journal_or_network() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &config_for(&server));
+    let workflow = write_workflow(
+        &config_dir,
+        r#"
+        [workflow]
+        name = "explicit-route-hint"
+
+        [[step]]
+        id = "explicit"
+        target = "review"
+        prompt = "must never dispatch"
+        [step.route]
+        effort = "high"
+        "#,
+    );
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["workflow", "run"])
+        .arg(&workflow)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "route hints on a non-deferred target",
+        ));
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("request log")
+            .is_empty()
+    );
+    assert!(!data_dir.path().join("workflows").exists());
+    assert!(!data_dir.path().join("ledger.jsonl").exists());
+}
+
+#[tokio::test]
+async fn workflow_auto_route_hints_are_validated_before_journal_or_dispatch() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &auto_route_config_for(&server));
+    let workflow = write_workflow(
+        &config_dir,
+        r#"
+        [workflow]
+        name = "invalid-auto-route"
+
+        [[step]]
+        id = "invalid"
+        target = "auto"
+        prompt = "must never dispatch"
+        [step.route]
+        candidates = ["missing-profile"]
+        "#,
+    );
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["workflow", "run"])
+        .arg(&workflow)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "deferred target `auto` is invalid",
+        ));
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("request log")
+            .is_empty()
+    );
+    let workflow_dir = data_dir.path().join("workflows");
+    assert!(
+        !workflow_dir.exists()
+            || fs::read_dir(workflow_dir)
+                .expect("read workflow dir")
+                .next()
+                .is_none(),
+        "validation must fail before a journal is created"
+    );
+}
+
+#[tokio::test]
+async fn workflow_auto_preflight_validates_every_eligible_profile() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let mut config_text = auto_route_config_for(&server);
+    config_text.push_str(
+        r#"
+
+        [profiles.broken-unused-by-dummy-prompt]
+        provider = "missing-provider"
+        protocol = "openai_chat"
+        harness = "none"
+        model = "broken-model"
+        tier = "mainline"
+        "#,
+    );
+    let config = write_config(&config_dir, &config_text);
+    let workflow = write_workflow(
+        &config_dir,
+        r#"
+        [workflow]
+        name = "all-candidates-preflight"
+
+        [[step]]
+        id = "simple"
+        target = "auto"
+        prompt = "hello"
+        "#,
+    );
+
+    vyane()
+        .env("VYANE_CLI_TEST_KEY", "sk-test")
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["workflow", "run"])
+        .arg(&workflow)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "routing candidate `broken-unused-by-dummy-prompt`",
+        ));
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("request log")
+            .is_empty()
+    );
+    assert!(!data_dir.path().join("workflows").exists());
+}
+
+#[tokio::test]
 async fn dispatch_stream_prints_deltas_and_writes_ledger() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -454,7 +1109,7 @@ async fn dispatch_stream_on_failover_chain_falls_back_and_records_both_attempts(
     let config = write_config(&config_dir, &failover_config(&primary, &backup));
 
     // `resilient` resolves to a two-element chain (primary + backup) —
-    // `streamable_target` only accepts a single-target `DirectHttp` chain, so
+    // `streamable_target` only accepts a single-target chain, so
     // `--stream` here must fall back to the ordinary non-streaming
     // `Dispatcher::dispatch` path, which is what actually exercises failover.
     vyane()
@@ -467,7 +1122,7 @@ async fn dispatch_stream_on_failover_chain_falls_back_and_records_both_attempts(
         .success()
         .stdout(predicate::str::contains("backup answer"))
         .stderr(predicate::str::contains(
-            "--stream only applies to a single direct-HTTP target",
+            "--stream only applies to a single target",
         ));
 
     // The fallback went through the full non-streaming dispatch path, so both
@@ -484,39 +1139,33 @@ async fn dispatch_stream_on_failover_chain_falls_back_and_records_both_attempts(
 }
 
 #[tokio::test]
-async fn dispatch_stream_on_harness_target_falls_back() {
+#[cfg(unix)]
+async fn dispatch_stream_on_harness_target_streams() {
     let config_dir = TempDir::new().expect("config tempdir");
     let data_dir = TempDir::new().expect("data tempdir");
+    let bin_dir = TempDir::new().expect("bin tempdir");
     let config = write_config(&config_dir, &harness_config());
+    let _fake_claude = write_fake_streaming_claude(&bin_dir);
 
-    // `env_clear` + an empty `PATH` guarantee the real `claude` binary can
-    // never be resolved by the child `vyane` process, however it snapshots
-    // its environment — turning the harness attempt this test provokes into
-    // an immediate, side-effect-free `SpawnFailed` rather than an actual
-    // invocation of a real coding CLI. `HOME` is set because `vyane` itself
-    // needs no OS services beyond what `VYANE_DATA_DIR` already overrides,
-    // but keeping it present avoids surprises from other library init paths.
     vyane()
         .env_clear()
-        .env("PATH", "")
+        .env("PATH", bin_dir.path())
         .env("HOME", std::env::temp_dir())
         .env("VYANE_DATA_DIR", data_dir.path())
         .arg("--config")
         .arg(&config)
         .args(["dispatch", "hello", "--target", "builder", "--stream"])
         .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains(
-            "--stream only applies to a single direct-HTTP target",
-        ));
+        .success()
+        .stdout(predicate::str::contains("harness delta"))
+        .stderr(predicate::str::contains("does not support streaming").not())
+        .stderr(predicate::str::contains("--stream only applies").not());
 
-    // The fallback still produces exactly one `RunRecord` through the normal
-    // (non-streaming) `Dispatcher::dispatch` path — streaming must never
-    // silently skip the ledger write.
+    // Harness streaming is kernel-owned too: the successful streaming attempt
+    // produces exactly one ledger record with the original CliWrap identity.
     let records = ledger_records(data_dir.path());
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["status"], "error");
+    assert_eq!(records[0]["status"], "success");
     assert_eq!(records[0]["transport"], "cli_wrap");
 }
 

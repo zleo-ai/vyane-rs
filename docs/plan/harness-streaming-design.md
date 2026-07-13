@@ -1,5 +1,11 @@
 # WP-35: Harness Streaming — Architecture Design
 
+> **Status:** implemented by WP-36. This document preserves the proposal and
+> implementation sequence; [`../ARCHITECTURE.md`](../ARCHITECTURE.md) describes
+> the current behavior. The implementation additionally uses real CLI event
+> fixtures, forwards nested tool-use events, and treats a missing terminal
+> Claude result envelope as failure.
+
 ## Problem
 
 `Dispatcher::dispatch_stream` (WP-18) only supports direct-HTTP targets.

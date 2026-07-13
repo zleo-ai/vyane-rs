@@ -34,6 +34,7 @@
 
 mod claude_code;
 mod codex_cli;
+pub mod native;
 mod parse;
 mod probe;
 mod spawn;

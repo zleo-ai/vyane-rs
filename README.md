@@ -31,8 +31,11 @@ child agents are launched from a scrubbed baseline environment, so the calling
 session's credentials and base-URL overrides never leak into them; **failover
 chains that never leak a model id across providers** — each element of a chain
 is resolved fully and independently, so a fallback always uses the model that
-belongs to the provider it runs against; and an **append-only JSONL run
-ledger** that records prompt *digests* (not prompt bodies), the full attempt
+belongs to the provider it runs against; **whole-chain capability admission** —
+`Write`/`Full` cannot silently run on a chat-only target, and Linux mutating
+runs retain the admitted directory object across child spawn; and an
+**append-only JSONL run ledger** that records prompt *digests* (not prompt
+bodies), the full attempt
 trail of every dispatch, and **owner-scoped records from day one** so
 multi-user isolation never needs a schema retrofit.
 
@@ -56,27 +59,235 @@ model that wrote it.
 
 ## Status
 
-**v0.1 + v0.2 surface complete end-to-end; v0.3 protocol front-ends (REST API +
-MCP) delivered. APIs are still unstable pre-release and will change without
-notice.** Every crate is implemented and covered by tests; the CLI runs real
-dispatch/broadcast/failover today.
+**The repository-local v0.1 through v0.3 milestones and v0.4 implementation
+scope are delivered. External crates.io publication (to Rust's public package
+registry) is a deferred distribution action, not a feature milestone, and
+requires separate authorization; a tag or registry token is not that
+authorization. The manual release workflow additionally requires a protected
+`crates-io` environment approval by a reviewer other than the dispatcher and
+requires the supplied release tag, current `main`, and workflow SHA to identify
+one exact commit. The registry token is exposed only to the final publish step.
+The 16-crate local package preflight passes, but no crate has
+been published. This does not mean full parity with the original private Vyane
+system.** In the current public integration baseline, the fixed cross-repository matrix
+tracks 53 capabilities across eight domains: 7 implemented, 20 partial, 16
+missing, 8 deliberately different or awaiting a decision, and 2 planned. It
+records substantial native-harness, continuity, collaboration, governance,
+observability, and interface work still to do. Unqualified “full parity” means
+whole-system capability parity: private credentials and deployment details stay
+out of this public repo, but their generic contracts and optional/private
+adapter boundaries still need verifiable coverage. Live daemon pause/resume and
+automatic restart replay are two explicit daemon limits, not the whole remaining
+parity backlog. See the
+[original-Vyane parity baseline](docs/parity/ORIGINAL-VYANE-PARITY.md). APIs
+remain unstable pre-release; the CLI runs real dispatch/broadcast/failover
+today.
 
 | capability | crate | state |
 |------------|-------|-------|
-| core type system (four-layer model, traits, errors, env policy) | `vyane-core` | [x] |
+| core type system (four-layer model, traits, errors, env policy, process-local workdir pin) | `vyane-core` | [x] includes the non-serializable live native-side-effect authority contract |
 | config & profiles | `vyane-config` | [x] |
-| OpenAI-Chat + Responses + Anthropic-Messages clients | `vyane-protocol` | [x] |
-| Claude Code + Codex CLI harnesses | `vyane-harness` | [x] |
-| dispatch / broadcast / failover kernel | `vyane-kernel` | [x] |
-| JSONL ledger & sessions | `vyane-ledger` | [x] |
+| OpenAI-Chat + Responses + Anthropic-Messages clients | `vyane-protocol` | [x] baseline clients; [~] bounded typed tool turns and the per-wire authorized path currently cover non-streaming OpenAI Chat only |
+| Claude Code + Codex CLI harnesses, including stdout event streaming | `vyane-harness` | [x] additive scoped execution carries the Linux pinned workdir and an optional live spawn authority; gated capture/streaming revalidate before wrapper spawn and real-target release. No production AgentRun caller constructs that authority yet, and this remains adapter-delegated rather than a host sandbox |
+| native permission/tool execution seam (not yet a `Harness` implementation) | `vyane-harness` + `vyane-service` | [~] atomic AgentRun scope validation, per-wire model authorization, an allowed-tool registry gate, a fresh-sessionless permit/store bridge, bounded serial turn driver, lifetime-bound in-process native-scope composition, and a generic crash-consistent completion handback boundary exist as dark components. No concrete product operation or production factory/runtime is wired; session-bearing authority, trusted built-ins, OS sandbox, checkpoint/session commit, approval resume and native resume remain absent |
+| dispatch / broadcast / failover kernel | `vyane-kernel` | [x] early execution id, whole-chain trusted capability admission, one-shot prepared dispatch and original-ordinal failover evidence |
+| append-only run ledger + owner-isolated session records | `vyane-ledger` | [x] direct-HTTP transcript continuation plus strict revisioned V2 snapshots, store-level CAS `Reset` / `ForkFresh` / `Commit`, and an exact local-filesystem execution-period lease; CLI/service control is limited to owner-local list/inspect/reset-native, with no public fork, REST mutation, distributed lease protocol, or production native resume |
+| replayable owner-scoped event store | `vyane-ledger` | [~] storage/cursors, bounded message and AgentRun lifecycle projection, explicit owner-bound projection-only service assembly, and an unwired resident broker driver now exist; dispatch/workflow producers, subscription, retention and a unified timeline remain |
+| durable, secret-free task metadata | `vyane-task` | [x] schema v2 keys snapshots, events and CAS by `(owner,id)` with transactional v1 migration; built-in frontends still select explicit `local` |
+| durable owner-scoped AgentRun queue, worker topology and recovery truth | `vyane-agent` | [~] exact leases/deadlines, logical/native-session-id and policy-digest-fenced resume, non-serializable active permits, atomic native-scope revalidation, bounded tree cancel, body-free completion receipts/outbox, durable projection deferral/quarantine, and a three-loop in-process resident supervisor exist; no concrete product operation, production host, Process/Remote integration or public execution API exists |
+| owner-scoped transactional message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO, delayed/idempotent delivery, fenced leases, TTL, ack/nack, body-free outbox, external-receipt reconciliation, and hidden staged completion publication exist |
+| bounded replay-safe delivery broker + body-free EventLog projectors | `vyane-broker` | [~] fake-adapter contracts, message/AgentRun lifecycle projection with stable source event IDs, and the explicit non-`Clone` `ResidentBrokerSupervisor` library driver exist; no service/CLI/daemon production assembly, worker/message glue, or A2A/Channels adapters exist yet |
 | declarative workflow engine (DAG + journal/resume) | `vyane-workflow` | [x] |
+| resident workflow daemon (authenticated local submit/status/cancel) | `vyane-cli` | [x] |
 | detached background runs (`--detach` + `task` commands) | `vyane-cli` | [x] |
-| CLI (check / dispatch / broadcast / history / sessions / workflow / task) | `vyane-cli` | [x] |
-| shared service layer | `vyane-service` | [x] |
-| **REST API** (`vyane serve` — dispatch/broadcast/runs/sessions/health) | `vyane-cli` + `axum` | [x] |
-| **MCP server** (`vyane mcp` — dispatch/broadcast/history/sessions tools) | `vyane-mcp` + `rmcp` | [x] |
+| CLI (check / dispatch / broadcast / history / session / sessions / workflow / task / daemon) | `vyane-cli` | [x] revision-aware `session list/inspect/reset-native`; legacy `sessions` remains compatible |
+| shared service layer | `vyane-service` | [x] `OwnerContextFactory` authenticates and resolves a reserved-local-safe authority; `OwnerScopedService` freezes dispatch/stream/query/session/reset. Optional AgentRun components include a paired in-process backend, exact message-completion sink, and resident execution/recovery/publication supervisor; ordinary dispatch starts none of them |
+| **REST API** (`vyane serve` — dispatch/broadcast/runs/sessions/health) | `vyane-cli` + `axum` | [x] per-start bearer capability, loopback Host/Origin enforcement, non-loopback bind rejection, allowlisted views, and one assembly-frozen local service scope; the bearer still is not a distinct principal or hostile same-UID/multi-user boundary |
+| **MCP server** (`vyane mcp` — six tools) | `vyane-mcp` + `rmcp` | [x] dispatch/broadcast/history/sessions plus two bounded diagnostics: `route` preview and static-only `check`; generic success output has a 1 MiB cap |
 | pluggable routing | `vyane-router` | [x] |
-| multi-model review pipeline | `vyane-cli` (review module) | [x] |
+| solution-review workflow (implement → fan-out review → synthesize) | `vyane-cli` (review module) | [x] not yet the original system's structured git diff/PR review product |
+
+Capability admission is deliberately narrower than a sandbox. `ReadOnly` works
+with chat or harness targets. `Write`/`Full` requires an existing workdir and a
+trusted built-in Claude/Codex CLI editing manifest; direct HTTP and unknown
+adapters are rejected before executor construction. Mutating dispatch currently
+fails closed outside Linux. The pinned descriptor prevents workdir path
+replacement, but does not confine a hostile same-UID child or absolute-path
+access. The exact `NativeSessionDomain` storage contract and store-level CAS
+transitions now exist, but they are evidence rather than resume authority.
+Regular dispatch requires an exact `(owner, session_id, execution_id)` lease,
+acquires it before loading continuity, and retains it through model execution
+and a revision-CAS completion update. The filesystem store uses an owner-only
+advisory lock, serializes direct control mutations against the same authority,
+and prevents same-session runs from overlapping: a competitor either acquires
+the lease after a bounded wait or receives `Conflict`, always before executor
+construction. This is a local crash-released fence, not a distributed
+generation/TTL protocol; the
+post-model session commit also remains best-effort and must not be described as
+strict durable continuation. Regular dispatch still rejects legacy-unbound or
+domain-bound native harness state before executor construction. Streaming
+dispatch rejects any session even earlier, before session-store load,
+capability probe, or executor construction. Pure direct-HTTP transcript
+continuation remains available only through regular dispatch. The owner-local
+CLI/service exposes list, inspect, and revision-checked reset-native; it exposes
+no public fork, REST mutation, or production native resume.
+
+The native authority work remains an incomplete integration seam. A separate
+OpenAI Chat typed-turn path revalidates immediately before every explicit wire
+send; cancellation remains live through authority wait, send, response-body
+read and retry backoff. The shared HTTP client follows no redirects and performs
+no implicit retries, so one explicit attempt corresponds to one authority
+check. `ToolRegistry::execute_authorized` similarly revalidates only an allowed
+call immediately before executor polling; deny/ask/invalid/unknown/cancelled/
+expired decisions remain pure and revocation stays outside model-facing tool
+text. `AgentRunModelToolAuthority` is now a concrete bridge for a fresh,
+sessionless scope: it owns the permit and scope, revalidates the AgentRun store
+on Tokio's blocking pool for each one-based model send or tool operation, and
+rejects session-bearing scopes, checkpoint effects, and session commits. It is
+not registered by a production factory or called by a runtime/native loop, and
+it does not combine a session lease with an exact native-session domain.
+
+The paired in-process operation can now bind its lifetime-bound effect
+authority to one exact fresh, sessionless `NativeExecutionScope`. Binding first
+atomically validates owner/run/generation/lease/deadline/controller plus exact
+target, prompt and policy digests; each subsequent one-based model send or tool
+operation repeats that full native-scope validation. Session/resume scopes,
+checkpoint/session-commit effects, raw store/permit access and cloning or
+serialization remain closed. This completes an authority composition seam, not
+a concrete native AgentRun operation or result handback. See
+[WP-52](docs/plan/WP-52.md).
+
+`NativeTurnDriver` now supplies a separate bounded dark model/tool loop. It
+defaults to eight model turns with a hard ceiling of 32, permits at most one
+tool call per turn, requires the initial advertised tool-name set to equal the
+registry-name set, validates every request/response, and preflights the complete
+next transcript with a worst-case bounded tool result before any permission or
+tool future can run. Model sends and allowed tools use only the authorized
+entry points. Refusal, approval-required, parallel calls, tool-choice
+violations, cancellation, timeout and budget exhaustion are typed terminal
+stops; usage addition saturates, and post-tool model failure becomes a redacted
+non-replayable stop rather than an outer failover error. Invalid JSON arguments
+produce static non-echo tool text and never execute. Tool descriptions and
+schemas are non-authoritative model guidance; each `NativeTool` must validate
+the actual arguments it receives.
+
+The driver's outcome is non-serializable and has redacted `Debug`, but the
+driver is not a `Harness` and no factory/runtime constructs it. There are still
+no trusted built-ins, checkpoint/session-commit consumers, approval resume, or
+native resume. Separately, `AgentProjectionComponents::open` provides an
+explicit owner-bound path to the one-shot AgentRun projector while keeping the
+raw store encapsulated. Ordinary dispatch neither opens that database nor
+starts projection or other resident work.
+
+`vyane-service::AgentRunRecoveryDriver` is another explicit fixed-owner,
+non-`Clone` one-shot seam. Construction freezes the owner, injected store,
+options and at most one trusted adapter per `ControllerKind`; `recover_once`
+consumes the driver. Recovery claim and final confirmation run on Tokio's
+blocking pool. One pass is capped at 64 tickets and 16 concurrent adapter
+calls, each adapter timeout is at most 60 seconds, and the durable operation
+lease is at most five minutes and must be strictly longer than the timeout plus
+settlement margin. A conservative caller-local monotonic window starts before
+the blocking claim, so claim latency is deducted and a custom store's wall
+clock cannot extend adapter authority. Only a controllerless ticket or an
+affirmative `Gone` observation for the exact controller can reach
+`confirm_controller_gone`; reports and errors are body-free and recovery
+tickets never cross the adapter boundary.
+
+Standing alone this is not a resident worker-health or execution loop. WP-51
+later composes only the paired in-process backend; there is still no Process/
+Remote controller adapter, concrete product operation,
+session-aware resume, production factory/CLI/daemon assembly, message handback,
+live pause/resume, or automatic replay. Controller adapters must revalidate the
+complete identity before every effect, return `Unavailable` without an effect
+when identity reuse cannot be excluded, and remain safe to repeat after
+timeout, drop, or settlement failure. A custom store's blocking call cannot be
+forcibly cancelled, and an adapter timeout bounds future polling rather than
+proving a non-abortable external effect stopped. See
+[WP-45](docs/plan/WP-45.md) for the exact boundary.
+
+`vyane-service::AgentRunExecutionDriver` complements recovery with a separate
+fixed-owner, non-`Clone`, consuming one-shot pass over newly due runs. A pass
+admits its whole claim on Tokio's blocking pool and is capped at 64 runs, 16
+concurrent polls, a five-minute lease, and heartbeat intervals from 100
+milliseconds through 60 seconds that must remain below the lease. Its monotonic
+base starts before claim. For every admitted item it generates independent
+256-bit prospective controller id and fingerprint material, then orders claim,
+durable start, permit issue, a pre-effect heartbeat, and only then the first
+executor poll. The trusted executor must revalidate the permit at every actual
+effect, and custom stores are checked after every transition.
+
+Only a `Quiesced` closed outcome authorizes the driver to initiate terminal
+settlement. A single item future owns and advances the receipt. Before that
+proof, cancellation, timeout, panic, drop, `Unknown`, or heartbeat failure
+authorizes no new settlement and may leave `Starting` or `Running` for WP-45
+exact-identity recovery. Once a blocking settlement call has started it cannot
+be interrupted and may outlive a dropped waiter; a custom store can also
+mutate-then-error, so a reported settlement failure is uncertain. This remains an unwired library seam: there is no
+concrete executor/controller adapter, production assembly,
+message handback, session-aware resume, live pause/resume, or automatic replay.
+See [WP-47](docs/plan/WP-47.md).
+
+`InProcessAgentComponents` now supplies one concrete pairing for those one-shot
+drivers. It admits one live backend per owner process-wide, regardless of store
+pointer; that backend binds one store and structured operation and mints both
+`InProcess` executor/recovery drivers. Exact id/fingerprint matching,
+`Notify`-based cancellation/exit observation, and a fail-closed 4096-entry
+tombstone bound prevent a late or reused controller from being mistaken for the
+one being recovered. Durable confirmation reclaims the exact tombstone; failed
+or uncertain confirmation retains it, and a post-reclamation late registration
+must revalidate its permit again before operation code runs. Operations receive
+a lifetime-bound non-`Clone` effect authority and must consume a freshly
+revalidated permit proof immediately before every effect.
+
+`ResidentInProcessAgentSupervisor` can consume this exact pairing into separate
+execution, recovery, and completion-publication polling loops. It validates poll/backoff bounds, applies
+capped exponential backoff to degraded/error/panic cycles, creates no task,
+channel, runtime, payload queue or replay policy, and never automatically
+enqueues resume. Host cancellation stops new cycles and scheduling waits but is
+not forwarded as AgentRun cancellation: an already-started pass drains with its
+own token. Forced drop still forfeits that guarantee, and a custom blocking
+store means drain has no fixed wall-clock bound. This remains a dark library
+driver with no concrete product operation, `Process`/`Remote` backend,
+protocol API or production host. The generic handback contract is defined in
+[WP-53](docs/plan/WP-53.md); the original resident boundary is in
+[WP-51](docs/plan/WP-51.md).
+
+The service layer also has a principal-derived owner phase-A boundary.
+`OwnerContextFactory` freezes a trusted authenticator and resolver, keeps
+`AuthenticatedPrincipal` construction private, rejects authenticated entry to
+the reserved `local` namespace, and mints a non-serializable redacted
+`OwnerContext`. `OwnerScopedService` freezes that owner into dispatch,
+single-target streaming, history, session inspection, and revision-checked
+reset. Existing frontends explicitly retain trusted single-user `local`
+compatibility; REST freezes all of its dispatch/broadcast/run/session/stream
+operations into one such local scope at router assembly, but its bearer does
+not yet represent distinct principals. See [WP-49](docs/plan/WP-49.md).
+
+Durable task schema v2 now keys snapshots, events, leases and CAS by
+`(owner,id)`, so two owners can safely reuse one task id. Its v1 migration is
+transactional and verifies counts, foreign keys, schema and event-sequence high
+water before commit. REST outputs use opaque owner/task-qualified artifact
+segments with an exact local-UUID legacy read fallback. Built-in task control
+still selects only `local`, and the old detached filesystem scaffold remains a
+local compatibility subsystem; this is therefore storage isolation, not a
+multi-user REST claim. See [WP-50](docs/plan/WP-50.md).
+
+`vyane-broker::ResidentBrokerSupervisor` is a separate explicit, non-`Clone`
+library driver. Its consuming `run` future concurrently owns disjoint
+owner/store-bound delivery lanes, message maintenance, message projection and
+AgentEvent projection. Batch sizes, aggregate delivery concurrency and
+exponential error backoff are validated and bounded; one lane's error or panic
+does not stop unrelated lanes or projectors. The driver creates no detached
+task, channel, runtime or second queue: the embedding caller supplies a Tokio
+runtime and cancellation token and must await the future. Cancellation is
+observed only between cycles, so an operation already in progress drains its
+current bounded cycle; dropping the outer future forfeits that graceful-drain
+guarantee.
+
+No service, CLI or daemon production assembly constructs this driver yet. It
+does not execute or recover AgentRuns, provide controller/message handback,
+implement A2A or Channels, or add live pause/resume or automatic replay. See
+[WP-44](docs/plan/WP-44.md) for the exact boundary.
 
 ### Protocol entry points
 
@@ -88,6 +299,19 @@ Vyane supports three interchangeable front-ends, all sharing the same
 | **CLI** | `vyane dispatch --target prod "task"` | interactive / scripted one-shot runs |
 | **REST API** | `vyane serve --addr 127.0.0.1:9721` | programmatic access from any HTTP client |
 | **MCP** | `vyane mcp` | let other agents (Claude, Codex, …) call vyane as a tool |
+
+The MCP surface contains six tools: dispatch, broadcast, history, sessions,
+`vyane_route`, and `vyane_check`. Generic success payloads have a 1 MiB cap;
+the two new diagnostics use stricter, smaller bounds. `vyane_route` is a
+Rust-side deterministic preview extension, not a same-name parity claim
+against the fixed reference baseline. `vyane_check` performs static
+configuration analysis only; it does not probe a network endpoint, spawn a
+harness, or validate a live credential. Every success result shares the generic
+output ceiling, but the legacy execution tools do not yet have the diagnostics'
+uniform field-level input budgets. If execution completed but detail exceeded
+the ceiling, dispatch/broadcast returns bounded run receipts with
+`operation_status="completed"` and `detail_omitted=true`; callers must not retry
+those receipts as though execution failed.
 
 ### REST API
 
@@ -101,8 +325,9 @@ support:
 | `POST` | `/v1/dispatch/stream` | dispatch with SSE streaming (deltas as they arrive) |
 | `POST` | `/v1/broadcast` | fan out to multiple targets concurrently |
 | `POST` | `/v1/tasks` | submit async dispatch, returns task id immediately |
-| `GET` | `/v1/tasks` | list all tasks in the registry |
-| `GET` | `/v1/tasks/:id` | get one task's status and result |
+| `GET` | `/v1/tasks` | list durable REST task metadata |
+| `GET` | `/v1/tasks/:id` | get one task's durable status and ledger link |
+| `GET` | `/v1/tasks/:id/output` | read a successful task's separate mode-0600 output artifact |
 | `POST` | `/v1/tasks/:id/cancel` | cancel a running task |
 | `GET` | `/v1/runs` | query the run ledger (filter by status/provider) |
 | `GET` | `/v1/sessions` | list saved sessions |
@@ -112,6 +337,8 @@ SSE streaming events (`POST /v1/dispatch/stream`):
 ```
 data: {"type":"delta","text":"Here is "}
 
+data: {"type":"tool_use","name":"Read","summary":"{\"path\":\"src/lib.rs\"}"}
+
 data: {"type":"delta","text":"a function..."}
 
 data: {"type":"finished","record":{...},"output":"Here is a function..."}
@@ -120,21 +347,94 @@ data: {"type":"finished","record":{...},"output":"Here is a function..."}
 Async task lifecycle (`POST /v1/tasks` → poll `GET /v1/tasks/:id`):
 
 ```bash
+# Use the exact mode-0600 token path printed by `vyane serve`. Feeding this
+# header through curl config stdin keeps the bearer out of argv and the process
+# environment. The token is removed after a clean shutdown.
+TOKEN_FILE='<path printed by vyane serve>'
+rest_auth() {
+  printf 'header = "Authorization: Bearer %s"\n' "$(<"$TOKEN_FILE")"
+}
+
 # Submit
-curl -X POST http://localhost:9721/v1/tasks \
+rest_auth | curl --config - -X POST http://localhost:9721/v1/tasks \
   -H 'Content-Type: application/json' \
   -d '{"task":"write tests","target":"openai/gpt-4o"}'
-# → {"id":"0195...","status":"running",...}
+# → {"id":"0195...","state":"running","task_digest":"...",...}
 
 # Poll
-curl http://localhost:9721/v1/tasks/0195...
-# → {"id":"0195...","status":"completed","outcome":{"record":{...},"output":"..."}}
+rest_auth | curl --config - http://localhost:9721/v1/tasks/0195...
+# → {"id":"0195...","state":"succeeded","ledger_run_id":"0195...",...}
+
+# Read the result body after success
+rest_auth | curl --config - http://localhost:9721/v1/tasks/0195.../output
+# → {"output":"..."}
 ```
+
+Cancellation first reports the non-terminal `cancelling` state; keep polling
+until the kernel records `cancelled`, `succeeded`, `failed`, `timed_out`, or
+`interrupted` after process cleanup and ledger settlement. Task responses never
+embed the prompt, output, or raw error; use `ledger_run_id` to correlate the
+bounded task record with the run ledger.
+
+The server rejects non-loopback bind addresses and every endpoint requires a
+fresh 256-bit bearer capability published to the private `serve.token` path
+printed at startup (mode `0600` inside a mode-`0700` data directory on Unix).
+It also rejects non-loopback `Host`/`Origin` values and
+cross-site browser requests. Run and session responses use allowlisted public
+views rather than serializing internal storage records. This blocks remote
+browser rebinding and other unauthenticated callers, but malicious code running
+under the same OS identity can read the token; this remains a local single-user
+control surface, not a hostile same-UID or multi-user boundary. On non-Unix
+systems, keep `VYANE_DATA_DIR` under a platform-managed user-private directory;
+Vyane does not replace the platform ACL on a caller-selected shared directory.
+
+### Resident workflow daemon
+
+The local-only workflow daemon is a separate control surface from `vyane serve`.
+It keeps an admitted workflow running after the submitting CLI exits:
+
+```sh
+vyane daemon start                         # detached, waits for readiness
+vyane daemon status --json
+vyane workflow submit workflow.toml --var env=dev
+vyane workflow status <uuidv7> --json
+vyane workflow cancel <uuidv7>
+vyane daemon stop
+```
+
+`daemon run` keeps the same supervisor in the foreground. The listener accepts
+only loopback addresses, and every endpoint — including `/health` — requires a
+per-start 256-bit bearer token stored separately from the owner-only daemon
+descriptor. The control API is `POST /v1/workflows`, `GET /v1/workflows/:id`,
+and `POST /v1/workflows/:id/cancel`; it has no permissive CORS layer. This
+protects against accidental browser and cross-process access, but is not a
+sandbox against hostile code running as the same OS user.
+
+The client authenticates the exact recorded daemon before reading local
+workflow sources. It sends the workflow TOML plus every declared `prompt_file`
+as an in-memory source bundle; the daemon never resolves those source paths on
+its own filesystem. The semantic limits are 1 MiB for the TOML, 4 MiB per
+prompt, 16 MiB total, 128 prompt entries, and 4,096 bytes per bundle path.
+Variables are limited to 128 entries, 256 bytes per key, 1 MiB per value, and
+4 MiB total. The canonical submission working directory is also carried in the
+request (maximum 4,096 bytes): a missing or relative step `workdir` is resolved
+from it, while an absolute step `workdir` is preserved.
+
+The client generates a canonical UUIDv7 by default and prints it to stderr
+before the request is sent. `--id <uuidv7>` reuses an id for reconciliation or
+an idempotent retry: the same daemon workflow scope, normalized source, working
+directory, and variables returns the existing task; any mismatch is a conflict
+and never replays the earlier payload. The task id and workflow journal id are
+identical. On daemon restart, abandoned daemon-owned rows are cleaned by exact
+controller identity and marked `interrupted`; they are not automatically
+resumed or replayed. Foreground `workflow resume` remains an explicit,
+journal-oriented command.
 
 ### Smart routing
 
-`vyane route "task text"` shows what the router would pick — without
-dispatching. The router scores task complexity from structural signals
+`vyane route "task text"` previews a decision. `vyane dispatch --target auto`
+executes the same decision and records the selected profile/provider/model,
+tier, effort, score, intent, and tag on the ledger record. The router scores task complexity from structural signals
 (changed files, dependency edges, retry count, prompt length, inferred
 tags) and maps to an economy / mainline / frontier tier, then resolves
 a preference based on profile `tier` and `tags` metadata:
@@ -142,12 +442,70 @@ a preference based on profile `tier` and `tags` metadata:
 ```
 vyane route "write an ADR for the system architecture" --changed-files 20
 vyane route "simple task" --tier frontier
+vyane dispatch "fix the parser" --target auto
+vyane dispatch "review auth" --target auto --no-frontier
 ```
 
-### Review pipeline
+Routing hints can also be supplied as `routing.stage`, `routing.tier`,
+`routing.tags`, `routing.candidates`, and `routing.allow_frontier` labels.
+Decision fields such as `routing.provider` and `routing.effort` are reserved so
+callers cannot forge audit metadata. A literal profile named `auto` remains
+addressable as `profile:auto`; `target:<provider>/<model>` explicitly selects a
+provider/model pair when a provider id begins with the reserved `profile:`
+prefix. Workflow steps may use a
+deferred auto target after prompt rendering:
 
-`vyane review` runs a three-step multi-model pipeline on the existing
-workflow engine: implement → fan-out review → synthesize:
+```toml
+[[step]]
+id = "review"
+target = "auto"
+prompt = "Review {{steps.implement.output}}"
+[step.route]
+stage = "review"
+tags = ["security"]
+allow_frontier = false
+effort = "high"
+```
+
+`[step.route].effort` is a closed typed value (`low`, `medium`, `high`, or
+`xhigh`) available only on a deferred single target. Route hints on an explicit
+target or `fan_out` fail before dispatch instead of being ignored. Effective
+effort precedence is workflow explicit effort, then the selected profile's
+configured effort, then the decision tier default. The resulting canonical
+`routing.effort` is applied to every failover leg and frozen for recorded,
+detached, daemon-idempotent, and journal-resume execution. Invalid values are
+rejected without echoing their input, and an ordinary `effort` label cannot
+forge the reserved decision field. See [WP-46](docs/plan/WP-46.md).
+
+`WorkflowPlan` schema v1 is now the bounded, strict, filesystem-independent
+execution payload shared by compile, prepare, run, and resume. It freezes the
+materialized DAG, typed targets and route hints, lossless timeouts, requested
+capability summary, source claim, and a canonical plan checksum. The payload is
+not a safe public view, and its checksum is not authentication, provenance, or
+execution authority. Plan-only continuation fails closed unless the journal has
+the exact checksum; only the source-bearing compatibility API may migrate an
+older journal after validating the exact source hash. See
+[WP-54](docs/plan/WP-54.md).
+
+This closes the repository-local shared typed-plan prerequisite, not workflow
+parity. Dynamic control flow, nested workflows, shared budgets, a compatibility
+frontend, replay/fork, CLI/REST/MCP plan transport, sanitized cross-implementation
+fixtures, and a production-complete model-tier policy remain open.
+
+The frontier guard is fail-closed across the selected profile and its failover
+chain. Detached auto-routed jobs send a secret-free target snapshot once over a
+private worker stdin pipe and refuse to start if config changes would make the
+worker execute a different provider/model/protocol/harness/parameter chain.
+The snapshot is not persisted. Endpoint URLs, provider-specific extra values,
+and harness env-injection values are represented only by safe digests/shape
+metadata; raw credentials are never copied.
+
+### Solution-review workflow
+
+`vyane review` runs a three-step solution-review workflow on the existing
+workflow engine: implement → fan-out review → synthesize. It is not yet the
+original system's structured git diff/PR review, finding-artifact, verifier,
+and publication pipeline.
 
 ```
 vyane review 'implement a sorting function' \
@@ -168,9 +526,9 @@ vyane review 'implement a sorting function' \
                    │
                    ▼
             ┌─────────────┐
-            │   kernel    │  resolve target chain,
-            │  dispatch / │  attempt loop, failover,
-            │  broadcast  │  assemble RunRecord
+            │   kernel    │  early execution id,
+            │  dispatch / │  whole-chain admission,
+            │  broadcast  │  attempts + RunRecord
             └──────┬──────┘
       ┌────────────┴────────────┐
       ▼                         ▼
@@ -180,25 +538,38 @@ OpenAI Chat / Responses,     Claude Code, Codex CLI, …
 Anthropic Messages                    │
       └────────────┬──────────────┘
                    ▼
-       append-only JSONL ledger
-        (digests, attempt trail)
-          + session store
+        append-only JSONL ledger
+         (digests, attempt trail)
+           + session store
+   SQLite transactional message store
+ (messages, deliveries, receipt/outbox state)
+       bounded delivery broker
+ (replay-safe adapters + body-free EventLog projection)
+    SQLite AgentRun / worker store
+ (leases, topology, recovery, tree cancel, body-free outbox)
 ```
 
 The kernel depends only on the traits and types in `vyane-core`; the concrete
-clients, harnesses and ledger are assembled behind those traits in the CLI
-layer. Nine crates:
+clients, harnesses and ledger are assembled behind those traits in the service
+layer. Sixteen crates:
 
 | crate | responsibility |
 |-------|----------------|
-| `vyane-core` | four-layer target model, capability traits, error taxonomy, env policy — the shared vocabulary everything else speaks |
+| `vyane-core` | four-layer target model, capability traits, error taxonomy, env policy, process-local workdir pin, and live native-side-effect authority vocabulary — the shared types everything else speaks |
 | `vyane-config` | TOML config + profiles; resolves a profile (and its failover chain) to a `BoundTarget` |
 | `vyane-provider` | provider registry; endpoints, auth styles, per-provider env-injection rules |
-| `vyane-protocol` | `ChatClient` implementations for the HTTP protocols (OpenAI Chat / Responses, Anthropic Messages) |
-| `vyane-harness` | `Harness` implementations wrapping coding CLIs headlessly, with process-group control |
-| `vyane-kernel` | the orchestration state machine: dispatch, broadcast, failover gating, run-record assembly |
-| `vyane-ledger` | JSONL `Ledger` + filesystem `SessionStore`, cost estimation |
+| `vyane-protocol` | `ChatClient` implementations for the HTTP protocols (OpenAI Chat / Responses, Anthropic Messages), a separately authorized OpenAI Chat typed-turn path, and the shared HTTP base validator and secret-free endpoint-routing digest |
+| `vyane-harness` | `Harness` implementations wrapping coding CLIs headlessly, with additive scoped execution, pinned-workdir handoff and process-group control; also owns the guarded native tool-registry boundary and unwired bounded native turn driver |
+| `vyane-kernel` | early execution identity, whole-chain capability admission, prepared streaming/dispatch, failover gating and run-record assembly |
+| `vyane-ledger` | JSONL `Ledger` + filesystem `SessionStore`, including strict revisioned native-session snapshots and atomic CAS transitions; cost estimation |
+| `vyane-task` | SQLite-backed, secret-free task lifecycle snapshots and CAS event history |
+| `vyane-agent` | SQLite-backed, owner-scoped AgentRun queue, worker topology, fenced two-stage recovery admission, active permits and atomic native-scope revalidation, bounded tree cancellation, and body-free lifecycle outbox |
+| `vyane-message` | SQLite-backed, owner-scoped transactional message and delivery truth, fenced leases, external receipts, and per-projector body-free outbox |
+| `vyane-broker` | bounded owner-bound delivery pumps, replay-safety admission, fenced settlement, maintenance, and body-free message/AgentRun EventLog projection |
 | `vyane-router` | target selection / routing policy (grows into pluggable routing) |
+| `vyane-workflow` | declarative DAG execution, templates, atomic journals, and resume |
+| `vyane-service` | shared construction and operation layer used by front-ends; also exports principal-derived owner scope, the unwired fresh-sessionless authority bridge, explicit AgentRun projection assembly, one-shot recovery/execution drivers, their paired in-process backend, and a dark resident supervisor over that pairing |
+| `vyane-mcp` | six-tool MCP server for dispatch, broadcast, history, sessions, deterministic route preview, and static configuration checks |
 | `vyane-cli` | the assembler and entry point: wires the crates together behind a command-line UI |
 
 ## Usage
@@ -267,8 +638,11 @@ profile environment:
   infrastructure where a plain file will do.
 - **Secrets never serialize.** Credential types are non-serializable by
   construction; config stores the *name* of an env var, never the value.
-- **The ledger stores digests, not prompts.** Run accounting records a
-  prompt digest (and, optionally, a short preview) — not the prompt body.
+- **Declaration and evidence are not authority.** Capability manifests and
+  scopes are serializable audit data; prepared plans, pinned directory handles
+  and active permits stay process-local and fail closed across provenance drift.
+- **The ledger stores digests, not prompts.** New run accounting records a
+  prompt digest and never copies a preview or prompt body by default.
 - **Scrubbed child environment by default.** Harnesses spawn from a minimal
   baseline env plus an explicit per-target injection set; inheriting the full
   parent environment is opt-in.
@@ -281,7 +655,11 @@ profile environment:
 
 - [Architecture](docs/ARCHITECTURE.md) — the four-layer model, crate map,
   dispatch lifecycle, env policy, failover and ledger semantics.
-- [Roadmap](docs/ROADMAP.md) — milestones for v0.1, v0.2, v0.3.
+- [Architecture decisions](docs/adr/README.md) — accepted product differences
+  and their still-open acceptance gates.
+- [Roadmap](docs/ROADMAP.md) — milestones for v0.1 through v0.4.
+- [Original-Vyane parity baseline](docs/parity/ORIGINAL-VYANE-PARITY.md) —
+  fixed cross-repository capability matrix and acceptance gates.
 - [Contributing](CONTRIBUTING.md) — toolchain, checks, and PR conventions.
 
 ## License
