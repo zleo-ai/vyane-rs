@@ -10,14 +10,14 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
+#[cfg(target_os = "linux")]
+use vyane_core::PinnedWorkdir;
 use vyane_core::env::EnvPolicy;
 use vyane_core::error::ErrorKind;
 use vyane_core::target::{AuthMaterial, AuthStyle, Endpoint, ModelId, Protocol, Sandbox, Secret};
 use vyane_core::task::{Effort, GenParams};
 use vyane_core::traits::{Harness, HarnessExecutionContext, HarnessJob, HarnessStreamEvent};
-use vyane_core::{
-    HarnessLifecycleEvent, HarnessLifecycleReporter, HarnessSpawnAuthority, PinnedWorkdir,
-};
+use vyane_core::{HarnessLifecycleEvent, HarnessLifecycleReporter, HarnessSpawnAuthority};
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 
 static KILL_TREE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
