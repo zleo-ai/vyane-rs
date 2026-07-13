@@ -718,6 +718,11 @@ async fn detached_direct_http_write_is_rejected_before_task_or_process() {
     let data_dir = TempDir::new().expect("data tempdir");
     let workdir = TempDir::new().expect("workdir tempdir");
     let config = write_config(&config_dir, &config_for(&server));
+    let expected_reason = if cfg!(target_os = "linux") {
+        "local_editing_unavailable"
+    } else {
+        "workdir_pinning_unavailable"
+    };
 
     vyane()
         .env("VYANE_CLI_TEST_KEY", "sk-test")
@@ -738,7 +743,7 @@ async fn detached_direct_http_write_is_rejected_before_task_or_process() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains("config error"))
-        .stderr(predicate::str::contains("local_editing_unavailable"));
+        .stderr(predicate::str::contains(expected_reason));
 
     assert_no_task_dir(data_dir.path());
     assert!(
