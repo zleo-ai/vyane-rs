@@ -1053,12 +1053,14 @@ async fn direct_http_mutating_sandboxes_are_rejected_before_make() {
             .as_deref()
             .and_then(|source| source.downcast_ref::<CapabilityAdmissionError>())
             .expect("pre-execution rejection keeps its typed source");
-        assert!(matches!(
+        #[cfg(target_os = "linux")]
+        let expected_reason = vyane_kernel::CapabilityRejectionReason::LocalEditingUnavailable;
+        #[cfg(not(target_os = "linux"))]
+        let expected_reason = vyane_kernel::CapabilityRejectionReason::WorkdirPinningUnavailable;
+        assert_eq!(
             typed.evidence.decision,
-            CapabilityAdmissionDecision::Rejected(
-                vyane_kernel::CapabilityRejectionReason::LocalEditingUnavailable
-            )
-        ));
+            CapabilityAdmissionDecision::Rejected(expected_reason)
+        );
     }
 }
 
@@ -1188,6 +1190,7 @@ async fn same_owner_dispatcher_clone_can_consume_prepared_plan() {
     assert_eq!(ledger.append_count(), 1);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn legacy_harness_default_fails_closed_when_given_a_pinned_context() {
     struct LegacyHarness {
@@ -1275,6 +1278,7 @@ async fn read_only_direct_http_remains_compatible() {
     assert_eq!(outcome.output.as_deref(), Some("read-only answer"));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn trusted_local_cli_write_uses_the_canonical_workdir() {
     let workdir = tempfile::tempdir().unwrap();
@@ -1307,6 +1311,7 @@ async fn trusted_local_cli_write_uses_the_canonical_workdir() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn filtered_chat_only_fallback_preserves_primary_error_semantics() {
     let workdir = tempfile::tempdir().unwrap();
@@ -1351,6 +1356,7 @@ async fn filtered_chat_only_fallback_preserves_primary_error_semantics() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn scoped_make_sees_final_execution_id_and_original_chain_ordinals() {
     let workdir = tempfile::tempdir().unwrap();
@@ -1507,6 +1513,7 @@ async fn compatibility_stream_api_returns_none_without_exposing_scope() {
     assert!(ledger.records().is_empty());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn mutating_legacy_native_resume_is_rejected_before_make() {
     let sessions = MockSessions::new();
@@ -1650,6 +1657,7 @@ async fn legacy_session_store_defaults_are_source_compatible_and_fail_closed() {
     assert_eq!(lease_error.kind, ErrorKind::Unsupported);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn frozen_capability_snapshot_detects_replaced_workdir_identity() {
     let root = tempfile::tempdir().unwrap();
