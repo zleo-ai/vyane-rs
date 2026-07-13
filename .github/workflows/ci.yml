@@ -34,11 +34,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      # macOS exposes its default temporary directory through /var, which is
-      # a symlink to /private/var. Security tests intentionally reject database
-      # paths that traverse symlinks, so use the runner's canonical temp root.
-      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,6 +54,11 @@ jobs:
         run: python3 .github/scripts/parity-report.py --format json
 
       - name: Test
+        # macOS exposes its default temporary directory through /var, which is
+        # a symlink to /private/var. Security tests intentionally reject database
+        # paths that traverse symlinks, so use the runner's canonical temp root.
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: cargo test --workspace
 
   coverage:
