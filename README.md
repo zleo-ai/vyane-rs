@@ -81,7 +81,13 @@ automatic restart replay are two explicit daemon limits, not the whole remaining
 parity backlog. See the
 [original-Vyane parity baseline](docs/parity/ORIGINAL-VYANE-PARITY.md). APIs
 remain unstable pre-release; the CLI runs real dispatch/broadcast/failover
-today.
+today. The public parity manifest now contains 25 sanitized cases across
+classifier, failover, and automatic-routing suites; 15 match after their
+declared normalization and ten remain explicit open differences or one-sided
+Rust scope differences. Run `python3 .github/scripts/parity-report.py --format
+markdown` to recompute current Rust behavior, validate the stored sanitized
+attestation, and print an offline report. It does not execute the private
+reference implementation.
 
 | capability | crate | state |
 |------------|-------|-------|
