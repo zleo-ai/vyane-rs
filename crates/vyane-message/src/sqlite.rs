@@ -25,12 +25,12 @@ use crate::model::{
 };
 use crate::{
     ClaimQuery, DeliveryMailbox, DeliveryRecord, DeliveryStatus, EndpointKind, EndpointRef,
-    EnqueueOutcome, IdempotencyKey, LeaseReceipt, LeaseRequest, LeasedDelivery,
-    MarkTransportDeliveredOutcome, MessageBundle, MessageCursor, MessageEvent, MessageEventKind,
-    MessageIdempotencyResolution, MessagePage, MessagePublicationOutcome, MessagePublicationStatus,
-    MessageRecord, MessageRequestDigest, MessageStore, MessageStoreError, NackDisposition,
-    NewMessage, NewTransportReceipt, OutboxPage, ReplyAndAckOutcome, Result,
-    TransportReceiptRecord, TransportReceiptResolution,
+    EnqueueOutcome, IdempotencyKey, LeaseReceipt, LeaseRequest, LeasedDelivery, MailboxMessage,
+    MailboxPage, MailboxQuery, MarkTransportDeliveredOutcome, MessageBundle, MessageCursor,
+    MessageEvent, MessageEventKind, MessageIdempotencyResolution, MessagePage,
+    MessagePublicationOutcome, MessagePublicationStatus, MessageRecord, MessageRequestDigest,
+    MessageStore, MessageStoreError, NackDisposition, NewMessage, NewTransportReceipt, OutboxPage,
+    ReplyAndAckOutcome, Result, TransportReceiptRecord, TransportReceiptResolution,
 };
 
 pub const SCHEMA_VERSION: u32 = 2;
@@ -471,6 +471,71 @@ impl MessageStore for SqliteMessageStore {
         Ok(MessagePage { items, next_cursor })
     }
 
+    fn list_mailbox(
+        &self,
+        owner: &str,
+        mailbox: &DeliveryMailbox,
+        query: &MailboxQuery,
+    ) -> Result<MailboxPage> {
+        validate_owner(owner)?;
+        mailbox.validate()?;
+        query.validate()?;
+        let now = self.now()?;
+        let connection = self.connection()?;
+        let status_predicate = if query.include_acknowledged {
+            "d.status IN ('pending', 'leased', 'delivered', 'acknowledged')"
+        } else {
+            "d.status IN ('pending', 'leased', 'delivered')"
+        };
+        let availability_predicate = if query.include_future {
+            "1 = 1"
+        } else {
+            "d.available_at_ms <= ?5"
+        };
+        let sql = format!(
+            "SELECT d.id FROM deliveries d \
+             WHERE d.owner = ?1 AND d.route = ?2 AND d.target_kind = ?3 \
+               AND d.target_id = ?4 AND {status_predicate} \
+               AND {availability_predicate} \
+               AND (d.expires_at_ms IS NULL OR d.expires_at_ms > ?5) \
+               AND EXISTS (SELECT 1 FROM message_publications p \
+                   WHERE p.owner = d.owner AND p.message_id = d.message_id \
+                     AND p.status = 'published') \
+             ORDER BY d.available_at_ms ASC, ( \
+                 SELECT sequence FROM message_events e \
+                 WHERE e.owner = d.owner AND e.delivery_id = d.id \
+                   AND e.delivery_revision = 0 \
+             ) ASC, d.id ASC LIMIT ?6"
+        );
+        let fetch = query.limit.saturating_add(1);
+        let mut statement = connection.prepare(&sql)?;
+        let ids = statement
+            .query_map(
+                params![
+                    owner,
+                    mailbox.route,
+                    mailbox.target.kind.as_str(),
+                    mailbox.target.id,
+                    now.timestamp_millis(),
+                    usize_to_i64(fetch, "mailbox page limit")?
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        let has_more = ids.len() > query.limit;
+        let mut items = Vec::with_capacity(query.limit.min(ids.len()));
+        for delivery_id in ids.into_iter().take(query.limit) {
+            let delivery = get_delivery(&connection, owner, &delivery_id)?
+                .ok_or(MessageStoreError::NotFound)?;
+            let message = get_message(&connection, owner, &delivery.message_id)?
+                .ok_or(MessageStoreError::NotFound)?;
+            items.push(MailboxMessage { message, delivery });
+        }
+        Ok(MailboxPage { items, has_more })
+    }
+
     fn events(&self, owner: &str, message_id: &str) -> Result<Vec<MessageEvent>> {
         validate_owner(owner)?;
         validate_text("message id", message_id, 64)?;
@@ -542,96 +607,65 @@ impl MessageStore for SqliteMessageStore {
 
         let mut claimed = Vec::with_capacity(ids.len());
         for delivery_id in ids {
-            let before = get_delivery(&transaction, owner, &delivery_id)?
-                .ok_or(MessageStoreError::NotFound)?;
-            let message = get_message(&transaction, owner, &before.message_id)?
-                .ok_or(MessageStoreError::NotFound)?;
-            let claim_now = now.max(before.updated_at);
-            let requested_lease_expires_at =
-                add_seconds(claim_now, lease.lease_seconds, "lease duration")?;
-            let claimed_mailbox = DeliveryMailbox {
-                route: before.route.clone(),
-                target: before.target.clone(),
-            };
-            let lease_expires_at = before.expires_at.map_or(requested_lease_expires_at, |ttl| {
-                requested_lease_expires_at.min(ttl)
-            });
-            if lease_expires_at <= claim_now {
-                return Err(MessageStoreError::CorruptData(
-                    "claim selected a delivery with no live lease window".into(),
-                ));
-            }
-            let token = random_token()?;
-            let token_hash = Sha256::digest(token.as_bytes()).to_vec();
-            let generation = next_u64(before.lease_generation, "lease generation")?;
-            let attempt_count = before.attempt_count.checked_add(1).ok_or_else(|| {
-                MessageStoreError::CorruptData("delivery attempt counter overflow".into())
-            })?;
-            let revision = next_u64(before.revision, "delivery revision")?;
-            let changed = transaction.execute(
-                "UPDATE deliveries SET status = 'leased', attempt_count = ?1, revision = ?2, \
-                    lease_generation = ?3, lease_owner = ?4, lease_token_hash = ?5, \
-                    lease_expires_at_ms = ?6, updated_at_ms = ?7, failure_code = NULL \
-                 WHERE owner = ?8 AND id = ?9 AND status = 'pending' AND revision = ?10",
-                params![
-                    i64::from(attempt_count),
-                    u64_to_i64(revision, "delivery revision")?,
-                    u64_to_i64(generation, "lease generation")?,
-                    lease.consumer,
-                    token_hash,
-                    lease_expires_at.timestamp_millis(),
-                    claim_now.timestamp_millis(),
-                    owner,
-                    delivery_id,
-                    u64_to_i64(before.revision, "delivery revision")?
-                ],
-            )?;
-            if changed != 1 {
-                return Err(MessageStoreError::CorruptData(
-                    "claim lost its write lock invariant".into(),
-                ));
-            }
-            transaction.execute(
-                "INSERT INTO delivery_attempts (owner, delivery_id, generation, route, \
-                    target_kind, target_id, consumer, token_hash, claimed_at_ms, initial_expires_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    owner,
-                    delivery_id,
-                    u64_to_i64(generation, "lease generation")?,
-                    claimed_mailbox.route,
-                    claimed_mailbox.target.kind.as_str(),
-                    claimed_mailbox.target.id,
-                    lease.consumer,
-                    Sha256::digest(token.as_bytes()).to_vec(),
-                    claim_now.timestamp_millis(),
-                    lease_expires_at.timestamp_millis()
-                ],
-            )?;
-            let after = get_delivery(&transaction, owner, &delivery_id)?
-                .ok_or(MessageStoreError::NotFound)?;
-            insert_event(
+            claimed.push(lease_delivery_in_transaction(
                 &transaction,
-                &message,
-                &after,
-                MessageEventKind::Leased,
-                Some(before.status),
-                claim_now,
-            )?;
-            claimed.push(LeasedDelivery {
-                message,
-                delivery: after,
-                receipt: LeaseReceipt {
-                    delivery_id,
-                    generation,
-                    mailbox: claimed_mailbox,
-                    consumer: lease.consumer.clone(),
-                    token,
-                },
-            });
+                owner,
+                &delivery_id,
+                lease,
+                now,
+            )?);
         }
         transaction.commit()?;
         Ok(claimed)
+    }
+
+    fn claim_message(
+        &self,
+        owner: &str,
+        mailbox: &DeliveryMailbox,
+        message_id: &str,
+        lease: &LeaseRequest,
+    ) -> Result<Option<LeasedDelivery>> {
+        validate_owner(owner)?;
+        mailbox.validate()?;
+        validate_text("message id", message_id, 64)?;
+        lease.validate()?;
+        let now = self.now()?;
+        let mut connection = self.connection()?;
+        let transaction = self.write_transaction(&mut connection)?;
+        expire_due_in_transaction(&transaction, owner, now, 1_000)?;
+        reclaim_expired_in_transaction(&transaction, owner, now, 1_000)?;
+        let delivery_id = transaction
+            .query_row(
+                "SELECT id FROM deliveries \
+                 WHERE owner = ?1 AND route = ?2 AND target_kind = ?3 AND target_id = ?4 \
+                   AND message_id = ?5 AND status = 'pending' AND available_at_ms <= ?6 \
+                   AND (expires_at_ms IS NULL OR expires_at_ms > ?6) \
+                   AND attempt_count < max_attempts \
+                   AND EXISTS (SELECT 1 FROM message_publications p \
+                       WHERE p.owner = deliveries.owner AND p.message_id = deliveries.message_id \
+                         AND p.status = 'published') \
+                   AND NOT EXISTS (SELECT 1 FROM delivery_transport_receipts \
+                       WHERE owner = deliveries.owner AND delivery_id = deliveries.id) \
+                 LIMIT 1",
+                params![
+                    owner,
+                    mailbox.route,
+                    mailbox.target.kind.as_str(),
+                    mailbox.target.id,
+                    message_id,
+                    now.timestamp_millis()
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(delivery_id) = delivery_id else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let claimed = lease_delivery_in_transaction(&transaction, owner, &delivery_id, lease, now)?;
+        transaction.commit()?;
+        Ok(Some(claimed))
     }
 
     fn renew(
@@ -1164,6 +1198,100 @@ enum ReceiptAction {
     MarkDelivered,
     Acknowledge,
     Nack(NackDisposition),
+}
+
+fn lease_delivery_in_transaction(
+    connection: &Connection,
+    owner: &str,
+    delivery_id: &str,
+    lease: &LeaseRequest,
+    now: DateTime<Utc>,
+) -> Result<LeasedDelivery> {
+    let before =
+        get_delivery(connection, owner, delivery_id)?.ok_or(MessageStoreError::NotFound)?;
+    let message =
+        get_message(connection, owner, &before.message_id)?.ok_or(MessageStoreError::NotFound)?;
+    let claim_now = now.max(before.updated_at);
+    let requested_lease_expires_at = add_seconds(claim_now, lease.lease_seconds, "lease duration")?;
+    let claimed_mailbox = DeliveryMailbox {
+        route: before.route.clone(),
+        target: before.target.clone(),
+    };
+    let lease_expires_at = before.expires_at.map_or(requested_lease_expires_at, |ttl| {
+        requested_lease_expires_at.min(ttl)
+    });
+    if lease_expires_at <= claim_now {
+        return Err(MessageStoreError::CorruptData(
+            "claim selected a delivery with no live lease window".into(),
+        ));
+    }
+    let token = random_token()?;
+    let token_hash = Sha256::digest(token.as_bytes()).to_vec();
+    let generation = next_u64(before.lease_generation, "lease generation")?;
+    let attempt_count = before.attempt_count.checked_add(1).ok_or_else(|| {
+        MessageStoreError::CorruptData("delivery attempt counter overflow".into())
+    })?;
+    let revision = next_u64(before.revision, "delivery revision")?;
+    let changed = connection.execute(
+        "UPDATE deliveries SET status = 'leased', attempt_count = ?1, revision = ?2, \
+            lease_generation = ?3, lease_owner = ?4, lease_token_hash = ?5, \
+            lease_expires_at_ms = ?6, updated_at_ms = ?7, failure_code = NULL \
+         WHERE owner = ?8 AND id = ?9 AND status = 'pending' AND revision = ?10",
+        params![
+            i64::from(attempt_count),
+            u64_to_i64(revision, "delivery revision")?,
+            u64_to_i64(generation, "lease generation")?,
+            lease.consumer,
+            token_hash,
+            lease_expires_at.timestamp_millis(),
+            claim_now.timestamp_millis(),
+            owner,
+            delivery_id,
+            u64_to_i64(before.revision, "delivery revision")?
+        ],
+    )?;
+    if changed != 1 {
+        return Err(MessageStoreError::CorruptData(
+            "claim lost its write lock invariant".into(),
+        ));
+    }
+    connection.execute(
+        "INSERT INTO delivery_attempts (owner, delivery_id, generation, route, \
+            target_kind, target_id, consumer, token_hash, claimed_at_ms, initial_expires_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            owner,
+            delivery_id,
+            u64_to_i64(generation, "lease generation")?,
+            claimed_mailbox.route,
+            claimed_mailbox.target.kind.as_str(),
+            claimed_mailbox.target.id,
+            lease.consumer,
+            Sha256::digest(token.as_bytes()).to_vec(),
+            claim_now.timestamp_millis(),
+            lease_expires_at.timestamp_millis()
+        ],
+    )?;
+    let after = get_delivery(connection, owner, delivery_id)?.ok_or(MessageStoreError::NotFound)?;
+    insert_event(
+        connection,
+        &message,
+        &after,
+        MessageEventKind::Leased,
+        Some(before.status),
+        claim_now,
+    )?;
+    Ok(LeasedDelivery {
+        message,
+        delivery: after,
+        receipt: LeaseReceipt {
+            delivery_id: delivery_id.to_string(),
+            generation,
+            mailbox: claimed_mailbox,
+            consumer: lease.consumer.clone(),
+            token,
+        },
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]

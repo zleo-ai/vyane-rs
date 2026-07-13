@@ -1,9 +1,10 @@
 use crate::{
     ClaimQuery, DeliveryMailbox, DeliveryRecord, EnqueueOutcome, IdempotencyKey, LeaseReceipt,
-    LeaseRequest, LeasedDelivery, MarkTransportDeliveredOutcome, MessageBundle, MessageCursor,
-    MessageEvent, MessageIdempotencyResolution, MessagePage, MessagePublicationOutcome,
-    MessageRequestDigest, NackDisposition, NewMessage, NewTransportReceipt, OutboxPage,
-    ReplyAndAckOutcome, Result, TransportReceiptRecord, TransportReceiptResolution,
+    LeaseRequest, LeasedDelivery, MailboxPage, MailboxQuery, MarkTransportDeliveredOutcome,
+    MessageBundle, MessageCursor, MessageEvent, MessageIdempotencyResolution, MessagePage,
+    MessagePublicationOutcome, MessageRequestDigest, NackDisposition, NewMessage,
+    NewTransportReceipt, OutboxPage, ReplyAndAckOutcome, Result, TransportReceiptRecord,
+    TransportReceiptResolution,
 };
 
 /// Synchronous transactional message source of truth.
@@ -69,6 +70,14 @@ pub trait MessageStore: Send + Sync {
         limit: usize,
     ) -> Result<MessagePage>;
 
+    /// List one exact owner-scoped mailbox in stable delivery order.
+    fn list_mailbox(
+        &self,
+        owner: &str,
+        mailbox: &DeliveryMailbox,
+        query: &MailboxQuery,
+    ) -> Result<MailboxPage>;
+
     fn events(&self, owner: &str, message_id: &str) -> Result<Vec<MessageEvent>>;
 
     fn claim(
@@ -77,6 +86,17 @@ pub trait MessageStore: Send + Sync {
         query: &ClaimQuery,
         lease: &LeaseRequest,
     ) -> Result<Vec<LeasedDelivery>>;
+
+    /// Lease one exact message only when it belongs to the supplied mailbox.
+    ///
+    /// Another owner or mailbox is indistinguishable from an absent message.
+    fn claim_message(
+        &self,
+        owner: &str,
+        mailbox: &DeliveryMailbox,
+        message_id: &str,
+        lease: &LeaseRequest,
+    ) -> Result<Option<LeasedDelivery>>;
 
     fn renew(
         &self,
