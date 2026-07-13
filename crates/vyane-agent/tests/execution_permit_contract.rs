@@ -43,10 +43,6 @@ fn digest(byte: char) -> String {
     std::iter::repeat_n(byte, 64).collect()
 }
 
-fn private_tempdir() -> TempDir {
-    TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
-}
-
 fn new_run(id: &str, worker_id: &str, now: DateTime<Utc>, timeout_seconds: u64) -> NewAgentRun {
     NewAgentRun {
         id: id.into(),
@@ -73,7 +69,7 @@ fn controller() -> ControllerRef {
 }
 
 fn store() -> (TempDir, Arc<TestClock>, SqliteAgentStore) {
-    let directory = private_tempdir();
+    let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(TestClock::new());
     let store =
         SqliteAgentStore::open_with_clock(directory.path().join("agent.sqlite"), clock.clone())
