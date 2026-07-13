@@ -1,4 +1,4 @@
-use std::io::Read as _;
+use std::io::{Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -74,13 +74,12 @@ pub fn run(command: A2aCommand) -> Result<ExitCode> {
         Err(error) => {
             let message = format!("{error:#}");
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string(&ErrorOutput {
-                        status: "error",
-                        error: &message,
-                    })?
-                );
+                if let Err(write_error) = print_json(&ErrorOutput {
+                    status: "error",
+                    error: &message,
+                }) {
+                    eprintln!("a2a error: {message}; could not write JSON error: {write_error:#}");
+                }
             } else {
                 eprintln!("a2a error: {message}");
             }
@@ -213,6 +212,12 @@ fn inbox(args: A2aInboxArgs) -> Result<ExitCode> {
 }
 
 fn read(args: A2aReadArgs) -> Result<ExitCode> {
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    read_with_writer(args, &mut stdout)
+}
+
+fn read_with_writer(args: A2aReadArgs, stdout: &mut impl Write) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
     let mailbox = mailbox(&args.to);
     let claimed = store
@@ -229,22 +234,36 @@ fn read(args: A2aReadArgs) -> Result<ExitCode> {
         .ok_or_else(|| {
             anyhow!("message is absent, already read, or not currently claimable in this mailbox")
         })?;
-    store
+    let delivered = store
         .mark_delivered(&args.common.owner, &mailbox, &claimed.receipt)
         .context("mark local A2A message delivered")?;
-    let acknowledged = store
-        .acknowledge(&args.common.owner, &mailbox, &claimed.receipt)
-        .context("acknowledge local A2A message")?;
-    let view = message_view(&claimed.message, &acknowledged);
+    let view = message_view(&claimed.message, &delivered);
     if args.common.json {
-        print_json(&ReadOutput {
-            status: "success",
-            message: view,
-            db: path_text(&db),
-        })?;
+        write_json(
+            stdout,
+            &ReadOutput {
+                status: "success",
+                message: view,
+                db: path_text(&db),
+            },
+        )?;
     } else {
-        println!("{} read", terminal_safe(&view.id));
+        writeln!(
+            stdout,
+            "{} {} -> {} {}",
+            terminal_safe(&view.id),
+            terminal_safe(&view.from_code),
+            terminal_safe(&view.to_code),
+            terminal_safe(&view.kind),
+        )
+        .context("write local A2A message header")?;
+        writeln!(stdout, "{}", terminal_safe(&view.body))
+            .context("write local A2A message body")?;
+        stdout.flush().context("flush local A2A message response")?;
     }
+    store
+        .acknowledge(&args.common.owner, &mailbox, &claimed.receipt)
+        .context("acknowledge local A2A message after response flush")?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -337,8 +356,15 @@ fn message_view(message: &MessageRecord, delivery: &DeliveryRecord) -> MessageVi
 }
 
 fn print_json(value: &impl Serialize) -> Result<()> {
-    println!("{}", serde_json::to_string(value)?);
-    Ok(())
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    write_json(&mut stdout, value)
+}
+
+fn write_json(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
+    serde_json::to_writer(&mut *writer, value).context("write JSON response")?;
+    writer.write_all(b"\n").context("finish JSON response")?;
+    writer.flush().context("flush JSON response")
 }
 
 fn path_text(path: &Path) -> String {

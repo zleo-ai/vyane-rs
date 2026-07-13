@@ -51,7 +51,7 @@ pub enum Command {
     /// Run and control the authenticated local workflow daemon.
     #[command(subcommand)]
     Daemon(DaemonCommand),
-    /// Send and read owner-scoped messages through the local durable queue.
+    /// Use a local SQLite inbox; this is not authenticated A2A protocol transport.
     #[command(subcommand)]
     A2a(A2aCommand),
     /// Run the MCP server over stdio (for use as an MCP tool server).
@@ -67,7 +67,7 @@ pub enum A2aCommand {
     Send(A2aSendArgs),
     /// List one local agent mailbox without changing delivery state.
     Inbox(A2aInboxArgs),
-    /// Mark one exact mailbox message as read.
+    /// Deliver one exact mailbox message, then acknowledge after stdout flushes.
     Read(A2aReadArgs),
 }
 
@@ -76,7 +76,7 @@ pub struct A2aCommonArgs {
     /// SQLite message database; defaults to the standard Vyane data directory.
     #[arg(long, value_name = "PATH")]
     pub db: Option<PathBuf>,
-    /// Explicit owner authority for this local queue operation.
+    /// Caller-selected local storage scope; not authenticated authority.
     #[arg(long, alias = "owner-user-id", default_value = "local")]
     pub owner: String,
     /// Emit machine-readable JSON.
@@ -93,7 +93,7 @@ pub struct A2aSendArgs {
     /// Message body words; stdin is read when omitted.
     #[arg(num_args = 0..)]
     pub body: Vec<String>,
-    /// Sender agent id.
+    /// Caller-supplied sender label; not an authenticated identity.
     #[arg(long = "from", alias = "from-code", value_name = "AGENT")]
     pub from: String,
     /// Message kind, such as message, handoff, or review.

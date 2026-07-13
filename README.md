@@ -332,15 +332,20 @@ vyane a2a read reviewer <message-id> --json
 
 `inbox` is non-mutating. `read` requires the recipient mailbox as well as the
 message id, then uses the existing fenced claim → delivered → acknowledged
-state machine. `--delay-seconds`, `--include-future`, `--include-read`,
+state machine. It writes and flushes the full response before acknowledging;
+write failure remains reclaimable, while a crash after flush can produce a
+duplicate instead of message loss. Its JSON payload is therefore a pre-ack
+`delivered` snapshot; exit status zero confirms the subsequent acknowledgement.
+`--delay-seconds`, `--include-future`, `--include-read`,
 `--limit`, `--owner` (alias `--owner-user-id`), and `--db` provide explicit
 local control. The default database is the standard `messages.sqlite3` below
 the Vyane data directory.
 
 This is not an A2A HTTP implementation. It has no Agent Card, discovery,
-remote send/get/cancel, SSE, push, or Channels adapter. `--owner` is supplied by
-the caller and is a logical storage scope, not authenticated principal
-authority; do not expose this CLI directly as a hostile multi-user service.
+remote send/get/cancel, SSE, push, or Channels adapter. `--owner` and `--from`
+are supplied by the caller: the former is a logical storage scope and the
+latter is only a sender label, not authenticated principal authority or
+identity. Do not expose this CLI directly as a hostile multi-user service.
 See [WP-59](docs/plan/WP-59.md) for the exact boundary.
 
 ### REST API

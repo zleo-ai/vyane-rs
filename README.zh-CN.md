@@ -239,14 +239,18 @@ vyane a2a read reviewer <message-id> --json
 ```
 
 `inbox` 只读，不会暗中改 delivery 状态。`read` 必须同时给出收件 mailbox 和 message id，
-再沿用现有 fenced claim → delivered → acknowledged 状态机。可用 `--delay-seconds`、
+再沿用现有 fenced claim → delivered → acknowledged 状态机；它会先完整写出并 flush 响应，
+再执行 acknowledge。写失败时消息仍可回收；flush 后崩溃则可能重复交付，但不会静默丢失。
+因此 JSON 中是 ack 前的 `delivered` 快照，进程以零退出才表示随后 acknowledge 也成功。
+可用 `--delay-seconds`、
 `--include-future`、`--include-read`、`--limit`、`--owner`（兼容别名
 `--owner-user-id`）与 `--db` 显式控制；默认数据库是 Vyane 标准数据目录下的
 `messages.sqlite3`。
 
 这不是 A2A HTTP 实现：没有 Agent Card、discovery、远程 send/get/cancel、SSE、push 或
-Channels adapter。`--owner` 是调用方自己提供的逻辑存储 scope，不是经过认证得到的 principal；
-不能把这个 CLI 直接暴露为 hostile multi-user service。精确边界见
+Channels adapter。`--owner` 和 `--from` 都由调用方提供：前者只是逻辑存储 scope，后者只是
+sender label，均不是经过认证得到的 principal authority / identity。不能把这个 CLI 直接暴露为
+hostile multi-user service。精确边界见
 [WP-59](docs/plan/WP-59.md)。
 
 `vyane serve` 会拒绝非 loopback bind；每次启动都会生成 256-bit bearer capability，并把它原子写入

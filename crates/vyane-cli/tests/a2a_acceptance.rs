@@ -1,11 +1,31 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::BTreeSet;
+#[cfg(target_os = "linux")]
+use std::fs::OpenOptions;
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::process::{Command as ProcessCommand, Stdio};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 
 use assert_cmd::Command;
+#[cfg(target_os = "linux")]
+use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::Value;
 use tempfile::TempDir;
+#[cfg(target_os = "linux")]
+use vyane_message::{DeliveryStatus, MessageClock, MessageStore as _, SqliteMessageStore};
+
+#[cfg(target_os = "linux")]
+struct FixedClock(DateTime<Utc>);
+
+#[cfg(target_os = "linux")]
+impl MessageClock for FixedClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.0
+    }
+}
 
 fn vyane() -> Command {
     Command::cargo_bin("vyane").expect("vyane binary")
@@ -190,9 +210,9 @@ fn send_inbox_read_round_trip_has_stable_json_and_strict_scope() {
         true,
     );
     assert_eq!(read["message"]["id"], message_id);
-    assert_eq!(read["message"]["delivery_status"], "acknowledged");
+    assert_eq!(read["message"]["delivery_status"], "delivered");
     assert!(!read["message"]["delivered_at"].is_null());
-    assert!(!read["message"]["read_at"].is_null());
+    assert!(read["message"]["read_at"].is_null());
 
     let empty = json_output(
         &[
@@ -223,6 +243,8 @@ fn send_inbox_read_round_trip_has_stable_json_and_strict_scope() {
         true,
     );
     assert_eq!(history["messages"][0]["id"], message_id);
+    assert_eq!(history["messages"][0]["delivery_status"], "acknowledged");
+    assert!(!history["messages"][0]["read_at"].is_null());
 
     let repeated = json_output(
         &[
@@ -239,6 +261,74 @@ fn send_inbox_read_round_trip_has_stable_json_and_strict_scope() {
         false,
     );
     assert_eq!(repeated["status"], "error");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn read_does_not_acknowledge_when_stdout_rejects_the_response() {
+    let directory = TempDir::new().unwrap();
+    let db = directory.path().join("messages.sqlite3");
+    let db_text = db_text(&db);
+    let sent = send(&db, "local", "recipient", "must remain recoverable");
+    let message_id = sent["message"]["id"].as_str().unwrap();
+    let full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+
+    let binary = vyane().get_program().to_owned();
+    let status = ProcessCommand::new(binary)
+        .args([
+            "a2a",
+            "read",
+            "--db",
+            &db_text,
+            "--json",
+            "recipient",
+            message_id,
+        ])
+        .stdout(Stdio::from(full))
+        .status()
+        .unwrap();
+    assert!(!status.success());
+
+    let store = SqliteMessageStore::open(&db).unwrap();
+    let bundle = store.get("local", message_id).unwrap().unwrap();
+    assert_eq!(bundle.deliveries[0].status, DeliveryStatus::Delivered);
+    assert!(bundle.deliveries[0].acknowledged_at.is_none());
+
+    let future = Utc::now()
+        .checked_add_signed(TimeDelta::seconds(60))
+        .unwrap();
+    let reclaiming =
+        SqliteMessageStore::open_with_clock(&db, Arc::new(FixedClock(future))).unwrap();
+    assert_eq!(reclaiming.reclaim_expired("local", 10).unwrap(), 1);
+    let reclaimed = reclaiming.get("local", message_id).unwrap().unwrap();
+    assert_eq!(reclaimed.deliveries[0].status, DeliveryStatus::Pending);
+}
+
+#[test]
+fn human_read_prints_the_body_and_help_states_the_local_authority_boundary() {
+    let directory = TempDir::new().unwrap();
+    let db = directory.path().join("messages.sqlite3");
+    let db_text = db_text(&db);
+    let sent = send(&db, "local", "recipient", "visible review body");
+    let message_id = sent["message"]["id"].as_str().unwrap();
+
+    let output = vyane()
+        .args(["a2a", "read", "--db", &db_text, "recipient", message_id])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("visible review body"));
+
+    let a2a_help = vyane().args(["a2a", "--help"]).output().unwrap();
+    let a2a_help = String::from_utf8(a2a_help.stdout).unwrap();
+    assert!(a2a_help.contains("local SQLite inbox"));
+    assert!(a2a_help.contains("not authenticated A2A protocol transport"));
+
+    let send_help = vyane().args(["a2a", "send", "--help"]).output().unwrap();
+    let send_help = String::from_utf8(send_help.stdout).unwrap();
+    assert!(send_help.contains("Caller-supplied sender label"));
+    assert!(send_help.contains("not an authenticated identity"));
 }
 
 #[test]
