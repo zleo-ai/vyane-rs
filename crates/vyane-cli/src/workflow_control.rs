@@ -521,12 +521,25 @@ async fn wait_for_observation(
     let deadline = tokio::time::Instant::now() + budget;
     loop {
         let observation = observe_controller(controller);
-        if observation != ControllerObservation::Exact {
-            return observation;
+        // After an authorized signal, BSD/macOS may briefly keep the process
+        // group observable while its leader is already a zombie or has just
+        // been reaped. Keep polling those disappearance-shaped observations;
+        // the deadline still returns the unresolved state fail-closed and no
+        // later signal is authorized from it.
+        match observation {
+            ControllerObservation::GroupGone => return observation,
+            ControllerObservation::IdentityMismatch(reason)
+                if reason != "could not read process birth fingerprint" =>
+            {
+                return observation;
+            }
+            ControllerObservation::Exact
+            | ControllerObservation::DeadSentinelLiveGroup
+            | ControllerObservation::IdentityMismatch(_) => {}
         }
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            return ControllerObservation::Exact;
+            return observation;
         }
         tokio::time::sleep(deadline.saturating_duration_since(now).min(CONTROL_POLL)).await;
     }
