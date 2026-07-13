@@ -5277,11 +5277,15 @@ mod tests {
 
     const LOCK_PROBE_DATABASE: &str = "VYANE_AGENT_LOCK_PROBE_DATABASE";
 
+    fn private_tempdir() -> tempfile::TempDir {
+        tempfile::TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
+    }
+
     #[test]
     fn first_creation_closes_candidates_before_atomic_publication() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let path = directory.path().join("first-create.sqlite");
         let candidates = (0..8)
             .map(|_| create_closed_database_candidate(directory.path()).unwrap())
@@ -5343,7 +5347,7 @@ mod tests {
 
     #[test]
     fn metadata_validation_does_not_release_a_wal_writer_lock() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let path = directory.path().join("lock-probe.sqlite");
         prepare_database_path(&path).unwrap();
 
