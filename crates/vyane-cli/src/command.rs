@@ -3126,6 +3126,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::task::spawn::SpawnedWorker;
 
     fn session_test_service(directory: &TempDir) -> VyaneService {
