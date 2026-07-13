@@ -60,6 +60,40 @@
       ]
     },
     {
+      "id": "automatic_routing",
+      "fixture_sha256": "acd0832bc12871f273d11d29406950184b2854310d9123c78c530d1dda2b524f",
+      "scope": "sanitized automatic routing behavior with reference-native profile effort and no-eligible cases counted as normalized matches; Rust candidate mapping, explicit model/selector, rendered-task target selection, frontier filtering, and frozen replay remain explicit open differences",
+      "normalized_fixture": "docs/parity/fixtures/v1/automatic-routing.json",
+      "cases": [
+        { "id": "automatic-routing.routed-defaults", "disposition": "open_difference", "blocker": "BLOCKER EXE-05: the reference dispatch entry does not consume the Rust candidate/profile input shape, so this Rust default-route tuple cannot be claimed as a cross-implementation match." },
+        { "id": "automatic-routing.profile-effort", "disposition": "normalized_exact", "blocker": null },
+        { "id": "automatic-routing.explicit-effort", "disposition": "open_difference", "blocker": "BLOCKER EXE-05: explicit effort is accepted by the reference dispatch entry, but the selected target tuple depends on a Rust-only candidate/profile mapping that the reference entry does not consume." },
+        {
+          "id": "automatic-routing.explicit-model",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-05: the Rust automatic selector has no typed explicit-model override; adding one requires a bounded trusted input that is frozen across detached and daemon replay."
+        },
+        { "id": "automatic-routing.explicit-selector", "disposition": "open_difference", "blocker": "BLOCKER EXE-05: the reference dispatch entry has no same-shaped selector-to-profile-to-target resolution contract; Rust explicit profile selection is one-sided behavior." },
+        { "id": "automatic-routing.rendered-prompt", "disposition": "open_difference", "blocker": "BLOCKER EXE-05: both implementations route rendered task text, but this selected target tuple depends on a Rust-only tag/candidate mapping and is not reference-equivalent evidence." },
+        { "id": "automatic-routing.no-eligible", "disposition": "normalized_exact", "blocker": null },
+        {
+          "id": "automatic-routing.full-chain-frontier-guard",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-05: the reference route decision has no profile-failover-chain filtering contract; Rust keeps this stronger full-chain safety rule as an explicit scope difference."
+        },
+        {
+          "id": "automatic-routing.ambiguous-direct-frontier",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-05: the reference router has no direct provider/model failover ambiguity contract; Rust fails closed when profile provenance cannot prove a leg non-frontier."
+        },
+        {
+          "id": "automatic-routing.frozen-replay",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-06: the reference workflow replay cache has no same-shaped frozen automatic-chain contract; this case pins Rust chain reconstruction, changed-task divergence, and missing-label failure, not the later production target-snapshot fence."
+        }
+      ]
+    },
+    {
       "id": "failover",
       "fixture_sha256": "22fb2e054535adc23753528f1446586d0ea09eb1177ca94a74d9f1dbdfcac355",
       "scope": "classify_failover_reason taxonomy only; Rust failover_eligible is pinned as one-sided regression data and is not an oracle-equivalence claim; production attempt behavior is outside this suite and requires separate EXE-02 cross-repository acceptance evidence",

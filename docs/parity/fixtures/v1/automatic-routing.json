@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "suite": "automatic_routing",
+  "normalization": {
+    "identity": "Reference identities are replaced deterministically by the neutral candidate identities carried in each case input.",
+    "errors": "Implementation-specific diagnostics are reduced to closed status codes.",
+    "scope_gap": "A reference contract that does not exist is recorded as unsupported_contract and remains an open difference, never as equality."
+  },
+  "cases": [
+    {
+      "id": "automatic-routing.routed-defaults",
+      "oracle_locator": { "fn": "DispatchKernel.decide" },
+      "input": {
+        "scenario": "routed_defaults", "initial_task": null, "task": "summarize the change", "template": null, "variables": {}, "selector": "auto", "explicit_model": null, "explicit_effort": null, "allow_frontier": true,
+        "candidate_profiles": ["economy"], "fresh_candidate_profiles": [],
+        "candidates": [
+          { "name": "economy", "provider": "provider-alpha", "model": "model-alpha", "tier": "economy", "effort": null, "tags": [], "failover": [] }
+        ]
+      },
+      "sanitized_oracle_output": { "status": "unsupported_mapping", "provider": null, "model": null, "effort": null, "chain": [] },
+      "normalized_oracle_output": { "status": "unsupported_mapping", "provider": null, "model": null, "effort": null, "chain": [] },
+      "rust_output": { "status": "selected", "provider": "provider-alpha", "model": "model-alpha", "effort": "low", "chain": ["provider-alpha/model-alpha"] },
+      "disposition": "open_difference", "blocker": "BLOCKER EXE-05: the reference dispatch entry does not consume the Rust candidate/profile input shape, so this Rust default-route tuple cannot be claimed as a cross-implementation match."
+    },
+    {
+      "id": "automatic-routing.profile-effort",
+      "oracle_locator": { "fn": "route_task_v5" },
+      "input": {
+        "scenario": "profile_effort", "initial_task": null, "task": "implement the change", "template": null, "variables": {}, "selector": "auto", "explicit_model": null, "explicit_effort": null, "allow_frontier": true,
+        "candidate_profiles": ["tuned"], "fresh_candidate_profiles": [],
+        "candidates": [
+          { "name": "tuned", "provider": "provider-alpha", "model": "model-tuned", "tier": "mainline", "effort": "high", "tags": [], "failover": [] }
+        ]
+      },
+      "sanitized_oracle_output": { "status": "selected", "provider": "provider-alpha", "model": "model-tuned", "effort": "high", "chain": ["provider-alpha/model-tuned"] },
+      "normalized_oracle_output": { "status": "selected", "provider": "provider-alpha", "model": "model-tuned", "effort": "high", "chain": ["provider-alpha/model-tuned"] },
+      "rust_output": { "status": "selected", "provider": "provider-alpha", "model": "model-tuned", "effort": "high", "chain": ["provider-alpha/model-tuned"] },
+      "disposition": "normalized_exact", "blocker": null
+    },
+    {
+      "id": "automatic-routing.explicit-effort",
+      "oracle_locator": { "fn": "DispatchKernel.decide" },
+      "input": {
+        "scenario": "explicit_effort", "initial_task": null, "task": "implement the change", "template": null, "variables": {}, "selector": "auto", "explicit_model": null, "explicit_effort": "xhigh", "allow_frontier": true,
+        "candidate_profiles": ["tuned"], "fresh_candidate_profiles": [],
+        "candidates": [
+          { "name": "tuned", "provider": "provider-alpha", "model": "model-tuned", "tier": "mainline", "effort": "high", "tags": [], "failover": [] }
+        ]
+      },
+      "sanitized_oracle_output": { "status": "unsupported_mapping", "provider": null, "model": null, "effort": null, "chain": [] },
+      "normalized_oracle_output": { "status": "unsupported_mapping", "provider": null, "model": null, "effort": null, "chain": [] },
+      "rust_output": { "status": "selected", "provider": "provider-alpha", "model": "model-tuned", "effort": "xhigh", "chain": ["provider-alpha/model-tuned"] },
+      "disposition": "open_difference", "blocker": "BLOCKER EXE-05: explicit effort is accepted by the reference dispatch entry, but the selected target tuple depends on a Rust-only candidate/profile mapping that the reference entry does not consume."
+    },
+    {
+      "id": "automatic-routing.explicit-model",
+      "oracle_locator": { "fn": "DispatchKernel.decide" },
+      "input": {
+        "scenario": "explicit_model", "initial_task": null, "task": "implement the change", "template": null, "variables": {}, "selector": "auto", "explicit_model": "model-user", "explicit_effort": null, "allow_frontier": true,
+        "candidate_profiles": ["tuned"], "fresh_candidate_profiles": [],
+        "candidates": [
+          { "name": "tuned", "provider": "provider-alpha", "model": "model-tuned", "tier": "mainline", "effort": "high", "tags": [], "failover": [] }
+        ]
+      },
+      "sanitized_oracle_output": { "status": "selected", "provider": "provider-alpha", "model": "model-user", "effort": "high", "chain": ["provider-alpha/model-user"] },
+      "normalized_oracle_output": { "status": "selected", "provider": "provider-alpha", "model": "model-user", "effort": "high", "chain": ["provider-alpha/model-user"] },
+      "rust_output": { "status": "selected", "provider": "provider-alpha", "model": "model-tuned", "effort": "high", "chain": ["provider-alpha/model-tuned"] },
+      "disposition": "open_difference",
+      "blocker": "BLOCKER EXE-05: the Rust automatic selector has no typed explicit-model override; adding one requires a bounded trusted input that is frozen across detached and daemon replay."
+    },
+    {
+      "id": "automatic-routing.explicit-selector",
+      "oracle_locator": { "fn": "DispatchKernel.decide" },
+      "input": {
+        "scenario": "explicit_selector", "initial_task": null, "task": "summarize the change", "template": null, "variables": {}, "selector": "economy", "explicit_model": null, "explicit_effort": null, "allow_frontier": true,
+        "candidate_profiles": [], "fresh_candidate_profiles": [],
+        "candidates": [
+          { "name": "economy", "provider": "provider-alpha", "model": "model-alpha", "tier": "economy", "effort": null, "tags": [], "failover": [] }
+        ]
+      },
+      "sanitized_oracle_output": { "status": "unsupported_contract", "provider": null, "model": null, "effort": null, "chain": [] },
+      "normalized_oracle_output": { "status": "unsupported_contract", "provider": null, "model": null, "effort": null, "chain": [] },
+      "rust_output": { "status": "selected", "provider": "provider-alpha", "model": "model-alpha", "effort": null, "chain": ["provider-alpha/model-alpha"] },
+      "disposition": "open_difference", "blocker": "BLOCKER EXE-05: the reference dispatch entry has no same-shaped selector-to-profile-to-target resolution contract; Rust explicit profile selection is one-sided behavior."
+    },
+    {
+      "id": "automatic-routing.rendered-prompt",
+      "oracle_locator": { "fn": "DispatchKernel.decide" },
+      "input": {
+        "scenario": "rendered_prompt", "initial_task": null, "task": "review the library change", "template": "{{vars.action}} the library change", "variables": { "action": "review" }, "selector": "auto", "explicit_model": null, "explicit_effort": null, "allow_frontier": true,
+        "candidate_profiles": ["economy", "review"], "fresh_candidate_profiles": [],
+        "candidates": [
+          { "name": "economy", "provider": "provider-alpha", "model": "model-alpha", "tier": "economy", "effort": null, "tags": [], "failover": [] },
+          { "name": "review", "provider": "provider-beta", "model": "model-review", "tier": "mainline", "effort": "high", "tags": ["review"], "failover": [] }
+        ]
+      },
+      "sanitized_oracle_output": { "status": "unsupported_mapping", "provider": null, "model": null, "effort": null, "chain": [] },
+      "normalized_oracle_output": { "status": "unsupported_mapping", "provider": null, "model": null, "effort": null, "chain": [] },
+      "rust_output": { "status": "selected", "provider": "provider-beta", "model": "model-review", "effort": "high", "chain": ["provider-beta/model-review"] },
+      "disposition": "open_difference", "blocker": "BLOCKER EXE-05: both implementations route rendered task text, but this selected target tuple depends on a Rust-only tag/candidate mapping and is not reference-equivalent evidence."
+    },
+    {
+      "id": "automatic-routing.no-eligible",
+      "oracle_locator": { "fn": "route_task_v5" },
+      "input": {
+        "scenario": "no_eligible", "initial_task": null, "task": "summarize the change", "template": null, "variables": {}, "selector": "auto", "explicit_model": null, "explicit_effort": null, "allow_frontier": true,
+        "candidate_profiles": ["no-provider"], "fresh_candidate_profiles": [],
+        "candidates": [
+          { "name": "no-provider", "provider": null, "model": "model-none", "tier": "economy", "effort": null, "tags": [], "failover": [] }
+        ]
+      },
+      "sanitized_oracle_output": { "status": "no_eligible", "provider": null, "model": null, "effort": null, "chain": [] },
+      "normalized_oracle_output": { "status": "no_eligible", "provider": null, "model": null, "effort": null, "chain": [] },
+      "rust_output": { "status": "no_eligible", "provider": null, "model": null, "effort": null, "chain": [] },
+      "disposition": "normalized_exact", "blocker": null
+    },
+    {
+      "id": "automatic-routing.full-chain-frontier-guard",
+      "oracle_locator": { "fn": "unsupported_reference_contract" },
+      "input": {
+        "scenario": "frontier_chain", "initial_task": null, "task": "implement the change", "template": null, "variables": {}, "selector": "auto", "explicit_model": null, "explicit_effort": null, "allow_frontier": false,
+        "candidate_profiles": ["safe"], "fresh_candidate_profiles": [],
+        "candidates": [
+          { "name": "safe", "provider": "provider-alpha", "model": "model-safe", "tier": "mainline", "effort": null, "tags": [], "failover": ["frontier-backup"] },
+          { "name": "frontier-backup", "provider": "provider-frontier", "model": "model-frontier", "tier": "frontier", "effort": null, "tags": [], "failover": [] }
+        ]
+      },
+      "sanitized_oracle_output": { "status": "unsupported_contract", "provider": null, "model": null, "effort": null, "chain": [] },
+      "normalized_oracle_output": { "status": "unsupported_contract", "provider": null, "model": null, "effort": null, "chain": [] },
+      "rust_output": { "status": "selected", "provider": "provider-alpha", "model": "model-safe", "effort": "low", "chain": ["provider-alpha/model-safe"] },
+      "disposition": "open_difference",
+      "blocker": "BLOCKER EXE-05: the reference route decision has no profile-failover-chain filtering contract; Rust keeps this stronger full-chain safety rule as an explicit scope difference."
+    },
+    {
+      "id": "automatic-routing.ambiguous-direct-frontier",
+      "oracle_locator": { "fn": "unsupported_reference_contract" },
+      "input": {
+        "scenario": "ambiguous_direct", "initial_task": null, "task": "implement the change", "template": null, "variables": {}, "selector": "auto", "explicit_model": null, "explicit_effort": null, "allow_frontier": false,
+        "candidate_profiles": ["ambiguous-direct"], "fresh_candidate_profiles": [],
+        "candidates": [
+          { "name": "ambiguous-direct", "provider": "provider-alpha", "model": "model-safe", "tier": "mainline", "effort": null, "tags": [], "failover": ["provider-shared/model-shared"] },
+          { "name": "shared-safe", "provider": "provider-shared", "model": "model-shared", "tier": "mainline", "effort": null, "tags": [], "failover": [] },
+          { "name": "shared-frontier", "provider": "provider-shared", "model": "model-shared", "tier": "frontier", "effort": null, "tags": [], "failover": [] }
+        ]
+      },
+      "sanitized_oracle_output": { "status": "unsupported_contract", "provider": null, "model": null, "effort": null, "chain": [] },
+      "normalized_oracle_output": { "status": "unsupported_contract", "provider": null, "model": null, "effort": null, "chain": [] },
+      "rust_output": { "status": "no_eligible", "provider": null, "model": null, "effort": null, "chain": [] },
+      "disposition": "open_difference",
+      "blocker": "BLOCKER EXE-05: the reference router has no direct provider/model failover ambiguity contract; Rust fails closed when profile provenance cannot prove a leg non-frontier."
+    },
+    {
+      "id": "automatic-routing.frozen-replay",
+      "oracle_locator": { "fn": "unsupported_reference_contract" },
+      "input": {
+        "scenario": "frozen_replay", "initial_task": "implement the library change", "task": "review the library change", "template": null, "variables": {}, "selector": "auto", "explicit_model": null, "explicit_effort": "high", "allow_frontier": false,
+        "candidate_profiles": ["safe-replay"], "fresh_candidate_profiles": ["economy", "review"],
+        "candidates": [
+          { "name": "safe-replay", "provider": "provider-alpha", "model": "model-safe", "tier": "mainline", "effort": null, "tags": [], "failover": ["economy"] },
+          { "name": "economy", "provider": "provider-alpha", "model": "model-alpha", "tier": "economy", "effort": null, "tags": [], "failover": [] },
+          { "name": "review", "provider": "provider-beta", "model": "model-review", "tier": "mainline", "effort": "high", "tags": ["review"], "failover": [] }
+        ]
+      },
+      "sanitized_oracle_output": { "status": "unsupported_contract", "provider": null, "model": null, "effort": null, "chain": [] },
+      "normalized_oracle_output": { "status": "unsupported_contract", "provider": null, "model": null, "effort": null, "chain": [] },
+      "rust_output": { "status": "selected", "provider": "provider-alpha", "model": "model-safe", "effort": "high", "chain": ["provider-alpha/model-safe", "provider-alpha/model-alpha"] },
+      "disposition": "open_difference",
+      "blocker": "BLOCKER EXE-06: the reference workflow replay cache has no same-shaped frozen automatic-chain contract; this case pins Rust chain reconstruction, changed-task divergence, and missing-label failure, not the later production target-snapshot fence."
+    }
+  ]
+}
