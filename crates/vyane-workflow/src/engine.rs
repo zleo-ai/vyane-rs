@@ -249,7 +249,9 @@ impl WorkflowEngine {
     /// Replay is deliberately stricter than compatibility resume: the source
     /// journal must already carry the exact source and plan digests. A
     /// dependency-closed successful prefix is copied into a create-only new
-    /// journal, then remaining work executes live.
+    /// journal, then remaining work executes live. Reused prefix steps retain
+    /// the source journal's recorded target resolution; the live suffix uses
+    /// the current resolver.
     pub async fn replay(
         &self,
         source_wf_run_id: &str,

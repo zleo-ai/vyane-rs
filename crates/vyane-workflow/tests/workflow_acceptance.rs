@@ -924,6 +924,32 @@ async fn replay_rejects_digest_drift_and_existing_identity_before_resolution_or_
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
     assert_eq!(probe.call_count("ok"), 0);
 
+    let valid_plan = wf.compile_plan().unwrap();
+    let mut rebound_source: vyane_workflow::WorkflowJournal =
+        serde_json::from_slice(&source_bytes).unwrap();
+    rebound_source.plan_sha256 = Some("f".repeat(64));
+    std::fs::write(
+        &source.journal_path,
+        serde_json::to_vec_pretty(&rebound_source).unwrap(),
+    )
+    .unwrap();
+    let error = engine
+        .replay_plan(
+            source.wf_run_id.as_str(),
+            &valid_plan,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("workflow plan digest changed for continuation")
+    );
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.call_count("ok"), 0);
+    std::fs::write(&source.journal_path, &source_bytes).unwrap();
+
     let error = engine
         .replay_with_id(
             source.wf_run_id.clone(),

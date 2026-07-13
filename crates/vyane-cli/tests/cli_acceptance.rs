@@ -742,6 +742,31 @@ async fn workflow_replay_creates_a_new_run_without_reexecuting_recorded_successe
     );
 }
 
+#[test]
+fn workflow_replay_rejects_var_before_config_or_journal_access() {
+    let data_dir = TempDir::new().expect("data tempdir");
+    let missing_config = data_dir.path().join("missing-config.toml");
+    let missing_workflow = data_dir.path().join("missing-workflow.toml");
+
+    vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&missing_config)
+        .args([
+            "workflow",
+            "replay",
+            "019f5bad-be63-7b72-9b85-c2b1e4b2e507",
+            "--file",
+        ])
+        .arg(&missing_workflow)
+        .args(["--var", "topic=changed", "--json"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--var is not allowed"));
+
+    assert!(!data_dir.path().join("workflows").exists());
+}
+
 #[tokio::test]
 async fn workflow_auto_target_resolves_after_render_and_records_route() {
     let server = MockServer::start().await;
