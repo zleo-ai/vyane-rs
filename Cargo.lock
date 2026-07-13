@@ -2412,6 +2412,7 @@ dependencies = [
  "uuid",
  "vyane-config",
  "vyane-core",
+ "vyane-goal",
  "vyane-harness",
  "vyane-kernel",
  "vyane-ledger",
@@ -2453,6 +2454,19 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "vyane-goal"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "uuid",
 ]
 

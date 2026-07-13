@@ -104,6 +104,7 @@ Two consequences:
 | `vyane-kernel` | — (traits only) | early execution identity, whole-chain capability admission, prepared dispatch, dispatch / broadcast / failover state machine |
 | `vyane-ledger` | — | JSONL `Ledger`, filesystem `SessionStore` with strict revisioned native-session snapshots/CAS transitions, cost table |
 | `vyane-task` | — | owner-qualified SQLite task lifecycle snapshots/events, revision + executor-epoch CAS, transactional schema migration |
+| `vyane-goal` | — (independent leaf crate) | owner-scoped SQLite goal snapshots plus immutable lifecycle/progress events; acceptance descriptors are data, not executable checks |
 | `vyane-agent` | — (independent leaf crate) | owner-scoped SQLite AgentRun queue and worker-topology truth, fenced two-stage recovery admission, non-serializable active permits and native execution scopes with atomic durable revalidation, bounded tree cancellation, and body-free outbox |
 | `vyane-message` | — (independent leaf crate) | owner-scoped SQLite message/delivery truth, fenced leases, external receipts, per-projector body-free outbox |
 | `vyane-broker` | `vyane-agent`, `vyane-message`, `vyane-ledger` | bounded owner-bound delivery pump, replay-safe adapter boundary, maintenance, body-free message/AgentRun EventLog projectors, and an explicit unwired resident library driver |
@@ -111,7 +112,7 @@ Two consequences:
 | `vyane-workflow` | `vyane-kernel` | declarative DAG execution, bounded source bundles, atomic journals, and explicit resume |
 | `vyane-service` | `vyane-agent`, `vyane-kernel`, `vyane-config`, `vyane-ledger`, `vyane-message`, `vyane-broker` | shared facade plus principal-derived `OwnerScopedService`, allowlisted run/session views, owner-scoped session control, explicit projection construction, the fresh-sessionless authority bridge, fixed-owner one-shot drivers, a paired in-process backend and its resident library supervisor; ordinary dispatch constructs none of the optional AgentRun components |
 | `vyane-mcp` | `vyane-service`, `rmcp` | six-tool MCP server over stdio: dispatch/broadcast/history/sessions plus two bounded diagnostics, route preview and static configuration check; generic success output has a 1 MiB cap |
-| `vyane-cli` | `vyane-service`, `vyane-workflow`, `vyane-task`, `vyane-mcp`, `axum` | assembler: CLI + bearer-authenticated loopback-only REST API (`vyane serve`, Host/Origin checked and non-loopback rejected) + authenticated local workflow daemon + MCP launcher (`vyane mcp`) |
+| `vyane-cli` | `vyane-service`, `vyane-workflow`, `vyane-task`, `vyane-goal`, `vyane-mcp`, `axum` | assembler: CLI + bearer-authenticated loopback-only REST API (`vyane serve`, Host/Origin checked and non-loopback rejected) + authenticated local workflow daemon + MCP launcher (`vyane mcp`) |
 
 `ChatClient::complete_turn` is an additive typed boundary. Its default fallback
 keeps text-only clients source-compatible but delegates only when the request
@@ -976,6 +977,38 @@ service operation, CLI command or workflow daemon does so in production. The
 driver is not an AgentRun execution or recovery supervisor and supplies no
 controller/message handback glue, public execution API, A2A/Channels adapter,
 live pause/resume or automatic replay.
+
+## Durable goal truth
+
+`vyane-goal` owns `$VYANE_DATA_DIR/goals.sqlite3`. Its `goals` table is the
+current query snapshot; `goal_events` is the append-only lifecycle and progress
+history. They are not competing sources of truth: every mutation runs under one
+SQLite immediate transaction, updates the snapshot revision, appends the event
+with that same revision, and commits or rolls back both. Event update/delete
+triggers make the history immutable at the database boundary.
+
+The lifecycle is deliberately small:
+
+```text
+queued      -> in_progress | cancelled
+in_progress -> completed | failed | paused | cancelled
+paused      -> in_progress | cancelled
+completed | failed | cancelled -> terminal
+```
+
+Progress adds an event and revision without changing status. Queue selection is
+deterministic: lowest numeric priority, oldest creation time, then id. The
+snapshot primary key, event foreign key, every read/list/transition predicate,
+and queue selection all include owner. Two owners may reuse the same goal id;
+a foreign record is indistinguishable from an absent record.
+
+`vyane goal` is currently a local CLI surface. Its `--owner` is supplied by the
+caller and is therefore storage scope, not authenticated principal authority.
+The CLI supports create/get/list/next/start/progress/pause/resume/done/fail and
+cancel with stable JSON and exit status 2 for input/store errors. Acceptance
+criteria are bounded persisted `(kind,target)` descriptors. There is no
+verifier execution, automatic pursuer, quota handoff, continuity engine,
+REST/MCP exposure, or resident host integration in this phase.
 
 ## Durable task control
 
