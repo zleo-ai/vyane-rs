@@ -458,7 +458,7 @@ impl WorkflowHarnessControl {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     fn with_graces(mut self, term_grace: Duration, kill_grace: Duration) -> Self {
         self.term_grace = term_grace;
         self.kill_grace = kill_grace;

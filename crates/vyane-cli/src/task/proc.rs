@@ -62,7 +62,7 @@ pub const IDENTITY_START_TOLERANCE_SECS: i64 = 30;
 
 /// Fixed descriptor carrying a parent's pinned workdir into its detached
 /// worker. Harness children use 8 and lifecycle sentinels use 9.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub const WORKER_PINNED_WORKDIR_FD: i32 = 7;
 
 /// Put a test child in its own process group without changing its session.
