@@ -30,6 +30,7 @@ jobs:
         run: cargo check --workspace --all-targets --locked
 
   test:
+    timeout-minutes: 20
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -55,7 +56,18 @@ jobs:
         # paths that traverse symlinks, so use the runner's canonical temp root.
         env:
           TMPDIR: ${{ runner.temp }}
-        run: cargo test --workspace
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            # Several CLI fixtures exercise process-global POSIX locking from
+            # independent Tokio runtimes. Keep each fixture's internal
+            # concurrency, but do not overlap separate CLI fixtures on macOS.
+            # Other packages retain normal scheduling (including paused-time
+            # tests that rely on Tokio's automatic clock advancement).
+            cargo test --workspace --exclude vyane-cli
+            cargo test -p vyane-cli -- --test-threads=1
+          else
+            cargo test --workspace
+          fi
 
   coverage:
     runs-on: ubuntu-latest
