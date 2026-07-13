@@ -4,14 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{FuturesUnordered, StreamExt};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
 use vyane_core::{CancellationToken, HarnessLifecycleReporter, RunStatus, TaskSpec};
 use vyane_kernel::Dispatcher;
 
 use crate::error::{WorkflowError, WorkflowResult};
 use crate::journal::{
-    JournalStep, JournalStepStatus, JournalTargetOutput, WorkflowJournal, WorkflowRunId,
-    journal_path, read_journal, write_journal_atomic, write_journal_create_atomic,
+    JournalStep, JournalStepStatus, JournalTargetOutput, WorkflowJournal, WorkflowReplayProvenance,
+    WorkflowRunId, journal_path, read_journal, write_journal_atomic, write_journal_create_atomic,
 };
 use crate::model::{OnError, Workflow, WorkflowOutcome, WorkflowRunStatus};
 use crate::plan::{WorkflowPlan, WorkflowPlanStep};
@@ -241,6 +242,83 @@ impl WorkflowEngine {
         let journal = read_journal(&self.journal_dir, wf_run_id)?;
         validate_journal_plan_binding(&journal, plan)?;
         self.resume_plan_from_journal(journal, plan, cancel).await
+    }
+
+    /// Fork a completed or interrupted workflow into a new run identity.
+    ///
+    /// Replay is deliberately stricter than compatibility resume: the source
+    /// journal must already carry the exact source and plan digests. A
+    /// dependency-closed successful prefix is copied into a create-only new
+    /// journal, then remaining work executes live. Reused prefix steps retain
+    /// the source journal's recorded target resolution; the live suffix uses
+    /// the current resolver.
+    pub async fn replay(
+        &self,
+        source_wf_run_id: &str,
+        wf: &Workflow,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        self.replay_with_id(WorkflowRunId::generate(), source_wf_run_id, wf, cancel)
+            .await
+    }
+
+    pub async fn replay_with_id(
+        &self,
+        new_wf_run_id: WorkflowRunId,
+        source_wf_run_id: &str,
+        wf: &Workflow,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        let plan = wf.compile_plan()?;
+        self.replay_plan_with_id(new_wf_run_id, source_wf_run_id, &plan, cancel)
+            .await
+    }
+
+    pub async fn replay_plan(
+        &self,
+        source_wf_run_id: &str,
+        plan: &WorkflowPlan,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        self.replay_plan_with_id(WorkflowRunId::generate(), source_wf_run_id, plan, cancel)
+            .await
+    }
+
+    pub async fn replay_plan_with_id(
+        &self,
+        new_wf_run_id: WorkflowRunId,
+        source_wf_run_id: &str,
+        plan: &WorkflowPlan,
+        cancel: CancellationToken,
+    ) -> WorkflowResult<WorkflowOutcome> {
+        let source = read_journal(&self.journal_dir, source_wf_run_id)?;
+        if source.wf_run_id == new_wf_run_id {
+            return Err(WorkflowError::validation(vec![
+                "workflow replay requires a new run identity".into(),
+            ]));
+        }
+        validate_journal_plan_binding(&source, plan)?;
+        if source.status == WorkflowRunStatus::Running {
+            return Err(WorkflowError::validation(vec![
+                "workflow replay source is still running".into(),
+            ]));
+        }
+        validate_replay_source_shape(&source, plan)?;
+
+        // Resolve the complete plan before publishing the new identity. Digest
+        // and source failures above therefore remain free of resolver effects.
+        let validated = validate_plan(plan, &source.vars, self.resolver.as_ref())?;
+        let mut journal = WorkflowJournal::new_with_plan(new_wf_run_id, plan, source.vars.clone());
+        let reused_step_ids = copy_replay_prefix(&source, plan, &validated, &mut journal)?;
+        let reused_steps_sha256 = replay_steps_digest(&journal, &reused_step_ids)?;
+        journal.replay = Some(WorkflowReplayProvenance {
+            source_wf_run_id: source.wf_run_id,
+            source_plan_sha256: plan.plan_sha256.clone(),
+            reused_steps_sha256,
+            reused_step_ids,
+        });
+        write_journal_create_atomic(&self.journal_dir, &mut journal)?;
+        self.execute(plan, &validated, journal, cancel).await
     }
 
     async fn resume_plan_from_journal(
@@ -635,6 +713,94 @@ fn validate_journal_plan_binding(
         ]));
     }
     Ok(())
+}
+
+fn validate_replay_source_shape(
+    source: &WorkflowJournal,
+    plan: &WorkflowPlan,
+) -> WorkflowResult<()> {
+    let expected = plan
+        .steps
+        .iter()
+        .map(|step| step.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let actual = source
+        .steps
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if expected != actual {
+        return Err(WorkflowError::validation(vec![
+            "workflow replay source step set does not match the bound plan".into(),
+        ]));
+    }
+    Ok(())
+}
+
+fn copy_replay_prefix(
+    source: &WorkflowJournal,
+    plan: &WorkflowPlan,
+    validated: &ValidatedWorkflow,
+    target: &mut WorkflowJournal,
+) -> WorkflowResult<Vec<String>> {
+    let steps = plan
+        .steps
+        .iter()
+        .map(|step| (step.id.as_str(), step))
+        .collect::<BTreeMap<_, _>>();
+    let mut reused = BTreeSet::new();
+    let mut reused_ids = Vec::new();
+
+    for id in &validated.topo_order {
+        let Some(plan_step) = steps.get(id.as_str()) else {
+            return Err(WorkflowError::validation(vec![
+                "workflow replay validation returned an unknown step".into(),
+            ]));
+        };
+        let Some(source_step) = source.steps.get(id) else {
+            return Err(WorkflowError::validation(vec![
+                "workflow replay source is missing a planned step".into(),
+            ]));
+        };
+        let dependency_closed = plan_step.needs.iter().all(|need| reused.contains(need));
+        let fan_out_all_succeeded = source_step
+            .outputs
+            .as_ref()
+            .is_none_or(|outputs| !outputs.is_empty() && outputs.iter().all(|output| output.ok));
+        if source_step.status != JournalStepStatus::Success
+            || source_step.error.is_some()
+            || !dependency_closed
+            || !fan_out_all_succeeded
+        {
+            break;
+        }
+        target.steps.insert(id.clone(), source_step.clone());
+        reused.insert(id.clone());
+        reused_ids.push(id.clone());
+    }
+    Ok(reused_ids)
+}
+
+fn replay_steps_digest(
+    journal: &WorkflowJournal,
+    reused_step_ids: &[String],
+) -> WorkflowResult<String> {
+    let steps = reused_step_ids
+        .iter()
+        .map(|id| (id, journal.steps.get(id)))
+        .collect::<Vec<_>>();
+    let wire = serde_json::to_vec(&steps).map_err(|_| {
+        WorkflowError::validation(vec![
+            "workflow replay evidence could not be serialized".into(),
+        ])
+    })?;
+    let digest = Sha256::digest(wire);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    Ok(out)
 }
 
 fn migrate_or_validate_plan_binding(

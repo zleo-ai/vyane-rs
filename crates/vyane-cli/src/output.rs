@@ -147,6 +147,13 @@ pub fn print_workflow_summary(outcome: &WorkflowOutcome) {
         workflow_status_name(outcome.status)
     );
     println!("{}", outcome.journal_path.display());
+    if let Some(replay) = outcome.journal.replay.as_ref() {
+        println!(
+            "replay source={} reused_steps={}",
+            replay.source_wf_run_id,
+            replay.reused_step_ids.len()
+        );
+    }
     println!("{:<24} {:<10} runs output", "step", "status");
     for (id, step) in &outcome.journal.steps {
         let output = step

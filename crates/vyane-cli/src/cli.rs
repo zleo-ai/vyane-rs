@@ -70,6 +70,8 @@ pub enum WorkflowCommand {
     Cancel(WorkflowCancelArgs),
     /// Resume a workflow run from its journal.
     Resume(WorkflowResumeArgs),
+    /// Replay a journal-recorded all-success prefix into a new workflow run.
+    Replay(WorkflowReplayArgs),
     /// List workflow journals.
     List(WorkflowListArgs),
 }
@@ -332,6 +334,24 @@ pub struct WorkflowResumeArgs {
     #[arg(long, value_name = "FILE")]
     pub file: PathBuf,
     /// Workflow variables are loaded from the journal on resume; passing this is an error.
+    #[arg(long = "var", value_name = "k=v")]
+    pub vars: Vec<String>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowReplayArgs {
+    /// Prior canonical UUIDv7 workflow run to replay.
+    pub source_wf_run_id: WorkflowRunId,
+    /// Workflow TOML file used by the source run.
+    #[arg(long, value_name = "FILE")]
+    pub file: PathBuf,
+    /// Canonical UUIDv7 for the new run; generated when omitted.
+    #[arg(long, value_name = "UUIDV7")]
+    pub id: Option<WorkflowRunId>,
+    /// Workflow variables are loaded from the source journal; passing this is an error.
     #[arg(long = "var", value_name = "k=v")]
     pub vars: Vec<String>,
     /// Emit machine-readable JSON.

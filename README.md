@@ -103,7 +103,7 @@ reference implementation.
 | durable owner-scoped AgentRun queue, worker topology and recovery truth | `vyane-agent` | [~] exact leases/deadlines, logical/native-session-id and policy-digest-fenced resume, non-serializable active permits, atomic native-scope revalidation, bounded tree cancel, body-free completion receipts/outbox, durable projection deferral/quarantine, and a three-loop in-process resident supervisor exist; no concrete product operation, production host, Process/Remote integration or public execution API exists |
 | owner-scoped transactional message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO, delayed/idempotent delivery, fenced leases, TTL, ack/nack, body-free outbox, external-receipt reconciliation, and hidden staged completion publication exist |
 | bounded replay-safe delivery broker + body-free EventLog projectors | `vyane-broker` | [~] fake-adapter contracts, message/AgentRun lifecycle projection with stable source event IDs, and the explicit non-`Clone` `ResidentBrokerSupervisor` library driver exist; no service/CLI/daemon production assembly, worker/message glue, or A2A/Channels adapters exist yet |
-| declarative workflow engine (DAG + journal/resume) | `vyane-workflow` | [x] |
+| declarative workflow engine (DAG + journal/resume/replay) | `vyane-workflow` | [x] exact-plan replay creates a new run and reuses a journal-recorded all-success prefix |
 | resident workflow daemon (authenticated local submit/status/cancel) | `vyane-cli` | [x] |
 | detached background runs (`--detach` + `task` commands) | `vyane-cli` | [x] |
 | CLI (check / dispatch / broadcast / history / session / sessions / workflow / task / daemon) | `vyane-cli` | [x] revision-aware `session list/inspect/reset-native`; legacy `sessions` remains compatible |
@@ -493,10 +493,17 @@ the exact checksum; only the source-bearing compatibility API may migrate an
 older journal after validating the exact source hash. See
 [WP-54](docs/plan/WP-54.md).
 
+[WP-58](docs/plan/WP-58.md) adds explicit exact-plan replay/fork. It reads a
+terminal source journal, creates a new UUIDv7 journal, reuses only the
+dependency-closed, journal-recorded all-success prefix, and executes the
+remaining suffix live.
+The source remains unchanged; daemon restart still never implies replay.
+
 This closes the repository-local shared typed-plan prerequisite, not workflow
 parity. Dynamic control flow, nested workflows, shared budgets, a compatibility
-frontend, replay/fork, CLI/REST/MCP plan transport, sanitized cross-implementation
-fixtures, and a production-complete model-tier policy remain open.
+frontend, changed-plan call matching, CLI/REST/MCP plan transport, sanitized
+cross-implementation fixtures, and a production-complete model-tier policy
+remain open.
 
 The frontier guard is fail-closed across the selected profile and its failover
 chain. Detached auto-routed jobs send a secret-free target snapshot once over a

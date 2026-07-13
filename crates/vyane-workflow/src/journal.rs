@@ -192,12 +192,26 @@ pub struct WorkflowJournal {
     pub file_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<WorkflowReplayProvenance>,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub status: WorkflowRunStatus,
     pub steps: BTreeMap<String, JournalStep>,
+}
+
+/// Body-free lineage describing a new-run replay from one prior journal.
+///
+/// `reused_steps_sha256` is a drift checksum over copied journal data, not an
+/// authenticity or external-provenance proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowReplayProvenance {
+    pub source_wf_run_id: WorkflowRunId,
+    pub source_plan_sha256: String,
+    pub reused_steps_sha256: String,
+    pub reused_step_ids: Vec<String>,
 }
 
 impl WorkflowJournal {
@@ -221,6 +235,7 @@ impl WorkflowJournal {
             workflow_name: wf.name.clone(),
             file_sha256: wf.file_sha256.clone(),
             plan_sha256: wf.compile_plan().ok().map(|plan| plan.plan_sha256),
+            replay: None,
             vars,
             started_at: now,
             updated_at: now,
@@ -245,6 +260,7 @@ impl WorkflowJournal {
             workflow_name: plan.name.clone(),
             file_sha256: plan.source_sha256.clone(),
             plan_sha256: Some(plan.plan_sha256.clone()),
+            replay: None,
             vars,
             started_at: now,
             updated_at: now,

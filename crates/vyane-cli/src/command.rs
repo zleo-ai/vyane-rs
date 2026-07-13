@@ -29,7 +29,8 @@ use crate::cli::{
     BroadcastArgs, Cli, Command, DaemonCommand, DispatchArgs, HistoryArgs, ReviewArgs, RouteArgs,
     ServeArgs, SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs,
     TaskCancelArgs, TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCancelArgs,
-    WorkflowCommand, WorkflowResumeArgs, WorkflowRunArgs, WorkflowStatusArgs, WorkflowSubmitArgs,
+    WorkflowCommand, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs, WorkflowStatusArgs,
+    WorkflowSubmitArgs,
 };
 use crate::daemon_client::{DaemonWorkflowClient, WorkflowTaskView};
 use crate::output::{BroadcastJson, BroadcastRow, DurableTaskStatusJson, RunJson, TaskRow};
@@ -78,6 +79,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             WorkflowCommand::Status(args) => status_daemon_workflow(args).await,
             WorkflowCommand::Cancel(args) => cancel_daemon_workflow(args).await,
             WorkflowCommand::Resume(args) => resume_workflow(cli.config, args).await,
+            WorkflowCommand::Replay(args) => replay_workflow(cli.config, args).await,
             WorkflowCommand::List(args) => list_workflows(args).await,
         },
         Command::Review(args) => run_review_command(cli.config, args).await,
@@ -2757,6 +2759,99 @@ async fn resume_workflow(
     })
 }
 
+async fn replay_workflow(
+    config_path: Option<PathBuf>,
+    args: WorkflowReplayArgs,
+) -> Result<ExitCode> {
+    if !args.vars.is_empty() {
+        eprintln!(
+            "config error: workflow replay uses variables from the source journal; --var is not allowed"
+        );
+        return Ok(ExitCode::from(2));
+    }
+    let phase = load_config(config_path.as_deref()).and_then(|loaded| {
+        let wf = Workflow::from_path(&args.file).map_err(anyhow::Error::from)?;
+        Ok((loaded, wf))
+    });
+    let (loaded, wf) = match phase {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("config error: {error:#}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+
+    let paths = StoragePaths::resolve()?;
+    let runtime = Runtime::new(loaded.config.clone(), paths.clone())?;
+    let resolver = Arc::new(CliWorkflowResolver { loaded });
+    let mut engine = WorkflowEngine::new(
+        Arc::new(runtime.dispatcher.clone()),
+        resolver,
+        paths.workflows_dir.clone(),
+    );
+    if !args.json {
+        engine = engine.with_observer(Arc::new(CliWorkflowObserver));
+    }
+
+    let new_id = args.id.unwrap_or_else(WorkflowRunId::generate);
+    // Publish and flush the exact identity before create-only journal
+    // publication or any live suffix call. A killed foreground process can
+    // therefore be reconciled without generating a second replay identity.
+    {
+        let stderr = std::io::stderr();
+        let mut stderr = stderr.lock();
+        if args.json {
+            writeln!(
+                stderr,
+                "{}",
+                workflow_replay_id_event(&args.source_wf_run_id, &new_id)
+            )
+        } else {
+            writeln!(stderr, "workflow replay id: {new_id}")
+        }
+        .context("workflow replay was definitely not started: write replay id")?;
+        stderr
+            .flush()
+            .context("workflow replay was definitely not started: flush replay id")?;
+    }
+    let outcome = match engine
+        .replay_with_id(
+            new_id,
+            args.source_wf_run_id.as_str(),
+            &wf,
+            cancellation_token(),
+        )
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            print_workflow_error(&error);
+            return Ok(workflow_error_exit(&error));
+        }
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        crate::output::print_workflow_summary(&outcome);
+    }
+    Ok(if outcome.status.is_success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+fn workflow_replay_id_event(
+    source_wf_run_id: &WorkflowRunId,
+    new_wf_run_id: &WorkflowRunId,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": "workflow_replay_id",
+        "source_workflow_run_id": source_wf_run_id,
+        "workflow_run_id": new_wf_run_id,
+    })
+}
+
 async fn run_review_command(config_path: Option<PathBuf>, args: ReviewArgs) -> Result<ExitCode> {
     let reviewers = crate::review::ReviewArgs::parse_reviewers(&args.reviewers);
     if reviewers.len() < 2 {
@@ -3276,6 +3371,24 @@ mod tests {
             serde_json::json!({
                 "event": "workflow_submission_id",
                 "workflow_run_id": run_id,
+            })
+        );
+        assert!(!rendered.contains('\n'));
+        assert!(rendered.len() < 256);
+    }
+
+    #[test]
+    fn workflow_replay_id_json_event_is_one_bounded_line() {
+        let source: WorkflowRunId = "01890f3e-7b7c-7cc2-98d2-3f9a2b6c7d8e".parse().unwrap();
+        let new: WorkflowRunId = "01890f3e-7b7d-7cc2-98d2-3f9a2b6c7d8e".parse().unwrap();
+        let rendered = serde_json::to_string(&workflow_replay_id_event(&source, &new)).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&rendered).unwrap(),
+            serde_json::json!({
+                "event": "workflow_replay_id",
+                "source_workflow_run_id": source,
+                "workflow_run_id": new,
             })
         );
         assert!(!rendered.contains('\n'));
