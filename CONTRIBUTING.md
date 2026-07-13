@@ -37,6 +37,7 @@ in non-test code.
 ```
 vyane-core        types, traits, errors, env policy — no runtime
 vyane-message     owner-safe transactional messages, deliveries, leases, outbox
+vyane-goal        owner-scoped goal snapshots and immutable lifecycle/progress events
 vyane-task        secret-free durable task lifecycle metadata
 vyane-provider    provider registry, endpoints, auth styles
 vyane-config      TOML parsing, profile + failover chain resolution
@@ -64,7 +65,7 @@ interchangeable operations:
 
 | protocol | command | new code location |
 |----------|---------|-------------------|
-| CLI | `vyane dispatch/broadcast/review/route/task/workflow` | `vyane-cli/src/command.rs` |
+| CLI | `vyane dispatch/broadcast/review/route/task/workflow/a2a/goal` | `vyane-cli/src/command.rs` |
 | REST API | `vyane serve` (axum, 10 endpoints + SSE) | `vyane-cli/src/api.rs` |
 | MCP | `vyane mcp` (rmcp, 4 tools over stdio) | `vyane-mcp/src/lib.rs` |
 

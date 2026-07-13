@@ -67,7 +67,7 @@ authorization. The manual release workflow additionally requires a protected
 `crates-io` environment approval by a reviewer other than the dispatcher and
 requires the supplied release tag, current `main`, and workflow SHA to identify
 one exact commit. The registry token is exposed only to the final publish step.
-The 16-crate local package preflight passes, but no crate has
+The 17-crate local package preflight passes, but no crate has
 been published. This does not mean full parity with the original private Vyane
 system.** In the current public integration baseline, the fixed cross-repository matrix
 tracks 53 capabilities across eight domains: 7 implemented, 20 partial, 16
@@ -102,11 +102,12 @@ reference implementation.
 | durable, secret-free task metadata | `vyane-task` | [x] schema v2 keys snapshots, events and CAS by `(owner,id)` with transactional v1 migration; built-in frontends still select explicit `local` |
 | durable owner-scoped AgentRun queue, worker topology and recovery truth | `vyane-agent` | [~] exact leases/deadlines, logical/native-session-id and policy-digest-fenced resume, non-serializable active permits, atomic native-scope revalidation, bounded tree cancel, body-free completion receipts/outbox, durable projection deferral/quarantine, and a three-loop in-process resident supervisor exist; no concrete product operation, production host, Process/Remote integration or public execution API exists |
 | owner-scoped transactional message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO, delayed/idempotent delivery, fenced leases, TTL, ack/nack, body-free outbox, external-receipt reconciliation, hidden staged completion publication, bounded mailbox pages, and exact mailbox claim exist |
+| owner-scoped goal lifecycle and progress truth | `vyane-goal` | [x] one SQLite transaction updates the current snapshot and appends an immutable event; acceptance descriptors persist, while verification, pursuit, and quota handoff remain future layers |
 | bounded replay-safe delivery broker + body-free EventLog projectors | `vyane-broker` | [~] fake-adapter contracts, message/AgentRun lifecycle projection with stable source event IDs, and the explicit non-`Clone` `ResidentBrokerSupervisor` library driver exist; no service/daemon production assembly, worker/message glue, or remote A2A/Channels adapters exist yet |
 | declarative workflow engine (DAG + journal/resume/replay) | `vyane-workflow` | [x] exact-plan replay creates a new run and reuses a journal-recorded all-success prefix |
 | resident workflow daemon (authenticated local submit/status/cancel) | `vyane-cli` | [x] |
 | detached background runs (`--detach` + `task` commands) | `vyane-cli` | [x] |
-| CLI (check / dispatch / broadcast / history / session / sessions / workflow / task / daemon / a2a) | `vyane-cli` | [x] revision-aware `session list/inspect/reset-native`, plus local `a2a send/inbox/read`; legacy `sessions` remains compatible |
+| CLI (check / dispatch / broadcast / history / session / sessions / workflow / task / daemon / a2a / goal) | `vyane-cli` | [x] revision-aware session control, local `a2a send/inbox/read`, and owner-scoped `goal` lifecycle/progress commands; legacy `sessions` remains compatible |
 | shared service layer | `vyane-service` | [x] `OwnerContextFactory` authenticates and resolves a reserved-local-safe authority; `OwnerScopedService` freezes dispatch/stream/query/session/reset. Optional AgentRun components include a paired in-process backend, exact message-completion sink, and resident execution/recovery/publication supervisor; ordinary dispatch starts none of them |
 | **REST API** (`vyane serve` — dispatch/broadcast/runs/sessions/health) | `vyane-cli` + `axum` | [x] per-start bearer capability, loopback Host/Origin enforcement, non-loopback bind rejection, allowlisted views, and one assembly-frozen local service scope; the bearer still is not a distinct principal or hostile same-UID/multi-user boundary |
 | **MCP server** (`vyane mcp` — six tools) | `vyane-mcp` + `rmcp` | [x] dispatch/broadcast/history/sessions plus two bounded diagnostics: `route` preview and static-only `check`; generic success output has a 1 MiB cap |
@@ -348,6 +349,31 @@ latter is only a sender label, not authenticated principal authority or
 identity. Do not expose this CLI directly as a hostile multi-user service.
 See [WP-59](docs/plan/WP-59.md) for the exact boundary.
 
+### Local goals
+
+The CLI exposes an owner-scoped goal lifecycle over one SQLite source of truth:
+
+```sh
+vyane goal create --title "Ship a release" \
+  --acceptance test-passes:workspace --json
+vyane goal next --auto-start --json
+vyane goal progress <goal-id> --stage implementation --detail "tests added" --json
+vyane goal done <goal-id> --summary "all checks passed" --json
+```
+
+`create/get/list/next/start/progress/pause/resume/done/fail/cancel` share stable
+JSON success/error envelopes. Every mutation updates the current query snapshot
+and appends an immutable revision event in the same transaction. Queue selection
+orders priority ascending, then creation time ascending. The default database is
+`goals.sqlite3` below the Vyane data directory; `--db` selects another local
+file. `--owner` (alias `--owner-user-id`) is a caller-selected storage scope,
+not authenticated authority. Foreign and absent ids are intentionally
+indistinguishable at the store boundary.
+
+Acceptance `KIND:TARGET` values are persisted descriptors only. This phase does
+not execute acceptance checks, pursue goals automatically, coordinate quota
+handoff, or expose a goal REST/MCP service. See [WP-60](docs/plan/WP-60.md).
+
 ### REST API
 
 `vyane serve` exposes a JSON HTTP API with streaming (SSE) and async task
@@ -585,6 +611,8 @@ Anthropic Messages                    │
            + session store
    SQLite transactional message store
  (messages, deliveries, receipt/outbox state)
+      SQLite goal lifecycle store
+ (snapshot + immutable events in one transaction)
        bounded delivery broker
  (replay-safe adapters + body-free EventLog projection)
     SQLite AgentRun / worker store
@@ -593,7 +621,7 @@ Anthropic Messages                    │
 
 The kernel depends only on the traits and types in `vyane-core`; the concrete
 clients, harnesses and ledger are assembled behind those traits in the service
-layer. Sixteen crates:
+layer. Seventeen crates:
 
 | crate | responsibility |
 |-------|----------------|
@@ -607,6 +635,7 @@ layer. Sixteen crates:
 | `vyane-task` | SQLite-backed, secret-free task lifecycle snapshots and CAS event history |
 | `vyane-agent` | SQLite-backed, owner-scoped AgentRun queue, worker topology, fenced two-stage recovery admission, active permits and atomic native-scope revalidation, bounded tree cancellation, and body-free lifecycle outbox |
 | `vyane-message` | SQLite-backed, owner-scoped transactional message and delivery truth, fenced leases, external receipts, and per-projector body-free outbox |
+| `vyane-goal` | SQLite-backed, owner-scoped goal snapshots plus immutable lifecycle/progress events and persisted acceptance descriptors |
 | `vyane-broker` | bounded owner-bound delivery pumps, replay-safety admission, fenced settlement, maintenance, and body-free message/AgentRun EventLog projection |
 | `vyane-router` | target selection / routing policy (grows into pluggable routing) |
 | `vyane-workflow` | declarative DAG execution, templates, atomic journals, and resume |

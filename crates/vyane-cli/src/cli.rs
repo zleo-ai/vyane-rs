@@ -54,6 +54,9 @@ pub enum Command {
     /// Use a local SQLite inbox; this is not authenticated A2A protocol transport.
     #[command(subcommand)]
     A2a(A2aCommand),
+    /// Create, inspect, and advance owner-scoped local goals.
+    #[command(subcommand)]
+    Goal(GoalCommand),
     /// Run the MCP server over stdio (for use as an MCP tool server).
     Mcp,
     /// Internal: execute a detached run. Not for direct use.
@@ -69,6 +72,167 @@ pub enum A2aCommand {
     Inbox(A2aInboxArgs),
     /// Deliver one exact mailbox message, then acknowledge after stdout flushes.
     Read(A2aReadArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GoalCommand {
+    /// Create a queued goal.
+    Create(GoalCreateArgs),
+    /// Show one goal and its append-only events.
+    Get(GoalGetArgs),
+    /// List goals by priority and recent activity.
+    List(GoalListArgs),
+    /// Show the highest-priority queued goal.
+    Next(GoalNextArgs),
+    /// Move a queued or paused goal to in_progress.
+    Start(GoalIdArgs),
+    /// Append a progress event without changing lifecycle state.
+    Progress(GoalProgressArgs),
+    /// Pause an in-progress goal.
+    Pause(GoalReasonArgs),
+    /// Resume a paused goal.
+    Resume(GoalIdArgs),
+    /// Mark an in-progress goal completed.
+    Done(GoalDoneArgs),
+    /// Mark an in-progress goal failed.
+    Fail(GoalFailArgs),
+    /// Cancel a queued, in-progress, or paused goal.
+    Cancel(GoalReasonArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct GoalCommonArgs {
+    /// SQLite goal database; defaults to the standard Vyane data directory.
+    #[arg(long, value_name = "PATH")]
+    pub db: Option<PathBuf>,
+    /// Caller-selected local storage scope; not authenticated authority.
+    #[arg(long, alias = "owner-user-id", default_value = "local")]
+    pub owner: String,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalCreateArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Goal title.
+    #[arg(long)]
+    pub title: String,
+    /// Long-form goal description.
+    #[arg(long, default_value = "")]
+    pub description: String,
+    /// Priority from 0 (urgent) through 4 (backlog).
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=4))]
+    pub priority: u8,
+    /// Optional umbrella goal id.
+    #[arg(long)]
+    pub parent: Option<String>,
+    /// Acceptance descriptor in KIND:TARGET form; repeatable.
+    #[arg(long, value_name = "KIND:TARGET")]
+    pub acceptance: Vec<String>,
+    /// Explicit goal id; generated when omitted.
+    #[arg(long)]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalGetArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum GoalStatusArg {
+    Queued,
+    #[value(name = "in_progress")]
+    InProgress,
+    Paused,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalListArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Filter by lifecycle state; repeatable.
+    #[arg(long = "state")]
+    pub states: Vec<GoalStatusArg>,
+    /// Filter by parent goal id.
+    #[arg(long)]
+    pub parent: Option<String>,
+    /// Maximum rows; 0 means all, up to 1000.
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalNextArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Transition the selected goal to in_progress before returning it.
+    #[arg(long)]
+    pub auto_start: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalIdArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalProgressArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+    /// Stable progress stage label.
+    #[arg(long)]
+    pub stage: String,
+    /// Human-readable progress detail.
+    #[arg(long)]
+    pub detail: String,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalReasonArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+    /// Optional pause or cancellation reason.
+    #[arg(long)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalDoneArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+    /// Optional completion summary.
+    #[arg(long)]
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalFailArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+    /// Required failure reason.
+    #[arg(long)]
+    pub reason: String,
 }
 
 #[derive(Debug, Args)]

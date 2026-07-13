@@ -22,6 +22,7 @@ const SECRETS_FILE: &str = "secrets.env";
 const TASK_METADATA_DB_FILE: &str = "tasks.sqlite3";
 const AGENT_METADATA_DB_FILE: &str = "agent-runs.sqlite3";
 const MESSAGE_DB_FILE: &str = "messages.sqlite3";
+const GOAL_DB_FILE: &str = "goals.sqlite3";
 const EVENT_LOG_DIR: &str = "events";
 
 /// The loaded configuration plus the secrets needed to resolve endpoints.
@@ -183,6 +184,12 @@ impl StoragePaths {
         self.data_dir.join(MESSAGE_DB_FILE)
     }
 
+    /// SQLite source of truth for owner-scoped goal snapshots and events.
+    #[must_use]
+    pub fn goal_db_path(&self) -> PathBuf {
+        self.data_dir.join(GOAL_DB_FILE)
+    }
+
     /// Owner-isolated EventLog projection root.
     #[must_use]
     pub fn event_log_dir(&self) -> PathBuf {
@@ -221,6 +228,10 @@ mod tests {
         assert_eq!(
             paths.message_db_path(),
             PathBuf::from("/tmp/vyane-explicit-path-test/messages.sqlite3")
+        );
+        assert_eq!(
+            paths.goal_db_path(),
+            PathBuf::from("/tmp/vyane-explicit-path-test/goals.sqlite3")
         );
         assert_eq!(
             paths.event_log_dir(),

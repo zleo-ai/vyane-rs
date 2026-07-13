@@ -20,6 +20,7 @@ readonly PUBLISH_ORDER=(
   vyane-core
   vyane-agent
   vyane-message
+  vyane-goal
   vyane-task
   vyane-provider
   vyane-config
