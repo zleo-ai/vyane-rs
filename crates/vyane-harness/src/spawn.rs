@@ -1876,6 +1876,22 @@ mod tests {
         assert_eq!(started_pid as i32, started_pgid);
     }
 
+    fn assert_empty_target_environment(stdout: &str) {
+        #[cfg(target_os = "macos")]
+        {
+            let keys = stdout
+                .lines()
+                .map(|line| line.split_once('=').map(|(key, _)| key).unwrap_or(line))
+                .collect::<Vec<_>>();
+            assert!(
+                keys.iter().all(|key| matches!(*key, "SHLVL" | "_")),
+                "empty target inherited unexpected environment keys: {keys:?}"
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(stdout, "");
+    }
+
     fn cleanup_observing_reporter(
         heartbeat: std::path::PathBuf,
     ) -> (
@@ -2089,7 +2105,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.stdout, "");
+        assert_empty_target_environment(&result.stdout);
     }
 
     #[tokio::test]
@@ -2111,8 +2127,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.stdout, "");
-        assert!(lines.lock().unwrap().is_empty());
+        assert_empty_target_environment(&result.stdout);
+        assert_eq!(
+            *lines.lock().unwrap(),
+            result.stdout.lines().map(str::to_owned).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -2696,7 +2715,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let heartbeat = dir.path().join("reaped-guard-heartbeat");
         let script = format!(
-            "( trap '' TERM; while :; do printf x >> '{}'; /bin/sleep 0.02; done ) & while [ ! -s '{}' ]; do /bin/sleep 0.01; done; exit 0",
+            "( trap '' HUP TERM; while :; do printf x >> '{}'; /bin/sleep 0.02; done ) & while [ ! -s '{}' ]; do /bin/sleep 0.01; done; exit 0",
             heartbeat.display(),
             heartbeat.display()
         );

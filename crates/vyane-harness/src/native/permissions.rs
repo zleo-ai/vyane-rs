@@ -1085,7 +1085,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn non_utf8_cwd_cannot_produce_an_ambiguous_approval_hash() {
         use std::ffi::OsString;
