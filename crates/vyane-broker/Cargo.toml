@@ -1,0 +1,30 @@
+[package]
+name = "vyane-broker"
+description = "Bounded message delivery and control-plane event projection for Vyane"
+keywords = ["ai", "messages", "broker", "orchestration", "events"]
+categories = ["asynchronous", "development-tools"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vyane-core = { workspace = true }
+vyane-agent = { workspace = true }
+vyane-message = { workspace = true }
+vyane-ledger = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+static_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

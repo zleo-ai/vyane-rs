@@ -83,7 +83,8 @@ pub struct RunRecord {
     pub finished_at: DateTime<Utc>,
     /// SHA-256 (hex, first 16 chars) of the prompt text.
     pub task_digest: String,
-    /// First ~120 chars of the prompt, for human scanning. Configurable off.
+    /// Legacy/explicit opt-in preview. New dispatches leave this `None` so the
+    /// default ledger never copies prompt text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -60,6 +60,7 @@ pub fn build_review_workflow(args: &ReviewArgs) -> Workflow {
             sandbox: Sandbox::ReadOnly,
             timeout,
             on_error: OnError::Abort,
+            route: Default::default(),
         },
         // Step 2: fan out to independent reviewers
         WorkflowStep {
@@ -91,6 +92,7 @@ pub fn build_review_workflow(args: &ReviewArgs) -> Workflow {
             sandbox: Sandbox::ReadOnly,
             timeout,
             on_error: OnError::Continue,
+            route: Default::default(),
         },
         // Step 3: synthesize the reviews
         WorkflowStep {
@@ -128,6 +130,7 @@ pub fn build_review_workflow(args: &ReviewArgs) -> Workflow {
             sandbox: Sandbox::ReadOnly,
             timeout,
             on_error: OnError::Abort,
+            route: Default::default(),
         },
     ];
 
@@ -137,6 +140,7 @@ pub fn build_review_workflow(args: &ReviewArgs) -> Workflow {
         max_concurrency: 4,
         steps,
         file_path: PathBuf::from("(builtin:review)"),
+        legacy_file_sha256: None,
         file_sha256: String::new(),
     }
 }

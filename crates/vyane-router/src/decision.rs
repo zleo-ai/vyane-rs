@@ -61,6 +61,12 @@ impl RouteEffort {
 /// the rest are diagnostic metadata for logging and observability.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteDecision {
+    /// Opaque caller-owned identity copied from the matched preference. Empty
+    /// means the router used an unkeyed fallback. This is deliberately not part
+    /// of [`Self::as_tuple`], whose stable public provider/model contract is
+    /// unchanged.
+    #[serde(default)]
+    pub selection_key: String,
     /// The chosen provider id (e.g. "openai", "anthropic").
     pub provider: String,
     /// The chosen model id within that provider. Empty means "use the
@@ -89,5 +95,20 @@ impl RouteDecision {
             self.effort.as_str(),
             self.tier.as_str(),
         )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_json_defaults_empty_selection_key() {
+        let decision: RouteDecision = serde_json::from_str(
+            r#"{"provider":"openai","model":"m","effort":"low","tier":"economy","tag":"","intent":"other","complexity_score":0.0,"reason":"legacy"}"#,
+        )
+        .unwrap();
+        assert!(decision.selection_key.is_empty());
     }
 }

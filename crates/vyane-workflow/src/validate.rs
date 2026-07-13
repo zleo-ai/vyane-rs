@@ -1,20 +1,49 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use vyane_core::{BoundTarget, Result as VyaneResult};
+use vyane_core::{BoundTarget, Result as VyaneResult, TaskSpec};
 
 use crate::error::{WorkflowError, WorkflowResult};
-use crate::model::{StepTargets, Workflow};
+use crate::model::{StepTargets, Workflow, WorkflowRouteHints};
+use crate::plan::WorkflowPlan;
 use crate::template::validate_template;
+
+pub const MAX_TEMPLATE_ANCESTOR_RELATIONS: usize = 65_536;
 
 pub trait TargetResolver: Send + Sync {
     fn resolve(&self, target: &str) -> VyaneResult<Vec<BoundTarget>>;
+
+    /// Validate and, when possible, pre-resolve a selector. Returning `None`
+    /// declares a deferred selector whose concrete target depends on the
+    /// rendered task and will be resolved immediately before dispatch.
+    fn resolve_for_validation(&self, target: &str) -> VyaneResult<Option<Vec<BoundTarget>>> {
+        self.resolve(target).map(Some)
+    }
+
+    /// Resolve a deferred selector against the rendered task. Implementations
+    /// may attach decision metadata to `task.labels`.
+    fn resolve_for_task(
+        &self,
+        target: &str,
+        _task: &mut TaskSpec,
+    ) -> VyaneResult<Vec<BoundTarget>> {
+        self.resolve(target)
+    }
+
+    /// Validate a selector that intentionally deferred concrete resolution.
+    /// Implementations can check candidate names, policy guards, and config
+    /// viability without committing to the prompt-dependent final route.
+    fn validate_deferred(&self, _target: &str, _route: &WorkflowRouteHints) -> VyaneResult<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum ResolvedStepTargets {
     Single {
         target: String,
-        chain: Vec<BoundTarget>,
+        /// `None` means the resolver deferred selection until the rendered
+        /// task is available at execution time.
+        chain: Option<Vec<BoundTarget>>,
     },
     FanOut {
         targets: Vec<String>,
@@ -47,6 +76,12 @@ pub fn validate_workflow(
     }
     if wf.steps.is_empty() {
         problems.push("workflow must contain at least one [[step]]".to_string());
+    }
+    if wf.max_concurrency > tokio::sync::Semaphore::MAX_PERMITS {
+        problems.push(format!(
+            "[workflow].max_concurrency must not exceed {}",
+            tokio::sync::Semaphore::MAX_PERMITS
+        ));
     }
 
     let mut ids = BTreeMap::<String, usize>::new();
@@ -97,7 +132,9 @@ pub fn validate_workflow(
     }
 
     let topo_order = topo_sort(&unique_ids, &dependencies, &mut problems);
-    let ancestors = transitive_needs(&unique_ids, &dependencies);
+    let Some(ancestors) = transitive_needs(&topo_order, &dependencies, &mut problems) else {
+        return Err(WorkflowError::validation(problems));
+    };
 
     for step in &wf.steps {
         match &step.targets {
@@ -147,20 +184,50 @@ pub fn validate_workflow(
     for step in wf.steps.iter().filter(|step| unique_ids.contains(&step.id)) {
         match &step.targets {
             StepTargets::Single(target) if !target.trim().is_empty() => {
-                match resolver.resolve(target) {
-                    Ok(chain) if !chain.is_empty() => {
-                        resolved_targets.insert(
-                            step.id.clone(),
-                            ResolvedStepTargets::Single {
-                                target: target.clone(),
-                                chain,
-                            },
-                        );
+                match resolver.resolve_for_validation(target) {
+                    Ok(Some(chain)) if !chain.is_empty() => {
+                        if step.route.is_empty() {
+                            resolved_targets.insert(
+                                step.id.clone(),
+                                ResolvedStepTargets::Single {
+                                    target: target.clone(),
+                                    chain: Some(chain),
+                                },
+                            );
+                        } else {
+                            problems.push(format!(
+                                "step `{}` has route hints on a non-deferred target; route hints require a deferred single target",
+                                step.id
+                            ));
+                        }
                     }
-                    Ok(_) => problems.push(format!(
-                        "step `{}` target `{target}` resolved to an empty chain",
-                        step.id
-                    )),
+                    Ok(Some(_)) => {
+                        if !step.route.is_empty() {
+                            problems.push(format!(
+                                "step `{}` has route hints on a non-deferred target; route hints require a deferred single target",
+                                step.id
+                            ));
+                        }
+                        problems.push(format!(
+                            "step `{}` target `{target}` resolved to an empty chain",
+                            step.id
+                        ));
+                    }
+                    Ok(None) => match resolver.validate_deferred(target, &step.route) {
+                        Ok(()) => {
+                            resolved_targets.insert(
+                                step.id.clone(),
+                                ResolvedStepTargets::Single {
+                                    target: target.clone(),
+                                    chain: None,
+                                },
+                            );
+                        }
+                        Err(error) => problems.push(format!(
+                            "step `{}` deferred target `{target}` is invalid: {}",
+                            step.id, error.message
+                        )),
+                    },
                     Err(error) => problems.push(format!(
                         "step `{}` target `{target}` could not be resolved: {}",
                         step.id, error.message
@@ -168,6 +235,15 @@ pub fn validate_workflow(
                 }
             }
             StepTargets::FanOut(targets) if !targets.is_empty() => {
+                let route_hints_valid = if step.route.is_empty() {
+                    true
+                } else {
+                    problems.push(format!(
+                        "step `{}` has route hints on fan_out targets; route hints require a deferred single target",
+                        step.id
+                    ));
+                    false
+                };
                 let mut chains = Vec::with_capacity(targets.len());
                 let mut ok = true;
                 for target in targets {
@@ -175,12 +251,19 @@ pub fn validate_workflow(
                         ok = false;
                         continue;
                     }
-                    match resolver.resolve(target) {
-                        Ok(chain) if !chain.is_empty() => chains.push(chain),
-                        Ok(_) => {
+                    match resolver.resolve_for_validation(target) {
+                        Ok(Some(chain)) if !chain.is_empty() => chains.push(chain),
+                        Ok(Some(_)) => {
                             ok = false;
                             problems.push(format!(
                                 "step `{}` fan_out target `{target}` resolved to an empty chain",
+                                step.id
+                            ));
+                        }
+                        Ok(None) => {
+                            ok = false;
+                            problems.push(format!(
+                                "step `{}` fan_out target `{target}` requires deferred routing, which is only supported for a single target",
                                 step.id
                             ));
                         }
@@ -193,7 +276,7 @@ pub fn validate_workflow(
                         }
                     }
                 }
-                if ok {
+                if ok && route_hints_valid {
                     resolved_targets.insert(
                         step.id.clone(),
                         ResolvedStepTargets::FanOut {
@@ -238,6 +321,18 @@ pub fn validate_workflow(
         dependencies,
         resolved_targets,
     })
+}
+
+/// Validate the portable execution contract. The compatibility frontend uses
+/// the same graph/target validator, but the engine's primary API accepts only
+/// the already-materialized plan.
+pub fn validate_plan(
+    plan: &WorkflowPlan,
+    vars: &BTreeMap<String, String>,
+    resolver: &dyn TargetResolver,
+) -> WorkflowResult<ValidatedWorkflow> {
+    plan.verify()?;
+    validate_workflow(&plan.as_validation_workflow(), vars, resolver)
 }
 
 fn topo_sort(
@@ -295,35 +390,41 @@ fn topo_sort(
 }
 
 fn transitive_needs(
-    ids: &BTreeSet<String>,
+    topo_order: &[String],
     dependencies: &BTreeMap<String, Vec<String>>,
-) -> BTreeMap<String, BTreeSet<String>> {
-    let mut out = BTreeMap::new();
-    for id in ids {
-        let mut seen = BTreeSet::new();
-        collect_needs(id, dependencies, &mut seen, &mut BTreeSet::new());
-        out.insert(id.clone(), seen);
-    }
-    out
-}
-
-fn collect_needs(
-    id: &str,
-    dependencies: &BTreeMap<String, Vec<String>>,
-    out: &mut BTreeSet<String>,
-    stack: &mut BTreeSet<String>,
-) {
-    if !stack.insert(id.to_string()) {
-        return;
-    }
-    if let Some(needs) = dependencies.get(id) {
-        for need in needs {
-            if out.insert(need.clone()) {
-                collect_needs(need, dependencies, out, stack);
+    problems: &mut Vec<String>,
+) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    let mut out = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut relation_count = 0usize;
+    for id in topo_order {
+        let mut ancestors = BTreeSet::new();
+        for need in dependencies.get(id).into_iter().flatten() {
+            if ancestors.insert(need.clone()) {
+                if relation_count == MAX_TEMPLATE_ANCESTOR_RELATIONS {
+                    problems.push(format!(
+                        "workflow template ancestor relations exceed {MAX_TEMPLATE_ANCESTOR_RELATIONS}"
+                    ));
+                    return None;
+                }
+                relation_count += 1;
+            }
+            if let Some(inherited) = out.get(need) {
+                for ancestor in inherited {
+                    if ancestors.insert(ancestor.clone()) {
+                        if relation_count == MAX_TEMPLATE_ANCESTOR_RELATIONS {
+                            problems.push(format!(
+                                "workflow template ancestor relations exceed {MAX_TEMPLATE_ANCESTOR_RELATIONS}"
+                            ));
+                            return None;
+                        }
+                        relation_count += 1;
+                    }
+                }
             }
         }
+        out.insert(id.clone(), ancestors);
     }
-    stack.remove(id);
+    Some(out)
 }
 
 fn display_step_id(step: &crate::model::WorkflowStep) -> String {

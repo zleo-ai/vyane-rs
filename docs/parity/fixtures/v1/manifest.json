@@ -1,0 +1,101 @@
+{
+  "schema_version": 2,
+  "normalization_version": "vyane-cross-repo-v1",
+  "reference": {
+    "snapshot": "behavioral-baseline-v1",
+    "disclosure": "sanitized_behavior_only"
+  },
+  "suites": [
+    {
+      "id": "routing",
+      "fixture_sha256": "e7e026785b0fc9637a936ef8e08f008fa881cd69a5911b5073aba15763e9d572",
+      "scope": "classify_intent primary, confidence and secondary plus vyane-service primary-intent exposure; stateful history, benchmark and feedback routing are excluded",
+      "normalized_fixture": "docs/parity/fixtures/v1/routing.json",
+      "cases": [
+        {
+          "id": "routing.classify_intent.implement",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "routing.classify_intent.function",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "routing.classify_intent.unit-test",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "routing.classify_intent.implement-and-review",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "routing.classify_intent.review-audit-implement",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "routing.classify_intent.debug-refactor",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "routing.classify_intent.test-api-endpoint",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "routing.classify_intent.root-cause",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "routing.classify_intent.bare-pr-confidence",
+          "disposition": "normalized_exact",
+          "blocker": null
+        }
+      ]
+    },
+    {
+      "id": "failover",
+      "fixture_sha256": "22fb2e054535adc23753528f1446586d0ea09eb1177ca94a74d9f1dbdfcac355",
+      "scope": "classify_failover_reason taxonomy only; Rust failover_eligible is pinned as one-sided regression data and is not an oracle-equivalence claim; production attempt behavior is outside this suite and requires separate EXE-02 cross-repository acceptance evidence",
+      "normalized_fixture": "docs/parity/fixtures/v1/failover.json",
+      "cases": [
+        {
+          "id": "failover.reason.timeout",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "failover.reason.rate-limit",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "failover.reason.runtime-unavailable",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "failover.reason.execution-error",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "failover.reason.policy-blocked",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-02/GOV-04: Rust has no dedicated policy-blocked ErrorKind; Unsupported is fail-closed but cannot be normalized as the oracle's policy_blocked reason without losing taxonomy truth."
+        },
+        {
+          "id": "failover.reason.quota-exhausted",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-02: Rust intentionally combines rate limiting and quota exhaustion in ErrorKind::RateLimited; a taxonomy decision is required before these outputs can be accepted as equal."
+        }
+      ]
+    }
+  ]
+}

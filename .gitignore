@@ -1,11 +1,20 @@
 # build
 /target
 **/target
+__pycache__/
+*.py[cod]
 
 # local config with real endpoints/keys — only *.example.toml is tracked
 profiles.toml
 secrets.env
 .env
+
+# local control-plane capabilities (mode 0600 at runtime on Unix)
+**/serve.token
+**/daemon.token
+
+# local agent/session planning state
+.zcode/
 
 # editors / os
 .DS_Store

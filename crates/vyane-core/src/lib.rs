@@ -25,25 +25,42 @@
 pub mod chat;
 pub mod env;
 pub mod error;
+pub mod native_authority;
 pub mod run;
 pub mod session;
 pub mod target;
 pub mod task;
+pub mod tool_chat;
 pub mod traits;
+pub mod workdir;
 
 pub use chat::{ChatMessage, ChatOutcome, ChatRequest, Role, StreamEvent};
 pub use env::{BASELINE_ENV, EnvPolicy, InheritMode};
 pub use error::{ErrorKind, Result, VyaneError};
+pub use native_authority::{NativeExecutionAuthority, NativeSideEffect};
 pub use run::{Attempt, AttemptOutcome, RunQuery, RunRecord, RunStatus, Usage};
-pub use session::{SessionRecord, SessionRef};
+pub use session::{
+    NativeSessionBinding, NativeSessionDomain, NativeSessionState, NativeSessionTransition,
+    SessionRecord, SessionRef, SessionSnapshot, SessionUpdate,
+};
 pub use target::{
     AdapterTransport, AuthMaterial, AuthStyle, BoundTarget, Endpoint, HarnessKind, ModelId,
     Protocol, ProviderId, Sandbox, Secret, Target,
 };
-pub use task::{Effort, GenParams, TaskSpec};
-pub use traits::{
-    ChatClient, Harness, HarnessJob, HarnessOutcome, HarnessStreamEvent, Ledger, SessionStore,
+pub use task::{
+    Effort, GenParams, HarnessLifecycleEvent, HarnessLifecycleReporter, HarnessSpawnAuthority,
+    TaskSpec,
 };
+pub use tool_chat::{
+    AssistantContentPart, AssistantToolTurn, ModelToolCall, ToolCallArguments, ToolChatLimits,
+    ToolChatMessage, ToolChatOutcome, ToolChatRequest, ToolChatValidationError, ToolChoice,
+    ToolDefinition, ToolResultMessage, validate_conversation,
+};
+pub use traits::{
+    AuthorizedToolChatClient, ChatClient, Harness, HarnessExecutionContext, HarnessJob,
+    HarnessOutcome, HarnessStreamEvent, Ledger, SessionExecutionLease, SessionStore,
+};
+pub use workdir::{PinnedWorkdir, WorkdirIdentity};
 
 /// Re-exported so downstream crates use the same cancellation primitive.
 pub use tokio_util::sync::CancellationToken;

@@ -6,7 +6,31 @@ on:
   pull_request:
 
 jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4 (resolved from the official repository).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Test release authorization gate
+        run: bash .github/scripts/test-release-gate.sh
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.85.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv-1.85.0
+
+      - name: Check minimum supported Rust version
+        run: cargo check --workspace --all-targets --locked
+
   test:
+    timeout-minutes: 20
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -27,7 +51,19 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        # macOS exposes its default temporary directory through /var, which is
+        # a symlink to /private/var. Security tests intentionally reject database
+        # paths that traverse symlinks, so use the runner's canonical temp root.
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          # Several CLI fixtures exercise process-global POSIX locking from
+          # independent Tokio runtimes. Keep each fixture's internal
+          # concurrency, but do not overlap separate CLI fixtures. Other
+          # packages retain normal scheduling (including paused-time tests
+          # that rely on Tokio's automatic clock advancement).
+          cargo test --workspace --exclude vyane-cli
+          cargo test -p vyane-cli -- --test-threads=1
 
   coverage:
     runs-on: ubuntu-latest
@@ -47,4 +83,8 @@ jobs:
 
       # Measurement only for now: report the summary, no threshold gate.
       - name: Coverage summary
-        run: cargo llvm-cov --workspace --summary-only
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report --workspace --exclude vyane-cli
+          cargo llvm-cov --no-report -p vyane-cli -- --test-threads=1
+          cargo llvm-cov report --summary-only

@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,11 +14,19 @@ use async_trait::async_trait;
 use futures::future::pending;
 use vyane_core::{
     AdapterTransport, AttemptOutcome, BoundTarget, CancellationToken, ChatClient, ChatMessage,
-    ChatOutcome, ChatRequest, Endpoint, ErrorKind, GenParams, Harness, HarnessJob, HarnessKind,
-    HarnessOutcome, Ledger, ModelId, Protocol, ProviderId, Result, Role, RunQuery, RunRecord,
-    RunStatus, SessionRecord, SessionRef, SessionStore, Target, TaskSpec, Usage, VyaneError,
+    ChatOutcome, ChatRequest, Endpoint, ErrorKind, GenParams, Harness, HarnessExecutionContext,
+    HarnessJob, HarnessKind, HarnessOutcome, HarnessStreamEvent, Ledger, ModelId,
+    NativeSessionBinding, NativeSessionDomain, NativeSessionState, NativeSessionTransition,
+    Protocol, ProviderId, Result, Role, RunQuery, RunRecord, RunStatus, Sandbox,
+    SessionExecutionLease, SessionRecord, SessionRef, SessionSnapshot, SessionStore, SessionUpdate,
+    Target, TaskSpec, Usage, VyaneError, WorkdirIdentity,
 };
-use vyane_kernel::{Dispatcher, Executor, ExecutorFactory};
+use vyane_kernel::{
+    AttemptScope, CapabilityAdmissionDecision, CapabilityAdmissionError,
+    CapabilityAdmissionEvidence, CapabilityManifest, Dispatcher, Executor, ExecutorFactory,
+    FilesystemCapability, IsolationStrength,
+};
+use vyane_ledger::FsSessionStore;
 
 // ---------------------------------------------------------------------------
 // Shared probe: concurrency high-water mark + captured requests/jobs
@@ -100,6 +108,12 @@ enum Behaviour {
         delay: Duration,
         then: Box<Behaviour>,
     },
+    /// Wait at a deterministic barrier until the test releases the attempt.
+    Block {
+        entered: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Notify>,
+        then: Box<Behaviour>,
+    },
 }
 
 impl Behaviour {
@@ -147,11 +161,24 @@ impl Behaviour {
 /// guard across the whole attempt, so the sleep is counted as in-flight.
 async fn settle(behaviour: &Behaviour) -> &Behaviour {
     let mut current = behaviour;
-    while let Behaviour::Delay { delay, then } = current {
-        tokio::time::sleep(*delay).await;
-        current = then;
+    loop {
+        match current {
+            Behaviour::Delay { delay, then } => {
+                tokio::time::sleep(*delay).await;
+                current = then;
+            }
+            Behaviour::Block {
+                entered,
+                release,
+                then,
+            } => {
+                entered.wait().await;
+                release.notified().await;
+                current = then;
+            }
+            _ => return current,
+        }
     }
-    current
 }
 
 struct MockChat {
@@ -180,7 +207,9 @@ impl ChatClient for MockChat {
                 pending::<()>().await;
                 unreachable!("hang behaviour must be cancelled by the kernel")
             }
-            Behaviour::Delay { .. } => unreachable!("settle strips all Delay layers"),
+            Behaviour::Delay { .. } | Behaviour::Block { .. } => {
+                unreachable!("settle strips all waiting layers")
+            }
         }
     }
 }
@@ -218,8 +247,19 @@ impl Harness for MockHarnessImpl {
                 pending::<()>().await;
                 unreachable!("hang behaviour must be cancelled by the kernel")
             }
-            Behaviour::Delay { .. } => unreachable!("settle strips all Delay layers"),
+            Behaviour::Delay { .. } | Behaviour::Block { .. } => {
+                unreachable!("settle strips all waiting layers")
+            }
         }
+    }
+
+    async fn run_scoped(
+        &self,
+        job: HarnessJob,
+        _context: HarnessExecutionContext,
+        cancel: CancellationToken,
+    ) -> Result<HarnessOutcome> {
+        self.run(job, cancel).await
     }
 }
 
@@ -242,6 +282,8 @@ struct MockFactory {
     /// Count of `make` calls, to assert the factory is never touched when a
     /// dispatch is cancelled before any attempt.
     make_calls: Arc<AtomicUsize>,
+    /// Audit scopes observed by `make_scoped`, in construction order.
+    scopes: Arc<Mutex<Vec<AttemptScope>>>,
     /// When `make` is asked to build this model, it cancels the paired token
     /// (synchronously, before returning) and reports a `SpawnFailed` build
     /// error. This lets a test cancel *between* failover attempts with no
@@ -257,6 +299,7 @@ impl MockFactory {
             build_errors: HashMap::new(),
             probe: Probe::new(),
             make_calls: Arc::new(AtomicUsize::new(0)),
+            scopes: Arc::new(Mutex::new(Vec::new())),
             cancel_on: None,
         }
     }
@@ -283,12 +326,25 @@ impl MockFactory {
     fn make_calls(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.make_calls)
     }
+    fn scopes(&self) -> Arc<Mutex<Vec<AttemptScope>>> {
+        Arc::clone(&self.scopes)
+    }
     fn into_arc(self) -> Arc<dyn ExecutorFactory> {
         Arc::new(self)
     }
 }
 
 impl ExecutorFactory for MockFactory {
+    fn capability_manifest(&self, target: &BoundTarget) -> CapabilityManifest {
+        match target.transport {
+            AdapterTransport::CliWrap => {
+                CapabilityManifest::local_workdir_editing(IsolationStrength::AdapterDelegated)
+            }
+            AdapterTransport::DirectHttp => CapabilityManifest::chat_only(),
+            _ => CapabilityManifest::chat_only(),
+        }
+    }
+
     fn make(&self, target: &BoundTarget) -> Result<Executor> {
         self.make_calls.fetch_add(1, Ordering::SeqCst);
         let key = target.target.model.as_str();
@@ -328,11 +384,143 @@ impl ExecutorFactory for MockFactory {
             _ => Ok(Executor::Chat(Arc::new(MockChat { behaviour, probe }))),
         }
     }
+
+    fn make_scoped(&self, target: &BoundTarget, scope: &AttemptScope) -> Result<Executor> {
+        self.scopes.lock().unwrap().push(scope.clone());
+        self.make(target)
+    }
+}
+
+/// A harness that makes cancellation cleanup observable. The dispatcher must
+/// keep polling `run` after signalling cancellation; dropping the future would
+/// leave a real harness's child process group unreaped.
+struct CancellationCleanupHarness {
+    started: Arc<tokio::sync::Barrier>,
+    cleaned: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Harness for CancellationCleanupHarness {
+    fn kind(&self) -> HarnessKind {
+        HarnessKind::ClaudeCode
+    }
+
+    async fn available(&self) -> bool {
+        true
+    }
+
+    async fn run(&self, _job: HarnessJob, cancel: CancellationToken) -> Result<HarnessOutcome> {
+        self.started.wait().await;
+        cancel.cancelled().await;
+        self.cleaned.store(true, Ordering::SeqCst);
+        Err(VyaneError::cancelled())
+    }
+}
+
+struct CancellationCleanupFactory {
+    started: Arc<tokio::sync::Barrier>,
+    cleaned: Arc<AtomicBool>,
+}
+
+impl ExecutorFactory for CancellationCleanupFactory {
+    fn make(&self, _target: &BoundTarget) -> Result<Executor> {
+        Ok(Executor::Agent(Arc::new(CancellationCleanupHarness {
+            started: Arc::clone(&self.started),
+            cleaned: Arc::clone(&self.cleaned),
+        })))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Mock Ledger / SessionStore
 // ---------------------------------------------------------------------------
+
+/// Source-compatible custom stores must opt into the new execution-period
+/// contract. These test stores delegate through a live object so kernel tests
+/// exercise the same read/update API shape without pretending to test the
+/// filesystem lock implementation (covered in `vyane-ledger`).
+struct DelegatingExecutionLease<S> {
+    store: S,
+    owner: String,
+    session_id: String,
+    execution_id: String,
+}
+
+#[async_trait]
+impl<S> SessionExecutionLease for DelegatingExecutionLease<S>
+where
+    S: SessionStore + Clone + Send + Sync + 'static,
+{
+    fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn execution_id(&self) -> &str {
+        &self.execution_id
+    }
+
+    async fn revalidate(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn load_snapshot(&self) -> Result<Option<SessionSnapshot>> {
+        self.store
+            .load_snapshot(&self.owner, &self.session_id)
+            .await
+    }
+
+    async fn apply_update(
+        &self,
+        expected_revision: u64,
+        update: &SessionUpdate,
+    ) -> Result<SessionSnapshot> {
+        if update.owner != self.owner || update.session_id != self.session_id {
+            return Err(VyaneError::config("test lease identity mismatch"));
+        }
+        let record = self.store.apply_update(&self.owner, update).await?;
+        let native_session = record.native_session_id.as_ref().map_or(
+            NativeSessionState::Absent,
+            |native_session_id| NativeSessionState::LegacyUnbound {
+                native_session_id: native_session_id.clone(),
+            },
+        );
+        Ok(SessionSnapshot {
+            record,
+            session_revision: expected_revision.saturating_add(1),
+            native_session,
+        })
+    }
+
+    async fn apply_native_transition(
+        &self,
+        transition: &NativeSessionTransition,
+    ) -> Result<SessionSnapshot> {
+        self.store
+            .apply_native_transition(&self.owner, &self.session_id, transition)
+            .await
+    }
+}
+
+fn delegating_execution_lease<S>(
+    store: S,
+    owner: &str,
+    session_id: &str,
+    execution_id: &str,
+) -> Box<dyn SessionExecutionLease>
+where
+    S: SessionStore + Clone + Send + Sync + 'static,
+{
+    Box::new(DelegatingExecutionLease {
+        store,
+        owner: owner.to_string(),
+        session_id: session_id.to_string(),
+        execution_id: execution_id.to_string(),
+    })
+}
 
 #[derive(Clone, Default)]
 struct MockLedger {
@@ -364,7 +552,8 @@ impl Ledger for MockLedger {
 
 #[derive(Clone, Default)]
 struct MockSessions {
-    store: Arc<Mutex<HashMap<String, SessionRecord>>>,
+    store: Arc<Mutex<HashMap<(String, String), SessionRecord>>>,
+    load_calls: Arc<AtomicUsize>,
 }
 
 impl MockSessions {
@@ -372,7 +561,17 @@ impl MockSessions {
         Self::default()
     }
     fn get(&self, id: &str) -> Option<SessionRecord> {
-        self.store.lock().unwrap().get(id).cloned()
+        self.get_for("local", id)
+    }
+    fn get_for(&self, owner: &str, id: &str) -> Option<SessionRecord> {
+        self.store
+            .lock()
+            .unwrap()
+            .get(&(owner.to_string(), id.to_string()))
+            .cloned()
+    }
+    fn load_calls(&self) -> usize {
+        self.load_calls.load(Ordering::SeqCst)
     }
     /// Pre-populate a session record (e.g. an existing transcript or native id
     /// to resume) so the dispatcher loads it as continuity context.
@@ -380,24 +579,159 @@ impl MockSessions {
         self.store
             .lock()
             .unwrap()
-            .insert(record.session_id.clone(), record);
+            .insert((record.owner.clone(), record.session_id.clone()), record);
     }
 }
 
 #[async_trait]
 impl SessionStore for MockSessions {
-    async fn load(&self, session_id: &str) -> Result<Option<SessionRecord>> {
-        Ok(self.store.lock().unwrap().get(session_id).cloned())
+    async fn acquire_execution_lease(
+        &self,
+        owner: &str,
+        session_id: &str,
+        execution_id: &str,
+    ) -> Result<Box<dyn SessionExecutionLease>> {
+        Ok(delegating_execution_lease(
+            self.clone(),
+            owner,
+            session_id,
+            execution_id,
+        ))
     }
-    async fn save(&self, record: &SessionRecord) -> Result<()> {
-        self.store
+
+    async fn load(&self, owner: &str, session_id: &str) -> Result<Option<SessionRecord>> {
+        self.load_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .store
             .lock()
             .unwrap()
-            .insert(record.session_id.clone(), record.clone());
+            .get(&(owner.to_string(), session_id.to_string()))
+            .cloned())
+    }
+    async fn save(&self, owner: &str, record: &SessionRecord) -> Result<()> {
+        assert_eq!(owner, record.owner);
+        self.store.lock().unwrap().insert(
+            (record.owner.clone(), record.session_id.clone()),
+            record.clone(),
+        );
         Ok(())
     }
-    async fn list(&self, _owner: Option<&str>) -> Result<Vec<SessionRecord>> {
-        Ok(self.store.lock().unwrap().values().cloned().collect())
+    async fn apply_update(&self, owner: &str, update: &SessionUpdate) -> Result<SessionRecord> {
+        assert_eq!(owner, update.owner);
+        let key = (owner.to_string(), update.session_id.clone());
+        let mut store = self.store.lock().unwrap();
+        let record = update.apply_to(store.remove(&key));
+        store.insert(key, record.clone());
+        Ok(record)
+    }
+    async fn list(&self, owner: &str) -> Result<Vec<SessionRecord>> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|record| record.owner == owner)
+            .cloned()
+            .collect())
+    }
+}
+
+#[derive(Clone)]
+struct BoundSnapshotSessions {
+    snapshot: SessionSnapshot,
+    legacy_load_calls: Arc<AtomicUsize>,
+    snapshot_load_calls: Arc<AtomicUsize>,
+}
+
+impl BoundSnapshotSessions {
+    fn new(session_id: &str) -> Self {
+        let mut record = seed_record(session_id, None, Vec::new());
+        record.target = Target {
+            provider: ProviderId::new("anthropic"),
+            protocol: Protocol::AnthropicMessages,
+            harness: Some(HarnessKind::ClaudeCode),
+            model: ModelId::new("agent-model"),
+        };
+        let domain = NativeSessionDomain {
+            runtime: "claude-code-v1".into(),
+            harness: HarnessKind::ClaudeCode,
+            provider: record.target.provider.clone(),
+            protocol: record.target.protocol,
+            model: record.target.model.clone(),
+            endpoint_routing_digest: "1".repeat(64),
+            canonical_workdir: "/workspace".into(),
+            workdir_identity: WorkdirIdentity {
+                device: 1,
+                inode: 2,
+            },
+            checkpoint_namespace: "claude-code-v1".into(),
+            checkpoint_schema: 1,
+            account_scope_digest: "2".repeat(64),
+            runtime_scope_digest: "3".repeat(64),
+        };
+        Self {
+            snapshot: SessionSnapshot {
+                record,
+                session_revision: 7,
+                native_session: NativeSessionState::Bound {
+                    binding: Box::new(NativeSessionBinding {
+                        native_session_id: "native-bound".into(),
+                        domain,
+                    }),
+                },
+            },
+            legacy_load_calls: Arc::new(AtomicUsize::new(0)),
+            snapshot_load_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[async_trait]
+impl SessionStore for BoundSnapshotSessions {
+    async fn acquire_execution_lease(
+        &self,
+        owner: &str,
+        session_id: &str,
+        execution_id: &str,
+    ) -> Result<Box<dyn SessionExecutionLease>> {
+        Ok(delegating_execution_lease(
+            self.clone(),
+            owner,
+            session_id,
+            execution_id,
+        ))
+    }
+
+    async fn load(&self, _owner: &str, _session_id: &str) -> Result<Option<SessionRecord>> {
+        self.legacy_load_calls.fetch_add(1, Ordering::SeqCst);
+        Err(VyaneError::unsupported(
+            "legacy load must not be used for a bound snapshot",
+        ))
+    }
+
+    async fn load_snapshot(
+        &self,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<Option<SessionSnapshot>> {
+        self.snapshot_load_calls.fetch_add(1, Ordering::SeqCst);
+        if owner == self.snapshot.record.owner && session_id == self.snapshot.record.session_id {
+            Ok(Some(self.snapshot.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn save(&self, _owner: &str, _record: &SessionRecord) -> Result<()> {
+        Err(VyaneError::unsupported("test store is read-only"))
+    }
+
+    async fn apply_update(&self, _owner: &str, update: &SessionUpdate) -> Result<SessionRecord> {
+        Ok(update.apply_to(Some(self.snapshot.record.clone())))
+    }
+
+    async fn list(&self, _owner: &str) -> Result<Vec<SessionRecord>> {
+        Ok(vec![self.snapshot.record.clone()])
     }
 }
 
@@ -446,14 +780,174 @@ impl ErroringSessions {
 
 #[async_trait]
 impl SessionStore for ErroringSessions {
-    async fn load(&self, _session_id: &str) -> Result<Option<SessionRecord>> {
+    async fn acquire_execution_lease(
+        &self,
+        owner: &str,
+        session_id: &str,
+        execution_id: &str,
+    ) -> Result<Box<dyn SessionExecutionLease>> {
+        Ok(delegating_execution_lease(
+            self.clone(),
+            owner,
+            session_id,
+            execution_id,
+        ))
+    }
+
+    async fn load(&self, _owner: &str, _session_id: &str) -> Result<Option<SessionRecord>> {
         Ok(None)
     }
-    async fn save(&self, _record: &SessionRecord) -> Result<()> {
+    async fn save(&self, _owner: &str, _record: &SessionRecord) -> Result<()> {
         self.save_calls.fetch_add(1, Ordering::SeqCst);
         Err(VyaneError::new(ErrorKind::Io, "mock session save failure"))
     }
-    async fn list(&self, _owner: Option<&str>) -> Result<Vec<SessionRecord>> {
+    async fn apply_update(&self, _owner: &str, _update: &SessionUpdate) -> Result<SessionRecord> {
+        self.save_calls.fetch_add(1, Ordering::SeqCst);
+        Err(VyaneError::new(ErrorKind::Io, "mock session save failure"))
+    }
+    async fn list(&self, _owner: &str) -> Result<Vec<SessionRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Clone, Default)]
+struct LoadErrorSessions;
+
+#[async_trait]
+impl SessionStore for LoadErrorSessions {
+    async fn acquire_execution_lease(
+        &self,
+        owner: &str,
+        session_id: &str,
+        execution_id: &str,
+    ) -> Result<Box<dyn SessionExecutionLease>> {
+        Ok(delegating_execution_lease(
+            self.clone(),
+            owner,
+            session_id,
+            execution_id,
+        ))
+    }
+
+    async fn load(&self, _owner: &str, _session_id: &str) -> Result<Option<SessionRecord>> {
+        Err(VyaneError::new(
+            ErrorKind::Config,
+            "session requires migration",
+        ))
+    }
+
+    async fn save(&self, _owner: &str, _record: &SessionRecord) -> Result<()> {
+        Ok(())
+    }
+
+    async fn apply_update(&self, _owner: &str, update: &SessionUpdate) -> Result<SessionRecord> {
+        Ok(update.apply_to(None))
+    }
+
+    async fn list(&self, _owner: &str) -> Result<Vec<SessionRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Clone)]
+struct ForgedAuthoritySessions {
+    forge_lease_identity: bool,
+    snapshot: SessionSnapshot,
+    lease_load_calls: Arc<AtomicUsize>,
+}
+
+struct ForgedAuthorityLease {
+    owner: String,
+    session_id: String,
+    execution_id: String,
+    snapshot: SessionSnapshot,
+    load_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl SessionExecutionLease for ForgedAuthorityLease {
+    fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn execution_id(&self) -> &str {
+        &self.execution_id
+    }
+
+    async fn revalidate(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn load_snapshot(&self) -> Result<Option<SessionSnapshot>> {
+        self.load_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(self.snapshot.clone()))
+    }
+
+    async fn apply_update(
+        &self,
+        _expected_revision: u64,
+        _update: &SessionUpdate,
+    ) -> Result<SessionSnapshot> {
+        Err(VyaneError::unsupported(
+            "forged authority fixture is read-only",
+        ))
+    }
+
+    async fn apply_native_transition(
+        &self,
+        _transition: &NativeSessionTransition,
+    ) -> Result<SessionSnapshot> {
+        Err(VyaneError::unsupported(
+            "forged authority fixture is read-only",
+        ))
+    }
+}
+
+#[async_trait]
+impl SessionStore for ForgedAuthoritySessions {
+    async fn acquire_execution_lease(
+        &self,
+        owner: &str,
+        session_id: &str,
+        execution_id: &str,
+    ) -> Result<Box<dyn SessionExecutionLease>> {
+        let (owner, session_id, execution_id) = if self.forge_lease_identity {
+            ("foreign-owner", "foreign-session", "foreign-execution")
+        } else {
+            (owner, session_id, execution_id)
+        };
+        Ok(Box::new(ForgedAuthorityLease {
+            owner: owner.to_string(),
+            session_id: session_id.to_string(),
+            execution_id: execution_id.to_string(),
+            snapshot: self.snapshot.clone(),
+            load_calls: Arc::clone(&self.lease_load_calls),
+        }))
+    }
+
+    async fn load(&self, _owner: &str, _session_id: &str) -> Result<Option<SessionRecord>> {
+        Err(VyaneError::unsupported(
+            "forged authority fixture has no direct reads",
+        ))
+    }
+
+    async fn save(&self, _owner: &str, _record: &SessionRecord) -> Result<()> {
+        Err(VyaneError::unsupported(
+            "forged authority fixture is read-only",
+        ))
+    }
+
+    async fn apply_update(&self, _owner: &str, _update: &SessionUpdate) -> Result<SessionRecord> {
+        Err(VyaneError::unsupported(
+            "forged authority fixture is read-only",
+        ))
+    }
+
+    async fn list(&self, _owner: &str) -> Result<Vec<SessionRecord>> {
         Ok(Vec::new())
     }
 }
@@ -526,6 +1020,714 @@ fn seed_record(
         updated_at: now,
         run_count: 3,
     }
+}
+
+// ===========================================================================
+// Acceptance: early execution identity + whole-chain capability admission
+// ===========================================================================
+
+#[tokio::test]
+async fn direct_http_mutating_sandboxes_are_rejected_before_make() {
+    for sandbox in [Sandbox::Write, Sandbox::Full] {
+        let workdir = tempfile::tempdir().unwrap();
+        let factory = MockFactory::new();
+        let make_calls = factory.make_calls();
+        let d = dispatcher(factory.into_arc(), MockLedger::new(), MockSessions::new());
+        let task = TaskSpec::new("edit")
+            .with_sandbox(sandbox)
+            .with_workdir(workdir.path());
+
+        let error = d
+            .dispatch(
+                &task,
+                vec![http_target("remote", "chat-only")],
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("direct HTTP must not be admitted for filesystem editing");
+
+        assert_eq!(error.kind, ErrorKind::Unsupported);
+        assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+        let typed = error
+            .source
+            .as_deref()
+            .and_then(|source| source.downcast_ref::<CapabilityAdmissionError>())
+            .expect("pre-execution rejection keeps its typed source");
+        #[cfg(target_os = "linux")]
+        let expected_reason = vyane_kernel::CapabilityRejectionReason::LocalEditingUnavailable;
+        #[cfg(not(target_os = "linux"))]
+        let expected_reason = vyane_kernel::CapabilityRejectionReason::WorkdirPinningUnavailable;
+        assert_eq!(
+            typed.evidence.decision,
+            CapabilityAdmissionDecision::Rejected(expected_reason)
+        );
+    }
+}
+
+#[tokio::test]
+async fn prepared_dispatch_rejects_another_factory_before_any_side_effect() {
+    let admitting_factory = MockFactory::new().on("bound", Behaviour::succeed("admitted"));
+    let admitting = dispatcher(
+        admitting_factory.into_arc(),
+        MockLedger::new(),
+        MockSessions::new(),
+    );
+    let executing_factory = MockFactory::new().on("bound", Behaviour::succeed("wrong"));
+    let make_calls = executing_factory.make_calls();
+    let probe = executing_factory.probe();
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    let executing = dispatcher(
+        executing_factory.into_arc(),
+        ledger.clone(),
+        sessions.clone(),
+    );
+    let mut task = TaskSpec::new("provenance");
+    task.session = Some(SessionRef::new("session-a"));
+    let prepared = admitting
+        .prepare(&task, vec![http_target("remote", "bound")])
+        .unwrap();
+
+    let error = executing
+        .dispatch_prepared(&task, prepared, CancellationToken::new())
+        .await
+        .expect_err("another dispatcher must not consume the prepared plan");
+
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(sessions.load_calls(), 0);
+    assert_eq!(ledger.append_count(), 0);
+    assert!(probe.chat_requests.lock().unwrap().is_empty());
+    assert!(probe.harness_jobs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn prepared_stream_rejects_owner_swap_before_any_side_effect() {
+    let factory = MockFactory::new().on("bound", Behaviour::succeed("wrong"));
+    let make_calls = factory.make_calls();
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    let admitting = dispatcher(factory.into_arc(), ledger.clone(), sessions.clone());
+    let executing = admitting.clone().with_owner("other-owner");
+    let task = TaskSpec::new("provenance");
+    let prepared = admitting
+        .prepare(&task, vec![http_target("remote", "bound")])
+        .unwrap();
+    let event_calls = Arc::new(AtomicUsize::new(0));
+    let event_calls_for_callback = Arc::clone(&event_calls);
+
+    let error = executing
+        .dispatch_stream_prepared(&task, &prepared, CancellationToken::new(), move |_| {
+            event_calls_for_callback.fetch_add(1, Ordering::SeqCst);
+        })
+        .await
+        .expect_err("an owner-swapped clone must not consume the prepared plan");
+
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(sessions.load_calls(), 0);
+    assert_eq!(ledger.append_count(), 0);
+    assert_eq!(event_calls.load(Ordering::SeqCst), 0);
+    assert!(probe.chat_requests.lock().unwrap().is_empty());
+    assert!(probe.harness_jobs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn prepared_session_validation_rejects_factory_and_owner_swap_before_load() {
+    let admitting = dispatcher(
+        MockFactory::new().into_arc(),
+        MockLedger::new(),
+        MockSessions::new(),
+    );
+    let executing_factory = MockFactory::new();
+    let make_calls = executing_factory.make_calls();
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    let executing = dispatcher(
+        executing_factory.into_arc(),
+        ledger.clone(),
+        sessions.clone(),
+    )
+    .with_owner("other-owner");
+    let mut task = TaskSpec::new("provenance");
+    task.session = Some(SessionRef::new("session-a"));
+    let prepared = admitting
+        .prepare(&task, vec![http_target("remote", "bound")])
+        .unwrap();
+
+    let error = executing
+        .validate_session_admission(&task, &prepared)
+        .await
+        .expect_err("foreign provenance must fail before session lookup");
+
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(sessions.load_calls(), 0);
+    assert_eq!(ledger.append_count(), 0);
+}
+
+#[tokio::test]
+async fn same_owner_dispatcher_clone_can_consume_prepared_plan() {
+    let factory = MockFactory::new().on("bound", Behaviour::succeed("ok"));
+    let make_calls = factory.make_calls();
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    let admitting = dispatcher(factory.into_arc(), ledger.clone(), sessions);
+    let executing = admitting.clone();
+    let task = TaskSpec::new("provenance");
+    let prepared = admitting
+        .prepare(&task, vec![http_target("remote", "bound")])
+        .unwrap();
+
+    let outcome = executing
+        .dispatch_prepared(&task, prepared, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.output.as_deref(), Some("ok"));
+    assert_eq!(make_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ledger.append_count(), 1);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn legacy_harness_default_fails_closed_when_given_a_pinned_context() {
+    struct LegacyHarness {
+        runs: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl Harness for LegacyHarness {
+        fn kind(&self) -> HarnessKind {
+            HarnessKind::Other("legacy-test".into())
+        }
+        async fn available(&self) -> bool {
+            true
+        }
+        async fn run(
+            &self,
+            _job: HarnessJob,
+            _cancel: CancellationToken,
+        ) -> Result<HarnessOutcome> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            unreachable!("default run_scoped must reject before legacy run")
+        }
+    }
+    struct LegacyFactory {
+        runs: Arc<AtomicUsize>,
+    }
+    impl ExecutorFactory for LegacyFactory {
+        fn capability_manifest(&self, _target: &BoundTarget) -> CapabilityManifest {
+            CapabilityManifest::local_workdir_editing(IsolationStrength::AdapterDelegated)
+        }
+        fn make(&self, _target: &BoundTarget) -> Result<Executor> {
+            Ok(Executor::Agent(Arc::new(LegacyHarness {
+                runs: Arc::clone(&self.runs),
+            })))
+        }
+    }
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let d = dispatcher(
+        Arc::new(LegacyFactory {
+            runs: Arc::clone(&runs),
+        }),
+        MockLedger::new(),
+        MockSessions::new(),
+    );
+    let workdir = tempfile::tempdir().unwrap();
+    let outcome = d
+        .dispatch(
+            &TaskSpec::new("edit")
+                .with_sandbox(Sandbox::Write)
+                .with_workdir(workdir.path()),
+            vec![cli_target("legacy", "model")],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.record.status, RunStatus::Error);
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    assert!(
+        outcome
+            .record
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("does not implement pinned scoped execution")
+    );
+}
+
+#[tokio::test]
+async fn read_only_direct_http_remains_compatible() {
+    let factory = MockFactory::new()
+        .on("chat", Behaviour::succeed("read-only answer"))
+        .into_arc();
+    let d = dispatcher(factory, MockLedger::new(), MockSessions::new());
+
+    let outcome = d
+        .dispatch(
+            &TaskSpec::new("inspect"),
+            vec![http_target("remote", "chat")],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.record.status, RunStatus::Success);
+    assert_eq!(outcome.output.as_deref(), Some("read-only answer"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn trusted_local_cli_write_uses_the_canonical_workdir() {
+    let workdir = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(workdir.path()).unwrap();
+    let factory = MockFactory::new().on(
+        "local-editor",
+        Behaviour::succeed_harness("edited", "native-1"),
+    );
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory.into_arc(), ledger, MockSessions::new());
+    let task = TaskSpec::new("edit")
+        .with_sandbox(Sandbox::Write)
+        .with_workdir(workdir.path());
+
+    let outcome = d
+        .dispatch(
+            &task,
+            vec![cli_target("local", "local-editor")],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.record.status, RunStatus::Success);
+    assert_eq!(outcome.record.workdir.as_deref(), canonical.to_str());
+    assert_eq!(
+        probe.harness_jobs()[0].workdir.as_deref(),
+        Some(canonical.as_path())
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn filtered_chat_only_fallback_preserves_primary_error_semantics() {
+    let workdir = tempfile::tempdir().unwrap();
+    let factory = MockFactory::new().on("local-primary", Behaviour::fail(ErrorKind::RateLimited));
+    let make_calls = factory.make_calls();
+    let scopes = factory.scopes();
+    let d = dispatcher(factory.into_arc(), MockLedger::new(), MockSessions::new());
+    let task = TaskSpec::new("edit")
+        .with_sandbox(Sandbox::Write)
+        .with_workdir(workdir.path());
+
+    let outcome = d
+        .dispatch(
+            &task,
+            vec![
+                cli_target("local", "local-primary"),
+                http_target("remote", "filtered-fallback"),
+            ],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(make_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(scopes.lock().unwrap().len(), 1);
+    assert_eq!(outcome.record.status, RunStatus::Error);
+    assert_eq!(outcome.record.attempts.len(), 1);
+    match &outcome.record.attempts[0].outcome {
+        AttemptOutcome::Err {
+            kind,
+            message,
+            failed_over,
+        } => {
+            assert_eq!(*kind, ErrorKind::RateLimited);
+            assert!(message.contains("RateLimited"));
+            assert!(
+                !failed_over,
+                "filtered fallback is not an attempted failover"
+            );
+        }
+        AttemptOutcome::Ok => panic!("primary should fail"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scoped_make_sees_final_execution_id_and_original_chain_ordinals() {
+    let workdir = tempfile::tempdir().unwrap();
+    let factory = MockFactory::new()
+        .on("first", Behaviour::fail(ErrorKind::RateLimited))
+        .on("third", Behaviour::succeed_harness("winner", "native-3"));
+    let scopes = factory.scopes();
+    let make_calls = factory.make_calls();
+    let d = dispatcher(factory.into_arc(), MockLedger::new(), MockSessions::new());
+    let task = TaskSpec::new("edit")
+        .with_sandbox(Sandbox::Write)
+        .with_workdir(workdir.path());
+
+    let outcome = d
+        .dispatch(
+            &task,
+            vec![
+                cli_target("local", "first"),
+                http_target("remote", "filtered"),
+                cli_target("local", "third"),
+            ],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(make_calls.load(Ordering::SeqCst), 2);
+    let scopes = scopes.lock().unwrap();
+    assert_eq!(
+        scopes
+            .iter()
+            .map(AttemptScope::original_chain_ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 2]
+    );
+    assert!(
+        scopes
+            .iter()
+            .all(|scope| scope.execution.execution_id == outcome.record.run_id)
+    );
+    assert_eq!(outcome.record.status, RunStatus::Success);
+    match &outcome.record.attempts[0].outcome {
+        AttemptOutcome::Err { failed_over, .. } => assert!(*failed_over),
+        AttemptOutcome::Ok => panic!("first target should fail over"),
+    }
+}
+
+#[test]
+fn capability_evidence_is_serializable_audit_data_without_authority_fields() {
+    let manifest = CapabilityManifest::local_workdir_editing(IsolationStrength::AdapterDelegated);
+    let evidence = CapabilityAdmissionEvidence {
+        execution_id: "01900000-0000-7000-8000-000000000000".to_string(),
+        original_chain_ordinal: 7,
+        target: cli_target("local", "editor").target,
+        requested_sandbox: Sandbox::Write,
+        canonical_workdir: Some(std::path::PathBuf::from("/workspace")),
+        workdir_identity: None,
+        manifest: manifest.clone(),
+        decision: CapabilityAdmissionDecision::Admitted,
+    };
+
+    let manifest_json = serde_json::to_string(&manifest).unwrap();
+    let evidence_json = serde_json::to_string(&evidence).unwrap();
+    assert_eq!(
+        manifest.filesystem,
+        FilesystemCapability::CallerWorkdirEditing
+    );
+    for json in [manifest_json, evidence_json] {
+        assert!(!json.contains("token"));
+        assert!(!json.contains("authority"));
+        assert!(!json.contains("credential"));
+    }
+}
+
+#[tokio::test]
+async fn streaming_mutating_direct_target_is_gated_before_make() {
+    let workdir = tempfile::tempdir().unwrap();
+    let factory = MockFactory::new();
+    let make_calls = factory.make_calls();
+    let d = dispatcher(factory.into_arc(), MockLedger::new(), MockSessions::new());
+    let task = TaskSpec::new("edit")
+        .with_sandbox(Sandbox::Write)
+        .with_workdir(workdir.path());
+
+    let error = d
+        .dispatch_stream(
+            &task,
+            &http_target("remote", "chat-only"),
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect_err("stream dispatch must capability-gate before make");
+
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn prepared_stream_fallback_reuses_one_factory_observed_execution_id() {
+    let factory = MockFactory::new().on("chat", Behaviour::succeed("fallback answer"));
+    let scopes = factory.scopes();
+    let d = dispatcher(factory.into_arc(), MockLedger::new(), MockSessions::new());
+    let task = TaskSpec::new("inspect");
+    let prepared = d
+        .prepare(&task, vec![http_target("remote", "chat")])
+        .unwrap();
+    let execution_id = prepared.execution_id().to_string();
+
+    let streamed = d
+        .dispatch_stream_prepared(&task, &prepared, CancellationToken::new(), |_| {})
+        .await
+        .unwrap();
+    assert!(streamed.is_none(), "mock client declines streaming");
+
+    let outcome = d
+        .dispatch_prepared(&task, prepared, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(outcome.record.run_id, execution_id);
+    assert_eq!(outcome.output.as_deref(), Some("fallback answer"));
+    let scopes = scopes.lock().unwrap();
+    assert_eq!(scopes.len(), 2, "stream probe and fallback each build once");
+    assert!(
+        scopes
+            .iter()
+            .all(|scope| scope.execution.execution_id == execution_id)
+    );
+}
+
+#[tokio::test]
+async fn compatibility_stream_api_returns_none_without_exposing_scope() {
+    let factory = MockFactory::new().on("chat", Behaviour::succeed("compat fallback"));
+    let scopes = factory.scopes();
+    let make_calls = factory.make_calls();
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory.into_arc(), ledger.clone(), MockSessions::new());
+    let task = TaskSpec::new("inspect");
+
+    let outcome = d
+        .dispatch_stream(
+            &task,
+            &http_target("remote", "chat"),
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+    assert!(outcome.is_none());
+    let scopes = scopes.lock().unwrap();
+    assert!(scopes.is_empty(), "legacy probe must not expose its scope");
+    assert_eq!(make_calls.load(Ordering::SeqCst), 1);
+    assert!(ledger.records().is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn mutating_legacy_native_resume_is_rejected_before_make() {
+    let sessions = MockSessions::new();
+    sessions.seed(seed_record("legacy-native", Some("native-old"), Vec::new()));
+    let factory = MockFactory::new().on(
+        "agent-model",
+        Behaviour::succeed_harness("must not run", "native-new"),
+    );
+    let make_calls = factory.make_calls();
+    let d = Dispatcher::new(
+        factory.into_arc(),
+        Arc::new(MockLedger::new()),
+        Arc::new(sessions),
+    );
+
+    for (workdir, target) in [
+        (
+            tempfile::tempdir().unwrap(),
+            cli_target("anthropic", "agent-model"),
+        ),
+        (
+            tempfile::tempdir().unwrap(),
+            cli_target("another-provider", "another-model"),
+        ),
+    ] {
+        let mut task = TaskSpec::new("edit")
+            .with_sandbox(Sandbox::Write)
+            .with_workdir(workdir.path());
+        task.session = Some(SessionRef::new("legacy-native"));
+        let error = d
+            .dispatch(&task, vec![target], CancellationToken::new())
+            .await
+            .expect_err("legacy native resume must fail closed for every workdir");
+        assert_eq!(error.kind, ErrorKind::Unsupported);
+        assert!(error.message.contains("NativeSessionDomain"));
+    }
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn domain_bound_native_resume_stays_disabled_before_make() {
+    let sessions = BoundSnapshotSessions::new("bound-native");
+    let legacy_load_calls = Arc::clone(&sessions.legacy_load_calls);
+    let snapshot_load_calls = Arc::clone(&sessions.snapshot_load_calls);
+    let factory = MockFactory::new().on(
+        "agent-model",
+        Behaviour::succeed_harness("must not run", "native-new"),
+    );
+    let make_calls = factory.make_calls();
+    let d = Dispatcher::new(
+        factory.into_arc(),
+        Arc::new(MockLedger::new()),
+        Arc::new(sessions),
+    );
+    let mut task = TaskSpec::new("continue safely");
+    task.session = Some(SessionRef::new("bound-native"));
+
+    let error = d
+        .dispatch(
+            &task,
+            vec![cli_target("anthropic", "agent-model")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("binding alone must not enable native resume");
+
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert!(error.message.contains("active execution permit"));
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(legacy_load_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshot_load_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn legacy_session_store_defaults_are_source_compatible_and_fail_closed() {
+    let sessions = MockSessions::new();
+    sessions.seed(seed_record(
+        "legacy-default",
+        Some("native-old"),
+        Vec::new(),
+    ));
+    let snapshot = sessions
+        .load_snapshot("local", "legacy-default")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.session_revision, 0);
+    assert!(matches!(
+        snapshot.native_session,
+        NativeSessionState::LegacyUnbound { native_session_id }
+            if native_session_id == "native-old"
+    ));
+    let listed = sessions.list_snapshots("local").await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].session_revision, 0);
+    assert!(matches!(
+        &listed[0].native_session,
+        NativeSessionState::LegacyUnbound { native_session_id }
+            if native_session_id == "native-old"
+    ));
+    let error = sessions
+        .apply_native_transition(
+            "local",
+            "legacy-default",
+            &vyane_core::NativeSessionTransition::Reset {
+                expected_revision: 0,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+
+    #[derive(Clone)]
+    struct LegacyOnlyStore(MockSessions);
+
+    #[async_trait]
+    impl SessionStore for LegacyOnlyStore {
+        async fn load(&self, owner: &str, session_id: &str) -> Result<Option<SessionRecord>> {
+            self.0.load(owner, session_id).await
+        }
+
+        async fn save(&self, owner: &str, record: &SessionRecord) -> Result<()> {
+            self.0.save(owner, record).await
+        }
+
+        async fn apply_update(&self, owner: &str, update: &SessionUpdate) -> Result<SessionRecord> {
+            self.0.apply_update(owner, update).await
+        }
+
+        async fn list(&self, owner: &str) -> Result<Vec<SessionRecord>> {
+            self.0.list(owner).await
+        }
+    }
+
+    let legacy = LegacyOnlyStore(sessions);
+    let lease_error = legacy
+        .acquire_execution_lease("local", "legacy-default", "execution")
+        .await
+        .err()
+        .expect("legacy store must not fabricate execution authority");
+    assert_eq!(lease_error.kind, ErrorKind::Unsupported);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn frozen_capability_snapshot_detects_replaced_workdir_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let requested = root.path().join("work");
+    let admitted = root.path().join("admitted-work");
+    std::fs::create_dir(&requested).unwrap();
+    let factory = MockFactory::new();
+    let make_calls = factory.make_calls();
+    let d = dispatcher(factory.into_arc(), MockLedger::new(), MockSessions::new());
+    let task = TaskSpec::new("edit")
+        .with_sandbox(Sandbox::Write)
+        .with_workdir(&requested);
+
+    let parent = d
+        .prepare(&task, vec![cli_target("local", "editor")])
+        .unwrap();
+    let frozen = parent.capability_snapshot().clone();
+    std::fs::rename(&requested, &admitted).unwrap();
+    std::fs::create_dir(&requested).unwrap();
+
+    let worker = d
+        .prepare(&task, vec![cli_target("local", "editor")])
+        .unwrap();
+    assert_ne!(
+        frozen.workdir_identity,
+        worker.capability_snapshot().workdir_identity
+    );
+    let error = worker
+        .verify_capability_snapshot(&frozen)
+        .expect_err("replacement directory must invalidate the frozen plan");
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn inherited_pin_revalidates_frozen_plan_without_reopening_replaced_path() {
+    let root = tempfile::tempdir().unwrap();
+    let requested = root.path().join("work");
+    let moved = root.path().join("moved-work");
+    std::fs::create_dir(&requested).unwrap();
+    let factory = MockFactory::new();
+    let make_calls = factory.make_calls();
+    let d = dispatcher(factory.into_arc(), MockLedger::new(), MockSessions::new());
+    let task = TaskSpec::new("edit")
+        .with_sandbox(Sandbox::Write)
+        .with_workdir(&requested);
+    let parent = d
+        .prepare(&task, vec![cli_target("local", "editor")])
+        .unwrap();
+    let frozen = parent.capability_snapshot().clone();
+    let parent_pin = parent.pinned_workdir().unwrap();
+    let inherited = vyane_core::PinnedWorkdir::from_open_file(
+        parent_pin.canonical_path().to_path_buf(),
+        parent_pin.handle().try_clone().unwrap(),
+        parent_pin.identity(),
+    )
+    .unwrap();
+
+    std::fs::rename(&requested, &moved).unwrap();
+    std::fs::create_dir(&requested).unwrap();
+    let worker = d
+        .prepare_with_pinned_workdir(&task, vec![cli_target("local", "editor")], inherited)
+        .unwrap();
+    worker.verify_capability_snapshot(&frozen).unwrap();
+    assert_eq!(
+        worker.capability_snapshot().workdir_identity,
+        frozen.workdir_identity
+    );
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
 }
 
 // ===========================================================================
@@ -656,7 +1858,9 @@ async fn failover_table_is_mirrored_for_every_error_kind() {
         ErrorKind::Cancelled,
         ErrorKind::Unsupported,
         ErrorKind::NotFound,
+        ErrorKind::Conflict,
         ErrorKind::Io,
+        ErrorKind::Indeterminate,
         ErrorKind::Other,
     ];
 
@@ -945,6 +2149,41 @@ async fn cancelling_mid_attempt_yields_cancelled_and_still_appends() {
 }
 
 #[tokio::test]
+async fn harness_cancellation_waits_for_process_owner_cleanup() {
+    let started = Arc::new(tokio::sync::Barrier::new(2));
+    let cleaned = Arc::new(AtomicBool::new(false));
+    let factory: Arc<dyn ExecutorFactory> = Arc::new(CancellationCleanupFactory {
+        started: Arc::clone(&started),
+        cleaned: Arc::clone(&cleaned),
+    });
+    let ledger = MockLedger::new();
+    let d = dispatcher(factory, ledger.clone(), MockSessions::new());
+    let cancel = CancellationToken::new();
+    let child_cancel = cancel.clone();
+
+    let handle = tokio::spawn(async move {
+        d.dispatch(
+            &TaskSpec::new("cancel harness"),
+            vec![cli_target("anthropic", "cleanup-aware")],
+            child_cancel,
+        )
+        .await
+    });
+
+    // Do not cancel until Harness::run owns the synthetic process lifecycle.
+    started.wait().await;
+    cancel.cancel();
+
+    let outcome = handle.await.unwrap().unwrap();
+    assert_eq!(outcome.record.status, RunStatus::Cancelled);
+    assert!(
+        cleaned.load(Ordering::SeqCst),
+        "dispatcher returned before the harness completed cancellation cleanup"
+    );
+    assert_eq!(ledger.append_count(), 1);
+}
+
+#[tokio::test]
 async fn already_cancelled_token_produces_cancelled_run() {
     // Pre-cancelled token: the attempt must not even reach a would-succeed
     // executor; the run is Cancelled and recorded.
@@ -1154,7 +2393,7 @@ async fn harness_run_updates_session_native_id_and_run_count() {
 #[tokio::test]
 async fn session_run_count_increments_across_runs() {
     let factory = MockFactory::new()
-        .on("agent-model", Behaviour::succeed_harness("a", "native-1"))
+        .on("chat-model", Behaviour::succeed("a"))
         .into_arc();
     let ledger = MockLedger::new();
     let sessions = MockSessions::new();
@@ -1162,7 +2401,7 @@ async fn session_run_count_increments_across_runs() {
 
     let mut task = TaskSpec::new("work");
     task.session = Some(vyane_core::SessionRef::new("sess-run"));
-    let chain = || vec![cli_target("anthropic", "agent-model")];
+    let chain = || vec![http_target("openai", "chat-model")];
 
     d.dispatch(&task, chain(), CancellationToken::new())
         .await
@@ -1173,6 +2412,70 @@ async fn session_run_count_increments_across_runs() {
 
     let saved = sessions.get("sess-run").unwrap();
     assert_eq!(saved.run_count, 2, "run_count bumps each run");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn filesystem_session_lease_spans_model_execution_and_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let sessions = Arc::new(FsSessionStore::new(directory.path().join("sessions")));
+    let entered = Arc::new(tokio::sync::Barrier::new(2));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let factory = MockFactory::new().on(
+        "slow-model",
+        Behaviour::Block {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            then: Box::new(Behaviour::succeed("serialized answer")),
+        },
+    );
+    let make_calls = factory.make_calls();
+    let dispatcher = Dispatcher::new(
+        factory.into_arc(),
+        Arc::new(MockLedger::new()),
+        sessions.clone(),
+    );
+    let mut task = TaskSpec::new("continue once");
+    task.session = Some(SessionRef::new("serialized"));
+
+    let first_dispatcher = dispatcher.clone();
+    let first_task = task.clone();
+    let first = tokio::spawn(async move {
+        first_dispatcher
+            .dispatch(
+                &first_task,
+                vec![http_target("provider", "slow-model")],
+                CancellationToken::new(),
+            )
+            .await
+    });
+    entered.wait().await;
+
+    let conflict = dispatcher
+        .dispatch(
+            &task,
+            vec![http_target("provider", "slow-model")],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.kind, ErrorKind::Conflict);
+    assert_eq!(
+        make_calls.load(Ordering::SeqCst),
+        1,
+        "the competing execution must fail before factory construction"
+    );
+
+    release.notify_waiters();
+    let outcome = first.await.unwrap().unwrap();
+    assert_eq!(outcome.record.status, RunStatus::Success);
+
+    let post = sessions
+        .acquire_execution_lease("local", "serialized", "post-check")
+        .await
+        .unwrap();
+    let snapshot = post.load_snapshot().await.unwrap().unwrap();
+    assert_eq!(snapshot.record.run_count, 1);
+    assert_eq!(snapshot.record.transcript.len(), 2);
 }
 
 #[tokio::test]
@@ -1192,7 +2495,7 @@ async fn no_session_ref_means_no_session_write() {
 
     assert_eq!(rec.record.session_id, None);
     assert!(
-        sessions.list(None).await.unwrap().is_empty(),
+        sessions.list("local").await.unwrap().is_empty(),
         "no session record written"
     );
 }
@@ -1230,7 +2533,7 @@ async fn factory_build_error_is_treated_as_failover_eligible_attempt() {
 }
 
 #[tokio::test]
-async fn labels_and_preview_are_copied_onto_the_record() {
+async fn labels_are_copied_but_prompt_preview_is_omitted() {
     let factory = MockFactory::new()
         .on("m", Behaviour::succeed("ok"))
         .into_arc();
@@ -1238,7 +2541,7 @@ async fn labels_and_preview_are_copied_onto_the_record() {
     let d = dispatcher(factory, ledger.clone(), MockSessions::new());
 
     let mut task = TaskSpec::new("a rather long prompt body for preview checking");
-    task.labels.insert("ticket".into(), "EOS-4".into());
+    task.labels.insert("ticket".into(), "ISSUE-4".into());
     let rec = d
         .dispatch(&task, vec![http_target("p", "m")], CancellationToken::new())
         .await
@@ -1246,12 +2549,9 @@ async fn labels_and_preview_are_copied_onto_the_record() {
 
     assert_eq!(
         rec.record.labels.get("ticket").map(String::as_str),
-        Some("EOS-4")
+        Some("ISSUE-4")
     );
-    assert_eq!(
-        rec.record.task_preview.as_deref(),
-        Some("a rather long prompt body for preview checking")
-    );
+    assert!(rec.record.task_preview.is_none());
 }
 
 #[tokio::test]
@@ -1434,19 +2734,16 @@ async fn timeout_is_failover_eligible_and_recovers_on_next_target() {
 }
 
 // ===========================================================================
-// Finding 1: harness resume uses the native session id, never the logical id
+// Finding 1: unbound native harness sessions fail closed
 // ===========================================================================
 
 #[tokio::test]
-async fn harness_resume_passes_native_session_id_not_logical_id() {
-    // A session already carries a native id from a prior harness run. The next
-    // harness dispatch must resume with that native id — never the logical
-    // (store-key) id.
+async fn harness_legacy_native_resume_is_rejected_even_for_read_only() {
     let factory = MockFactory::new().on(
         "agent-model",
-        Behaviour::succeed_harness("continued", "native-2"),
+        Behaviour::succeed_harness("must not run", "native-2"),
     );
-    let probe = factory.probe();
+    let make_calls = factory.make_calls();
     let ledger = MockLedger::new();
     let sessions = MockSessions::new();
     sessions.seed(seed_record("logical-sess", Some("native-abc"), Vec::new()));
@@ -1455,28 +2752,44 @@ async fn harness_resume_passes_native_session_id_not_logical_id() {
     let mut task = TaskSpec::new("keep going");
     task.session = Some(SessionRef::new("logical-sess"));
     let chain = vec![cli_target("anthropic", "agent-model")];
-    let rec = d
+    let error = d
         .dispatch(&task, chain, CancellationToken::new())
         .await
-        .unwrap();
-    assert_eq!(rec.record.status, RunStatus::Success);
+        .expect_err("unbound native sessions must not resume in a harness");
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert!(error.message.contains("NativeSessionDomain"));
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+    assert!(ledger.records().is_empty());
+}
 
-    let jobs = probe.harness_jobs();
-    assert_eq!(jobs.len(), 1, "exactly one harness attempt");
-    assert_eq!(
-        jobs[0].resume.as_deref(),
-        Some("native-abc"),
-        "resume must be the stored native id"
-    );
-    assert_ne!(
-        jobs[0].resume.as_deref(),
-        Some("logical-sess"),
-        "the logical id must never be used as the native resume token"
-    );
+#[tokio::test]
+async fn native_resume_rejects_when_any_admitted_fallback_is_a_harness() {
+    let factory = MockFactory::new()
+        .on("chat-model", Behaviour::succeed("must not run"))
+        .on(
+            "agent-model",
+            Behaviour::succeed_harness("must not run", "native-new"),
+        );
+    let make_calls = factory.make_calls();
+    let sessions = MockSessions::new();
+    sessions.seed(seed_record("hybrid", Some("legacy-native"), Vec::new()));
+    let d = dispatcher(factory.into_arc(), MockLedger::new(), sessions);
+    let mut task = TaskSpec::new("inspect");
+    task.session = Some(SessionRef::new("hybrid"));
 
-    // And the run then advances the stored native id to the one it reported.
-    let saved = sessions.get("logical-sess").unwrap();
-    assert_eq!(saved.native_session_id.as_deref(), Some("native-2"));
+    let error = d
+        .dispatch(
+            &task,
+            vec![
+                http_target("openai", "chat-model"),
+                cli_target("anthropic", "agent-model"),
+            ],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an admitted harness fallback makes unbound native resume unsafe");
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1520,7 +2833,7 @@ async fn direct_chat_replays_transcript_then_current_user_message() {
     let sessions = MockSessions::new();
     sessions.seed(seed_record(
         "chat-sess",
-        None,
+        Some("native-history-is-ignored-for-direct-http"),
         vec![ChatMessage::user("q1"), ChatMessage::assistant("a1")],
     ));
     let d = dispatcher(factory.into_arc(), ledger.clone(), sessions.clone());
@@ -1547,6 +2860,130 @@ async fn direct_chat_replays_transcript_then_current_user_message() {
     assert_eq!(msgs[2].content, "a1");
     assert_eq!(msgs[3].role, Role::User);
     assert_eq!(msgs[3].content, "q2");
+    assert_eq!(
+        sessions
+            .get("chat-sess")
+            .unwrap()
+            .native_session_id
+            .as_deref(),
+        Some("native-history-is-ignored-for-direct-http")
+    );
+}
+
+#[tokio::test]
+async fn dispatcher_never_loads_or_overwrites_another_owners_session() {
+    let factory = MockFactory::new().on("chat-model", Behaviour::succeed("alice-answer"));
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let sessions = MockSessions::new();
+    let mut bob = seed_record(
+        "shared",
+        None,
+        vec![
+            ChatMessage::user("bob-private-question"),
+            ChatMessage::assistant("bob-private-answer"),
+        ],
+    );
+    bob.owner = "bob".into();
+    sessions.seed(bob.clone());
+    let d = dispatcher(factory.into_arc(), ledger, sessions.clone()).with_owner("alice");
+
+    let mut task = TaskSpec::new("alice-question");
+    task.session = Some(SessionRef::new("shared"));
+    d.dispatch(
+        &task,
+        vec![http_target("openai", "chat-model")],
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let requests = probe.chat_requests();
+    assert_eq!(requests[0].messages.len(), 1);
+    assert_eq!(requests[0].messages[0].content, "alice-question");
+    let saved_alice = sessions.get_for("alice", "shared").unwrap();
+    assert_eq!(saved_alice.owner, "alice");
+    assert_eq!(saved_alice.transcript.len(), 2);
+    let saved_bob = sessions.get_for("bob", "shared").unwrap();
+    assert_eq!(saved_bob.transcript, bob.transcript);
+    assert_eq!(saved_bob.run_count, bob.run_count);
+}
+
+#[tokio::test]
+async fn session_integrity_error_fails_before_any_model_execution() {
+    let factory = MockFactory::new().on("chat-model", Behaviour::succeed("must-not-run"));
+    let probe = factory.probe();
+    let ledger = MockLedger::new();
+    let d = Dispatcher::new(
+        factory.into_arc(),
+        Arc::new(ledger.clone()),
+        Arc::new(LoadErrorSessions),
+    );
+    let mut task = TaskSpec::new("question");
+    task.session = Some(SessionRef::new("legacy"));
+
+    let error = d
+        .dispatch(
+            &task,
+            vec![http_target("openai", "chat-model")],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert!(probe.chat_requests().is_empty());
+    assert!(ledger.records().is_empty());
+}
+
+#[tokio::test]
+async fn forged_lease_or_snapshot_identity_never_reaches_a_model() {
+    for forge_lease_identity in [true, false] {
+        let factory = MockFactory::new().on("chat-model", Behaviour::succeed("must-not-run"));
+        let make_calls = factory.make_calls();
+        let probe = factory.probe();
+        let mut foreign_record = seed_record(
+            "foreign-session",
+            None,
+            vec![ChatMessage::user("cross-session-canary")],
+        );
+        foreign_record.owner = "foreign-owner".into();
+        let lease_load_calls = Arc::new(AtomicUsize::new(0));
+        let sessions = ForgedAuthoritySessions {
+            forge_lease_identity,
+            snapshot: SessionSnapshot {
+                record: foreign_record,
+                session_revision: 9,
+                native_session: NativeSessionState::Absent,
+            },
+            lease_load_calls: Arc::clone(&lease_load_calls),
+        };
+        let dispatcher = Dispatcher::new(
+            factory.into_arc(),
+            Arc::new(MockLedger::new()),
+            Arc::new(sessions),
+        );
+        let mut task = TaskSpec::new("local question");
+        task.session = Some(SessionRef::new("local-session"));
+
+        let error = dispatcher
+            .dispatch(
+                &task,
+                vec![http_target("openai", "chat-model")],
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Config);
+        assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+        assert!(probe.chat_requests().is_empty());
+        assert_eq!(
+            lease_load_calls.load(Ordering::SeqCst),
+            usize::from(!forge_lease_identity),
+            "a forged lease is rejected before any continuity read"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1968,6 +3405,7 @@ impl ChatClient for StreamingChat {
 /// Factory variant that produces streaming chat clients.
 struct StreamingFactory {
     events: Vec<vyane_core::StreamEvent>,
+    scopes: Arc<Mutex<Vec<AttemptScope>>>,
 }
 
 impl ExecutorFactory for StreamingFactory {
@@ -1977,12 +3415,188 @@ impl ExecutorFactory for StreamingFactory {
             probe: Probe::new(),
         })))
     }
+
+    fn make_scoped(&self, target: &BoundTarget, scope: &AttemptScope) -> Result<Executor> {
+        self.scopes.lock().unwrap().push(scope.clone());
+        self.make(target)
+    }
+}
+
+/// Final result scripted for a streaming harness after it emits its events.
+#[derive(Clone)]
+enum StreamingHarnessTerminal {
+    Succeed { text: String, usage: Option<Usage> },
+    Fail { kind: ErrorKind, message: String },
+}
+
+impl StreamingHarnessTerminal {
+    fn succeed(text: &str, usage: Option<Usage>) -> Self {
+        Self::Succeed {
+            text: text.to_string(),
+            usage,
+        }
+    }
+
+    fn fail(kind: ErrorKind) -> Self {
+        Self::Fail {
+            kind,
+            message: format!("mock streaming harness {kind:?}"),
+        }
+    }
+}
+
+/// Harness mock whose callback is `'static`, while the dispatcher callback in
+/// the tests below deliberately borrows a local vector. Yielding after each
+/// event exercises the kernel's mpsc bridge rather than only its final drain.
+struct StreamingHarness {
+    events: Vec<HarnessStreamEvent>,
+    terminal: StreamingHarnessTerminal,
+    jobs: Arc<Mutex<Vec<HarnessJob>>>,
+}
+
+#[async_trait]
+impl Harness for StreamingHarness {
+    fn kind(&self) -> HarnessKind {
+        HarnessKind::ClaudeCode
+    }
+
+    async fn available(&self) -> bool {
+        true
+    }
+
+    async fn run(&self, _job: HarnessJob, _cancel: CancellationToken) -> Result<HarnessOutcome> {
+        unreachable!("streaming harness tests should call run_stream(), not run()")
+    }
+
+    async fn run_stream(
+        &self,
+        job: HarnessJob,
+        cancel: CancellationToken,
+        mut on_event: Box<dyn FnMut(HarnessStreamEvent) + Send + Sync>,
+    ) -> Result<HarnessOutcome> {
+        self.jobs.lock().unwrap().push(job);
+
+        if cancel.is_cancelled() {
+            return Err(VyaneError::cancelled());
+        }
+        for event in self.events.iter().cloned() {
+            on_event(event);
+            tokio::task::yield_now().await;
+            if cancel.is_cancelled() {
+                return Err(VyaneError::cancelled());
+            }
+        }
+
+        match &self.terminal {
+            StreamingHarnessTerminal::Succeed { text, usage } => Ok(HarnessOutcome {
+                text: text.clone(),
+                native_session_id: Some("native-stream-session".to_string()),
+                usage: *usage,
+                exit_code: 0,
+                duration: Duration::from_millis(1),
+            }),
+            StreamingHarnessTerminal::Fail { kind, message } => {
+                Err(VyaneError::new(*kind, message.clone()))
+            }
+        }
+    }
+}
+
+/// Factory for the streaming harness mock, with observable make/job counts.
+struct StreamingHarnessFactory {
+    events: Vec<HarnessStreamEvent>,
+    terminal: StreamingHarnessTerminal,
+    jobs: Arc<Mutex<Vec<HarnessJob>>>,
+    make_calls: Arc<AtomicUsize>,
+}
+
+impl StreamingHarnessFactory {
+    fn new(events: Vec<HarnessStreamEvent>, terminal: StreamingHarnessTerminal) -> Self {
+        Self {
+            events,
+            terminal,
+            jobs: Arc::new(Mutex::new(Vec::new())),
+            make_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl ExecutorFactory for StreamingHarnessFactory {
+    fn make(&self, _target: &BoundTarget) -> Result<Executor> {
+        self.make_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Executor::Agent(Arc::new(StreamingHarness {
+            events: self.events.clone(),
+            terminal: self.terminal.clone(),
+            jobs: Arc::clone(&self.jobs),
+        })))
+    }
+}
+
+#[tokio::test]
+async fn compatibility_stream_rejects_legacy_session_before_load_probe_or_make() {
+    let sessions = MockSessions::new();
+    sessions.seed(seed_record("legacy-stream", Some("native-old"), Vec::new()));
+    let factory = MockFactory::new().on(
+        "agent-model",
+        Behaviour::succeed_harness("must not run", "native-new"),
+    );
+    let make_calls = factory.make_calls();
+    let d = dispatcher(factory.into_arc(), MockLedger::new(), sessions.clone());
+    let mut task = TaskSpec::new("stream");
+    task.session = Some(SessionRef::new("legacy-stream"));
+
+    let error = d
+        .dispatch_stream(
+            &task,
+            &cli_target("anthropic", "agent-model"),
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert!(error.message.contains("does not support sessions"));
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(sessions.load_calls(), 0);
+}
+
+#[tokio::test]
+async fn prepared_stream_rejects_bound_session_before_load_probe_or_make() {
+    let sessions = BoundSnapshotSessions::new("bound-stream");
+    let snapshot_load_calls = Arc::clone(&sessions.snapshot_load_calls);
+    let factory = MockFactory::new().on(
+        "agent-model",
+        Behaviour::succeed_harness("must not run", "native-new"),
+    );
+    let make_calls = factory.make_calls();
+    let d = Dispatcher::new(
+        factory.into_arc(),
+        Arc::new(MockLedger::new()),
+        Arc::new(sessions),
+    );
+    let mut task = TaskSpec::new("stream");
+    task.session = Some(SessionRef::new("bound-stream"));
+    let prepared = d
+        .prepare(&task, vec![cli_target("anthropic", "agent-model")])
+        .unwrap();
+
+    let error = d
+        .dispatch_stream_prepared(&task, &prepared, CancellationToken::new(), |_| {})
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert!(error.message.contains("does not support sessions"));
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshot_load_calls.load(Ordering::SeqCst), 0);
 }
 
 /// `dispatch_stream` with a successful stream produces a Success RunRecord
 /// and delivers all delta events through the callback.
 #[tokio::test]
 async fn dispatch_stream_success_delivers_deltas_and_records() {
+    let scopes = Arc::new(Mutex::new(Vec::new()));
     let factory = Arc::new(StreamingFactory {
         events: vec![
             vyane_core::StreamEvent::Delta("Hello ".into()),
@@ -1997,16 +3611,173 @@ async fn dispatch_stream_success_delivers_deltas_and_records() {
                 finish_reason: Some("stop".into()),
             },
         ],
+        scopes: Arc::clone(&scopes),
     });
     let ledger = MockLedger::default();
     let sessions = MockSessions::new();
     let d = Dispatcher::new(factory, Arc::new(ledger), Arc::new(sessions));
 
+    let task = TaskSpec::new("say hello");
+    let prepared = d
+        .prepare(&task, vec![http_target("test", "streaming-model")])
+        .unwrap();
+    let mut collected = Vec::new();
+    let outcome = d
+        .dispatch_stream_prepared(&task, &prepared, CancellationToken::new(), |event| {
+            if let vyane_kernel::StreamDispatchEvent::Delta(text) = event {
+                collected.push(text);
+            }
+        })
+        .await
+        .expect("dispatch_stream succeeds");
+
+    let outcome = outcome.expect("streaming was supported");
+    assert_eq!(outcome.record.status, RunStatus::Success);
+    assert_eq!(
+        scopes.lock().unwrap()[0].execution.execution_id,
+        outcome.record.run_id
+    );
+    assert_eq!(outcome.output.as_deref(), Some("Hello world"));
+    assert_eq!(collected, vec!["Hello ".to_string(), "world".to_string()]);
+}
+
+/// Harness streaming forwards every text and tool event in order and records
+/// the harness's final outcome.
+#[tokio::test]
+async fn dispatch_stream_harness_success_delivers_all_deltas_and_records() {
+    let usage = Usage {
+        input_tokens: 11,
+        output_tokens: 7,
+        reasoning_tokens: Some(3),
+        cached_input_tokens: None,
+    };
+    let factory = Arc::new(StreamingHarnessFactory::new(
+        vec![
+            HarnessStreamEvent::Delta("first ".to_string()),
+            HarnessStreamEvent::ToolUse {
+                name: "Edit".to_string(),
+                summary: "src/lib.rs".to_string(),
+            },
+            HarnessStreamEvent::Delta("second".to_string()),
+        ],
+        StreamingHarnessTerminal::succeed("first second", Some(usage)),
+    ));
+    let jobs = Arc::clone(&factory.jobs);
+    let make_calls = Arc::clone(&factory.make_calls);
+    let ledger = MockLedger::new();
+    let d = Dispatcher::new(
+        factory,
+        Arc::new(ledger.clone()),
+        Arc::new(MockSessions::new()),
+    );
+
+    let mut task = TaskSpec::new("use the harness");
+    task.system = Some("be careful".to_string());
+    let target = cli_target("anthropic", "streaming-agent");
     let mut collected = Vec::new();
     let outcome = d
         .dispatch_stream(
-            &TaskSpec::new("say hello"),
-            &http_target("test", "streaming-model"),
+            &task,
+            &target,
+            CancellationToken::new(),
+            |event| match event {
+                vyane_kernel::StreamDispatchEvent::Delta(text) => {
+                    collected.push(format!("delta:{text}"));
+                }
+                vyane_kernel::StreamDispatchEvent::ToolUse { name, summary } => {
+                    collected.push(format!("tool:{name}:{summary}"));
+                }
+                vyane_kernel::StreamDispatchEvent::ReasoningDelta(_) => {}
+            },
+        )
+        .await
+        .expect("harness streaming succeeds")
+        .expect("harness supports streaming");
+
+    assert_eq!(
+        collected,
+        vec![
+            "delta:first ".to_string(),
+            "tool:Edit:src/lib.rs".to_string(),
+            "delta:second".to_string(),
+        ]
+    );
+    assert_eq!(outcome.output.as_deref(), Some("first second"));
+    assert_eq!(outcome.record.status, RunStatus::Success);
+    assert_eq!(outcome.record.transport, AdapterTransport::CliWrap);
+    assert_eq!(outcome.record.output_chars, Some(12));
+    assert_eq!(outcome.record.usage.as_ref().unwrap().input_tokens, 11);
+    assert_eq!(outcome.record.usage.as_ref().unwrap().output_tokens, 7);
+    assert_eq!(outcome.record.attempts.len(), 1);
+    assert!(matches!(
+        outcome.record.attempts[0].outcome,
+        AttemptOutcome::Ok
+    ));
+    assert_eq!(ledger.append_count(), 1);
+    assert_eq!(make_calls.load(Ordering::SeqCst), 1);
+
+    let jobs = jobs.lock().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(
+        jobs[0].prompt,
+        "use the harness\n\n## Additional instructions\n\nbe careful"
+    );
+    assert!(
+        jobs[0].resume.is_none(),
+        "streaming does not resume sessions"
+    );
+}
+
+/// The prepared probe seam reports Unsupported without appending; its caller
+/// retains the prepared value and can reuse it for fallback.
+#[tokio::test]
+async fn dispatch_stream_harness_unsupported_returns_none_without_record() {
+    let factory = Arc::new(StreamingHarnessFactory::new(
+        Vec::new(),
+        StreamingHarnessTerminal::fail(ErrorKind::Unsupported),
+    ));
+    let make_calls = Arc::clone(&factory.make_calls);
+    let ledger = MockLedger::new();
+    let d = Dispatcher::new(
+        factory,
+        Arc::new(ledger.clone()),
+        Arc::new(MockSessions::new()),
+    );
+
+    let task = TaskSpec::new("fallback");
+    let prepared = d
+        .prepare(&task, vec![cli_target("anthropic", "unsupported-agent")])
+        .unwrap();
+    let outcome = d
+        .dispatch_stream_prepared(&task, &prepared, CancellationToken::new(), |_| {})
+        .await
+        .expect("Unsupported is not a kernel error");
+
+    assert!(outcome.is_none());
+    assert_eq!(make_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ledger.append_count(), 0);
+}
+
+/// Cancellation returned by a streaming harness is represented as a normal
+/// Cancelled RunRecord, and deltas emitted before cancellation are not lost.
+#[tokio::test]
+async fn dispatch_stream_harness_cancelled_result_is_recorded() {
+    let factory = Arc::new(StreamingHarnessFactory::new(
+        vec![HarnessStreamEvent::Delta("partial".to_string())],
+        StreamingHarnessTerminal::fail(ErrorKind::Cancelled),
+    ));
+    let ledger = MockLedger::new();
+    let d = Dispatcher::new(
+        factory,
+        Arc::new(ledger.clone()),
+        Arc::new(MockSessions::new()),
+    );
+
+    let mut collected = Vec::new();
+    let outcome = d
+        .dispatch_stream(
+            &TaskSpec::new("cancel me"),
+            &cli_target("anthropic", "cancelled-agent"),
             CancellationToken::new(),
             |event| {
                 if let vyane_kernel::StreamDispatchEvent::Delta(text) = event {
@@ -2015,15 +3786,71 @@ async fn dispatch_stream_success_delivers_deltas_and_records() {
             },
         )
         .await
-        .expect("dispatch_stream succeeds");
+        .expect("cancelled harness run returns its record")
+        .expect("Cancelled is not Unsupported");
 
-    let outcome = outcome.expect("streaming was supported");
-    assert_eq!(outcome.record.status, RunStatus::Success);
-    assert_eq!(outcome.output.as_deref(), Some("Hello world"));
-    assert_eq!(collected, vec!["Hello ".to_string(), "world".to_string()]);
+    assert_eq!(collected, vec!["partial".to_string()]);
+    assert_eq!(outcome.record.status, RunStatus::Cancelled);
+    assert!(outcome.output.is_none());
+    assert!(matches!(
+        outcome.record.attempts[0].outcome,
+        AttemptOutcome::Err {
+            kind: ErrorKind::Cancelled,
+            failed_over: false,
+            ..
+        }
+    ));
+    assert_eq!(ledger.append_count(), 1);
 }
 
-/// `dispatch_stream` returns Ok(None) when the ChatClient returns
+/// Non-cancellation harness failures are likewise assembled into an Error
+/// record with the original error kind and no successful output.
+#[tokio::test]
+async fn dispatch_stream_harness_error_is_recorded() {
+    let factory = Arc::new(StreamingHarnessFactory::new(
+        Vec::new(),
+        StreamingHarnessTerminal::fail(ErrorKind::Protocol),
+    ));
+    let ledger = MockLedger::new();
+    let d = Dispatcher::new(
+        factory,
+        Arc::new(ledger.clone()),
+        Arc::new(MockSessions::new()),
+    );
+
+    let outcome = d
+        .dispatch_stream(
+            &TaskSpec::new("fail"),
+            &cli_target("anthropic", "broken-agent"),
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect("harness error returns its record")
+        .expect("Protocol is not Unsupported");
+
+    assert_eq!(outcome.record.status, RunStatus::Error);
+    assert!(outcome.output.is_none());
+    assert!(
+        outcome
+            .record
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Protocol")
+    );
+    assert!(matches!(
+        outcome.record.attempts[0].outcome,
+        AttemptOutcome::Err {
+            kind: ErrorKind::Protocol,
+            failed_over: false,
+            ..
+        }
+    ));
+    assert_eq!(ledger.append_count(), 1);
+}
+
+/// `dispatch_stream_prepared` returns Ok(None) when the ChatClient returns
 /// ErrorKind::Unsupported from stream().
 #[tokio::test]
 async fn dispatch_stream_unsupported_returns_none() {
@@ -2057,13 +3884,10 @@ async fn dispatch_stream_unsupported_returns_none() {
         MockSessions::new(),
     );
 
+    let task = TaskSpec::new("test");
+    let prepared = d.prepare(&task, vec![http_target("p", "m")]).unwrap();
     let outcome = d
-        .dispatch_stream(
-            &TaskSpec::new("test"),
-            &http_target("p", "m"),
-            CancellationToken::new(),
-            |_| {},
-        )
+        .dispatch_stream_prepared(&task, &prepared, CancellationToken::new(), |_| {})
         .await
         .expect("no kernel error");
 
@@ -2074,16 +3898,15 @@ async fn dispatch_stream_unsupported_returns_none() {
 /// without calling the client.
 #[tokio::test]
 async fn dispatch_stream_pre_cancelled_produces_cancelled_record() {
-    let factory = Arc::new(StreamingFactory {
-        events: vec![
-            vyane_core::StreamEvent::Delta("should not see this".into()),
-            vyane_core::StreamEvent::Done {
-                finish_reason: None,
-            },
-        ],
-    });
+    let factory = MockFactory::new().on("m", Behaviour::succeed("must not run"));
+    let make_calls = factory.make_calls();
+    let probe = factory.probe();
     let ledger = MockLedger::default();
-    let d = Dispatcher::new(factory, Arc::new(ledger), Arc::new(MockSessions::new()));
+    let d = Dispatcher::new(
+        factory.into_arc(),
+        Arc::new(ledger.clone()),
+        Arc::new(MockSessions::new()),
+    );
 
     let cancel = CancellationToken::new();
     cancel.cancel();
@@ -2100,6 +3923,16 @@ async fn dispatch_stream_pre_cancelled_produces_cancelled_record() {
 
     let outcome = outcome.expect("pre-cancelled still produces a record");
     assert_eq!(outcome.record.status, RunStatus::Cancelled);
+    assert_eq!(
+        make_calls.load(Ordering::SeqCst),
+        0,
+        "pre-cancelled streaming must not call factory.make"
+    );
+    assert!(
+        probe.chat_requests().is_empty() && probe.harness_jobs().is_empty(),
+        "no executor may run"
+    );
+    assert_eq!(ledger.append_count(), 1);
 }
 
 /// `dispatch_stream` with a mid-stream error produces an Error record.

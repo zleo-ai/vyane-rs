@@ -44,6 +44,26 @@ pub fn parse_labels(raw: Vec<String>) -> Result<BTreeMap<String, String>> {
     Ok(labels)
 }
 
+/// Reject labels that impersonate router output. Routing inputs use a small,
+/// explicit allow-list; decision fields are written only by `plan_dispatch`.
+pub fn validate_user_routing_labels(labels: &BTreeMap<String, String>) -> Result<()> {
+    const INPUT_KEYS: &[&str] = &[
+        "routing.stage",
+        "routing.tier",
+        "routing.tags",
+        "routing.candidates",
+        "routing.allow_frontier",
+    ];
+    for key in labels.keys().filter(|key| key.starts_with("routing.")) {
+        if !INPUT_KEYS.contains(&key.as_str()) {
+            bail!(
+                "label `{key}` is reserved for Vyane routing decisions; use stage/tier/tags/candidates/allow_frontier inputs instead"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +83,22 @@ mod tests {
     #[test]
     fn label_empty_key_errors() {
         assert!(parse_labels(vec!["=value".into()]).is_err());
+    }
+
+    #[test]
+    fn routing_decision_labels_are_reserved() {
+        let labels = parse_labels(vec![
+            "routing.stage=review".into(),
+            "routing.allow_frontier=false".into(),
+        ])
+        .unwrap();
+        validate_user_routing_labels(&labels).unwrap();
+
+        let forged = parse_labels(vec!["routing.provider=foreign".into()]).unwrap();
+        assert!(validate_user_routing_labels(&forged).is_err());
+        let forged_effort = parse_labels(vec!["routing.effort=xhigh".into()]).unwrap();
+        assert!(validate_user_routing_labels(&forged_effort).is_err());
+        let future_reserved = parse_labels(vec!["routing.unknown=value".into()]).unwrap();
+        assert!(validate_user_routing_labels(&future_reserved).is_err());
     }
 }

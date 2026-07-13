@@ -1,13 +1,116 @@
 //! What the caller asks for: a task plus generation parameters.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::session::SessionRef;
 use crate::target::Sandbox;
+
+/// Process-local authority that must remain valid at harness spawn boundaries.
+///
+/// The callback is invoked synchronously immediately before every physical
+/// spawn attempt and, for lifecycle-gated children, again before releasing the
+/// real target. It must perform a bounded live revalidation and return `false`
+/// on stale, revoked, unavailable, or uncertain authority. The callback is
+/// executable state: it must never be serialized, persisted, logged, or passed
+/// into the child environment. It must also keep panic payloads body-free:
+/// [`Self::revalidate`] catches an unwind, but the process panic hook runs
+/// before that catch can redact anything.
+#[derive(Clone)]
+pub struct HarnessSpawnAuthority {
+    callback: Arc<dyn Fn() -> bool + Send + Sync + 'static>,
+}
+
+impl HarnessSpawnAuthority {
+    pub fn new(callback: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Revalidate and fail closed without propagating a callback panic.
+    #[must_use]
+    pub fn revalidate(&self) -> bool {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.callback)()))
+            .unwrap_or(false)
+    }
+}
+
+impl fmt::Debug for HarnessSpawnAuthority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HarnessSpawnAuthority")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Runtime lifecycle event for a process group owned by a CLI harness.
+///
+/// Harness children run in their own session, so their process-group id is
+/// intentionally distinct from a detached Vyane worker's process group. A
+/// detached caller can use these events to maintain a private sidecar with the
+/// currently-live inner process group and cancel it independently if the
+/// worker is killed before Rust destructors can run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessLifecycleEvent {
+    /// The harness child was spawned successfully and its process group is
+    /// live. On Unix, `pid == pgid` because the child calls `setsid(2)`.
+    Started { pid: u32, pgid: i32 },
+    /// The harness has completed normal cleanup, or its owning future was
+    /// dropped and synchronously signalled the process group for cleanup.
+    Stopped {
+        pid: u32,
+        pgid: i32,
+        /// True only after the harness observed the entire isolated process
+        /// group disappear. Abrupt future drop reports false after issuing its
+        /// best-effort SIGKILL, so a durable controller retains the sidecar.
+        group_empty: bool,
+    },
+}
+
+/// Clone-safe, runtime-only observer for harness process-group lifecycle.
+///
+/// The callback is deliberately held behind an [`Arc`]: cloned [`TaskSpec`]s
+/// and failover attempts must all report to the same runtime observer. This
+/// value is executable process-local state and must never be serialized into a
+/// task request, ledger record, or durable task database.
+#[derive(Clone)]
+pub struct HarnessLifecycleReporter {
+    callback:
+        Arc<dyn Fn(HarnessLifecycleEvent) -> crate::error::Result<()> + Send + Sync + 'static>,
+}
+
+impl HarnessLifecycleReporter {
+    pub fn new(
+        callback: impl Fn(HarnessLifecycleEvent) -> crate::error::Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Report one lifecycle transition synchronously.
+    ///
+    /// A failed [`HarnessLifecycleEvent::Started`] is a hard coordination
+    /// failure: harness implementations kill and reap the just-spawned process
+    /// group instead of running a child that an independent controller cannot
+    /// discover. A failed `Stopped` is best-effort because the group is already
+    /// dead (or has already been synchronously signalled from a drop guard).
+    pub fn report(&self, event: HarnessLifecycleEvent) -> crate::error::Result<()> {
+        (self.callback)(event)
+    }
+}
+
+impl fmt::Debug for HarnessLifecycleReporter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HarnessLifecycleReporter")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Reasoning-effort level, passed through to targets that support it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -68,6 +171,11 @@ pub struct TaskSpec {
     pub timeout: Option<Duration>,
     /// Free-form labels recorded into the ledger (task tags, ticket ids…).
     pub labels: BTreeMap<String, String>,
+    /// Optional process-local observer for harness child process groups.
+    ///
+    /// Runtime coordination only: this callback must not enter persisted task
+    /// metadata or run records.
+    pub harness_lifecycle_reporter: Option<HarnessLifecycleReporter>,
 }
 
 impl TaskSpec {
@@ -80,6 +188,7 @@ impl TaskSpec {
             session: None,
             timeout: None,
             labels: BTreeMap::new(),
+            harness_lifecycle_reporter: None,
         }
     }
 

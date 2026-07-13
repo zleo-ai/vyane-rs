@@ -1,12 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use vyane_core::Sandbox;
+use vyane_core::{Effort, Sandbox};
 
-use crate::error::{WorkflowError, WorkflowResult};
-use crate::journal::WorkflowJournal;
+use crate::journal::{WorkflowJournal, WorkflowRunId};
 
 #[derive(Debug, Clone)]
 pub struct Workflow {
@@ -15,71 +13,12 @@ pub struct Workflow {
     pub max_concurrency: usize,
     pub steps: Vec<WorkflowStep>,
     pub file_path: PathBuf,
+    /// Hash produced by the pre-source-bundle algorithm. New journals never
+    /// write this value; it is retained only so `resume` can migrate existing
+    /// journals to the versioned source-bundle hash without weakening content
+    /// comparison.
+    pub legacy_file_sha256: Option<String>,
     pub file_sha256: String,
-}
-
-impl Workflow {
-    pub fn from_path(path: impl AsRef<Path>) -> WorkflowResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let bytes = std::fs::read(&path).map_err(|source| WorkflowError::ReadWorkflow {
-            path: path.clone(),
-            source,
-        })?;
-        Self::from_bytes(path, &bytes)
-    }
-
-    pub fn from_bytes(path: PathBuf, bytes: &[u8]) -> WorkflowResult<Self> {
-        let text = std::str::from_utf8(bytes).map_err(|source| WorkflowError::ReadWorkflow {
-            path: path.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
-        })?;
-        let raw: RawRoot = toml::from_str(text).map_err(|source| WorkflowError::ParseWorkflow {
-            path: path.clone(),
-            source,
-        })?;
-        let file_sha256 = sha256_hex(bytes);
-        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let section = raw.workflow.unwrap_or_default();
-        let max_concurrency = section.max_concurrency.unwrap_or(4).max(1);
-        let mut steps = Vec::with_capacity(raw.steps.len());
-
-        for (index, raw_step) in raw.steps.into_iter().enumerate() {
-            let prompt_template = match (&raw_step.prompt, &raw_step.prompt_file) {
-                (Some(prompt), _) => Some(prompt.clone()),
-                (None, Some(rel)) => {
-                    let full = base_dir.join(rel);
-                    Some(
-                        std::fs::read_to_string(&full)
-                            .map_err(|source| WorkflowError::ReadPrompt { path: full, source })?,
-                    )
-                }
-                (None, None) => None,
-            };
-            steps.push(WorkflowStep {
-                index,
-                id: raw_step.id.unwrap_or_default(),
-                needs: raw_step.needs,
-                targets: StepTargets::from_raw(raw_step.target, raw_step.fan_out),
-                prompt: raw_step.prompt,
-                prompt_file: raw_step.prompt_file,
-                prompt_template,
-                system: raw_step.system,
-                workdir: raw_step.workdir,
-                sandbox: raw_step.sandbox.unwrap_or_default(),
-                timeout: raw_step.timeout_secs.map(Duration::from_secs),
-                on_error: raw_step.on_error.unwrap_or_default(),
-            });
-        }
-
-        Ok(Self {
-            name: section.name.unwrap_or_default(),
-            description: section.description,
-            max_concurrency,
-            steps,
-            file_path: path,
-            file_sha256,
-        })
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +35,28 @@ pub struct WorkflowStep {
     pub sandbox: Sandbox,
     pub timeout: Option<Duration>,
     pub on_error: OnError,
+    pub route: WorkflowRouteHints,
+}
+
+/// Optional routing hints used when a resolver supports deferred/automatic
+/// target selection. They are translated into canonical `routing.*` task
+/// labels immediately before a step is dispatched.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRouteHints {
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub candidates: Vec<String>,
+    #[serde(default)]
+    pub allow_frontier: Option<bool>,
+    /// Explicit reasoning effort for a deferred route. This is a closed,
+    /// protocol-neutral value; adapters translate it to their own wire shape.
+    #[serde(default)]
+    pub effort: Option<Effort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +71,7 @@ pub enum StepTargets {
 }
 
 impl StepTargets {
-    fn from_raw(target: Option<String>, fan_out: Option<Vec<String>>) -> Self {
+    pub(crate) fn from_raw(target: Option<String>, fan_out: Option<Vec<String>>) -> Self {
         match (target, fan_out) {
             (Some(target), Some(fan_out)) => StepTargets::Both { target, fan_out },
             (Some(target), None) => StepTargets::Single(target),
@@ -163,49 +124,91 @@ impl WorkflowRunStatus {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowOutcome {
-    pub wf_run_id: String,
+    pub wf_run_id: WorkflowRunId,
     pub status: WorkflowRunStatus,
     pub journal_path: PathBuf,
     pub journal: WorkflowJournal,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct RawRoot {
-    #[serde(default)]
-    workflow: Option<RawWorkflowSection>,
-    #[serde(default, rename = "step")]
-    steps: Vec<RawStep>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RawWorkflowSection {
-    name: Option<String>,
-    description: Option<String>,
-    max_concurrency: Option<usize>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RawStep {
-    id: Option<String>,
-    #[serde(default)]
-    needs: Vec<String>,
-    target: Option<String>,
-    fan_out: Option<Vec<String>>,
-    prompt: Option<String>,
-    prompt_file: Option<PathBuf>,
-    system: Option<String>,
-    workdir: Option<PathBuf>,
-    sandbox: Option<Sandbox>,
-    timeout_secs: Option<u64>,
-    on_error: Option<OnError>,
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
+impl WorkflowRouteHints {
+    /// Whether this step carries no deferred-routing inputs.
+    pub fn is_empty(&self) -> bool {
+        self.stage.is_none()
+            && self.tier.is_none()
+            && self.tags.is_empty()
+            && self.candidates.is_empty()
+            && self.allow_frontier.is_none()
+            && self.effort.is_none()
     }
-    out
+
+    /// Add normalized routing inputs to a task without exposing workflow
+    /// internals to resolver implementations.
+    pub fn apply_to_labels(&self, labels: &mut std::collections::BTreeMap<String, String>) {
+        if let Some(stage) = self.stage.as_ref() {
+            labels.insert("routing.stage".into(), stage.clone());
+        }
+        if let Some(tier) = self.tier.as_ref() {
+            labels.insert("routing.tier".into(), tier.clone());
+        }
+        if !self.tags.is_empty() {
+            labels.insert("routing.tags".into(), self.tags.join(","));
+        }
+        if !self.candidates.is_empty() {
+            labels.insert("routing.candidates".into(), self.candidates.join(","));
+        }
+        if let Some(allow) = self.allow_frontier {
+            labels.insert("routing.allow_frontier".into(), allow.to_string());
+        }
+        if let Some(effort) = self.effort {
+            labels.insert("routing.effort".into(), effort.as_str().to_string());
+        }
+    }
+}
+
+impl Workflow {
+    /// Compile the materialized frontend model into the filesystem-independent
+    /// source-materialized execution
+    /// contract consumed by the workflow engine.
+    pub fn compile_plan(&self) -> crate::WorkflowResult<crate::WorkflowPlan> {
+        crate::WorkflowPlan::compile(self)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn prompt_file_content_participates_in_resume_hash() {
+        let dir = TempDir::new().unwrap();
+        let workflow_path = dir.path().join("workflow.toml");
+        let prompt_path = dir.path().join("prompt.txt");
+        let workflow = br#"
+[workflow]
+name = "hash-test"
+
+[[step]]
+id = "one"
+target = "test"
+prompt_file = "prompt.txt"
+"#;
+        std::fs::write(&workflow_path, workflow).unwrap();
+        std::fs::write(&prompt_path, "first prompt").unwrap();
+        let first = Workflow::from_path(&workflow_path).unwrap();
+
+        std::fs::write(&prompt_path, "second prompt").unwrap();
+        let second = Workflow::from_path(&workflow_path).unwrap();
+
+        assert_ne!(first.file_sha256, second.file_sha256);
+        assert_eq!(
+            first.steps[0].prompt_template.as_deref(),
+            Some("first prompt")
+        );
+        assert_eq!(
+            second.steps[0].prompt_template.as_deref(),
+            Some("second prompt")
+        );
+    }
 }

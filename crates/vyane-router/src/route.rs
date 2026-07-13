@@ -67,6 +67,7 @@ pub fn route_task(
                     effort = parse_effort(&pref.effort);
                 }
                 return RouteDecision {
+                    selection_key: pref.selection_key.clone(),
                     provider: pref.provider.clone(),
                     model: pref.model.clone(),
                     effort,
@@ -87,6 +88,7 @@ pub fn route_task(
         .unwrap_or(default_provider);
 
     RouteDecision {
+        selection_key: String::new(),
         provider: provider.to_string(),
         model: String::new(),
         effort,
@@ -133,6 +135,7 @@ mod tests {
         tag_prefs.insert(
             "frontend".into(),
             RouteTargetPreference {
+                selection_key: "profile:frontend".into(),
                 provider: "anthropic".into(),
                 model: "claude-sonnet".into(),
                 effort: "high".into(),
@@ -155,6 +158,7 @@ mod tests {
         assert_eq!(decision.model, "claude-sonnet");
         assert_eq!(decision.effort, RouteEffort::High);
         assert_eq!(decision.tag, "frontend");
+        assert_eq!(decision.selection_key, "profile:frontend");
     }
 
     #[test]
@@ -312,6 +316,7 @@ mod tests {
         tier_prefs.insert(
             "mainline".into(),
             RouteTargetPreference {
+                selection_key: String::new(),
                 provider: "mainline-prov".into(),
                 effort: "xhigh".into(),
                 tier: "mainline".into(),

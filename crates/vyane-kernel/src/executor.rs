@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 use vyane_core::{BoundTarget, ChatClient, Harness, Result};
 
+use crate::capability::{AttemptScope, CapabilityManifest};
+
 /// One resolved way to run a single attempt.
 ///
 /// The variant is selected by the target's transport, not by the kernel
@@ -36,6 +38,22 @@ pub enum Executor {
 /// dispatch loop classifies the error and applies the failover gate to it like
 /// any other attempt failure.
 pub trait ExecutorFactory: Send + Sync {
+    /// Trusted, side-effect-free capability declaration for `target`.
+    ///
+    /// The default is deliberately chat-only so existing custom factories
+    /// remain source-compatible without silently gaining filesystem powers.
+    fn capability_manifest(&self, _target: &BoundTarget) -> CapabilityManifest {
+        CapabilityManifest::chat_only()
+    }
+
     /// Construct the executor for `target`, or fail if it cannot be built.
     fn make(&self, target: &BoundTarget) -> Result<Executor>;
+
+    /// Construct an executor with stable audit context for this attempt.
+    ///
+    /// Existing factories remain compatible through the default delegation.
+    /// `scope` is serializable evidence only and grants no runtime authority.
+    fn make_scoped(&self, target: &BoundTarget, _scope: &AttemptScope) -> Result<Executor> {
+        self.make(target)
+    }
 }

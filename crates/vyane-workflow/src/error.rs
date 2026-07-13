@@ -41,18 +41,46 @@ pub enum WorkflowError {
         #[source]
         source: std::io::Error,
     },
-    #[error("failed to parse workflow file {path}: {source}")]
-    ParseWorkflow {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
+    #[error("failed to parse workflow file {path}: invalid TOML")]
+    ParseWorkflow { path: PathBuf },
+    #[error("invalid workflow plan: {reason}")]
+    InvalidWorkflowPlan { reason: String },
     #[error("failed to read prompt file {path}: {source}")]
     ReadPrompt {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
+    #[error("workflow TOML at {path} exceeds the {limit}-byte limit (observed {actual} bytes)")]
+    WorkflowSourceTooLarge {
+        path: PathBuf,
+        limit: usize,
+        actual: u64,
+    },
+    #[error("workflow prompt `{path}` exceeds the {limit}-byte limit (observed {actual} bytes)")]
+    WorkflowPromptTooLarge {
+        path: String,
+        limit: usize,
+        actual: u64,
+    },
+    #[error("workflow source bundle exceeds the {limit}-byte limit (observed {actual} bytes)")]
+    WorkflowSourceBundleTooLarge { limit: usize, actual: usize },
+    #[error("workflow source bundle has {actual} entries; limit is {limit}")]
+    WorkflowSourceTooManyEntries { limit: usize, actual: usize },
+    #[error(
+        "step {step} has an invalid prompt_file path; expected canonical UTF-8 relative components"
+    )]
+    InvalidWorkflowPromptPath { step: usize },
+    #[error("workflow prompt `{path}` resolves outside the workflow directory")]
+    WorkflowPromptPathEscape { path: String },
+    #[error("workflow prompt `{path}` is not a regular file")]
+    WorkflowPromptNotRegular { path: String },
+    #[error("workflow source bundle contains duplicate prompt entry `{path}`")]
+    DuplicateWorkflowPromptEntry { path: String },
+    #[error("workflow source bundle is missing declared prompt entry `{path}`")]
+    MissingWorkflowPromptEntry { path: String },
+    #[error("workflow source bundle contains undeclared prompt entry `{path}`")]
+    ExtraWorkflowPromptEntry { path: String },
     #[error("{0}")]
     Validation(ValidationReport),
     #[error("failed to write workflow journal {path}: {source}")]
@@ -73,6 +101,22 @@ pub enum WorkflowError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("invalid workflow run ID `{value}`: expected a canonical lowercase hyphenated UUIDv7")]
+    InvalidRunId { value: String },
+    #[error(
+        "workflow journal ID mismatch in {path}: requested {requested}, journal contains {actual}"
+    )]
+    JournalIdMismatch {
+        path: PathBuf,
+        requested: String,
+        actual: String,
+    },
+    #[error(
+        "invalid workflow journal filename {path}: expected `<canonical lowercase hyphenated UUIDv7>.json`"
+    )]
+    InvalidJournalFileName { path: PathBuf },
+    #[error("workflow journal already exists for run {wf_run_id} at {path}")]
+    JournalAlreadyExists { path: PathBuf, wf_run_id: String },
     #[error(
         "workflow file hash changed for resume: journal has {expected}, current file is {actual}"
     )]
@@ -87,7 +131,21 @@ impl WorkflowError {
     pub fn is_validation_or_config(&self) -> bool {
         matches!(
             self,
-            WorkflowError::Validation(_) | WorkflowError::WorkflowHashChanged { .. }
+            WorkflowError::Validation(_)
+                | WorkflowError::ParseWorkflow { .. }
+                | WorkflowError::InvalidWorkflowPlan { .. }
+                | WorkflowError::InvalidRunId { .. }
+                | WorkflowError::WorkflowSourceTooLarge { .. }
+                | WorkflowError::WorkflowPromptTooLarge { .. }
+                | WorkflowError::WorkflowSourceBundleTooLarge { .. }
+                | WorkflowError::WorkflowSourceTooManyEntries { .. }
+                | WorkflowError::InvalidWorkflowPromptPath { .. }
+                | WorkflowError::WorkflowPromptPathEscape { .. }
+                | WorkflowError::WorkflowPromptNotRegular { .. }
+                | WorkflowError::DuplicateWorkflowPromptEntry { .. }
+                | WorkflowError::MissingWorkflowPromptEntry { .. }
+                | WorkflowError::ExtraWorkflowPromptEntry { .. }
+                | WorkflowError::WorkflowHashChanged { .. }
         )
     }
 }

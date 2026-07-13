@@ -15,6 +15,7 @@ pub enum Role {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,

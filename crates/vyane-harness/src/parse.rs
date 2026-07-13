@@ -108,6 +108,56 @@ pub(crate) fn parse_claude_json(stdout: &str) -> Parsed {
     }
 }
 
+/// Parse Claude Code `--output-format stream-json` output.
+///
+/// Stream mode emits one JSON object per line. Only the terminal `result`
+/// envelope is authoritative for the final answer, native session id, usage,
+/// and error status; preceding `assistant`/tool events are live telemetry and
+/// must not be returned as the final answer text.
+pub(crate) fn parse_claude_stream_json(stdout: &str) -> Parsed {
+    let mut terminal = None;
+    let mut last_assistant_text = None;
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) == Some("result") {
+            terminal = Some(parse_claude_json(line));
+        } else if event.get("type").and_then(Value::as_str) == Some("assistant") {
+            let text = event
+                .pointer("/message/content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("");
+            if !text.is_empty() {
+                last_assistant_text = Some(text);
+            }
+        }
+    }
+
+    terminal.unwrap_or_else(|| {
+        let detail = last_assistant_text
+            .map(|text| text.chars().take(512).collect::<String>())
+            .map(|text| format!("; last assistant text: {text}"))
+            .unwrap_or_default();
+        Parsed {
+            text: format!("stream ended without a terminal result envelope{detail}"),
+            is_error: true,
+            subtype: Some("missing_result".to_string()),
+            ..Default::default()
+        }
+    })
+}
+
 /// Parse Codex `--json` JSONL events for the native session id and token usage.
 ///
 /// The final answer is NOT taken from here — it comes from the
@@ -259,6 +309,56 @@ mod tests {
         assert_eq!(p.text, "turn limit reached");
         assert!(p.is_error);
         assert_eq!(p.subtype.as_deref(), Some("error_max_turns"));
+    }
+
+    #[test]
+    fn claude_stream_json_uses_terminal_result_envelope() {
+        let out = concat!(
+            "{\"type\":\"system\",\"session_id\":\"ignored\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"live\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,",
+            "\"result\":\"final answer\",\"session_id\":\"session-7\",",
+            "\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":3,",
+            "\"cache_read_input_tokens\":5,\"output_tokens\":7}}\n"
+        );
+
+        let parsed = parse_claude_stream_json(out);
+        assert_eq!(parsed.text, "final answer");
+        assert_eq!(parsed.native_session_id.as_deref(), Some("session-7"));
+        let usage = parsed.usage.unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cached_input_tokens, Some(5));
+    }
+
+    #[test]
+    fn claude_stream_json_uses_last_result_envelope() {
+        let out = concat!(
+            "{\"type\":\"result\",\"result\":\"old\",\"session_id\":\"s1\"}\n",
+            "not-json\n",
+            "{\"type\":\"result\",\"result\":\"new\",\"session_id\":\"s2\"}"
+        );
+
+        let parsed = parse_claude_stream_json(out);
+        assert_eq!(parsed.text, "new");
+        assert_eq!(parsed.native_session_id.as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn claude_stream_json_without_result_is_an_error_with_bounded_context() {
+        let long_partial = "x".repeat(700);
+        let out = format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":{}}}]}}}}\n",
+            serde_json::to_string(&long_partial).unwrap()
+        );
+
+        let parsed = parse_claude_stream_json(&out);
+        assert!(parsed.is_error);
+        assert_eq!(parsed.subtype.as_deref(), Some("missing_result"));
+        assert!(parsed.text.contains("terminal result"));
+        assert!(parsed.text.contains("last assistant text"));
+        assert!(parsed.text.len() < 600, "diagnostic must remain bounded");
+        assert!(!parsed.text.contains(&long_partial));
     }
 
     #[test]

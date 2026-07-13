@@ -13,12 +13,12 @@ use vyane_core::{
     AdapterTransport, BoundTarget, CancellationToken, ChatClient, ChatOutcome, ChatRequest,
     Endpoint, ErrorKind, GenParams, Harness, HarnessJob, HarnessKind, HarnessOutcome, Ledger,
     ModelId, Protocol, ProviderId, Result, RunQuery, RunRecord, SessionRecord, SessionStore,
-    Target, VyaneError,
+    SessionUpdate, Target, VyaneError,
 };
 use vyane_kernel::{Dispatcher, Executor, ExecutorFactory};
 use vyane_workflow::{
-    JournalStepStatus, JournalTargetOutput, TargetResolver, Workflow, WorkflowEngine,
-    WorkflowRunStatus, render_template,
+    JournalStepStatus, JournalTargetOutput, TargetResolver, Workflow, WorkflowEngine, WorkflowPlan,
+    WorkflowRunId, WorkflowRunStatus, render_template,
 };
 
 #[derive(Default)]
@@ -65,6 +65,7 @@ impl Drop for ActiveGuard {
 enum Behaviour {
     Succeed(String),
     Fail(ErrorKind),
+    Panic,
     Delay {
         delay: Duration,
         then: Box<Behaviour>,
@@ -117,6 +118,7 @@ impl ChatClient for MockChat {
                 finish_reason: None,
             }),
             Behaviour::Fail(kind) => Err(VyaneError::new(*kind, format!("mock {kind:?}"))),
+            Behaviour::Panic => panic!("mock step panic"),
             Behaviour::Hang => {
                 pending::<()>().await;
                 unreachable!("cancel should end hanging mock")
@@ -221,15 +223,19 @@ struct MockSessions;
 
 #[async_trait]
 impl SessionStore for MockSessions {
-    async fn load(&self, _session_id: &str) -> Result<Option<SessionRecord>> {
+    async fn load(&self, _owner: &str, _session_id: &str) -> Result<Option<SessionRecord>> {
         Ok(None)
     }
 
-    async fn save(&self, _record: &SessionRecord) -> Result<()> {
+    async fn save(&self, _owner: &str, _record: &SessionRecord) -> Result<()> {
         Ok(())
     }
 
-    async fn list(&self, _owner: Option<&str>) -> Result<Vec<SessionRecord>> {
+    async fn apply_update(&self, _owner: &str, update: &SessionUpdate) -> Result<SessionRecord> {
+        Ok(update.apply_to(None))
+    }
+
+    async fn list(&self, _owner: &str) -> Result<Vec<SessionRecord>> {
         Ok(Vec::new())
     }
 }
@@ -256,6 +262,34 @@ impl TargetResolver for MockResolver {
         self.targets.get(target).cloned().ok_or_else(|| {
             VyaneError::new(ErrorKind::NotFound, format!("unknown target `{target}`"))
         })
+    }
+}
+
+struct CountingResolver {
+    calls: Arc<AtomicUsize>,
+    inner: MockResolver,
+}
+
+impl TargetResolver for CountingResolver {
+    fn resolve(&self, target: &str) -> Result<Vec<BoundTarget>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.resolve(target)
+    }
+}
+
+struct DeferredResolver;
+
+impl TargetResolver for DeferredResolver {
+    fn resolve(&self, target: &str) -> Result<Vec<BoundTarget>> {
+        Ok(vec![http_target("deferred", target)])
+    }
+
+    fn resolve_for_validation(&self, target: &str) -> Result<Option<Vec<BoundTarget>>> {
+        if target == "auto" {
+            Ok(None)
+        } else {
+            self.resolve(target).map(Some)
+        }
     }
 }
 
@@ -313,7 +347,7 @@ fn workflow_engine(
 #[test]
 fn validation_collects_all_requested_problem_types() {
     let dir = TempDir::new().unwrap();
-    let wf = workflow_from(
+    let mut wf = workflow_from(
         &dir,
         r#"
         [workflow]
@@ -344,14 +378,81 @@ fn validation_collects_all_requested_problem_types() {
         prompt = "d"
         "#,
     );
+    wf.max_concurrency = tokio::sync::Semaphore::MAX_PERMITS + 1;
     let resolver = MockResolver::with_targets(&["ok"]);
     let err = vyane_workflow::validate_workflow(&wf, &BTreeMap::new(), &resolver).unwrap_err();
     let text = err.to_string();
     assert!(text.contains("cycle"));
+    assert!(text.contains("max_concurrency must not exceed"));
     assert!(text.contains("unknown variable `missing`"));
     assert!(text.contains("exactly one of `target` or `fan_out`, not both"));
     assert!(text.contains("could not be resolved"));
     assert!(text.contains("not in its transitive needs"));
+}
+
+#[test]
+fn template_ancestor_budget_rejects_long_chain_before_target_resolution() {
+    let dir = TempDir::new().unwrap();
+    let mut source = String::from("[workflow]\nname = \"closure-budget\"\n");
+    for index in 0..400 {
+        source.push_str("\n[[step]]\n");
+        source.push_str(&format!("id = \"n{index:03}\"\n"));
+        if index > 0 {
+            source.push_str(&format!("needs = [\"n{:03}\"]\n", index - 1));
+        }
+        source.push_str("target = \"ok\"\nprompt = \"run\"\n");
+    }
+    let workflow = workflow_from(&dir, &source);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let resolver = CountingResolver {
+        calls: Arc::clone(&calls),
+        inner: MockResolver::with_targets(&["ok"]),
+    };
+
+    let error =
+        vyane_workflow::validate_workflow(&workflow, &BTreeMap::new(), &resolver).unwrap_err();
+    assert!(error.to_string().contains("template ancestor relations"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let plan = workflow.compile_plan().unwrap();
+    let error = vyane_workflow::validate_plan(&plan, &BTreeMap::new(), &resolver).unwrap_err();
+    assert!(error.to_string().contains("template ancestor relations"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn route_hints_fail_closed_for_explicit_and_fan_out_targets() {
+    let dir = TempDir::new().unwrap();
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "route-hint-scope"
+
+        [[step]]
+        id = "explicit"
+        target = "one"
+        prompt = "one"
+        [step.route]
+        effort = "high"
+
+        [[step]]
+        id = "fan"
+        fan_out = ["one", "missing"]
+        prompt = "fan"
+        [step.route]
+        tier = "mainline"
+        "#,
+    );
+    let resolver = MockResolver::with_targets(&["one"]);
+
+    let error = vyane_workflow::validate_workflow(&wf, &BTreeMap::new(), &resolver)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("route hints on a non-deferred target"));
+    assert!(error.contains("route hints on fan_out targets"));
+    assert!(error.contains("fan_out target `missing` could not be resolved"));
 }
 
 #[test]
@@ -465,6 +566,313 @@ async fn diamond_dag_runs_middle_steps_concurrently_and_d_sees_outputs() {
     );
     let prompts = probe.prompts();
     assert!(prompts.iter().any(|prompt| prompt == "d sees B and C"));
+}
+
+#[tokio::test]
+async fn typed_plan_executes_three_finders_then_one_synthesizer() {
+    let dir = TempDir::new().unwrap();
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "typed-plan-3-plus-1"
+        max_concurrency = 3
+
+        [[step]]
+        id = "finders"
+        fan_out = ["finder-a", "finder-b", "finder-c"]
+        prompt = "find evidence"
+
+        [[step]]
+        id = "synth"
+        needs = ["finders"]
+        target = "synth"
+        prompt = "combine {{steps.finders.outputs}}"
+        "#,
+    );
+    let compiled = wf.compile_plan().unwrap();
+    let plan = WorkflowPlan::from_json(&compiled.to_canonical_json().unwrap()).unwrap();
+    assert_eq!(plan, compiled);
+    let factory = MockFactory::new()
+        .on(
+            "finder-a",
+            Behaviour::delayed(Duration::from_millis(40), "A"),
+        )
+        .on(
+            "finder-b",
+            Behaviour::delayed(Duration::from_millis(40), "B"),
+        )
+        .on(
+            "finder-c",
+            Behaviour::delayed(Duration::from_millis(40), "C"),
+        )
+        .on("synth", Behaviour::Succeed("S".to_string()));
+    let (engine, probe) = workflow_engine(
+        factory,
+        MockResolver::with_targets(&["finder-a", "finder-b", "finder-c", "synth"]),
+        &dir.path().join("journals"),
+    );
+
+    let run_id = WorkflowRunId::generate();
+    engine
+        .prepare_plan_with_id(run_id.clone(), &plan, BTreeMap::new())
+        .unwrap();
+    let outcome = engine
+        .run_prepared_plan(run_id.clone(), &plan, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, WorkflowRunStatus::Completed);
+    assert_eq!(
+        outcome.journal.plan_sha256.as_deref(),
+        Some(plan.plan_sha256.as_str())
+    );
+    assert!(probe.max_concurrent() >= 3);
+    assert_eq!(probe.call_count("finder-a"), 1);
+    assert_eq!(probe.call_count("finder-b"), 1);
+    assert_eq!(probe.call_count("finder-c"), 1);
+    assert_eq!(probe.call_count("synth"), 1);
+    let prompts = probe.prompts();
+    let synth = prompts
+        .iter()
+        .find(|prompt| prompt.starts_with("combine "))
+        .unwrap();
+    assert!(synth.contains("## finder-a\nA"));
+    assert!(synth.contains("## finder-b\nB"));
+    assert!(synth.contains("## finder-c\nC"));
+
+    let resumed = engine
+        .resume_plan(run_id.as_str(), &plan, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(resumed.journal.plan_sha256, Some(plan.plan_sha256.clone()));
+    assert_eq!(probe.call_count("synth"), 1, "successful steps are reused");
+}
+
+#[tokio::test]
+async fn plan_only_continuations_require_digest_before_resolution_or_dispatch() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "plan-binding"
+
+        [[step]]
+        id = "only"
+        target = "ok"
+        prompt = "run"
+        "#,
+    );
+    let plan = wf.compile_plan().unwrap();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let factory = factory_ok();
+    let probe = factory.probe();
+    let engine = WorkflowEngine::new(
+        dispatcher(factory.into_arc()),
+        Arc::new(CountingResolver {
+            calls: Arc::clone(&resolver_calls),
+            inner: MockResolver::with_targets(&["ok"]),
+        }),
+        journal_dir.clone(),
+    );
+
+    for resume in [false, true] {
+        let run_id = WorkflowRunId::generate();
+        engine
+            .prepare_plan_with_id(run_id.clone(), &plan, BTreeMap::new())
+            .unwrap();
+        resolver_calls.store(0, Ordering::SeqCst);
+        let path = journal_dir.join(format!("{run_id}.json"));
+        let mut journal: vyane_workflow::WorkflowJournal =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        journal.plan_sha256 = None;
+        std::fs::write(&path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
+
+        let error = if resume {
+            engine
+                .resume_plan(run_id.as_str(), &plan, CancellationToken::new())
+                .await
+                .unwrap_err()
+        } else {
+            engine
+                .run_prepared_plan(run_id, &plan, CancellationToken::new())
+                .await
+                .unwrap_err()
+        };
+        assert!(error.to_string().contains("not bound to a plan digest"));
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.call_count("ok"), 0);
+    }
+}
+
+#[tokio::test]
+async fn workflow_prepared_compatibility_migrates_missing_plan_digest_after_source_check() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "compat-binding"
+        [[step]]
+        id = "only"
+        target = "ok"
+        prompt = "run"
+        "#,
+    );
+    let expected_digest = wf.compile_plan().unwrap().plan_sha256;
+    let (engine, probe) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        &journal_dir,
+    );
+    let run_id = WorkflowRunId::generate();
+    engine
+        .prepare_run_with_id(run_id.clone(), &wf, BTreeMap::new())
+        .unwrap();
+    let path = journal_dir.join(format!("{run_id}.json"));
+    let mut journal: vyane_workflow::WorkflowJournal =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    journal.plan_sha256 = None;
+    std::fs::write(&path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
+
+    let outcome = engine
+        .run_prepared(run_id, &wf, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(outcome.journal.plan_sha256, Some(expected_digest));
+    assert_eq!(probe.call_count("ok"), 1);
+}
+
+#[tokio::test]
+async fn programmatic_workflow_split_continuations_use_derived_source_digest() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let base = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "programmatic-split"
+        [[step]]
+        id = "only"
+        target = "ok"
+        prompt = "run"
+        "#,
+    );
+    let (engine, probe) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        &journal_dir,
+    );
+
+    for (index, file_sha256) in ["", "not-a-source-sha"].into_iter().enumerate() {
+        let mut workflow = base.clone();
+        workflow.file_path = std::path::PathBuf::new();
+        workflow.file_sha256 = file_sha256.into();
+        workflow.legacy_file_sha256 = None;
+        let plan = workflow.compile_plan().unwrap();
+        assert_ne!(plan.source_sha256, workflow.file_sha256);
+
+        let run_id = WorkflowRunId::generate();
+        engine
+            .prepare_run_with_id(run_id.clone(), &workflow, BTreeMap::new())
+            .unwrap();
+        let first = engine
+            .run_prepared(run_id.clone(), &workflow, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(first.journal.file_sha256, plan.source_sha256);
+        assert_eq!(first.journal.plan_sha256, Some(plan.plan_sha256.clone()));
+
+        let resumed = engine
+            .resume(run_id.as_str(), &workflow, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(resumed.journal.file_sha256, plan.source_sha256);
+        assert_eq!(
+            probe.call_count("ok"),
+            index + 1,
+            "resume must reuse the successful step"
+        );
+    }
+}
+
+#[tokio::test]
+async fn workflow_run_preserves_prepare_and_execute_validation_phases() {
+    let dir = TempDir::new().unwrap();
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "single-validation"
+        [[step]]
+        id = "only"
+        target = "ok"
+        prompt = "run"
+        "#,
+    );
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let factory = factory_ok();
+    let engine = WorkflowEngine::new(
+        dispatcher(factory.into_arc()),
+        Arc::new(CountingResolver {
+            calls: Arc::clone(&resolver_calls),
+            inner: MockResolver::with_targets(&["ok"]),
+        }),
+        dir.path().join("journals"),
+    );
+
+    engine
+        .run(&wf, BTreeMap::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn tampered_plan_is_rejected_before_resolution_or_dispatch() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "tamper"
+        [[step]]
+        id = "only"
+        target = "ok"
+        prompt = "run"
+        "#,
+    );
+    let plan = wf.compile_plan().unwrap();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let factory = factory_ok();
+    let probe = factory.probe();
+    let engine = WorkflowEngine::new(
+        dispatcher(factory.into_arc()),
+        Arc::new(CountingResolver {
+            calls: Arc::clone(&resolver_calls),
+            inner: MockResolver::with_targets(&["ok"]),
+        }),
+        journal_dir,
+    );
+    let run_id = WorkflowRunId::generate();
+    engine
+        .prepare_plan_with_id(run_id.clone(), &plan, BTreeMap::new())
+        .unwrap();
+    resolver_calls.store(0, Ordering::SeqCst);
+    let mut tampered = plan;
+    tampered.steps[0].prompt_template = "changed".into();
+
+    let error = engine
+        .run_prepared_plan(run_id, &tampered, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("digest does not match"));
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.call_count("ok"), 0);
 }
 
 #[tokio::test]
@@ -663,6 +1071,45 @@ async fn cancellation_mid_flight_marks_journal_cancelled() {
     );
 }
 
+/// A panic inside a step must propagate to the workflow caller instead of being
+/// converted through a detached JoinHandle into a fake `<join-error>` step. The
+/// old path could leave the real step in `running`, exhaust the futures set, and
+/// then incorrectly persist the whole workflow as `completed`.
+#[tokio::test]
+async fn step_panic_is_never_misreported_as_completed() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "panic"
+
+        [[step]]
+        id = "boom"
+        target = "boom"
+        prompt = "boom"
+        "#,
+    );
+    let (engine, _probe) = workflow_engine(
+        MockFactory::new().on("boom", Behaviour::Panic),
+        MockResolver::with_targets(&["boom"]),
+        &journal_dir,
+    );
+
+    let handle = tokio::spawn(async move {
+        engine
+            .run(&wf, BTreeMap::new(), CancellationToken::new())
+            .await
+    });
+    let error = handle.await.expect_err("step panic must propagate");
+    assert!(error.is_panic());
+
+    let journals = vyane_workflow::list_journals(&journal_dir).unwrap();
+    assert_eq!(journals.len(), 1);
+    assert_eq!(journals[0].status, WorkflowRunStatus::Running);
+}
+
 #[tokio::test]
 async fn resume_skips_successes_reruns_failed_and_refuses_changed_hash() {
     let dir = TempDir::new().unwrap();
@@ -745,6 +1192,195 @@ async fn resume_skips_successes_reruns_failed_and_refuses_changed_hash() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("workflow file hash changed"));
+}
+
+#[tokio::test]
+async fn prepared_journal_rejects_route_effort_drift_before_dispatch() {
+    let dir = TempDir::new().unwrap();
+    let path = write_workflow(
+        &dir,
+        r#"
+        [workflow]
+        name = "effort-replay-freeze"
+
+        [[step]]
+        id = "only"
+        target = "auto"
+        prompt = "run"
+        [step.route]
+        effort = "high"
+        "#,
+    );
+    let original = Workflow::from_path(&path).unwrap();
+    let journal_dir = dir.path().join("journals");
+    let factory = MockFactory::new();
+    let probe = factory.probe();
+    let engine = WorkflowEngine::new(
+        dispatcher(factory.into_arc()),
+        Arc::new(DeferredResolver),
+        journal_dir,
+    );
+    let run_id = WorkflowRunId::generate();
+    engine
+        .prepare_run_with_id(run_id.clone(), &original, BTreeMap::new())
+        .unwrap();
+
+    let changed_source = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("effort = \"high\"", "effort = \"low\"");
+    std::fs::write(&path, changed_source).unwrap();
+    let changed = Workflow::from_path(&path).unwrap();
+    let error = engine
+        .run_prepared(run_id, &changed, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("workflow file hash changed"));
+    assert_eq!(probe.call_count("auto"), 0);
+}
+
+#[tokio::test]
+async fn resume_accepts_an_exact_legacy_hash_once_and_migrates_it_to_v1() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "legacy-migration"
+
+        [[step]]
+        id = "only"
+        target = "ok"
+        prompt = "run"
+        "#,
+    );
+    let legacy = wf
+        .legacy_file_sha256
+        .clone()
+        .expect("filesystem workflows carry their exact legacy hash");
+    assert_ne!(legacy, wf.file_sha256);
+    let (engine, probe) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        &journal_dir,
+    );
+    let run_id = WorkflowRunId::generate();
+    engine
+        .prepare_run_with_id(run_id.clone(), &wf, BTreeMap::new())
+        .unwrap();
+    let path = journal_dir.join(format!("{run_id}.json"));
+    let mut journal: vyane_workflow::WorkflowJournal =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    journal.file_sha256 = legacy;
+    journal.plan_sha256 = None;
+    std::fs::write(&path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
+
+    let outcome = engine
+        .resume(run_id.as_str(), &wf, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, WorkflowRunStatus::Completed);
+    assert_eq!(probe.call_count("ok"), 1);
+    let migrated = vyane_workflow::read_journal(&journal_dir, run_id.as_str()).unwrap();
+    assert_eq!(migrated.file_sha256, wf.file_sha256);
+    assert_eq!(
+        migrated.plan_sha256,
+        Some(wf.compile_plan().unwrap().plan_sha256)
+    );
+}
+
+#[tokio::test]
+async fn caller_supplied_run_id_is_the_persisted_journal_identity() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "caller-id"
+
+        [[step]]
+        id = "only"
+        target = "ok"
+        prompt = "run"
+        "#,
+    );
+    let (engine, probe) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        &journal_dir,
+    );
+    let run_id: WorkflowRunId = "01890f3e-7b7c-7cc2-98d2-3f9a2b6c7d8e".parse().unwrap();
+
+    let outcome = engine
+        .run_with_id(
+            run_id.clone(),
+            &wf,
+            BTreeMap::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.wf_run_id, run_id);
+    assert_eq!(outcome.journal.wf_run_id, outcome.wf_run_id);
+    assert_eq!(
+        outcome
+            .journal_path
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("01890f3e-7b7c-7cc2-98d2-3f9a2b6c7d8e.json")
+    );
+    let persisted = vyane_workflow::read_journal(&journal_dir, outcome.wf_run_id.as_str()).unwrap();
+    assert_eq!(persisted.wf_run_id, outcome.wf_run_id);
+
+    let before = std::fs::read(&outcome.journal_path).unwrap();
+    let error = engine
+        .run_with_id(run_id, &wf, BTreeMap::new(), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        vyane_workflow::WorkflowError::JournalAlreadyExists { .. }
+    ));
+    assert_eq!(probe.call_count("ok"), 1);
+    assert_eq!(std::fs::read(&outcome.journal_path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn resume_rejects_traversal_before_reading_a_journal_path() {
+    let dir = TempDir::new().unwrap();
+    let journal_dir = dir.path().join("journals");
+    let wf = workflow_from(
+        &dir,
+        r#"
+        [workflow]
+        name = "resume-id"
+
+        [[step]]
+        id = "only"
+        target = "ok"
+        prompt = "run"
+        "#,
+    );
+    let (engine, _) = workflow_engine(
+        factory_ok(),
+        MockResolver::with_targets(&["ok"]),
+        &journal_dir,
+    );
+
+    let error = engine
+        .resume("../outside", &wf, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        vyane_workflow::WorkflowError::InvalidRunId { .. }
+    ));
+    assert!(!journal_dir.exists());
 }
 
 /// Helper: a MockFactory that returns "OK" for any model.

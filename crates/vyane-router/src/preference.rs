@@ -9,6 +9,12 @@ use crate::decision::{RouteEffort, RouteTier};
 /// instead of the default fallback.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RouteTargetPreference {
+    /// Opaque caller-owned identity for this preference. The router never
+    /// interprets it; it only copies it into the resulting `RouteDecision` so
+    /// adapters can recover an exact target/profile without reverse-mapping a
+    /// potentially non-unique provider/model pair.
+    #[serde(default)]
+    pub selection_key: String,
     pub provider: String,
     #[serde(default)]
     pub model: String,
@@ -111,6 +117,7 @@ mod tests {
 
     fn pref(provider: &str) -> RouteTargetPreference {
         RouteTargetPreference {
+            selection_key: String::new(),
             provider: provider.into(),
             model: String::new(),
             effort: String::new(),

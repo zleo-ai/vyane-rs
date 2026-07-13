@@ -11,20 +11,30 @@ rust-version.workspace = true
 
 [dependencies]
 vyane-core = { workspace = true }
+vyane-agent = { workspace = true }
 vyane-config = { workspace = true }
 vyane-protocol = { workspace = true }
 vyane-harness = { workspace = true }
 vyane-kernel = { workspace = true }
 vyane-ledger = { workspace = true }
+vyane-message = { workspace = true }
+vyane-broker = { workspace = true }
 vyane-router = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
+futures = { workspace = true }
+getrandom = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+static_assertions = { workspace = true }
+tempfile = { workspace = true }
+vyane-provider = { workspace = true }
 
 [lints]
 # `unsafe_code` stays denied — the service layer never touches raw process control.
