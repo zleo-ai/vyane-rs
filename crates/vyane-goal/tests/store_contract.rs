@@ -77,33 +77,41 @@ fn lifecycle_updates_snapshot_and_appends_revision_ordered_events() {
         .expect("resume");
     assert_eq!(resumed.status, GoalStatus::InProgress);
 
+    for index in 0..2 {
+        store
+            .satisfy_criterion(OWNER_A, &created.id, index, base + TimeDelta::seconds(5))
+            .expect("satisfy criterion");
+    }
+
     let completed = store
         .done(
             OWNER_A,
             &created.id,
             Some("all checks passed"),
-            base + TimeDelta::seconds(5),
+            None,
+            base + TimeDelta::seconds(6),
         )
         .expect("complete");
     assert_eq!(completed.status, GoalStatus::Completed);
-    assert_eq!(completed.revision, 5);
+    assert_eq!(completed.revision, 7);
     assert_eq!(
         completed.completion_summary.as_deref(),
         Some("all checks passed")
     );
-    assert_eq!(completed.finished_at, Some(base + TimeDelta::seconds(5)));
+    assert_eq!(completed.finished_at, Some(base + TimeDelta::seconds(6)));
 
     let events = store.events(OWNER_A, &created.id).expect("events");
-    assert_eq!(events.len(), 6);
+    assert_eq!(events.len(), 8);
     assert_eq!(
         events
             .iter()
             .map(|event| event.revision)
             .collect::<Vec<_>>(),
-        [0, 1, 2, 3, 4, 5]
+        [0, 1, 2, 3, 4, 5, 6, 7]
     );
     assert_eq!(events[0].from_status, None);
-    assert_eq!(events[5].to_status, GoalStatus::Completed);
+    assert_eq!(events[5].kind, GoalEventKind::CriterionSatisfied);
+    assert_eq!(events[7].to_status, GoalStatus::Completed);
 }
 
 #[test]
@@ -218,7 +226,9 @@ fn illegal_terminal_transition_is_rejected_without_an_event() {
         .create(OWNER_A, new_goal("terminal", "Terminal", 2, at))
         .expect("create");
     store.start(OWNER_A, "terminal", at).expect("start");
-    store.done(OWNER_A, "terminal", None, at).expect("complete");
+    store
+        .done(OWNER_A, "terminal", None, None, at)
+        .expect("complete");
 
     assert!(matches!(
         store.fail(OWNER_A, "terminal", "too late", at),
@@ -343,7 +353,7 @@ fn store_reopens_and_rejects_newer_schema() {
         SqliteGoalStore::open(&path),
         Err(GoalStoreError::UnsupportedSchema {
             found: 99,
-            supported: 1
+            supported: 2
         })
     ));
 }

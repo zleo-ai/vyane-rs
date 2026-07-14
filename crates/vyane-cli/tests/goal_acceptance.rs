@@ -130,6 +130,30 @@ fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
         ],
         vec![
             "goal",
+            "satisfy",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "goal-public",
+            "--index",
+            "0",
+        ],
+        vec![
+            "goal",
+            "satisfy",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "goal-public",
+            "--index",
+            "1",
+        ],
+        vec![
+            "goal",
             "done",
             "--db",
             &db,
@@ -158,10 +182,122 @@ fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
         0,
     );
     assert_eq!(detail["goal"]["status"], "completed");
-    assert_eq!(detail["goal"]["revision"], 5);
+    assert_eq!(detail["goal"]["revision"], 7);
     assert_eq!(detail["goal"]["completion_summary"], "verified");
-    assert_eq!(detail["events"].as_array().unwrap().len(), 6);
+    assert!(detail["goal"]["acceptance_criteria"][0]["satisfied_at"].is_string());
+    assert!(detail["goal"]["acceptance_criteria"][1]["satisfied_at"].is_string());
+    assert_eq!(detail["events"].as_array().unwrap().len(), 8);
     assert_eq!(detail["events"][2]["stage"], "implementation");
+}
+
+#[test]
+fn done_requires_satisfied_criteria_or_an_explicit_waiver() {
+    let directory = TempDir::new().unwrap();
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let created = json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--id",
+            "gated",
+            "--title",
+            "Gated goal",
+            "--acceptance",
+            "test-passes:workspace",
+        ],
+        0,
+    );
+    assert_eq!(created["status"], "success");
+    json_output(
+        &[
+            "goal", "start", "--db", &db, "--owner", "owner-a", "--json", "gated",
+        ],
+        0,
+    );
+
+    let refused = json_output(
+        &[
+            "goal", "done", "--db", &db, "--owner", "owner-a", "--json", "gated",
+        ],
+        2,
+    );
+    assert_eq!(refused["status"], "error");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsatisfied acceptance criteria")
+    );
+
+    let waived = json_output(
+        &[
+            "goal",
+            "done",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "gated",
+            "--waive",
+            "manual override for test",
+        ],
+        0,
+    );
+    assert_eq!(waived["goal"]["status"], "completed");
+    assert!(waived["goal"]["acceptance_criteria"][0]["satisfied_at"].is_null());
+}
+
+#[test]
+fn claim_holds_a_lease_that_blocks_other_workers() {
+    let directory = TempDir::new().unwrap();
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    create(&db, "owner-a", "leased", "Leased", "1");
+
+    let claimed = json_output(
+        &[
+            "goal",
+            "claim-next",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--worker",
+            "worker-1",
+            "--lease-seconds",
+            "600",
+        ],
+        0,
+    );
+    assert_eq!(claimed["goal"]["id"], "leased");
+    assert_eq!(claimed["goal"]["status"], "in_progress");
+    assert_eq!(claimed["goal"]["claimed_by"], "worker-1");
+    assert_eq!(claimed["goal"]["claim_generation"], 1);
+
+    let refused = json_output(
+        &[
+            "goal", "claim", "--db", &db, "--owner", "owner-a", "--json", "leased", "--worker",
+            "worker-2",
+        ],
+        2,
+    );
+    assert_eq!(refused["status"], "error");
+    assert!(refused["error"].as_str().unwrap().contains("worker-1"));
+
+    let renewed = json_output(
+        &[
+            "goal", "renew", "--db", &db, "--owner", "owner-a", "--json", "leased", "--worker",
+            "worker-1",
+        ],
+        0,
+    );
+    assert_eq!(renewed["goal"]["claimed_by"], "worker-1");
 }
 
 #[test]

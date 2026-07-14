@@ -64,7 +64,12 @@ impl FromStr for GoalStatus {
 pub enum GoalEventKind {
     Created,
     Started,
+    Claimed,
+    LeaseRenewed,
+    Reclaimed,
     Progress,
+    CriterionSatisfied,
+    CriteriaWaived,
     Paused,
     Resumed,
     Completed,
@@ -77,7 +82,12 @@ impl GoalEventKind {
         match self {
             Self::Created => "created",
             Self::Started => "started",
+            Self::Claimed => "claimed",
+            Self::LeaseRenewed => "lease_renewed",
+            Self::Reclaimed => "reclaimed",
             Self::Progress => "progress",
+            Self::CriterionSatisfied => "criterion_satisfied",
+            Self::CriteriaWaived => "criteria_waived",
             Self::Paused => "paused",
             Self::Resumed => "resumed",
             Self::Completed => "completed",
@@ -94,7 +104,12 @@ impl FromStr for GoalEventKind {
         match value {
             "created" => Ok(Self::Created),
             "started" => Ok(Self::Started),
+            "claimed" => Ok(Self::Claimed),
+            "lease_renewed" => Ok(Self::LeaseRenewed),
+            "reclaimed" => Ok(Self::Reclaimed),
             "progress" => Ok(Self::Progress),
+            "criterion_satisfied" => Ok(Self::CriterionSatisfied),
+            "criteria_waived" => Ok(Self::CriteriaWaived),
             "paused" => Ok(Self::Paused),
             "resumed" => Ok(Self::Resumed),
             "completed" => Ok(Self::Completed),
@@ -199,6 +214,20 @@ pub struct GoalRecord {
     pub failure_reason: Option<String>,
     pub pause_reason: Option<String>,
     pub cancel_reason: Option<String>,
+    /// Worker currently holding the execution lease, if any.
+    pub claimed_by: Option<String>,
+    /// Instant the current lease lapses; meaningful only while `claimed_by` is set.
+    pub claim_expires_at: Option<DateTime<Utc>>,
+    /// Fencing token: increments on every successful claim or reclaim.
+    pub claim_generation: u64,
+}
+
+impl GoalRecord {
+    /// Whether an unexpired execution lease is held at instant `now`.
+    #[must_use]
+    pub fn lease_active(&self, now: DateTime<Utc>) -> bool {
+        self.claimed_by.is_some() && self.claim_expires_at.is_some_and(|expiry| expiry > now)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,8 +274,24 @@ impl GoalQuery {
     }
 }
 
+/// Longest lease a worker may request, in seconds (one day).
+pub const MAX_LEASE_SECONDS: u64 = 86_400;
+
 pub(crate) fn validate_owner(owner: &str) -> Result<()> {
     validate_text("owner", owner, 256)
+}
+
+pub(crate) fn validate_worker(worker: &str) -> Result<()> {
+    validate_text("worker id", worker, 256)
+}
+
+pub(crate) fn validate_lease_seconds(lease_seconds: u64) -> Result<()> {
+    if lease_seconds == 0 || lease_seconds > MAX_LEASE_SECONDS {
+        return Err(GoalStoreError::InvalidInput(format!(
+            "lease seconds must be between 1 and {MAX_LEASE_SECONDS}"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_goal_id(id: &str) -> Result<()> {
