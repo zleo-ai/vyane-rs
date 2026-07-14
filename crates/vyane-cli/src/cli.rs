@@ -86,12 +86,22 @@ pub enum GoalCommand {
     Next(GoalNextArgs),
     /// Move a queued or paused goal to in_progress.
     Start(GoalIdArgs),
+    /// Atomically claim a queued goal for a worker under a lease.
+    Claim(GoalClaimArgs),
+    /// Atomically select and claim the highest-priority queued goal.
+    ClaimNext(GoalClaimNextArgs),
+    /// Heartbeat: extend the lease currently held by a worker.
+    Renew(GoalClaimArgs),
+    /// Take over a goal whose lease has expired.
+    Reclaim(GoalClaimArgs),
+    /// Record that an acceptance criterion was actually verified.
+    Satisfy(GoalSatisfyArgs),
     /// Append a progress event without changing lifecycle state.
     Progress(GoalProgressArgs),
-    /// Pause an in-progress goal.
+    /// Pause an in-progress goal; releases any lease (holder-only while leased).
     Pause(GoalReasonArgs),
-    /// Resume a paused goal.
-    Resume(GoalIdArgs),
+    /// Resume a paused goal; resumed goals are always unleased.
+    Resume(GoalResumeArgs),
     /// Mark an in-progress goal completed.
     Done(GoalDoneArgs),
     /// Mark an in-progress goal failed.
@@ -211,6 +221,20 @@ pub struct GoalReasonArgs {
     /// Optional pause or cancellation reason.
     #[arg(long)]
     pub reason: Option<String>,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalResumeArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -222,6 +246,52 @@ pub struct GoalDoneArgs {
     /// Optional completion summary.
     #[arg(long)]
     pub summary: Option<String>,
+    /// Explicitly waive unsatisfied acceptance criteria, recording an audit event.
+    #[arg(long, value_name = "REASON")]
+    pub waive: Option<String>,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalClaimArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+    /// Caller-supplied worker identity; not authenticated authority.
+    #[arg(long)]
+    pub worker: String,
+    /// Lease duration in seconds before the claim can be reclaimed.
+    #[arg(long, default_value_t = 300)]
+    pub lease_seconds: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalClaimNextArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Caller-supplied worker identity; not authenticated authority.
+    #[arg(long)]
+    pub worker: String,
+    /// Lease duration in seconds before the claim can be reclaimed.
+    #[arg(long, default_value_t = 300)]
+    pub lease_seconds: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalSatisfyArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+    /// Zero-based acceptance criterion index.
+    #[arg(long)]
+    pub index: usize,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -233,6 +303,9 @@ pub struct GoalFailArgs {
     /// Required failure reason.
     #[arg(long)]
     pub reason: String,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Args)]

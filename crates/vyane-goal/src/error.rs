@@ -19,6 +19,15 @@ pub enum GoalStoreError {
         status: GoalStatus,
     },
 
+    #[error("goal `{id}` is claimed by `{held_by}` under an active lease")]
+    LeaseHeld { id: String, held_by: String },
+
+    #[error("lease on goal `{id}` has expired; reclaim it before continuing")]
+    LeaseExpired { id: String },
+
+    #[error("goal `{id}` still has {remaining} unsatisfied acceptance criteria")]
+    CriteriaUnsatisfied { id: String, remaining: usize },
+
     #[error("invalid goal metadata: {0}")]
     InvalidInput(String),
 

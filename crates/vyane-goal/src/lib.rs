@@ -11,7 +11,8 @@ mod store;
 
 pub use error::{GoalStoreError, Result};
 pub use model::{
-    AcceptanceCriterion, GoalEvent, GoalEventKind, GoalQuery, GoalRecord, GoalStatus, NewGoal,
+    AcceptanceCriterion, GoalEvent, GoalEventKind, GoalQuery, GoalRecord, GoalStatus,
+    MAX_LEASE_SECONDS, NewGoal,
 };
 pub use sqlite::{SCHEMA_VERSION, SqliteGoalStore};
 pub use store::GoalStore;

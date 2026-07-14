@@ -12,8 +12,9 @@ use vyane_goal::{
 
 use crate::app::StoragePaths;
 use crate::cli::{
-    GoalCommand, GoalCommonArgs, GoalCreateArgs, GoalDoneArgs, GoalFailArgs, GoalGetArgs,
-    GoalIdArgs, GoalListArgs, GoalNextArgs, GoalProgressArgs, GoalReasonArgs, GoalStatusArg,
+    GoalClaimArgs, GoalClaimNextArgs, GoalCommand, GoalCommonArgs, GoalCreateArgs, GoalDoneArgs,
+    GoalFailArgs, GoalGetArgs, GoalIdArgs, GoalListArgs, GoalNextArgs, GoalProgressArgs,
+    GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs, GoalStatusArg,
 };
 
 #[derive(Debug, Serialize)]
@@ -88,6 +89,11 @@ fn run_inner(command: GoalCommand) -> Result<ExitCode> {
         GoalCommand::List(args) => list(args),
         GoalCommand::Next(args) => next(args),
         GoalCommand::Start(args) => start(args),
+        GoalCommand::Claim(args) => claim(args),
+        GoalCommand::ClaimNext(args) => claim_next(args),
+        GoalCommand::Renew(args) => renew(args),
+        GoalCommand::Reclaim(args) => reclaim(args),
+        GoalCommand::Satisfy(args) => satisfy(args),
         GoalCommand::Progress(args) => progress(args),
         GoalCommand::Pause(args) => pause(args),
         GoalCommand::Resume(args) => resume(args),
@@ -199,6 +205,84 @@ fn start(args: GoalIdArgs) -> Result<ExitCode> {
     print_goal_result(&args.common, &db, goal)
 }
 
+fn claim(args: GoalClaimArgs) -> Result<ExitCode> {
+    let (store, db) = open_store(&args.common)?;
+    let goal = store
+        .claim(
+            &args.common.owner,
+            &args.id,
+            &args.worker,
+            args.lease_seconds,
+            Utc::now(),
+        )
+        .context("claim goal")?;
+    print_goal_result(&args.common, &db, goal)
+}
+
+fn claim_next(args: GoalClaimNextArgs) -> Result<ExitCode> {
+    let (store, db) = open_store(&args.common)?;
+    let goal = store
+        .claim_next(
+            &args.common.owner,
+            &args.worker,
+            args.lease_seconds,
+            Utc::now(),
+        )
+        .context("claim next queued goal")?;
+    if args.common.json {
+        print_json(&GoalNextOutput {
+            status: "success",
+            goal,
+            db: path_text(&db),
+        })?;
+    } else if let Some(goal) = goal {
+        print_goal_line(&goal)?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn renew(args: GoalClaimArgs) -> Result<ExitCode> {
+    let (store, db) = open_store(&args.common)?;
+    let goal = store
+        .renew_lease(
+            &args.common.owner,
+            &args.id,
+            &args.worker,
+            args.lease_seconds,
+            Utc::now(),
+        )
+        .context("renew goal lease")?;
+    print_goal_result(&args.common, &db, goal)
+}
+
+fn reclaim(args: GoalClaimArgs) -> Result<ExitCode> {
+    let (store, db) = open_store(&args.common)?;
+    let goal = store
+        .reclaim(
+            &args.common.owner,
+            &args.id,
+            &args.worker,
+            args.lease_seconds,
+            Utc::now(),
+        )
+        .context("reclaim goal")?;
+    print_goal_result(&args.common, &db, goal)
+}
+
+fn satisfy(args: GoalSatisfyArgs) -> Result<ExitCode> {
+    let (store, db) = open_store(&args.common)?;
+    let goal = store
+        .satisfy_criterion(
+            &args.common.owner,
+            &args.id,
+            args.worker.as_deref(),
+            args.index,
+            Utc::now(),
+        )
+        .context("satisfy acceptance criterion")?;
+    print_goal_result(&args.common, &db, goal)
+}
+
 fn progress(args: GoalProgressArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
     let event = store
@@ -230,6 +314,7 @@ fn pause(args: GoalReasonArgs) -> Result<ExitCode> {
         .pause(
             &args.common.owner,
             &args.id,
+            args.worker.as_deref(),
             args.reason.as_deref(),
             Utc::now(),
         )
@@ -237,10 +322,15 @@ fn pause(args: GoalReasonArgs) -> Result<ExitCode> {
     print_goal_result(&args.common, &db, goal)
 }
 
-fn resume(args: GoalIdArgs) -> Result<ExitCode> {
+fn resume(args: GoalResumeArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
     let goal = store
-        .resume(&args.common.owner, &args.id, Utc::now())
+        .resume(
+            &args.common.owner,
+            &args.id,
+            args.worker.as_deref(),
+            Utc::now(),
+        )
         .context("resume goal")?;
     print_goal_result(&args.common, &db, goal)
 }
@@ -251,7 +341,9 @@ fn done(args: GoalDoneArgs) -> Result<ExitCode> {
         .done(
             &args.common.owner,
             &args.id,
+            args.worker.as_deref(),
             args.summary.as_deref(),
+            args.waive.as_deref(),
             Utc::now(),
         )
         .context("complete goal")?;
@@ -261,7 +353,13 @@ fn done(args: GoalDoneArgs) -> Result<ExitCode> {
 fn fail(args: GoalFailArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
     let goal = store
-        .fail(&args.common.owner, &args.id, &args.reason, Utc::now())
+        .fail(
+            &args.common.owner,
+            &args.id,
+            args.worker.as_deref(),
+            &args.reason,
+            Utc::now(),
+        )
         .context("fail goal")?;
     print_goal_result(&args.common, &db, goal)
 }
@@ -272,6 +370,7 @@ fn cancel(args: GoalReasonArgs) -> Result<ExitCode> {
         .cancel(
             &args.common.owner,
             &args.id,
+            args.worker.as_deref(),
             args.reason.as_deref(),
             Utc::now(),
         )
@@ -348,6 +447,11 @@ fn common(command: &GoalCommand) -> &GoalCommonArgs {
         GoalCommand::List(args) => &args.common,
         GoalCommand::Next(args) => &args.common,
         GoalCommand::Start(args) => &args.common,
+        GoalCommand::Claim(args) | GoalCommand::Renew(args) | GoalCommand::Reclaim(args) => {
+            &args.common
+        }
+        GoalCommand::ClaimNext(args) => &args.common,
+        GoalCommand::Satisfy(args) => &args.common,
         GoalCommand::Progress(args) => &args.common,
         GoalCommand::Pause(args) => &args.common,
         GoalCommand::Resume(args) => &args.common,
@@ -377,7 +481,12 @@ const fn event_kind_text(kind: vyane_goal::GoalEventKind) -> &'static str {
     match kind {
         vyane_goal::GoalEventKind::Created => "created",
         vyane_goal::GoalEventKind::Started => "started",
+        vyane_goal::GoalEventKind::Claimed => "claimed",
+        vyane_goal::GoalEventKind::LeaseRenewed => "lease_renewed",
+        vyane_goal::GoalEventKind::Reclaimed => "reclaimed",
         vyane_goal::GoalEventKind::Progress => "progress",
+        vyane_goal::GoalEventKind::CriterionSatisfied => "criterion_satisfied",
+        vyane_goal::GoalEventKind::CriteriaWaived => "criteria_waived",
         vyane_goal::GoalEventKind::Paused => "paused",
         vyane_goal::GoalEventKind::Resumed => "resumed",
         vyane_goal::GoalEventKind::Completed => "completed",
