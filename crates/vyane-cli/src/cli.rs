@@ -98,10 +98,10 @@ pub enum GoalCommand {
     Satisfy(GoalSatisfyArgs),
     /// Append a progress event without changing lifecycle state.
     Progress(GoalProgressArgs),
-    /// Pause an in-progress goal.
+    /// Pause an in-progress goal; releases any lease (holder-only while leased).
     Pause(GoalReasonArgs),
-    /// Resume a paused goal.
-    Resume(GoalIdArgs),
+    /// Resume a paused goal; resumed goals are always unleased.
+    Resume(GoalResumeArgs),
     /// Mark an in-progress goal completed.
     Done(GoalDoneArgs),
     /// Mark an in-progress goal failed.
@@ -221,6 +221,20 @@ pub struct GoalReasonArgs {
     /// Optional pause or cancellation reason.
     #[arg(long)]
     pub reason: Option<String>,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalResumeArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -235,6 +249,9 @@ pub struct GoalDoneArgs {
     /// Explicitly waive unsatisfied acceptance criteria, recording an audit event.
     #[arg(long, value_name = "REASON")]
     pub waive: Option<String>,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -272,6 +289,9 @@ pub struct GoalSatisfyArgs {
     /// Zero-based acceptance criterion index.
     #[arg(long)]
     pub index: usize,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -283,6 +303,9 @@ pub struct GoalFailArgs {
     /// Required failure reason.
     #[arg(long)]
     pub reason: String,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -234,6 +234,41 @@ fn grant_lease(
     Ok(())
 }
 
+/// Fence for every non-claim write path: while an active lease is held, only
+/// the holder may mutate the goal. A stale worker whose lease was reclaimed
+/// (its `claim_generation` superseded) no longer matches `claimed_by` and is
+/// rejected, as is any anonymous caller.
+fn ensure_lease_holder(
+    record: &GoalRecord,
+    worker_id: Option<&str>,
+    at: DateTime<Utc>,
+) -> Result<()> {
+    if record.lease_active(at) {
+        let holder = record.claimed_by.as_deref().unwrap_or("unknown");
+        if worker_id != Some(holder) {
+            return Err(GoalStoreError::LeaseHeld {
+                id: record.id.clone(),
+                held_by: holder.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_worker(worker_id: Option<&str>) -> Result<()> {
+    if let Some(worker_id) = worker_id {
+        validate_worker(worker_id)?;
+    }
+    Ok(())
+}
+
+/// Release the lease without touching `claim_generation` (the tenure history
+/// stays monotonic and auditable).
+fn clear_lease(after: &mut GoalRecord) {
+    after.claimed_by = None;
+    after.claim_expires_at = None;
+}
+
 fn lease_expiry(from: DateTime<Utc>, lease_seconds: u64) -> Result<DateTime<Utc>> {
     let seconds = i64::try_from(lease_seconds)
         .map_err(|_| GoalStoreError::InvalidInput("lease duration overflow".into()))?;
@@ -515,9 +550,11 @@ impl GoalStore for SqliteGoalStore {
         &self,
         owner: &str,
         id: &str,
+        worker_id: Option<&str>,
         index: usize,
         at: DateTime<Utc>,
     ) -> Result<GoalRecord> {
+        validate_optional_worker(worker_id)?;
         self.mutate(
             owner,
             id,
@@ -532,6 +569,7 @@ impl GoalStore for SqliteGoalStore {
                         status: before.status,
                     });
                 }
+                ensure_lease_holder(before, worker_id, effective_at)?;
                 let total = before.acceptance_criteria.len();
                 let Some(criterion) = after.acceptance_criteria.get_mut(index) else {
                     return Err(GoalStoreError::InvalidInput(format!(
@@ -620,9 +658,11 @@ impl GoalStore for SqliteGoalStore {
         &self,
         owner: &str,
         id: &str,
+        worker_id: Option<&str>,
         reason: Option<&str>,
         at: DateTime<Utc>,
     ) -> Result<GoalRecord> {
+        validate_optional_worker(worker_id)?;
         validate_optional_reason("pause reason", reason)?;
         self.mutate(
             owner,
@@ -630,9 +670,12 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Paused,
             "pause",
             at,
-            |before, after, _effective_at| {
+            |before, after, effective_at| {
                 ensure_transition(before, GoalStatus::Paused, "pause")?;
+                ensure_lease_holder(before, worker_id, effective_at)?;
                 after.status = GoalStatus::Paused;
+                // Pausing releases the lease: a paused goal is never leased.
+                clear_lease(after);
                 if let Some(reason) = reason {
                     after.pause_reason = Some(reason.to_string());
                 }
@@ -642,16 +685,27 @@ impl GoalStore for SqliteGoalStore {
         .map(|(record, _)| record)
     }
 
-    fn resume(&self, owner: &str, id: &str, at: DateTime<Utc>) -> Result<GoalRecord> {
+    fn resume(
+        &self,
+        owner: &str,
+        id: &str,
+        worker_id: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> Result<GoalRecord> {
+        validate_optional_worker(worker_id)?;
         self.mutate(
             owner,
             id,
             GoalEventKind::Resumed,
             "resume",
             at,
-            |before, after, _effective_at| {
+            |before, after, effective_at| {
                 ensure_transition(before, GoalStatus::InProgress, "resume")?;
+                ensure_lease_holder(before, worker_id, effective_at)?;
                 after.status = GoalStatus::InProgress;
+                // Pause already released the lease; clear any stale fields left
+                // by older data so a resumed goal is unambiguously unleased.
+                clear_lease(after);
                 Ok((None, None))
             },
         )
@@ -662,12 +716,14 @@ impl GoalStore for SqliteGoalStore {
         &self,
         owner: &str,
         id: &str,
+        worker_id: Option<&str>,
         summary: Option<&str>,
         waive_reason: Option<&str>,
         at: DateTime<Utc>,
     ) -> Result<GoalRecord> {
         validate_owner(owner)?;
         validate_goal_id(id)?;
+        validate_optional_worker(worker_id)?;
         validate_optional_reason("completion summary", summary)?;
         validate_optional_reason("waive reason", waive_reason)?;
         let occurred_at = normalize_timestamp(at)?;
@@ -676,6 +732,8 @@ impl GoalStore for SqliteGoalStore {
         let before = get_in_transaction(&transaction, owner, id)?
             .ok_or_else(|| GoalStoreError::NotFound { id: id.to_string() })?;
         ensure_transition(&before, GoalStatus::Completed, "complete")?;
+        let effective_at = std::cmp::max(occurred_at, before.updated_at);
+        ensure_lease_holder(&before, worker_id, effective_at)?;
         let unsatisfied: Vec<String> = before
             .acceptance_criteria
             .iter()
@@ -712,6 +770,8 @@ impl GoalStore for SqliteGoalStore {
                 ensure_transition(before, GoalStatus::Completed, "complete")?;
                 after.status = GoalStatus::Completed;
                 after.finished_at = Some(effective_at);
+                // Terminal states release the lease.
+                clear_lease(after);
                 if let Some(summary) = summary {
                     after.completion_summary = Some(summary.to_string());
                 }
@@ -722,7 +782,15 @@ impl GoalStore for SqliteGoalStore {
         Ok(after)
     }
 
-    fn fail(&self, owner: &str, id: &str, reason: &str, at: DateTime<Utc>) -> Result<GoalRecord> {
+    fn fail(
+        &self,
+        owner: &str,
+        id: &str,
+        worker_id: Option<&str>,
+        reason: &str,
+        at: DateTime<Utc>,
+    ) -> Result<GoalRecord> {
+        validate_optional_worker(worker_id)?;
         validate_optional_reason("failure reason", Some(reason))?;
         self.mutate(
             owner,
@@ -732,8 +800,11 @@ impl GoalStore for SqliteGoalStore {
             at,
             |before, after, effective_at| {
                 ensure_transition(before, GoalStatus::Failed, "fail")?;
+                ensure_lease_holder(before, worker_id, effective_at)?;
                 after.status = GoalStatus::Failed;
                 after.finished_at = Some(effective_at);
+                // Terminal states release the lease.
+                clear_lease(after);
                 after.failure_reason = Some(reason.to_string());
                 Ok((None, Some(reason.to_string())))
             },
@@ -745,9 +816,11 @@ impl GoalStore for SqliteGoalStore {
         &self,
         owner: &str,
         id: &str,
+        worker_id: Option<&str>,
         reason: Option<&str>,
         at: DateTime<Utc>,
     ) -> Result<GoalRecord> {
+        validate_optional_worker(worker_id)?;
         validate_optional_reason("cancel reason", reason)?;
         self.mutate(
             owner,
@@ -757,8 +830,11 @@ impl GoalStore for SqliteGoalStore {
             at,
             |before, after, effective_at| {
                 ensure_transition(before, GoalStatus::Cancelled, "cancel")?;
+                ensure_lease_holder(before, worker_id, effective_at)?;
                 after.status = GoalStatus::Cancelled;
                 after.finished_at = Some(effective_at);
+                // Terminal states release the lease.
+                clear_lease(after);
                 if let Some(reason) = reason {
                     after.cancel_reason = Some(reason.to_string());
                 }

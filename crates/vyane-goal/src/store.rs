@@ -56,11 +56,13 @@ pub trait GoalStore: Send + Sync {
     ) -> Result<GoalRecord>;
 
     /// Record that acceptance criterion `index` was actually verified: the only
-    /// code path that writes `satisfied_at`.
+    /// code path that writes `satisfied_at`. While the goal is under an active
+    /// lease, `worker_id` must match the lease holder.
     fn satisfy_criterion(
         &self,
         owner: &str,
         id: &str,
+        worker_id: Option<&str>,
         index: usize,
         at: DateTime<Utc>,
     ) -> Result<GoalRecord>;
@@ -78,34 +80,60 @@ pub trait GoalStore: Send + Sync {
         at: DateTime<Utc>,
     ) -> Result<GoalEvent>;
 
+    /// Pause an in-progress goal. While an active lease is held, only the
+    /// holder (matching `worker_id`) may pause; pausing releases the lease.
     fn pause(
         &self,
         owner: &str,
         id: &str,
+        worker_id: Option<&str>,
         reason: Option<&str>,
         at: DateTime<Utc>,
     ) -> Result<GoalRecord>;
 
-    fn resume(&self, owner: &str, id: &str, at: DateTime<Utc>) -> Result<GoalRecord>;
+    /// Resume a paused goal. Pausing already released any lease, so a resumed
+    /// goal is always unleased; any stale lease fields are cleared defensively.
+    fn resume(
+        &self,
+        owner: &str,
+        id: &str,
+        worker_id: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> Result<GoalRecord>;
 
     /// Complete a goal. Every acceptance criterion must carry `satisfied_at`,
     /// unless `waive_reason` explicitly waives the unsatisfied remainder, which
-    /// appends an auditable `criteria_waived` event before completion.
+    /// appends an auditable `criteria_waived` event before completion. While an
+    /// active lease is held, only the holder (matching `worker_id`) may
+    /// complete; terminal states clear the lease.
     fn done(
         &self,
         owner: &str,
         id: &str,
+        worker_id: Option<&str>,
         summary: Option<&str>,
         waive_reason: Option<&str>,
         at: DateTime<Utc>,
     ) -> Result<GoalRecord>;
 
-    fn fail(&self, owner: &str, id: &str, reason: &str, at: DateTime<Utc>) -> Result<GoalRecord>;
+    /// Fail a goal. While an active lease is held, only the holder (matching
+    /// `worker_id`) may fail it; terminal states clear the lease.
+    fn fail(
+        &self,
+        owner: &str,
+        id: &str,
+        worker_id: Option<&str>,
+        reason: &str,
+        at: DateTime<Utc>,
+    ) -> Result<GoalRecord>;
 
+    /// Cancel a goal. While an active lease is held, only the holder (matching
+    /// `worker_id`) may cancel it; terminal states clear the lease.
     fn cancel(
         &self,
         owner: &str,
         id: &str,
+        worker_id: Option<&str>,
         reason: Option<&str>,
         at: DateTime<Utc>,
     ) -> Result<GoalRecord>;

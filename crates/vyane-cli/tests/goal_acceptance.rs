@@ -298,6 +298,30 @@ fn claim_holds_a_lease_that_blocks_other_workers() {
         0,
     );
     assert_eq!(renewed["goal"]["claimed_by"], "worker-1");
+
+    // The fence holds at the CLI boundary: a non-holder cannot complete.
+    let fenced = json_output(
+        &[
+            "goal", "done", "--db", &db, "--owner", "owner-a", "--json", "leased", "--worker",
+            "worker-2",
+        ],
+        2,
+    );
+    assert_eq!(fenced["status"], "error");
+    assert!(fenced["error"].as_str().unwrap().contains("worker-1"));
+
+    // The holder completes; terminal state releases the lease.
+    let completed = json_output(
+        &[
+            "goal", "done", "--db", &db, "--owner", "owner-a", "--json", "leased", "--worker",
+            "worker-1",
+        ],
+        0,
+    );
+    assert_eq!(completed["goal"]["status"], "completed");
+    assert!(completed["goal"]["claimed_by"].is_null());
+    assert!(completed["goal"]["claim_expires_at"].is_null());
+    assert_eq!(completed["goal"]["claim_generation"], 1);
 }
 
 #[test]

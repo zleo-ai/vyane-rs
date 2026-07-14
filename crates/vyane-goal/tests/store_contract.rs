@@ -66,6 +66,7 @@ fn lifecycle_updates_snapshot_and_appends_revision_ordered_events() {
         .pause(
             OWNER_A,
             &created.id,
+            None,
             Some("waiting for review"),
             base + TimeDelta::seconds(3),
         )
@@ -73,13 +74,19 @@ fn lifecycle_updates_snapshot_and_appends_revision_ordered_events() {
     assert_eq!(paused.status, GoalStatus::Paused);
 
     let resumed = store
-        .resume(OWNER_A, &created.id, base + TimeDelta::seconds(4))
+        .resume(OWNER_A, &created.id, None, base + TimeDelta::seconds(4))
         .expect("resume");
     assert_eq!(resumed.status, GoalStatus::InProgress);
 
     for index in 0..2 {
         store
-            .satisfy_criterion(OWNER_A, &created.id, index, base + TimeDelta::seconds(5))
+            .satisfy_criterion(
+                OWNER_A,
+                &created.id,
+                None,
+                index,
+                base + TimeDelta::seconds(5),
+            )
             .expect("satisfy criterion");
     }
 
@@ -87,6 +94,7 @@ fn lifecycle_updates_snapshot_and_appends_revision_ordered_events() {
         .done(
             OWNER_A,
             &created.id,
+            None,
             Some("all checks passed"),
             None,
             base + TimeDelta::seconds(6),
@@ -227,11 +235,11 @@ fn illegal_terminal_transition_is_rejected_without_an_event() {
         .expect("create");
     store.start(OWNER_A, "terminal", at).expect("start");
     store
-        .done(OWNER_A, "terminal", None, None, at)
+        .done(OWNER_A, "terminal", None, None, None, at)
         .expect("complete");
 
     assert!(matches!(
-        store.fail(OWNER_A, "terminal", "too late", at),
+        store.fail(OWNER_A, "terminal", None, "too late", at),
         Err(GoalStoreError::InvalidStatus {
             status: GoalStatus::Completed,
             ..
@@ -259,7 +267,7 @@ fn failed_and_cancelled_terminal_paths_persist_reasons() {
         .start(OWNER_A, "failed", at)
         .expect("start failed fixture");
     let failed = store
-        .fail(OWNER_A, "failed", "verification failed", at)
+        .fail(OWNER_A, "failed", None, "verification failed", at)
         .expect("fail");
     assert_eq!(failed.status, GoalStatus::Failed);
     assert_eq!(
@@ -268,7 +276,7 @@ fn failed_and_cancelled_terminal_paths_persist_reasons() {
     );
 
     let cancelled = store
-        .cancel(OWNER_A, "cancelled", Some("superseded"), at)
+        .cancel(OWNER_A, "cancelled", None, Some("superseded"), at)
         .expect("cancel queued");
     assert_eq!(cancelled.status, GoalStatus::Cancelled);
     assert_eq!(cancelled.cancel_reason.as_deref(), Some("superseded"));
@@ -277,10 +285,10 @@ fn failed_and_cancelled_terminal_paths_persist_reasons() {
         .start(OWNER_A, "paused-cancel", at)
         .expect("start paused fixture");
     store
-        .pause(OWNER_A, "paused-cancel", None, at)
+        .pause(OWNER_A, "paused-cancel", None, None, at)
         .expect("pause fixture");
     let paused_cancel = store
-        .cancel(OWNER_A, "paused-cancel", None, at)
+        .cancel(OWNER_A, "paused-cancel", None, None, at)
         .expect("cancel paused");
     assert_eq!(paused_cancel.status, GoalStatus::Cancelled);
 }

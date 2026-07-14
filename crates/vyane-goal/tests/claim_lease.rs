@@ -328,7 +328,7 @@ fn done_is_rejected_while_acceptance_criteria_are_unsatisfied() {
     store.start(OWNER, "gated", at).expect("start");
 
     assert!(matches!(
-        store.done(OWNER, "gated", Some("looks done"), None, at),
+        store.done(OWNER, "gated", None, Some("looks done"), None, at),
         Err(GoalStoreError::CriteriaUnsatisfied { remaining: 2, .. })
     ));
     // Rejection leaves no trace: still in_progress, no completed event.
@@ -339,19 +339,19 @@ fn done_is_rejected_while_acceptance_criteria_are_unsatisfied() {
 
     // Satisfying one of two is still not enough.
     store
-        .satisfy_criterion(OWNER, "gated", 0, at)
+        .satisfy_criterion(OWNER, "gated", None, 0, at)
         .expect("satisfy first");
     assert!(matches!(
-        store.done(OWNER, "gated", None, None, at),
+        store.done(OWNER, "gated", None, None, None, at),
         Err(GoalStoreError::CriteriaUnsatisfied { remaining: 1, .. })
     ));
 
     // All satisfied: completion goes through.
     store
-        .satisfy_criterion(OWNER, "gated", 1, at)
+        .satisfy_criterion(OWNER, "gated", None, 1, at)
         .expect("satisfy second");
     let completed = store
-        .done(OWNER, "gated", Some("verified"), None, at)
+        .done(OWNER, "gated", None, Some("verified"), None, at)
         .expect("complete");
     assert_eq!(completed.status, GoalStatus::Completed);
 }
@@ -364,7 +364,7 @@ fn satisfy_criterion_persists_satisfied_at_and_appends_an_event() {
     store.start(OWNER, "verified", base).expect("start");
 
     let updated = store
-        .satisfy_criterion(OWNER, "verified", 0, base + TimeDelta::seconds(5))
+        .satisfy_criterion(OWNER, "verified", None, 0, base + TimeDelta::seconds(5))
         .expect("satisfy");
     assert_eq!(
         updated.acceptance_criteria[0].satisfied_at,
@@ -389,12 +389,12 @@ fn satisfy_criterion_persists_satisfied_at_and_appends_an_event() {
 
     // A criterion cannot be satisfied twice.
     assert!(matches!(
-        store.satisfy_criterion(OWNER, "verified", 0, base + TimeDelta::seconds(6)),
+        store.satisfy_criterion(OWNER, "verified", None, 0, base + TimeDelta::seconds(6)),
         Err(GoalStoreError::InvalidInput(_))
     ));
     // Out-of-range index is rejected.
     assert!(matches!(
-        store.satisfy_criterion(OWNER, "verified", 9, base + TimeDelta::seconds(6)),
+        store.satisfy_criterion(OWNER, "verified", None, 9, base + TimeDelta::seconds(6)),
         Err(GoalStoreError::InvalidInput(_))
     ));
 }
@@ -405,7 +405,7 @@ fn satisfy_criterion_requires_an_in_progress_goal() {
     let at = timestamp(1_700_000_000);
     goal_with_criteria(&store, "not-running", at);
     assert!(matches!(
-        store.satisfy_criterion(OWNER, "not-running", 0, at),
+        store.satisfy_criterion(OWNER, "not-running", None, 0, at),
         Err(GoalStoreError::InvalidStatus {
             status: GoalStatus::Queued,
             ..
@@ -420,13 +420,14 @@ fn explicit_waiver_records_an_auditable_event_before_completion() {
     goal_with_criteria(&store, "waived", base);
     store.start(OWNER, "waived", base).expect("start");
     store
-        .satisfy_criterion(OWNER, "waived", 0, base + TimeDelta::seconds(1))
+        .satisfy_criterion(OWNER, "waived", None, 0, base + TimeDelta::seconds(1))
         .expect("satisfy first");
 
     let completed = store
         .done(
             OWNER,
             "waived",
+            None,
             Some("shipping anyway"),
             Some("reviewer unavailable before deadline"),
             base + TimeDelta::seconds(2),
@@ -483,7 +484,7 @@ fn waiver_and_completion_commit_atomically() {
 
     assert!(
         store
-            .done(OWNER, "atomic-waive", None, Some("waive it"), at)
+            .done(OWNER, "atomic-waive", None, None, Some("waive it"), at)
             .is_err()
     );
     // The half-applied waiver must have rolled back with the completion.
@@ -558,4 +559,169 @@ fn v1_database_upgrades_in_place_and_supports_claims() {
         .claim(OWNER, "legacy", "worker-1", TTL, at)
         .expect("claim on upgraded database");
     assert_eq!(claimed.claim_generation, 1);
+}
+
+// --- review follow-up: the store itself fences stale workers ----------------
+
+#[test]
+fn stale_worker_writes_are_fenced_out_after_reclaim() {
+    // Review probes 1/2 for PR #8: A claims, its lease expires, B reclaims
+    // (claim_generation superseded) — every write path from stale A must be
+    // rejected by the store itself, not by a hoped-for verifier layer.
+    let (_directory, store) = fixture();
+    let base = timestamp(1_700_000_000);
+    goal_with_criteria(&store, "fenced", base);
+    store
+        .claim(OWNER, "fenced", "worker-a", TTL, base)
+        .expect("A claims");
+    let reclaimed = store
+        .reclaim(
+            OWNER,
+            "fenced",
+            "worker-b",
+            TTL,
+            base + TimeDelta::seconds(61),
+        )
+        .expect("B reclaims after expiry");
+    assert_eq!(reclaimed.claim_generation, 2);
+    let now = base + TimeDelta::seconds(62);
+
+    // Stale A: every write path is rejected while B's lease is active.
+    assert!(matches!(
+        store.satisfy_criterion(OWNER, "fenced", Some("worker-a"), 0, now),
+        Err(GoalStoreError::LeaseHeld { held_by, .. }) if held_by == "worker-b"
+    ));
+    assert!(matches!(
+        store.done(OWNER, "fenced", Some("worker-a"), None, Some("stale waive"), now),
+        Err(GoalStoreError::LeaseHeld { held_by, .. }) if held_by == "worker-b"
+    ));
+    assert!(matches!(
+        store.fail(OWNER, "fenced", Some("worker-a"), "stale failure", now),
+        Err(GoalStoreError::LeaseHeld { held_by, .. }) if held_by == "worker-b"
+    ));
+    assert!(matches!(
+        store.pause(OWNER, "fenced", Some("worker-a"), None, now),
+        Err(GoalStoreError::LeaseHeld { .. })
+    ));
+    assert!(matches!(
+        store.cancel(OWNER, "fenced", Some("worker-a"), None, now),
+        Err(GoalStoreError::LeaseHeld { .. })
+    ));
+    // Anonymous writes are equally rejected while a lease is active.
+    assert!(matches!(
+        store.done(OWNER, "fenced", None, None, Some("anonymous waive"), now),
+        Err(GoalStoreError::LeaseHeld { .. })
+    ));
+
+    // Nothing leaked: B's tenure is untouched.
+    let record = store.get(OWNER, "fenced").expect("get").expect("record");
+    assert_eq!(record.status, GoalStatus::InProgress);
+    assert_eq!(record.claimed_by.as_deref(), Some("worker-b"));
+    assert!(
+        record
+            .acceptance_criteria
+            .iter()
+            .all(|criterion| criterion.satisfied_at.is_none())
+    );
+
+    // The holder itself passes the fence.
+    store
+        .satisfy_criterion(OWNER, "fenced", Some("worker-b"), 0, now)
+        .expect("holder satisfies");
+    store
+        .satisfy_criterion(OWNER, "fenced", Some("worker-b"), 1, now)
+        .expect("holder satisfies second");
+    let completed = store
+        .done(
+            OWNER,
+            "fenced",
+            Some("worker-b"),
+            Some("verified"),
+            None,
+            now,
+        )
+        .expect("holder completes");
+    assert_eq!(completed.status, GoalStatus::Completed);
+}
+
+#[test]
+fn terminal_states_release_the_lease() {
+    let (_directory, store) = fixture();
+    let base = timestamp(1_700_000_000);
+
+    for (id, terminal) in [
+        ("t-done", "done"),
+        ("t-fail", "fail"),
+        ("t-cancel", "cancel"),
+    ] {
+        queued_goal(&store, id, base);
+        store
+            .claim(OWNER, id, "worker-1", TTL, base)
+            .expect("claim");
+        let record = match terminal {
+            "done" => store
+                .done(OWNER, id, Some("worker-1"), None, None, base)
+                .expect("done"),
+            "fail" => store
+                .fail(OWNER, id, Some("worker-1"), "broken", base)
+                .expect("fail"),
+            _ => store
+                .cancel(OWNER, id, Some("worker-1"), None, base)
+                .expect("cancel"),
+        };
+        assert!(record.status.is_terminal());
+        assert_eq!(record.claimed_by, None, "{terminal} must clear claimed_by");
+        assert_eq!(
+            record.claim_expires_at, None,
+            "{terminal} must clear claim_expires_at"
+        );
+        assert_eq!(
+            record.claim_generation, 1,
+            "{terminal} must preserve the tenure history"
+        );
+    }
+}
+
+#[test]
+fn pause_releases_the_lease_and_resumed_goals_are_unleased() {
+    let (_directory, store) = fixture();
+    let base = timestamp(1_700_000_000);
+    queued_goal(&store, "pausable", base);
+    store
+        .claim(OWNER, "pausable", "worker-1", TTL, base)
+        .expect("claim");
+
+    // Non-holder and anonymous pause are rejected while the lease is active.
+    assert!(matches!(
+        store.pause(OWNER, "pausable", Some("worker-2"), None, base),
+        Err(GoalStoreError::LeaseHeld { held_by, .. }) if held_by == "worker-1"
+    ));
+    assert!(matches!(
+        store.pause(OWNER, "pausable", None, None, base),
+        Err(GoalStoreError::LeaseHeld { .. })
+    ));
+
+    // Holder pause releases the lease.
+    let paused = store
+        .pause(
+            OWNER,
+            "pausable",
+            Some("worker-1"),
+            Some("stepping away"),
+            base,
+        )
+        .expect("holder pauses");
+    assert_eq!(paused.status, GoalStatus::Paused);
+    assert_eq!(paused.claimed_by, None);
+    assert_eq!(paused.claim_expires_at, None);
+    assert_eq!(paused.claim_generation, 1);
+
+    // Resume yields an unleased in_progress goal (chosen semantics: the lease
+    // is cleared at pause, so nothing stale can survive a pause/resume cycle).
+    let resumed = store
+        .resume(OWNER, "pausable", None, base + TimeDelta::seconds(1))
+        .expect("resume");
+    assert_eq!(resumed.status, GoalStatus::InProgress);
+    assert_eq!(resumed.claimed_by, None);
+    assert_eq!(resumed.claim_expires_at, None);
 }

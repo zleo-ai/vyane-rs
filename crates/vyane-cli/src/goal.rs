@@ -14,7 +14,7 @@ use crate::app::StoragePaths;
 use crate::cli::{
     GoalClaimArgs, GoalClaimNextArgs, GoalCommand, GoalCommonArgs, GoalCreateArgs, GoalDoneArgs,
     GoalFailArgs, GoalGetArgs, GoalIdArgs, GoalListArgs, GoalNextArgs, GoalProgressArgs,
-    GoalReasonArgs, GoalSatisfyArgs, GoalStatusArg,
+    GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs, GoalStatusArg,
 };
 
 #[derive(Debug, Serialize)]
@@ -272,7 +272,13 @@ fn reclaim(args: GoalClaimArgs) -> Result<ExitCode> {
 fn satisfy(args: GoalSatisfyArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
     let goal = store
-        .satisfy_criterion(&args.common.owner, &args.id, args.index, Utc::now())
+        .satisfy_criterion(
+            &args.common.owner,
+            &args.id,
+            args.worker.as_deref(),
+            args.index,
+            Utc::now(),
+        )
         .context("satisfy acceptance criterion")?;
     print_goal_result(&args.common, &db, goal)
 }
@@ -308,6 +314,7 @@ fn pause(args: GoalReasonArgs) -> Result<ExitCode> {
         .pause(
             &args.common.owner,
             &args.id,
+            args.worker.as_deref(),
             args.reason.as_deref(),
             Utc::now(),
         )
@@ -315,10 +322,15 @@ fn pause(args: GoalReasonArgs) -> Result<ExitCode> {
     print_goal_result(&args.common, &db, goal)
 }
 
-fn resume(args: GoalIdArgs) -> Result<ExitCode> {
+fn resume(args: GoalResumeArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
     let goal = store
-        .resume(&args.common.owner, &args.id, Utc::now())
+        .resume(
+            &args.common.owner,
+            &args.id,
+            args.worker.as_deref(),
+            Utc::now(),
+        )
         .context("resume goal")?;
     print_goal_result(&args.common, &db, goal)
 }
@@ -329,6 +341,7 @@ fn done(args: GoalDoneArgs) -> Result<ExitCode> {
         .done(
             &args.common.owner,
             &args.id,
+            args.worker.as_deref(),
             args.summary.as_deref(),
             args.waive.as_deref(),
             Utc::now(),
@@ -340,7 +353,13 @@ fn done(args: GoalDoneArgs) -> Result<ExitCode> {
 fn fail(args: GoalFailArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
     let goal = store
-        .fail(&args.common.owner, &args.id, &args.reason, Utc::now())
+        .fail(
+            &args.common.owner,
+            &args.id,
+            args.worker.as_deref(),
+            &args.reason,
+            Utc::now(),
+        )
         .context("fail goal")?;
     print_goal_result(&args.common, &db, goal)
 }
@@ -351,6 +370,7 @@ fn cancel(args: GoalReasonArgs) -> Result<ExitCode> {
         .cancel(
             &args.common.owner,
             &args.id,
+            args.worker.as_deref(),
             args.reason.as_deref(),
             Utc::now(),
         )
