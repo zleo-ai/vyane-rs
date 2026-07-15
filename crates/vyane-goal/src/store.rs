@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    AcceptanceVerification, GoalEvent, GoalQuery, GoalRecord, GoalVerificationArtifact, NewGoal,
-    Result,
+    AcceptanceVerification, GoalEvent, GoalPursuitCheckpoint, GoalQuery, GoalRecord,
+    GoalVerificationArtifact, NewGoal, Result,
 };
 
 pub trait GoalStore: Send + Sync {
@@ -85,6 +85,23 @@ pub trait GoalStore: Send + Sync {
     fn verifications(&self, owner: &str, id: &str) -> Result<Vec<GoalVerificationArtifact>>;
 
     fn events(&self, owner: &str, id: &str) -> Result<Vec<GoalEvent>>;
+
+    fn pursuit_checkpoint(&self, owner: &str, id: &str) -> Result<Option<GoalPursuitCheckpoint>>;
+
+    /// CAS-write one lease-fenced checkpoint and append its progress event in
+    /// the same transaction. A checkpoint from an older lease may be adopted
+    /// only by presenting the current goal revision and claim generation.
+    #[allow(clippy::too_many_arguments)]
+    fn record_pursuit_checkpoint(
+        &self,
+        owner: &str,
+        id: &str,
+        worker_id: &str,
+        checkpoint: &GoalPursuitCheckpoint,
+        stage: &str,
+        detail: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(GoalPursuitCheckpoint, GoalEvent)>;
 
     fn start(&self, owner: &str, id: &str, at: DateTime<Utc>) -> Result<GoalRecord>;
 

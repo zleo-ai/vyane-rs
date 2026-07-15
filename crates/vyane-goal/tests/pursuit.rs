@@ -11,8 +11,9 @@ use chrono::Utc;
 use tempfile::TempDir;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerifier, GoalEventKind, GoalPursuer, GoalSegmentRuntime,
-    GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitConfig, PursuitSegmentRequest,
-    PursuitSegmentResult, PursuitSegmentStatus, PursuitStatus, SqliteGoalStore,
+    GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus, PursuitConfig,
+    PursuitSegmentRequest, PursuitSegmentResult, PursuitSegmentStatus, PursuitStatus,
+    SqliteGoalStore,
 };
 
 const OWNER: &str = "owner-a";
@@ -149,6 +150,16 @@ async fn segment_then_reverify_completes_without_runtime_owned_done() {
     assert_eq!(requests[0].runtime, "fake");
     assert_eq!(requests[0].verification.goal_id, "achieve");
     assert_eq!(store.verifications(OWNER, "achieve").unwrap().len(), 2);
+    let checkpoint = store
+        .pursuit_checkpoint(OWNER, "achieve")
+        .unwrap()
+        .expect("achieved checkpoint");
+    assert_eq!(checkpoint.status, PursuitCheckpointStatus::Achieved);
+    assert_eq!(checkpoint.segments_started, 1);
+    assert_eq!(checkpoint.segments_completed, 1);
+    assert_eq!(checkpoint.consecutive_failures, 0);
+    assert_eq!(checkpoint.last_run_id.as_deref(), Some("run-1"));
+    assert!(checkpoint.last_verification_id.is_some());
     let events = store.events(OWNER, "achieve").unwrap();
     assert_eq!(
         events
@@ -164,6 +175,89 @@ async fn segment_then_reverify_completes_without_runtime_owned_done() {
                 .as_deref()
                 .is_some_and(|detail| detail.contains("run-1"))
     }));
+}
+
+#[tokio::test]
+async fn paused_checkpoint_survives_reopen_and_new_lease_continues_lifetime_budget() {
+    let directory = TempDir::new().expect("tempdir");
+    let database = directory.path().join("goals.sqlite3");
+    let started_at;
+    let first_revision;
+    let first_generation;
+
+    {
+        let store = SqliteGoalStore::open(&database).expect("store");
+        running_goal(
+            &store,
+            "restart",
+            vec![AcceptanceCriterion::new("custom", "cmd:false")],
+        );
+        let runtime = FakeRuntime::new(|_| PursuitSegmentResult {
+            status: PursuitSegmentStatus::Success,
+            run_id: Some("run-1".into()),
+        });
+        let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
+
+        let first = GoalPursuer::new(&store, &runtime, &verifier, config(&directory, 1, 2))
+            .unwrap()
+            .pursue(OWNER, "restart")
+            .await
+            .unwrap();
+
+        assert_eq!(first.status, PursuitStatus::Paused);
+        assert_eq!(first.reason, "pursuit max segments reached");
+        assert_eq!(first.segments_started, 1);
+        let checkpoint = store
+            .pursuit_checkpoint(OWNER, "restart")
+            .unwrap()
+            .expect("first checkpoint");
+        assert_eq!(checkpoint.status, PursuitCheckpointStatus::Paused);
+        assert_eq!(checkpoint.last_run_id.as_deref(), Some("run-1"));
+        started_at = checkpoint.started_at;
+        first_revision = checkpoint.checkpoint_revision;
+        first_generation = checkpoint.claim_generation;
+    }
+
+    let store = SqliteGoalStore::open(&database).expect("reopened store");
+    store
+        .resume(OWNER, "restart", None, Utc::now())
+        .expect("resume");
+    let claimed = store
+        .claim(OWNER, "restart", "replacement", 60, Utc::now())
+        .expect("replacement claim");
+    assert!(claimed.claim_generation > first_generation);
+    let runtime = FakeRuntime::new(|_| PursuitSegmentResult {
+        status: PursuitSegmentStatus::Success,
+        run_id: Some("run-2".into()),
+    });
+    let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
+    let mut resumed_config = config(&directory, 2, 2);
+    resumed_config.worker_id = "replacement".into();
+
+    let resumed = GoalPursuer::new(&store, &runtime, &verifier, resumed_config)
+        .unwrap()
+        .pursue(OWNER, "restart")
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.status, PursuitStatus::Paused);
+    assert_eq!(resumed.reason, "pursuit max segments reached");
+    assert_eq!(resumed.segments_started, 2);
+    assert_eq!(resumed.segments_completed, 2);
+    assert_eq!(runtime.call_count(), 1);
+    assert_eq!(runtime.requests()[0].segment_index, 2);
+    let checkpoint = store
+        .pursuit_checkpoint(OWNER, "restart")
+        .unwrap()
+        .expect("resumed checkpoint");
+    assert_eq!(checkpoint.status, PursuitCheckpointStatus::Paused);
+    assert_eq!(checkpoint.started_at, started_at);
+    assert!(checkpoint.checkpoint_revision > first_revision);
+    assert_eq!(checkpoint.claim_generation, claimed.claim_generation);
+    assert_eq!(checkpoint.worker_id, "replacement");
+    assert_eq!(checkpoint.segments_started, 2);
+    assert_eq!(checkpoint.segments_completed, 2);
+    assert_eq!(checkpoint.last_run_id.as_deref(), Some("run-2"));
 }
 
 #[tokio::test]

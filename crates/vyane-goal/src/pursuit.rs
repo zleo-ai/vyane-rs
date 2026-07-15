@@ -114,6 +114,94 @@ pub enum PursuitStatus {
     Stopped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PursuitCheckpointStatus {
+    Running,
+    Paused,
+    Achieved,
+}
+
+/// Mutable restart checkpoint for one explicit pursuit. Store writes are CAS
+/// fenced by both `checkpoint_revision` and the goal's lease generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalPursuitCheckpoint {
+    pub owner: String,
+    pub goal_id: String,
+    pub checkpoint_revision: u64,
+    pub goal_revision: u64,
+    pub claim_generation: u64,
+    pub worker_id: String,
+    pub runtime: String,
+    pub workdir: PathBuf,
+    pub started_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub segments_started: u16,
+    pub segments_completed: u16,
+    pub consecutive_failures: u16,
+    pub status: PursuitCheckpointStatus,
+    pub last_run_id: Option<String>,
+    pub last_verification_id: Option<String>,
+}
+
+impl GoalPursuitCheckpoint {
+    pub(crate) fn validate(&self) -> Result<()> {
+        crate::model::validate_owner(&self.owner)?;
+        crate::model::validate_goal_id(&self.goal_id)?;
+        validate_worker(&self.worker_id)?;
+        if self.runtime.trim().is_empty() || self.runtime.len() > 256 {
+            return Err(GoalStoreError::InvalidInput(
+                "pursuit checkpoint runtime must be between 1 and 256 bytes".into(),
+            ));
+        }
+        if !self.workdir.is_absolute() {
+            return Err(GoalStoreError::InvalidInput(
+                "pursuit checkpoint workdir must be absolute".into(),
+            ));
+        }
+        if self.updated_at < self.started_at {
+            return Err(GoalStoreError::InvalidInput(
+                "pursuit checkpoint timestamps are out of order".into(),
+            ));
+        }
+        if self.segments_completed > self.segments_started {
+            return Err(GoalStoreError::InvalidInput(
+                "pursuit checkpoint completed segments exceed started segments".into(),
+            ));
+        }
+        validate_optional_run_id(self.last_run_id.as_deref())?;
+        validate_optional_checkpoint_id(
+            "pursuit checkpoint verification id",
+            self.last_verification_id.as_deref(),
+        )
+    }
+}
+
+fn validate_optional_run_id(value: Option<&str>) -> Result<()> {
+    if let Some(value) = value {
+        if value.is_empty()
+            || value.len() > 256
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(GoalStoreError::InvalidInput(
+                "pursuit checkpoint run id is invalid".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_checkpoint_id(field: &str, value: Option<&str>) -> Result<()> {
+    if let Some(value) = value {
+        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            return Err(GoalStoreError::InvalidInput(format!("{field} is invalid")));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PursuitOutcome {
     pub goal_id: String,
@@ -155,19 +243,47 @@ where
     }
 
     pub async fn pursue(&self, owner: &str, goal_id: &str) -> Result<PursuitOutcome> {
+        let goal = self.require_running(owner, goal_id)?;
+        let now = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+            .expect("current UTC timestamp is representable");
+        let mut checkpoint = self
+            .store
+            .pursuit_checkpoint(owner, goal_id)?
+            .unwrap_or_else(|| GoalPursuitCheckpoint {
+                owner: owner.to_string(),
+                goal_id: goal_id.to_string(),
+                checkpoint_revision: 0,
+                goal_revision: goal.revision,
+                claim_generation: goal.claim_generation,
+                worker_id: self.config.worker_id.clone(),
+                runtime: self.config.runtime.clone(),
+                workdir: self.config.workdir.clone(),
+                started_at: now,
+                updated_at: now,
+                segments_started: 0,
+                segments_completed: 0,
+                consecutive_failures: 0,
+                status: PursuitCheckpointStatus::Running,
+                last_run_id: None,
+                last_verification_id: None,
+            });
+        checkpoint.status = PursuitCheckpointStatus::Running;
+        self.record_checkpoint(
+            owner,
+            goal_id,
+            &mut checkpoint,
+            "pursuit.started",
+            "pursuit started or resumed",
+        )?;
+
         let started = Instant::now();
-        let mut segments_started = 0_u16;
-        let mut segments_completed = 0_u16;
-        let mut consecutive_failures = 0_u16;
         let mut previous_verification = None;
         loop {
             let Some(remaining) = self.config.overall_timeout.checked_sub(started.elapsed()) else {
                 return self.pause(
                     owner,
                     goal_id,
-                    segments_started,
-                    segments_completed,
-                    consecutive_failures,
+                    &mut checkpoint,
                     "pursuit overall timeout",
                     previous_verification,
                 );
@@ -176,33 +292,27 @@ where
                 return self.pause(
                     owner,
                     goal_id,
-                    segments_started,
-                    segments_completed,
-                    consecutive_failures,
+                    &mut checkpoint,
                     "pursuit overall timeout",
                     previous_verification,
                 );
             }
-            let goal = if segments_started == 0 {
-                self.require_running(owner, goal_id)?
-            } else {
-                let latest =
-                    self.store
-                        .get(owner, goal_id)?
-                        .ok_or_else(|| GoalStoreError::NotFound {
-                            id: goal_id.to_string(),
-                        })?;
-                if let Some(stopped) = self.stopped_for_record(
-                    &latest,
-                    segments_started,
-                    segments_completed,
-                    consecutive_failures,
-                    previous_verification.clone(),
-                ) {
-                    return Ok(stopped);
-                }
-                latest
+            let latest =
+                self.store
+                    .get(owner, goal_id)?
+                    .ok_or_else(|| GoalStoreError::NotFound {
+                        id: goal_id.to_string(),
+                    })?;
+            if let Some(stopped) = self.stopped_for_record(
+                &latest,
+                checkpoint.segments_started,
+                checkpoint.segments_completed,
+                checkpoint.consecutive_failures,
+                previous_verification.clone(),
+            ) {
+                return Ok(stopped);
             };
+            let goal = latest;
             self.store.renew_lease(
                 owner,
                 goal_id,
@@ -225,15 +335,15 @@ where
             if let Some(stopped) = self.stopped_if_drifted(
                 owner,
                 goal_id,
-                segments_started,
-                segments_completed,
-                consecutive_failures,
+                checkpoint.segments_started,
+                checkpoint.segments_completed,
+                checkpoint.consecutive_failures,
                 previous_verification.clone(),
             )? {
                 return Ok(stopped);
             }
             let verified_at = Utc::now();
-            self.store.record_verification(
+            let artifact = self.store.record_verification(
                 owner,
                 goal_id,
                 Some(&self.config.worker_id),
@@ -241,17 +351,27 @@ where
                 verified_at,
             )?;
             self.persist_satisfied(owner, &goal, &verification, verified_at)?;
-            self.store.progress(
+            checkpoint.last_verification_id = Some(artifact.verification_id);
+            self.record_checkpoint(
                 owner,
                 goal_id,
+                &mut checkpoint,
                 "acceptance.verify",
                 &verification.summary,
-                verified_at,
             )?;
             previous_verification = Some(verification.clone());
             let last_verification = previous_verification.clone();
 
             if verification.all_satisfied {
+                checkpoint.consecutive_failures = 0;
+                checkpoint.status = PursuitCheckpointStatus::Achieved;
+                self.record_checkpoint(
+                    owner,
+                    goal_id,
+                    &mut checkpoint,
+                    "pursuit.achieved",
+                    &verification.summary,
+                )?;
                 let completed = self.store.done(
                     owner,
                     goal_id,
@@ -263,8 +383,8 @@ where
                 return Ok(outcome(
                     &completed,
                     PursuitStatus::Achieved,
-                    segments_started,
-                    segments_completed,
+                    checkpoint.segments_started,
+                    checkpoint.segments_completed,
                     0,
                     &verification.summary,
                     "acceptance satisfied",
@@ -275,9 +395,7 @@ where
                 return self.pause(
                     owner,
                     goal_id,
-                    segments_started,
-                    segments_completed,
-                    consecutive_failures,
+                    &mut checkpoint,
                     "acceptance criteria required",
                     last_verification,
                 );
@@ -286,9 +404,7 @@ where
                 return self.pause(
                     owner,
                     goal_id,
-                    segments_started,
-                    segments_completed,
-                    consecutive_failures,
+                    &mut checkpoint,
                     "manual confirmation required",
                     last_verification,
                 );
@@ -302,26 +418,22 @@ where
                 // Verifier and runtime failures are separate failure events. A
                 // round where both fail deliberately consumes two slots, which
                 // preserves the established pursuit contract.
-                consecutive_failures = consecutive_failures.saturating_add(1);
-                if consecutive_failures >= self.config.max_failures {
+                checkpoint.consecutive_failures = checkpoint.consecutive_failures.saturating_add(1);
+                if checkpoint.consecutive_failures >= self.config.max_failures {
                     return self.pause(
                         owner,
                         goal_id,
-                        segments_started,
-                        segments_completed,
-                        consecutive_failures,
+                        &mut checkpoint,
                         "pursuit max failures reached",
                         last_verification,
                     );
                 }
             }
-            if segments_started >= self.config.max_segments {
+            if checkpoint.segments_started >= self.config.max_segments {
                 return self.pause(
                     owner,
                     goal_id,
-                    segments_started,
-                    segments_completed,
-                    consecutive_failures,
+                    &mut checkpoint,
                     "pursuit max segments reached",
                     last_verification,
                 );
@@ -334,15 +446,13 @@ where
                 return self.pause(
                     owner,
                     goal_id,
-                    segments_started,
-                    segments_completed,
-                    consecutive_failures,
+                    &mut checkpoint,
                     "pursuit overall timeout",
                     last_verification,
                 );
             }
 
-            let segment_index = segments_started.saturating_add(1);
+            let segment_index = checkpoint.segments_started.saturating_add(1);
             let timeout = std::cmp::min(remaining, self.config.segment_timeout);
             let request = PursuitSegmentRequest {
                 goal_id: goal_id.to_string(),
@@ -353,13 +463,13 @@ where
                 runtime: self.config.runtime.clone(),
                 verification,
             };
-            segments_started = segment_index;
-            self.store.progress(
+            checkpoint.segments_started = segment_index;
+            self.record_checkpoint(
                 owner,
                 goal_id,
+                &mut checkpoint,
                 "pursuit.segment.started",
                 &format!("segment {segment_index} started"),
-                Utc::now(),
             )?;
             let result =
                 match tokio::time::timeout(timeout, self.runtime.run_segment(request)).await {
@@ -373,29 +483,28 @@ where
             if let Some(stopped) = self.stopped_if_drifted(
                 owner,
                 goal_id,
-                segments_started,
-                segments_completed,
-                consecutive_failures,
+                checkpoint.segments_started,
+                checkpoint.segments_completed,
+                checkpoint.consecutive_failures,
                 last_verification.clone(),
             )? {
                 return Ok(stopped);
             }
-            segments_completed = segments_completed.saturating_add(1);
-            let run_suffix = result
-                .run_id
-                .as_deref()
-                .filter(|value| {
-                    !value.is_empty()
-                        && value.len() <= 256
-                        && value
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-                })
-                .map_or_else(String::new, |value| format!("; run {value}"));
+            checkpoint.segments_completed = checkpoint.segments_completed.saturating_add(1);
+            let valid_run_id = result.run_id.as_deref().filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 256
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            });
+            checkpoint.last_run_id = valid_run_id.map(str::to_string);
+            let run_suffix =
+                valid_run_id.map_or_else(String::new, |value| format!("; run {value}"));
             let (stage, detail) = match result.status {
                 PursuitSegmentStatus::Success => {
                     if !verifier_failed {
-                        consecutive_failures = 0;
+                        checkpoint.consecutive_failures = 0;
                     }
                     (
                         "pursuit.segment.completed",
@@ -403,40 +512,69 @@ where
                     )
                 }
                 other => {
-                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    checkpoint.consecutive_failures =
+                        checkpoint.consecutive_failures.saturating_add(1);
                     (
                         "pursuit.segment.failed",
                         format!("segment {segment_index} failed: {other:?}{run_suffix}"),
                     )
                 }
             };
-            self.store
-                .progress(owner, goal_id, stage, &detail, Utc::now())?;
+            self.record_checkpoint(owner, goal_id, &mut checkpoint, stage, &detail)?;
             if result.status == PursuitSegmentStatus::Cancelled {
                 return self.pause(
                     owner,
                     goal_id,
-                    segments_started,
-                    segments_completed,
-                    consecutive_failures,
+                    &mut checkpoint,
                     "pursuit cancelled",
                     last_verification,
                 );
             }
             if result.status != PursuitSegmentStatus::Success
-                && consecutive_failures >= self.config.max_failures
+                && checkpoint.consecutive_failures >= self.config.max_failures
             {
                 return self.pause(
                     owner,
                     goal_id,
-                    segments_started,
-                    segments_completed,
-                    consecutive_failures,
+                    &mut checkpoint,
                     "pursuit max failures reached",
                     last_verification,
                 );
             }
         }
+    }
+
+    fn record_checkpoint(
+        &self,
+        owner: &str,
+        goal_id: &str,
+        checkpoint: &mut GoalPursuitCheckpoint,
+        stage: &str,
+        detail: &str,
+    ) -> Result<()> {
+        let goal = self
+            .store
+            .get(owner, goal_id)?
+            .ok_or_else(|| GoalStoreError::NotFound {
+                id: goal_id.to_string(),
+            })?;
+        checkpoint.goal_revision = goal.revision;
+        checkpoint.claim_generation = goal.claim_generation;
+        checkpoint.worker_id.clone_from(&self.config.worker_id);
+        checkpoint.runtime.clone_from(&self.config.runtime);
+        checkpoint.workdir.clone_from(&self.config.workdir);
+        checkpoint.updated_at = Utc::now();
+        let (recorded, _) = self.store.record_pursuit_checkpoint(
+            owner,
+            goal_id,
+            &self.config.worker_id,
+            checkpoint,
+            stage,
+            detail,
+            checkpoint.updated_at,
+        )?;
+        *checkpoint = recorded;
+        Ok(())
     }
 
     fn require_running(&self, owner: &str, goal_id: &str) -> Result<GoalRecord> {
@@ -560,14 +698,12 @@ where
         &self,
         owner: &str,
         goal_id: &str,
-        segments_started: u16,
-        segments_completed: u16,
-        consecutive_failures: u16,
+        checkpoint: &mut GoalPursuitCheckpoint,
         reason: &str,
         verification: Option<AcceptanceVerification>,
     ) -> Result<PursuitOutcome> {
-        self.store
-            .progress(owner, goal_id, "pursuit.paused", reason, Utc::now())?;
+        checkpoint.status = PursuitCheckpointStatus::Paused;
+        self.record_checkpoint(owner, goal_id, checkpoint, "pursuit.paused", reason)?;
         let paused = self.store.pause(
             owner,
             goal_id,
@@ -581,9 +717,9 @@ where
         Ok(outcome(
             &paused,
             PursuitStatus::Paused,
-            segments_started,
-            segments_completed,
-            consecutive_failures,
+            checkpoint.segments_started,
+            checkpoint.segments_completed,
+            checkpoint.consecutive_failures,
             &summary,
             reason,
             verification,

@@ -9,9 +9,10 @@ use serde::Serialize;
 use vyane_core::{CancellationToken, RunStatus, Sandbox};
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus, GoalEvent,
-    GoalPursuer, GoalQuery, GoalRecord, GoalSegmentRuntime, GoalStatus, GoalStore,
-    GoalVerificationArtifact, NewGoal, PursuitConfig, PursuitOutcome, PursuitSegmentRequest,
-    PursuitSegmentResult, PursuitSegmentStatus, PursuitStatus, SqliteGoalStore,
+    GoalPursuer, GoalPursuitCheckpoint, GoalQuery, GoalRecord, GoalSegmentRuntime, GoalStatus,
+    GoalStore, GoalVerificationArtifact, NewGoal, PursuitConfig, PursuitOutcome,
+    PursuitSegmentRequest, PursuitSegmentResult, PursuitSegmentStatus, PursuitStatus,
+    SqliteGoalStore,
 };
 use vyane_service::{DispatchParams, VyaneService};
 
@@ -35,6 +36,7 @@ struct GoalDetailOutput {
     goal: GoalRecord,
     events: Vec<GoalEvent>,
     verifications: Vec<GoalVerificationArtifact>,
+    pursuit_checkpoint: Option<GoalPursuitCheckpoint>,
     db: String,
 }
 
@@ -289,12 +291,16 @@ fn get(args: GoalGetArgs) -> Result<ExitCode> {
     let verifications = store
         .verifications(&args.common.owner, &args.id)
         .context("read goal verification artifacts")?;
+    let pursuit_checkpoint = store
+        .pursuit_checkpoint(&args.common.owner, &args.id)
+        .context("read goal pursuit checkpoint")?;
     if args.common.json {
         print_json(&GoalDetailOutput {
             status: "success",
             goal,
             events,
             verifications,
+            pursuit_checkpoint,
             db: path_text(&db),
         })?;
     } else {

@@ -3,8 +3,8 @@ use rusqlite::Connection;
 use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use vyane_goal::{
-    AcceptanceCriterion, AcceptanceVerification, GoalEventKind, GoalQuery, GoalStatus, GoalStore,
-    GoalStoreError, NewGoal, SqliteGoalStore,
+    AcceptanceCriterion, AcceptanceVerification, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
+    GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus, SqliteGoalStore,
 };
 
 const OWNER_A: &str = "owner-a";
@@ -594,7 +594,114 @@ fn verification_history_returns_latest_hundred_in_insert_order() {
 }
 
 #[test]
-fn v2_database_migrates_verification_artifacts_without_losing_goals() {
+fn pursuit_checkpoint_is_revision_and_lease_generation_fenced() {
+    let (directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("checkpoint", "Checkpoint", 2, at))
+        .expect("create");
+    let claimed = store
+        .claim(OWNER_A, "checkpoint", "worker-a", 60, at)
+        .expect("claim");
+    let checkpoint = GoalPursuitCheckpoint {
+        owner: OWNER_A.into(),
+        goal_id: "checkpoint".into(),
+        checkpoint_revision: 0,
+        goal_revision: claimed.revision,
+        claim_generation: claimed.claim_generation,
+        worker_id: "worker-a".into(),
+        runtime: "builder".into(),
+        workdir: directory.path().canonicalize().expect("canonical workdir"),
+        started_at: at,
+        updated_at: at,
+        segments_started: 1,
+        segments_completed: 0,
+        consecutive_failures: 0,
+        status: PursuitCheckpointStatus::Running,
+        last_run_id: None,
+        last_verification_id: Some("verification-test".into()),
+    };
+
+    let (first, event) = store
+        .record_pursuit_checkpoint(
+            OWNER_A,
+            "checkpoint",
+            "worker-a",
+            &checkpoint,
+            "pursuit.segment.started",
+            "segment 1 started",
+            at + TimeDelta::seconds(1),
+        )
+        .expect("record initial checkpoint");
+    assert_eq!(first.checkpoint_revision, 0);
+    assert_eq!(first.goal_revision, event.revision);
+    assert_eq!(event.kind, GoalEventKind::Progress);
+    assert_eq!(
+        store
+            .pursuit_checkpoint(OWNER_A, "checkpoint")
+            .expect("read checkpoint"),
+        Some(first.clone())
+    );
+    assert!(matches!(
+        store.record_pursuit_checkpoint(
+            OWNER_A,
+            "checkpoint",
+            "worker-a",
+            &checkpoint,
+            "pursuit.segment.started",
+            "stale write",
+            at + TimeDelta::seconds(2),
+        ),
+        Err(GoalStoreError::CheckpointConflict { .. })
+    ));
+
+    let reclaimed = store
+        .reclaim(
+            OWNER_A,
+            "checkpoint",
+            "worker-b",
+            60,
+            at + TimeDelta::seconds(120),
+        )
+        .expect("reclaim expired lease");
+    let mut adopted = first;
+    adopted.goal_revision = reclaimed.revision;
+    adopted.claim_generation = reclaimed.claim_generation;
+    adopted.worker_id = "worker-b".into();
+    adopted.segments_completed = 1;
+    adopted.last_run_id = Some("run-1".into());
+    let (second, _) = store
+        .record_pursuit_checkpoint(
+            OWNER_A,
+            "checkpoint",
+            "worker-b",
+            &adopted,
+            "pursuit.segment.completed",
+            "segment 1 completed; run run-1",
+            at + TimeDelta::seconds(121),
+        )
+        .expect("adopt checkpoint under new generation");
+    assert_eq!(second.checkpoint_revision, 1);
+    assert_eq!(second.claim_generation, reclaimed.claim_generation);
+    assert_eq!(second.worker_id, "worker-b");
+    let mut stale_worker = adopted;
+    stale_worker.worker_id = "worker-a".into();
+    assert!(matches!(
+        store.record_pursuit_checkpoint(
+            OWNER_A,
+            "checkpoint",
+            "worker-a",
+            &stale_worker,
+            "pursuit.segment.completed",
+            "stale worker",
+            at + TimeDelta::seconds(122),
+        ),
+        Err(GoalStoreError::LeaseHeld { .. })
+    ));
+}
+
+#[test]
+fn v2_database_migrates_current_goal_features_without_losing_goals() {
     let (directory, store) = fixture();
     let path = directory.path().join("goals.sqlite3");
     let at = timestamp(1_700_000_000);
@@ -606,7 +713,9 @@ fn v2_database_migrates_verification_artifacts_without_losing_goals() {
     let connection = Connection::open(&path).expect("open raw database");
     connection
         .execute_batch(
-            "DROP TRIGGER goal_verifications_immutable_update;
+            "DROP INDEX goal_pursuit_checkpoints_owner_updated_idx;
+             DROP TABLE goal_pursuit_checkpoints;
+             DROP TRIGGER goal_verifications_immutable_update;
              DROP TRIGGER goal_verifications_immutable_delete;
              DROP INDEX goal_verifications_owner_goal_idx;
              DROP TABLE goal_verifications;
@@ -615,7 +724,7 @@ fn v2_database_migrates_verification_artifacts_without_losing_goals() {
         .expect("restore v2 schema shape");
     drop(connection);
 
-    let migrated = SqliteGoalStore::open(&path).expect("migrate v2 to v3");
+    let migrated = SqliteGoalStore::open(&path).expect("migrate v2 to current");
     assert!(
         migrated
             .get(OWNER_A, "v2-existing")
@@ -665,7 +774,7 @@ fn store_reopens_and_rejects_newer_schema() {
         SqliteGoalStore::open(&path),
         Err(GoalStoreError::UnsupportedSchema {
             found: 99,
-            supported: 3
+            supported: 4
         })
     ));
 }
