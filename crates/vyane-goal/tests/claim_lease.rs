@@ -1,4 +1,4 @@
-//! Behavior contract for EOS-652: queue claim/lease (P1-A) and real
+//! Behavior contract for queue claim/lease (P1-A) and real
 //! acceptance-criteria verification before completion (P1-B).
 
 use std::sync::Barrier;

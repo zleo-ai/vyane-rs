@@ -8,6 +8,11 @@ __pycache__/
 profiles.toml
 secrets.env
 .env
+.env.*
+!.env.example
+
+# project-local runtime configuration may contain real endpoints
+.vyane/config.toml
 
 # local control-plane capabilities (mode 0600 at runtime on Unix)
 **/serve.token
@@ -15,6 +20,11 @@ secrets.env
 
 # local agent/session planning state
 .zcode/
+.omo/
+.claude/settings.local.json
+.aider.conf.yml
+.aider.chat.history.md
+.aider.input.history
 
 # editors / os
 .DS_Store
