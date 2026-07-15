@@ -72,6 +72,51 @@ impl AcceptanceVerifier {
         }
     }
 
+    /// Verify all criteria under one shared wall-clock budget. The final
+    /// command receives only the remaining budget and every later criterion is
+    /// reported as an error without execution once the budget is exhausted.
+    #[must_use]
+    pub fn verify_with_budget(
+        &self,
+        record: &GoalRecord,
+        budget: Duration,
+    ) -> AcceptanceVerification {
+        let started = Instant::now();
+        let mut results = Vec::with_capacity(record.acceptance_criteria.len());
+        for (index, criterion) in record.acceptance_criteria.iter().enumerate() {
+            let remaining = budget.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                results.push(self.result(
+                    index,
+                    criterion_key(index, criterion),
+                    criterion.kind.trim().to_owned(),
+                    criterion.target.trim().to_owned(),
+                    CriterionStatus::Error,
+                    Vec::new(),
+                    None,
+                    "verification budget exhausted",
+                ));
+                continue;
+            }
+            let verifier = Self {
+                workdir: self.workdir.clone(),
+                timeout: std::cmp::min(self.timeout, remaining),
+            };
+            results.push(verifier.verify_criterion(criterion, index));
+        }
+        let all_satisfied = !results.is_empty()
+            && results
+                .iter()
+                .all(|result| result.status == CriterionStatus::Satisfied);
+        let summary = summarize(&results);
+        AcceptanceVerification {
+            goal_id: record.id.clone(),
+            all_satisfied,
+            results,
+            summary,
+        }
+    }
+
     #[must_use]
     pub fn verify_criterion(
         &self,
@@ -517,5 +562,20 @@ mod tests {
         let criterion = AcceptanceCriterion::new("custom", "cmd:true");
         assert_eq!(criterion_key(0, &criterion), criterion_key(0, &criterion));
         assert_ne!(criterion_key(0, &criterion), criterion_key(1, &criterion));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_budget_stops_later_criteria_without_execution() {
+        let verifier = AcceptanceVerifier::new(".", Duration::from_secs(1)).expect("cwd");
+        let result = verifier.verify_with_budget(
+            &record(vec![
+                AcceptanceCriterion::new("custom", "cmd:sleep 5"),
+                AcceptanceCriterion::new("custom", "cmd:true"),
+            ]),
+            Duration::from_millis(200),
+        );
+        assert_eq!(result.results[0].detail, "acceptance command timed out");
+        assert_eq!(result.results[1].detail, "verification budget exhausted");
     }
 }

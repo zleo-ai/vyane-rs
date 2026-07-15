@@ -1,6 +1,14 @@
 #![allow(clippy::unwrap_used)]
 
 use std::path::Path;
+#[cfg(unix)]
+use std::process::Stdio;
+#[cfg(unix)]
+use std::thread;
+#[cfg(unix)]
+use std::time::Duration;
+#[cfg(unix)]
+use std::{fs, os::unix::fs::PermissionsExt as _};
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -44,6 +52,40 @@ fn create(db: &str, owner: &str, id: &str, title: &str, priority: &str) -> Value
         ],
         0,
     )
+}
+
+#[cfg(unix)]
+fn pursuit_fixture(directory: &TempDir) -> (std::path::PathBuf, TempDir) {
+    let config = directory.path().join("config.toml");
+    fs::write(
+        &config,
+        r#"
+        [providers.native]
+        base_url = "https://unused.invalid"
+        auth_style = "x_api_key"
+        protocol = "anthropic_messages"
+        default_model = "test-model"
+
+        [profiles.builder]
+        provider = "native"
+        protocol = "anthropic_messages"
+        harness = "claude-code"
+        model = "test-model"
+        "#,
+    )
+    .expect("write pursuit config");
+    let bin = TempDir::new().expect("bin tempdir");
+    let claude = bin.path().join("claude");
+    fs::write(
+        &claude,
+        r#"#!/bin/sh
+: > "$PWD/done.txt"
+printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
+"#,
+    )
+    .expect("write fake claude");
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).expect("chmod fake claude");
+    (config, bin)
 }
 
 #[test]
@@ -738,6 +780,548 @@ fn verify_requires_the_matching_cli_worker_for_an_active_lease() {
         3,
     );
     assert_eq!(verified["artifact"]["worker_id"], "worker-1");
+}
+
+#[cfg(unix)]
+#[test]
+fn pursue_dispatches_fresh_segment_reverifies_and_completes() {
+    let directory = TempDir::new().expect("tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let (config, bin) = pursuit_fixture(&directory);
+    json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--id",
+            "pursued-goal",
+            "--title",
+            "Pursued goal",
+            "--acceptance",
+            "custom:cmd:/usr/bin/test -f done.txt",
+        ],
+        0,
+    );
+    json_output(
+        &[
+            "goal",
+            "claim",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "pursued-goal",
+            "--worker",
+            "pursuer",
+        ],
+        0,
+    );
+
+    let output = vyane()
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "pursue",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--target",
+            "builder",
+            "--workdir",
+            directory.path().to_str().expect("utf8 workdir"),
+            "--max-segments",
+            "2",
+            "--max-failures",
+            "1",
+            "--segment-timeout-seconds",
+            "5",
+            "--verifier-timeout-seconds",
+            "2",
+            "--worker",
+            "pursuer",
+            "pursued-goal",
+        ])
+        .output()
+        .expect("run pursuit");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("pursuit JSON");
+    assert_eq!(value["status"], "success");
+    assert_eq!(value["pursuit"]["status"], "achieved");
+    assert_eq!(value["pursuit"]["segments_started"], 1);
+    assert_eq!(value["goal"]["status"], "completed");
+    assert!(value["goal"]["acceptance_criteria"][0]["satisfied_at"].is_string());
+
+    let detail = json_output(
+        &[
+            "goal",
+            "get",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "pursued-goal",
+        ],
+        0,
+    );
+    assert_eq!(
+        detail["verifications"].as_array().expect("artifacts").len(),
+        2
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pursue_reports_runtime_error_as_paused_exit_three() {
+    let directory = TempDir::new().expect("tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let (config, bin) = pursuit_fixture(&directory);
+    let claude = bin.path().join("claude");
+    fs::write(&claude, "#!/bin/sh\nexit 1\n").expect("write failing fake claude");
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755))
+        .expect("chmod failing fake claude");
+    json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--id",
+            "failed-pursuit",
+            "--title",
+            "Failed pursuit",
+            "--acceptance",
+            "custom:cmd:/usr/bin/false",
+        ],
+        0,
+    );
+    json_output(
+        &[
+            "goal",
+            "claim",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "failed-pursuit",
+            "--worker",
+            "pursuer",
+        ],
+        0,
+    );
+
+    let output = vyane()
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "pursue",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--target",
+            "builder",
+            "--workdir",
+            directory.path().to_str().expect("utf8 workdir"),
+            "--max-failures",
+            "1",
+            "--worker",
+            "pursuer",
+            "failed-pursuit",
+        ])
+        .output()
+        .expect("run failing pursuit");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("pursuit JSON");
+    assert_eq!(value["status"], "paused");
+    assert_eq!(value["pursuit"]["status"], "paused");
+    assert_eq!(value["pursuit"]["reason"], "pursuit max failures reached");
+    assert_eq!(value["pursuit"]["consecutive_failures"], 1);
+    assert_eq!(value["pursuit"]["segments_started"], 1);
+    assert_eq!(value["pursuit"]["segments_completed"], 1);
+
+    let detail = json_output(
+        &[
+            "goal",
+            "get",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "failed-pursuit",
+        ],
+        0,
+    );
+    assert!(
+        detail["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .any(|event| {
+                event["stage"] == "pursuit.segment.failed"
+                    && event["detail"]
+                        .as_str()
+                        .is_some_and(|detail| detail.contains("Error"))
+            }),
+        "events: {}",
+        detail["events"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pursue_missing_acceptance_returns_paused_exit_three() {
+    let directory = TempDir::new().expect("tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let (config, bin) = pursuit_fixture(&directory);
+    create(
+        &db,
+        "local",
+        "missing-acceptance",
+        "Missing acceptance",
+        "2",
+    );
+    json_output(
+        &[
+            "goal",
+            "claim",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "missing-acceptance",
+            "--worker",
+            "pursuer",
+        ],
+        0,
+    );
+
+    let output = vyane()
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "pursue",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--target",
+            "builder",
+            "--workdir",
+            directory.path().to_str().expect("utf8 workdir"),
+            "--worker",
+            "pursuer",
+            "missing-acceptance",
+        ])
+        .output()
+        .expect("run pursuit without acceptance");
+    assert_eq!(output.status.code(), Some(3));
+    let value: Value = serde_json::from_slice(&output.stdout).expect("pursuit JSON");
+    assert_eq!(value["status"], "paused");
+    assert_eq!(value["pursuit"]["reason"], "acceptance criteria required");
+}
+
+#[cfg(unix)]
+#[test]
+fn pursue_external_pause_returns_stopped_exit_four() {
+    let directory = TempDir::new().expect("tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let (config, bin) = pursuit_fixture(&directory);
+    let claude = bin.path().join("claude");
+    fs::write(
+        &claude,
+        r#"#!/bin/sh
+: > "$PWD/segment-started"
+/bin/sleep 1
+printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
+"#,
+    )
+    .expect("write blocking fake claude");
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755))
+        .expect("chmod blocking fake claude");
+    json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--id",
+            "stopped-pursuit",
+            "--title",
+            "Stopped pursuit",
+            "--acceptance",
+            "custom:cmd:/usr/bin/false",
+        ],
+        0,
+    );
+    json_output(
+        &[
+            "goal",
+            "claim",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "stopped-pursuit",
+            "--worker",
+            "pursuer",
+        ],
+        0,
+    );
+
+    let program = vyane().get_program().to_owned();
+    let child = std::process::Command::new(program)
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "pursue",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--target",
+            "builder",
+            "--workdir",
+            directory.path().to_str().expect("utf8 workdir"),
+            "--worker",
+            "pursuer",
+            "stopped-pursuit",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pursuit");
+    let marker = directory.path().join("segment-started");
+    for _ in 0..200 {
+        if marker.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.exists(), "runtime segment did not start");
+    json_output(
+        &[
+            "goal",
+            "pause",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "stopped-pursuit",
+            "--worker",
+            "pursuer",
+            "--reason",
+            "external pause",
+        ],
+        0,
+    );
+    let output = child.wait_with_output().expect("wait for pursuit");
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("pursuit JSON");
+    assert_eq!(value["status"], "stopped");
+    assert_eq!(value["pursuit"]["status"], "stopped");
+    assert_eq!(value["pursuit"]["reason"], "goal status is paused");
+}
+
+#[test]
+fn pursue_rejects_non_local_owner_before_goal_or_runtime_access() {
+    let directory = TempDir::new().expect("tempdir");
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let value = json_output(
+        &[
+            "goal",
+            "pursue",
+            "--db",
+            &db,
+            "--owner",
+            "other-owner",
+            "--json",
+            "--target",
+            "builder",
+            "--worker",
+            "pursuer",
+            "unread-goal",
+        ],
+        2,
+    );
+    assert_eq!(value["status"], "error");
+    assert_eq!(
+        value["error"],
+        "goal pursue currently requires the local single-user owner scope"
+    );
+    assert!(!Path::new(&db).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn pursue_sigint_cancels_the_active_segment_and_pauses_immediately() {
+    let directory = TempDir::new().expect("tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let (config, bin) = pursuit_fixture(&directory);
+    let claude = bin.path().join("claude");
+    fs::write(
+        &claude,
+        r#"#!/bin/sh
+: > "$PWD/sigint-segment-started"
+/bin/sleep 5
+printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
+"#,
+    )
+    .expect("write interruptible fake claude");
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755))
+        .expect("chmod interruptible fake claude");
+    json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--id",
+            "cancelled-pursuit",
+            "--title",
+            "Cancelled pursuit",
+            "--acceptance",
+            "custom:cmd:/usr/bin/false",
+        ],
+        0,
+    );
+    json_output(
+        &[
+            "goal",
+            "claim",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "cancelled-pursuit",
+            "--worker",
+            "pursuer",
+        ],
+        0,
+    );
+
+    let program = vyane().get_program().to_owned();
+    let child = std::process::Command::new(program)
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "pursue",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--target",
+            "builder",
+            "--workdir",
+            directory.path().to_str().expect("utf8 workdir"),
+            "--overall-timeout-seconds",
+            "2",
+            "--segment-timeout-seconds",
+            "5",
+            "--max-failures",
+            "3",
+            "--worker",
+            "pursuer",
+            "cancelled-pursuit",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pursuit");
+    let marker = directory.path().join("sigint-segment-started");
+    for _ in 0..500 {
+        if marker.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.exists(), "runtime segment did not start");
+    let signal = std::process::Command::new("/bin/kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("send SIGINT");
+    assert!(signal.success());
+    let output = child.wait_with_output().expect("wait for pursuit");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("pursuit JSON");
+    assert_eq!(value["status"], "paused");
+    assert_eq!(value["pursuit"]["reason"], "pursuit cancelled");
+    assert_eq!(value["pursuit"]["segments_started"], 1);
 }
 
 #[test]

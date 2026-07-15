@@ -2463,6 +2463,7 @@ dependencies = [
 name = "vyane-goal"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "rusqlite",
  "rustix",
@@ -2471,6 +2472,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 

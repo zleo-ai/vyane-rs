@@ -98,6 +98,8 @@ pub enum GoalCommand {
     Satisfy(GoalSatisfyArgs),
     /// Run bounded local acceptance checks and persist successful criteria.
     Verify(GoalVerifyArgs),
+    /// Repeatedly verify and dispatch fresh bounded work segments until achieved or paused.
+    Pursue(GoalPursueArgs),
     /// Append a progress event without changing lifecycle state.
     Progress(GoalProgressArgs),
     /// Pause an in-progress goal; releases any lease (holder-only while leased).
@@ -311,6 +313,41 @@ pub struct GoalVerifyArgs {
     /// Caller-supplied worker identity; required while a lease is active.
     #[arg(long)]
     pub worker: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalPursueArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact in-progress goal id.
+    pub id: String,
+    /// Profile, provider/model pair, or auto target for each fresh segment.
+    #[arg(long, value_name = "TARGET")]
+    pub target: String,
+    /// Canonical workdir shared by verifier commands and runtime segments.
+    #[arg(long, value_name = "PATH")]
+    pub workdir: Option<PathBuf>,
+    /// Workspace permission for each fresh segment.
+    #[arg(long, value_enum, default_value_t = SandboxArg::Write)]
+    pub sandbox: SandboxArg,
+    /// Overall pursuit budget in seconds (1 through 86400).
+    #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..=vyane_goal::MAX_PURSUIT_TIMEOUT.as_secs()))]
+    pub overall_timeout_seconds: u64,
+    /// Runtime budget per fresh segment in seconds (1 through 3600).
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=vyane_goal::MAX_SEGMENT_TIMEOUT.as_secs()))]
+    pub segment_timeout_seconds: u64,
+    /// Runtime budget per acceptance command in seconds (1 through 300).
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=300))]
+    pub verifier_timeout_seconds: u64,
+    /// Maximum fresh runtime segments (1 through 64).
+    #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u16).range(1..=i64::from(vyane_goal::MAX_PURSUIT_SEGMENTS)))]
+    pub max_segments: u16,
+    /// Pause after this many consecutive verifier/runtime failures (1 through 16).
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=i64::from(vyane_goal::MAX_PURSUIT_FAILURES)))]
+    pub max_failures: u16,
+    /// Exact active lease holder; pursuit never runs without a lease.
+    #[arg(long)]
+    pub worker: String,
 }
 
 #[derive(Debug, Args)]
