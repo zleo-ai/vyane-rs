@@ -3353,6 +3353,13 @@ fn validate_stored_run(run: &AgentRunRecord) -> Result<()> {
     }
     if let Some(controller) = &run.controller {
         controller.validate()?;
+        if run.execution_backend.is_claimable()
+            && run.execution_backend.controller_kind() != Some(controller.kind)
+        {
+            return Err(AgentStoreError::CorruptData(
+                "run controller kind contradicts its execution backend".into(),
+            ));
+        }
     }
     if let Some(lease) = &run.lease {
         validate_text("run lease owner", &lease.owner, 256)?;

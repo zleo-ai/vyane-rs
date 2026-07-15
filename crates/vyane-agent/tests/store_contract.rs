@@ -1404,6 +1404,140 @@ fn backend_claim_filter_preserves_cross_backend_worker_fifo() {
 }
 
 #[test]
+fn active_run_exclusion_remains_cross_backend_for_every_active_state() {
+    let (_directory, clock, store) = store();
+    let now = clock.now();
+    let mut process = run("process-active", "shared", now);
+    process.execution_backend = ExecutionBackend::CliHarnessProcess;
+    store
+        .create_root("alice", &worker("shared", None), &process)
+        .unwrap();
+    store
+        .enqueue_run("alice", &run("native-after", "shared", now))
+        .unwrap();
+
+    let process = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::CliHarnessProcess,
+            "process-lane",
+            60,
+            1,
+        )
+        .unwrap()
+        .remove(0);
+    assert_eq!(process.run.state, RunState::Starting);
+    assert!(
+        store
+            .claim_due(
+                "alice",
+                ExecutionBackend::NativeInProcess,
+                "native-lane",
+                60,
+                1,
+            )
+            .unwrap()
+            .is_empty()
+    );
+
+    let running = store
+        .start(
+            "alice",
+            &process.receipt,
+            &ControllerRef {
+                kind: ControllerKind::Process,
+                id: "process-controller".into(),
+                fingerprint: Some("process-fingerprint".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(running.run.state, RunState::Running);
+    assert!(
+        store
+            .claim_due(
+                "alice",
+                ExecutionBackend::NativeInProcess,
+                "native-lane",
+                60,
+                1,
+            )
+            .unwrap()
+            .is_empty()
+    );
+
+    let cancel = store
+        .request_cancel_tree(
+            "alice",
+            "shared",
+            &cancel_request("cancel-process", Vec::new()),
+        )
+        .unwrap();
+    assert_eq!(cancel.tickets.len(), 1);
+    assert_eq!(
+        store
+            .get_run("alice", "process-active")
+            .unwrap()
+            .unwrap()
+            .state,
+        RunState::Cancelling
+    );
+    assert!(
+        store
+            .claim_due(
+                "alice",
+                ExecutionBackend::NativeInProcess,
+                "native-lane",
+                60,
+                1,
+            )
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .settle_cancel("alice", &cancel.tickets[0], CancelOutcome::Cancelled)
+        .unwrap();
+    store.audit_integrity().unwrap();
+}
+
+#[test]
+fn controller_backend_tamper_without_completion_fails_integrity_audit() {
+    let (directory, clock, store) = store();
+    let path = directory.path().join("agent.sqlite");
+    store
+        .create_root(
+            "alice",
+            &worker("worker", None),
+            &run("run", "worker", clock.now()),
+        )
+        .unwrap();
+    let claimed = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "native-lane",
+            60,
+            1,
+        )
+        .unwrap()
+        .remove(0);
+    store
+        .start("alice", &claimed.receipt, &controller("native"))
+        .unwrap();
+
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection
+        .execute(
+            "UPDATE agent_runs SET execution_backend = 'remote' \
+             WHERE owner = 'alice' AND id = 'run'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(store.audit_integrity().is_err());
+}
+
+#[test]
 fn projection_disposition_corruption_fails_integrity_audit() {
     let (directory, clock, store) = store();
     let path = directory.path().join("agent.sqlite");

@@ -687,7 +687,8 @@ impl IntoResponse for AgentApiError {
 }
 
 fn exact_retry(record: &AgentRunRecord, input: &AgentSpoolInput) -> bool {
-    record.owner == input.owner
+    exact_retry_backend(record.execution_backend)
+        && record.owner == input.owner
         && record.id == input.run_id
         && record.worker_id == input.worker_id
         && record.parent_run_id.is_none()
@@ -696,6 +697,10 @@ fn exact_retry(record: &AgentRunRecord, input: &AgentSpoolInput) -> bool {
         && record.policy_digest == input.policy_sha256
         && record.timeout_seconds == input.policy.timeout_seconds.unwrap_or_default()
         && record.max_resume_attempts == 0
+}
+
+const fn exact_retry_backend(backend: ExecutionBackend) -> bool {
+    matches!(backend, ExecutionBackend::CliHarnessProcess)
 }
 
 fn worker_id(run_id: &str) -> String {
@@ -749,7 +754,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{SubmissionGate, cancel_operation_id, freeze_requested_workdir};
+    use super::{
+        SubmissionGate, cancel_operation_id, exact_retry_backend, freeze_requested_workdir,
+    };
+    use vyane_agent::ExecutionBackend;
     use vyane_core::Sandbox;
 
     #[tokio::test]
@@ -849,5 +857,17 @@ mod tests {
             cancel_operation_id("ab", "c"),
             cancel_operation_id("a", "bc")
         );
+    }
+
+    #[test]
+    fn exact_retry_accepts_only_the_process_backend_owned_by_this_host() {
+        assert!(exact_retry_backend(ExecutionBackend::CliHarnessProcess));
+        for backend in [
+            ExecutionBackend::NativeInProcess,
+            ExecutionBackend::Remote,
+            ExecutionBackend::LegacyUnassigned,
+        ] {
+            assert!(!exact_retry_backend(backend));
+        }
     }
 }
