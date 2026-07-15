@@ -50,7 +50,7 @@ private-only 项从统计中移除而宣称完成。
 ### 2.1 状态定义
 
 下列状态表示 **Rust 基线自身的实现状态**，不是跨仓行为等价结论。当前 53 项计数为：
-`implemented` 7、`partial` 20、`missing` 16、`different` 8、`planned` 2。
+`implemented` 7、`partial` 21、`missing` 14、`different` 9、`planned` 2。
 
 | 状态 | 含义 |
 | --- | --- |

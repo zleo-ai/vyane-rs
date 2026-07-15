@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,40 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = REPO_ROOT / "docs" / "parity" / "fixtures" / "v1"
 MANIFEST_PATH = FIXTURE_ROOT / "manifest.json"
+CAPABILITY_MATRIX_PATH = REPO_ROOT / "docs" / "parity" / "ORIGINAL-VYANE-PARITY.md"
+CAPABILITY_STATUS_BASELINE = {
+    "total": 53,
+    "implemented": 7,
+    "partial": 21,
+    "missing": 14,
+    "different": 9,
+    "planned": 2,
+}
+CAPABILITY_STATUS_CLAIMS = {
+    CAPABILITY_MATRIX_PATH: re.compile(
+        r"当前 (?P<total>\d+) 项计数为：\s*"
+        r"implemented (?P<implemented>\d+)、partial (?P<partial>\d+)、"
+        r"missing (?P<missing>\d+)、different (?P<different>\d+)、"
+        r"planned (?P<planned>\d+)。"
+    ),
+    REPO_ROOT / "README.md": re.compile(
+        r"tracks (?P<total>\d+) capabilities across eight domains: "
+        r"(?P<implemented>\d+) implemented, (?P<partial>\d+) partial, "
+        r"(?P<missing>\d+) missing, (?P<different>\d+) deliberately different "
+        r"or awaiting a decision, and (?P<planned>\d+) planned\."
+    ),
+    REPO_ROOT / "README.zh-CN.md": re.compile(
+        r"矩阵按 8 个域追踪 (?P<total>\d+) 个能力项："
+        r"(?P<implemented>\d+) 个 implemented、(?P<partial>\d+) 个 partial、"
+        r"(?P<missing>\d+) 个 missing、\s*(?P<different>\d+) 个刻意不同或待决策、"
+        r"(?P<planned>\d+) 个 planned。"
+    ),
+    REPO_ROOT / "docs" / "ROADMAP.md": re.compile(
+        r"the (?P<total>\d+) matrix items are (?P<implemented>\d+) implemented, "
+        r"(?P<partial>\d+) partial, (?P<missing>\d+) missing, "
+        r"(?P<different>\d+) different, and (?P<planned>\d+) planned\."
+    ),
+}
 
 
 def fail(message: str) -> None:
@@ -40,6 +75,60 @@ def require_keys(value: dict[str, Any], expected: set[str], context: str) -> Non
             f"{context} keys differ: missing={sorted(expected - actual)}, "
             f"unknown={sorted(actual - expected)}"
         )
+
+
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as error:
+        fail(f"cannot read {path.relative_to(REPO_ROOT)}: {error}")
+
+
+def normalized_markdown(path: Path) -> str:
+    return " ".join(read_text(path).replace("`", "").split())
+
+
+def validate_capability_status_counts() -> None:
+    matrix = read_text(CAPABILITY_MATRIX_PATH)
+    counts = Counter()
+    seen_ids: set[str] = set()
+    for line in matrix.splitlines():
+        match = re.match(r"^\| ([A-Z]+-\d+) \|.*?\| `([^`]+)` \|", line)
+        if match is None:
+            continue
+        capability_id, status = match.groups()
+        if capability_id in seen_ids:
+            fail(f"capability matrix contains duplicate id {capability_id}")
+        if status not in CAPABILITY_STATUS_BASELINE or status == "total":
+            fail(f"capability {capability_id} has unknown status {status}")
+        seen_ids.add(capability_id)
+        counts[status] += 1
+
+    actual = {"total": len(seen_ids)}
+    actual.update(
+        {
+            status: counts[status]
+            for status in CAPABILITY_STATUS_BASELINE
+            if status != "total"
+        }
+    )
+    if actual != CAPABILITY_STATUS_BASELINE:
+        fail(
+            "capability matrix status counts drifted: "
+            f"expected={CAPABILITY_STATUS_BASELINE}, actual={actual}"
+        )
+
+    for path, pattern in CAPABILITY_STATUS_CLAIMS.items():
+        match = pattern.search(normalized_markdown(path))
+        relative = path.relative_to(REPO_ROOT)
+        if match is None:
+            fail(f"capability status declaration is missing or malformed in {relative}")
+        declared = {key: int(value) for key, value in match.groupdict().items()}
+        if declared != CAPABILITY_STATUS_BASELINE:
+            fail(
+                f"capability status declaration drifted in {relative}: "
+                f"expected={CAPABILITY_STATUS_BASELINE}, actual={declared}"
+            )
 
 
 def fixture_path(raw: object) -> Path:
@@ -79,6 +168,7 @@ def validate_disposition(case: dict[str, Any]) -> None:
 
 
 def build_report() -> dict[str, Any]:
+    validate_capability_status_counts()
     manifest = load_json(MANIFEST_PATH)
     require_keys(
         manifest,
