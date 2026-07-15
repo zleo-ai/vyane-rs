@@ -83,6 +83,10 @@ fn inherited_path(bin: &Path) -> std::ffi::OsString {
 }
 
 fn create_goal(data_dir: &Path, workdir: &Path) {
+    create_goal_named(data_dir, workdir, "resident-goal", "2");
+}
+
+fn create_goal_named(data_dir: &Path, workdir: &Path, id: &str, priority: &str) {
     vyane()
         .env("VYANE_DATA_DIR", data_dir)
         .args([
@@ -90,9 +94,11 @@ fn create_goal(data_dir: &Path, workdir: &Path) {
             "create",
             "--json",
             "--id",
-            "resident-goal",
+            id,
             "--title",
-            "Resident goal",
+            id,
+            "--priority",
+            priority,
             "--acceptance",
             "custom:cmd:/bin/test -f done.txt",
         ])
@@ -107,6 +113,21 @@ struct DaemonGuard {
 }
 
 impl DaemonGuard {
+    fn start_plain(data_dir: &Path, config: &Path) -> Self {
+        vyane()
+            .env("VYANE_DATA_DIR", data_dir)
+            .arg("--config")
+            .arg(config)
+            .args(["daemon", "start", "--addr", "127.0.0.1:0"])
+            .timeout(Duration::from_secs(30))
+            .assert()
+            .success();
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            running: true,
+        }
+    }
+
     fn start(data_dir: &Path, config: &Path, workdir: &Path, bin: &Path) -> Self {
         let sandbox = if cfg!(target_os = "linux") {
             "write"
@@ -179,9 +200,13 @@ fn stop_daemon(data_dir: &Path) -> Output {
 }
 
 fn goal_detail(data_dir: &Path) -> Option<Value> {
+    goal_detail_named(data_dir, "resident-goal")
+}
+
+fn goal_detail_named(data_dir: &Path, id: &str) -> Option<Value> {
     let output = vyane()
         .env("VYANE_DATA_DIR", data_dir)
-        .args(["goal", "get", "--json", "resident-goal"])
+        .args(["goal", "get", "--json", id])
         .output()
         .unwrap();
     if !output.status.success() {
@@ -191,10 +216,14 @@ fn goal_detail(data_dir: &Path) -> Option<Value> {
 }
 
 fn wait_for_completion(data_dir: &Path, budget: Duration) -> Value {
+    wait_for_completion_named(data_dir, "resident-goal", budget)
+}
+
+fn wait_for_completion_named(data_dir: &Path, id: &str, budget: Duration) -> Value {
     let deadline = Instant::now() + budget;
     let mut last = "unavailable".to_string();
     loop {
-        if let Some(detail) = goal_detail(data_dir) {
+        if let Some(detail) = goal_detail_named(data_dir, id) {
             last = detail["goal"]["status"]
                 .as_str()
                 .unwrap_or("unknown")
@@ -290,13 +319,13 @@ fn daemon_restart_adopts_running_checkpoint_without_implicit_pause() {
 }
 
 #[test]
-fn repeated_auto_start_requires_stopping_the_existing_daemon_first() {
+fn enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first() {
     let fixture = TempDir::new().unwrap();
     let data = TempDir::new().unwrap();
     let workdir = TempDir::new().unwrap();
     let config = write_config(&fixture);
     let bin = write_fake_harness(&fixture);
-    let mut daemon = DaemonGuard::start(data.path(), &config, workdir.path(), &bin);
+    let mut daemon = DaemonGuard::start_plain(data.path(), &config);
 
     let second = vyane()
         .env("VYANE_DATA_DIR", data.path())
@@ -321,5 +350,26 @@ fn repeated_auto_start_requires_stopping_the_existing_daemon_first() {
         String::from_utf8_lossy(&second.stderr)
             .contains("stop it before changing or reasserting automatic goal pursuit")
     );
+    assert!(daemon.stop().status.success());
+}
+
+#[test]
+fn resident_daemon_settles_queued_goals_sequentially_by_priority() {
+    let fixture = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let workdir = TempDir::new().unwrap();
+    let config = write_config(&fixture);
+    let bin = write_fake_harness(&fixture);
+    create_goal_named(data.path(), workdir.path(), "resident-low", "3");
+    create_goal_named(data.path(), workdir.path(), "resident-high", "0");
+
+    let mut daemon = DaemonGuard::start(data.path(), &config, workdir.path(), &bin);
+    let high = wait_for_completion_named(data.path(), "resident-high", Duration::from_secs(15));
+    let low = wait_for_completion_named(data.path(), "resident-low", Duration::from_secs(15));
+
+    assert_eq!(high["pursuit_checkpoint"]["segments_started"], 1);
+    assert_eq!(low["pursuit_checkpoint"]["segments_started"], 0);
+    assert_eq!(high["goal"]["claim_generation"], 1);
+    assert_eq!(low["goal"]["claim_generation"], 1);
     assert!(daemon.stop().status.success());
 }

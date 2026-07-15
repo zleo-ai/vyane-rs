@@ -18,6 +18,14 @@ use crate::goal_runtime::DispatchGoalRuntime;
 use crate::task::LOCAL_TASK_OWNER;
 
 const DAEMON_GOAL_WORKER: &str = "daemon-goal:auto-v1";
+const MAX_PURSUIT_ERRORS_PER_GENERATION: u8 = 5;
+const MAX_PURSUIT_ERROR_BACKOFF: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy)]
+struct PursuitRetry {
+    errors: u8,
+    eligible_at: Option<Instant>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct DaemonGoalConfig {
@@ -80,7 +88,7 @@ pub(crate) struct DaemonGoalSupervisor {
     store: SqliteGoalStore,
     verifier: AcceptanceVerifier,
     config: DaemonGoalConfig,
-    retry_after: HashMap<String, Instant>,
+    retry_after: HashMap<String, PursuitRetry>,
 }
 
 impl DaemonGoalSupervisor {
@@ -142,6 +150,7 @@ impl DaemonGoalSupervisor {
                 result = pursuer.pursue(LOCAL_TASK_OWNER, &goal.id) => {
                     match result {
                         Ok(outcome) => {
+                            self.retry_after.remove(&goal.id);
                             tracing::info!(
                                 goal_id = %goal.id,
                                 status = ?outcome.status,
@@ -151,14 +160,17 @@ impl DaemonGoalSupervisor {
                             false
                         }
                         Err(error) => {
+                            let retry = schedule_retry(
+                                &mut self.retry_after,
+                                &goal.id,
+                                Instant::now(),
+                            );
                             tracing::warn!(
                                 goal_id = %goal.id,
                                 error = %error,
+                                errors = retry.errors,
+                                quarantined = retry.eligible_at.is_none(),
                                 "resident goal pursuit stopped with an error"
-                            );
-                            self.retry_after.insert(
-                                goal.id.clone(),
-                                Instant::now() + Duration::from_secs(1),
                             );
                             true
                         }
@@ -186,7 +198,7 @@ impl DaemonGoalSupervisor {
 fn acquire_from_store<S: GoalStore>(
     store: &S,
     config: &DaemonGoalConfig,
-    retry_after: &HashMap<String, Instant>,
+    retry_after: &HashMap<String, PursuitRetry>,
 ) -> Result<Option<GoalRecord>> {
     let query = GoalQuery {
         statuses: vec![GoalStatus::InProgress],
@@ -194,10 +206,11 @@ fn acquire_from_store<S: GoalStore>(
         limit: 1_000,
     };
     for goal in store.list(LOCAL_TASK_OWNER, &query)? {
-        if retry_after
-            .get(&goal.id)
-            .is_some_and(|until| *until > Instant::now())
-        {
+        if retry_after.get(&goal.id).is_some_and(|retry| {
+            retry
+                .eligible_at
+                .is_none_or(|eligible_at| eligible_at > Instant::now())
+        }) {
             continue;
         }
         let now = Utc::now();
@@ -239,6 +252,30 @@ fn acquire_from_store<S: GoalStore>(
             Utc::now(),
         )
         .map_err(Into::into)
+}
+
+fn schedule_retry(
+    retries: &mut HashMap<String, PursuitRetry>,
+    goal_id: &str,
+    now: Instant,
+) -> PursuitRetry {
+    let errors = retries
+        .get(goal_id)
+        .map_or(1, |retry| retry.errors.saturating_add(1));
+    let eligible_at = if errors >= MAX_PURSUIT_ERRORS_PER_GENERATION {
+        None
+    } else {
+        let exponent = u32::from(errors.saturating_sub(1));
+        let seconds = 1_u64.checked_shl(exponent).unwrap_or(u64::MAX);
+        let delay = Duration::from_secs(seconds).min(MAX_PURSUIT_ERROR_BACKOFF);
+        Some(now + delay)
+    };
+    let retry = PursuitRetry {
+        errors,
+        eligible_at,
+    };
+    retries.insert(goal_id.to_string(), retry);
+    retry
 }
 
 fn acquisition_raced(error: &GoalStoreError) -> bool {
@@ -457,5 +494,96 @@ mod tests {
         assert_eq!(paused.status, GoalStatus::Paused);
         assert_eq!(foreign.claimed_by.as_deref(), Some("foreign-worker"));
         assert_eq!(foreign.claim_generation, 1);
+    }
+
+    #[test]
+    fn cooldown_skips_failed_goal_then_expiry_makes_it_eligible() {
+        let directory = TempDir::new().unwrap();
+        let (store, config) = supervisor_store(&directory);
+        create(&store, "cooling", 0);
+        store
+            .claim(
+                LOCAL_TASK_OWNER,
+                "cooling",
+                DAEMON_GOAL_WORKER,
+                60,
+                Utc::now(),
+            )
+            .unwrap();
+        create(&store, "next", 1);
+
+        let mut retries = HashMap::new();
+        retries.insert(
+            "cooling".into(),
+            PursuitRetry {
+                errors: 1,
+                eligible_at: Some(Instant::now() + Duration::from_secs(60)),
+            },
+        );
+        let next = acquire_from_store(&store, &config, &retries)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.id, "next");
+
+        store
+            .pause(
+                LOCAL_TASK_OWNER,
+                "next",
+                Some(DAEMON_GOAL_WORKER),
+                Some("test setup"),
+                Utc::now(),
+            )
+            .unwrap();
+        retries.insert(
+            "cooling".into(),
+            PursuitRetry {
+                errors: 1,
+                eligible_at: Some(Instant::now() - Duration::from_secs(1)),
+            },
+        );
+        let retried = acquire_from_store(&store, &config, &retries)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retried.id, "cooling");
+    }
+
+    #[test]
+    fn pursuit_error_retry_is_exponential_and_bounded_per_generation() {
+        let now = Instant::now();
+        let mut retries = HashMap::new();
+        for (attempt, expected_delay) in [(1, 1), (2, 2), (3, 4), (4, 8)] {
+            let retry = schedule_retry(&mut retries, "failing", now);
+            assert_eq!(retry.errors, attempt);
+            assert_eq!(
+                retry.eligible_at,
+                Some(now + Duration::from_secs(expected_delay))
+            );
+        }
+        let quarantined = schedule_retry(&mut retries, "failing", now);
+        assert_eq!(quarantined.errors, MAX_PURSUIT_ERRORS_PER_GENERATION);
+        assert_eq!(quarantined.eligible_at, None);
+        assert_eq!(retries.len(), 1);
+    }
+
+    #[test]
+    fn only_expected_claim_races_are_treated_as_retryable() {
+        for error in [
+            GoalStoreError::NotFound { id: "g".into() },
+            GoalStoreError::InvalidStatus {
+                id: "g".into(),
+                operation: "claim",
+                status: GoalStatus::Paused,
+            },
+            GoalStoreError::LeaseHeld {
+                id: "g".into(),
+                held_by: "other".into(),
+            },
+            GoalStoreError::LeaseExpired { id: "g".into() },
+        ] {
+            assert!(acquisition_raced(&error));
+        }
+        assert!(!acquisition_raced(&GoalStoreError::InvalidInput(
+            "corrupt request".into()
+        )));
     }
 }
