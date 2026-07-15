@@ -1020,6 +1020,7 @@ mod tests {
                 task_id: None,
                 trace_id: None,
                 parent_run_id: None,
+                execution_backend: vyane_agent::ExecutionBackend::NativeInProcess,
                 mode: RunMode::Autonomous,
                 target_key: "http:test/model".into(),
                 prompt_digest: "a".repeat(64),
@@ -1035,7 +1036,13 @@ mod tests {
             self.enqueue("permit");
             let claim = self
                 .store
-                .claim_due(OWNER, "lease-test", 30, 1)
+                .claim_due(
+                    OWNER,
+                    vyane_agent::ExecutionBackend::NativeInProcess,
+                    "lease-test",
+                    30,
+                    1,
+                )
                 .unwrap()
                 .remove(0);
             let started = self
@@ -1879,7 +1886,13 @@ mod tests {
         fixture.enqueue_for(TEST_OWNER, "sink-recovery");
         let claim = fixture
             .store
-            .claim_due(TEST_OWNER, "executor", 1, 1)
+            .claim_due(
+                TEST_OWNER,
+                vyane_agent::ExecutionBackend::NativeInProcess,
+                "executor",
+                1,
+                1,
+            )
             .unwrap()
             .remove(0);
         let started = fixture

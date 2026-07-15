@@ -16,8 +16,8 @@ use futures::{FutureExt as _, StreamExt as _, stream};
 use tokio::time::{Instant, sleep_until};
 use vyane_agent::{
     ActiveCompletionPermit, ActiveExecutionPermit, AgentRunRecord, AgentStore, ClaimedRun,
-    ControllerKind, ControllerRef, RunCompletionStatus, RunFailureCode, RunLeaseReceipt,
-    RunSettlement, RunState,
+    ControllerKind, ControllerRef, ExecutionBackend, RunCompletionStatus, RunFailureCode,
+    RunLeaseReceipt, RunSettlement, RunState,
 };
 use vyane_core::CancellationToken;
 
@@ -302,6 +302,7 @@ pub struct AgentRunExecutionDriver {
     options: AgentExecutionOptions,
     executor: Arc<dyn AgentRunExecutor>,
     executor_kind: ControllerKind,
+    execution_backend: ExecutionBackend,
 }
 
 impl AgentRunExecutionDriver {
@@ -319,6 +320,26 @@ impl AgentRunExecutionDriver {
         validate_options(&options)?;
         let executor_kind = catch_unwind(AssertUnwindSafe(|| executor.kind()))
             .map_err(|_| AgentExecutionError::ExecutorMetadataPanicked)?;
+        Self::new_with_executor_kind(owner, store, lease_owner, options, executor, executor_kind)
+    }
+
+    pub(crate) fn new_with_executor_kind(
+        owner: impl Into<String>,
+        store: Arc<dyn AgentStore>,
+        lease_owner: impl Into<String>,
+        options: AgentExecutionOptions,
+        executor: Arc<dyn AgentRunExecutor>,
+        executor_kind: ControllerKind,
+    ) -> Result<Self, AgentExecutionError> {
+        let owner = owner.into();
+        let lease_owner = lease_owner.into();
+        validate_text(&owner, MAX_OWNER_BYTES).map_err(|()| AgentExecutionError::InvalidOwner)?;
+        validate_identity(&lease_owner).map_err(|()| AgentExecutionError::InvalidLeaseOwner)?;
+        validate_options(&options)?;
+        let execution_backend = ExecutionBackend::for_controller_kind(executor_kind);
+        if execution_backend.controller_kind() != Some(executor_kind) {
+            return Err(AgentExecutionError::InvalidExecutorMetadata);
+        }
         Ok(Self {
             owner,
             store,
@@ -326,6 +347,7 @@ impl AgentRunExecutionDriver {
             options,
             executor,
             executor_kind,
+            execution_backend,
         })
     }
 
@@ -378,13 +400,26 @@ impl AgentRunExecutionDriver {
         let lease_owner = self.lease_owner.clone();
         let lease_seconds = self.options.lease_seconds;
         let limit = self.options.batch_limit;
+        let execution_backend = self.execution_backend;
         let claimed = tokio::task::spawn_blocking(move || {
-            store.claim_due(&owner, &lease_owner, lease_seconds, limit)
+            store.claim_due(
+                &owner,
+                execution_backend,
+                &lease_owner,
+                lease_seconds,
+                limit,
+            )
         })
         .await
         .map_err(|_| AgentExecutionError::ClaimTaskFailed)?
         .map_err(|_| AgentExecutionError::ClaimStoreFailed)?;
-        validate_claims(&claimed, &self.owner, &self.lease_owner, limit)?;
+        validate_claims(
+            &claimed,
+            &self.owner,
+            self.execution_backend,
+            &self.lease_owner,
+            limit,
+        )?;
 
         let executor = Arc::clone(&self.executor);
         let executor_kind = self.executor_kind;
@@ -801,6 +836,7 @@ fn validate_options(options: &AgentExecutionOptions) -> Result<(), AgentExecutio
 fn validate_claims(
     claims: &[ClaimedRun],
     owner: &str,
+    execution_backend: ExecutionBackend,
     lease_owner: &str,
     limit: usize,
 ) -> Result<(), AgentExecutionError> {
@@ -810,7 +846,7 @@ fn validate_claims(
     let mut runs = BTreeSet::new();
     let mut workers = BTreeSet::new();
     if claims.iter().any(|claim| {
-        !valid_claim(claim, owner)
+        !valid_claim(claim, owner, execution_backend)
             || claim.receipt.lease_owner != lease_owner
             || !runs.insert(claim.run.id.as_str())
             || !workers.insert(claim.run.worker_id.as_str())
@@ -820,9 +856,10 @@ fn validate_claims(
     Ok(())
 }
 
-fn valid_claim(claim: &ClaimedRun, owner: &str) -> bool {
+fn valid_claim(claim: &ClaimedRun, owner: &str, execution_backend: ExecutionBackend) -> bool {
     let receipt = &claim.receipt;
     claim.run.owner == owner
+        && claim.run.execution_backend == execution_backend
         && claim.run.state == RunState::Starting
         && claim.run.controller.is_none()
         && claim.run.deadline_at.is_some()
@@ -960,6 +997,7 @@ fn same_frozen_run(left: &AgentRunRecord, right: &AgentRunRecord) -> bool {
         && left.trace_id == right.trace_id
         && left.parent_run_id == right.parent_run_id
         && left.resume_of_run_id == right.resume_of_run_id
+        && left.execution_backend == right.execution_backend
         && left.mode == right.mode
         && left.target_key == right.target_key
         && left.prompt_digest == right.prompt_digest
@@ -1097,6 +1135,15 @@ mod tests {
         }
 
         fn enqueue(&self, suffix: &str, timeout_seconds: u64) {
+            self.enqueue_for_backend(suffix, timeout_seconds, ExecutionBackend::NativeInProcess);
+        }
+
+        fn enqueue_for_backend(
+            &self,
+            suffix: &str,
+            timeout_seconds: u64,
+            execution_backend: ExecutionBackend,
+        ) {
             let worker = NewWorker {
                 id: format!("worker-{suffix}"),
                 logical_session_id: None,
@@ -1107,6 +1154,7 @@ mod tests {
                 task_id: None,
                 trace_id: None,
                 parent_run_id: None,
+                execution_backend,
                 mode: RunMode::Autonomous,
                 target_key: "http:test/model".into(),
                 prompt_digest: "a".repeat(64),
@@ -1349,7 +1397,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_prospective_handle_has_zero_external_execution_effect() {
         let fixture = Fixture::new();
-        fixture.enqueue("invalid", 30);
+        fixture.enqueue_for_backend("invalid", 30, ExecutionBackend::CliHarnessProcess);
         let error = fixture
             .driver(Arc::new(InvalidReserve), options())
             .execute_once(CancellationToken::new())
@@ -1463,7 +1511,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_drops_executor_and_preserves_running_controller() {
         let fixture = Fixture::new();
-        fixture.enqueue("timeout", 1);
+        fixture.enqueue_for_backend("timeout", 1, ExecutionBackend::Remote);
         let task = tokio::spawn(
             fixture
                 .driver(Arc::new(NeverExecutor), options())
@@ -1607,6 +1655,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum StoreAttack {
         ForeignClaim,
+        WrongBackend,
         SwapStart,
     }
 
@@ -1665,17 +1714,27 @@ mod tests {
         fn claim_due(
             &self,
             owner: &str,
+            execution_backend: ExecutionBackend,
             lease_owner: &str,
             lease_seconds: u64,
             limit: usize,
         ) -> vyane_agent::Result<Vec<ClaimedRun>> {
-            let mut claims = self
-                .inner
-                .claim_due(owner, lease_owner, lease_seconds, limit)?;
+            let mut claims = self.inner.claim_due(
+                owner,
+                execution_backend,
+                lease_owner,
+                lease_seconds,
+                limit,
+            )?;
             *self.claimed.lock().unwrap() = claims.clone();
             if matches!(self.attack, StoreAttack::ForeignClaim) {
                 if let Some(claim) = claims.first_mut() {
                     claim.run.owner = "foreign-owner-canary".into();
+                }
+            }
+            if matches!(self.attack, StoreAttack::WrongBackend) {
+                if let Some(claim) = claims.first_mut() {
+                    claim.run.execution_backend = ExecutionBackend::Remote;
                 }
             }
             Ok(claims)
@@ -1903,9 +1962,39 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, AgentExecutionError::InvalidStoreResult);
         assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        assert!(executor.admissions.lock().unwrap().is_empty());
         let run = fixture
             .store
             .get_run(OWNER, "run-foreign")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, RunState::Starting);
+        assert!(run.controller.is_none());
+    }
+
+    #[tokio::test]
+    async fn mismatched_backend_claim_rejects_before_controller_reservation() {
+        let fixture = Fixture::new();
+        fixture.enqueue("wrong-backend", 30);
+        let executor = Arc::new(TestExecutor::new(AgentExecutorOutcome::Unknown));
+        let store: Arc<dyn AgentStore> = Arc::new(ForeignClaimStore {
+            inner: fixture.store.clone(),
+            attack: StoreAttack::WrongBackend,
+            claimed: Mutex::new(Vec::new()),
+        });
+        let driver =
+            AgentRunExecutionDriver::new(OWNER, store, LEASE_OWNER, options(), executor.clone())
+                .unwrap();
+        let error = driver
+            .execute_once(CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error, AgentExecutionError::InvalidStoreResult);
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        assert!(executor.admissions.lock().unwrap().is_empty());
+        let run = fixture
+            .store
+            .get_run(OWNER, "run-wrong-backend")
             .unwrap()
             .unwrap();
         assert_eq!(run.state, RunState::Starting);
@@ -1947,7 +2036,10 @@ mod tests {
         let fixture = Fixture::new();
         fixture.enqueue("transition-a", 30);
         fixture.enqueue("transition-b", 30);
-        let claims = fixture.store.claim_due(OWNER, LEASE_OWNER, 10, 2).unwrap();
+        let claims = fixture
+            .store
+            .claim_due(OWNER, ExecutionBackend::NativeInProcess, LEASE_OWNER, 10, 2)
+            .unwrap();
         assert_eq!(claims.len(), 2);
         let controller_a = random_controller(ControllerKind::InProcess).unwrap();
         let controller_b = random_controller(ControllerKind::InProcess).unwrap();

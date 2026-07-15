@@ -925,6 +925,10 @@ mod tests {
         fn create_claimed(&self, owner: &str, suffix: &str, controller: Option<ControllerRef>) {
             let worker_id = format!("worker-{suffix}");
             let run_id = format!("run-{suffix}");
+            let execution_backend = controller.as_ref().map_or(
+                vyane_agent::ExecutionBackend::NativeInProcess,
+                |controller| vyane_agent::ExecutionBackend::for_controller_kind(controller.kind),
+            );
             self.store
                 .create_root(
                     owner,
@@ -938,6 +942,7 @@ mod tests {
                         task_id: None,
                         trace_id: None,
                         parent_run_id: None,
+                        execution_backend,
                         mode: RunMode::Autonomous,
                         target_key: "provider/model".into(),
                         prompt_digest: digest('a'),
@@ -950,7 +955,7 @@ mod tests {
                 .unwrap();
             let claimed = self
                 .store
-                .claim_due(owner, "run-supervisor", 1, 1)
+                .claim_due(owner, execution_backend, "run-supervisor", 1, 1)
                 .unwrap()
                 .remove(0);
             if let Some(controller) = controller {
@@ -1016,6 +1021,7 @@ mod tests {
                         task_id: None,
                         trace_id: None,
                         parent_run_id: None,
+                        execution_backend: vyane_agent::ExecutionBackend::NativeInProcess,
                         mode: RunMode::Autonomous,
                         target_key: "provider/model".into(),
                         prompt_digest: digest('a'),
@@ -1028,7 +1034,13 @@ mod tests {
                 .unwrap();
             let claimed = self
                 .store
-                .claim_due(owner, "run-supervisor", 1, 1)
+                .claim_due(
+                    owner,
+                    vyane_agent::ExecutionBackend::NativeInProcess,
+                    "run-supervisor",
+                    1,
+                    1,
+                )
                 .unwrap()
                 .remove(0);
             let controller = ControllerRef {
@@ -1304,6 +1316,7 @@ mod tests {
                     task_id: None,
                     trace_id: None,
                     parent_run_id: None,
+                    execution_backend: vyane_agent::ExecutionBackend::NativeInProcess,
                     mode: RunMode::Autonomous,
                     target_key: "provider/model".into(),
                     prompt_digest: digest('a'),
@@ -1315,7 +1328,13 @@ mod tests {
             )
             .unwrap();
         let claim = store
-            .claim_due("alice", "executor", 1, 1)
+            .claim_due(
+                "alice",
+                vyane_agent::ExecutionBackend::NativeInProcess,
+                "executor",
+                1,
+                1,
+            )
             .unwrap()
             .remove(0);
         let started = store

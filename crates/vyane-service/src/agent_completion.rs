@@ -230,6 +230,7 @@ mod tests {
             run_id: "run-1".into(),
             worker_id: "worker-1".into(),
             worker_generation: 1,
+            execution_backend: vyane_agent::ExecutionBackend::NativeInProcess,
             completion_id: completion.id,
             sink_kind: completion.sink_kind,
             publication_key: completion.publication_key,

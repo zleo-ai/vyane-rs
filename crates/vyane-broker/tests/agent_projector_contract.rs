@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use tempfile::TempDir;
-use vyane_agent::{AgentStore, NewAgentRun, NewWorker, RunMode, SqliteAgentStore};
+use vyane_agent::{
+    AgentStore, ExecutionBackend, NewAgentRun, NewWorker, RunMode, SqliteAgentStore,
+};
 use vyane_broker::{AgentEventProjector, BrokerScope};
 use vyane_ledger::{EventCategory, EventLog, EventSource};
 
@@ -35,6 +37,7 @@ fn add_root(store: &dyn AgentStore, owner: &str, suffix: &str, include_canaries:
                 task_id,
                 trace_id,
                 parent_run_id: None,
+                execution_backend: ExecutionBackend::NativeInProcess,
                 mode: RunMode::Autonomous,
                 target_key: target_key.into(),
                 prompt_digest: digest('a'),

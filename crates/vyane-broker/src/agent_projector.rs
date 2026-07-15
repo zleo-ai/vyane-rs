@@ -144,7 +144,7 @@ mod tests {
 
     use chrono::Utc;
     use tempfile::TempDir;
-    use vyane_agent::{NewAgentRun, NewWorker, RunMode, SqliteAgentStore};
+    use vyane_agent::{ExecutionBackend, NewAgentRun, NewWorker, RunMode, SqliteAgentStore};
 
     use super::*;
 
@@ -166,6 +166,7 @@ mod tests {
                     task_id: None,
                     trace_id: None,
                     parent_run_id: None,
+                    execution_backend: ExecutionBackend::NativeInProcess,
                     mode: RunMode::Autonomous,
                     target_key: "native/default".into(),
                     prompt_digest: digest('a'),

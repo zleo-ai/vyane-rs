@@ -332,6 +332,7 @@ fn add_agent_root(store: &dyn AgentStore, owner: &str) {
                 task_id: None,
                 trace_id: None,
                 parent_run_id: None,
+                execution_backend: vyane_agent::ExecutionBackend::NativeInProcess,
                 mode: RunMode::Autonomous,
                 target_key: "provider/model".into(),
                 prompt_digest: digest('a'),

@@ -10,9 +10,9 @@ use static_assertions::assert_not_impl_any;
 use tempfile::TempDir;
 use vyane_agent::{
     ActiveCompletionPermit, AgentClock, AgentEventKind, AgentStore, AgentStoreError, CancelOutcome,
-    CancelRequest, ControllerKind, ControllerRef, NativeExecutionScope, NewAgentRun,
-    NewRunCompletion, NewWorker, RecoveryReason, RunCompletionStatus, RunFailureCode, RunMode,
-    RunSettlement, RunState, SqliteAgentStore,
+    CancelRequest, ControllerKind, ControllerRef, ExecutionBackend, NativeExecutionScope,
+    NewAgentRun, NewRunCompletion, NewWorker, RecoveryReason, RunCompletionStatus, RunFailureCode,
+    RunMode, RunSettlement, RunState, SqliteAgentStore,
 };
 
 assert_not_impl_any!(ActiveCompletionPermit: Clone);
@@ -155,6 +155,7 @@ impl Fixture {
                     task_id: None,
                     trace_id: None,
                     parent_run_id: None,
+                    execution_backend: ExecutionBackend::NativeInProcess,
                     mode: RunMode::Autonomous,
                     target_key: "test/default".into(),
                     prompt_digest: digest('a'),
@@ -167,7 +168,13 @@ impl Fixture {
             .unwrap();
         let claim = self
             .store
-            .claim_due(owner, "executor", lease_seconds, 1)
+            .claim_due(
+                owner,
+                ExecutionBackend::NativeInProcess,
+                "executor",
+                lease_seconds,
+                1,
+            )
             .unwrap()
             .remove(0);
         self.store
@@ -715,6 +722,38 @@ fn tampered_completion_commit_snapshot_fails_integrity_audit() {
 }
 
 #[test]
+fn tampered_completion_backend_fails_permit_and_integrity_audit() {
+    let fixture = Fixture::new();
+    let started = fixture.start("alice", "backend-tamper", 30, 600);
+    let permit = fixture
+        .store
+        .issue_execution_permit("alice", &started.receipt, &started.run.policy_digest)
+        .unwrap();
+    let prepared = fixture
+        .store
+        .prepare_completion("alice", &permit, &proposal("backend-tamper"))
+        .unwrap();
+    let connection = rusqlite::Connection::open(fixture.store.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE agent_run_completions SET execution_backend = 'remote' \
+             WHERE owner = 'alice' AND run_id = 'backend-tamper'",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .store
+            .validate_completion_permit("alice", &prepared.permit),
+        Err(AgentStoreError::InvalidCompletionPermit { .. })
+    ));
+    assert!(matches!(
+        fixture.store.audit_integrity(),
+        Err(AgentStoreError::CorruptData(_))
+    ));
+}
+
+#[test]
 fn recovery_descriptor_read_linearizes_before_ticket_settlement() {
     let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(ReaderBlockingClock::new());
@@ -736,6 +775,7 @@ fn recovery_descriptor_read_linearizes_before_ticket_settlement() {
                 task_id: None,
                 trace_id: None,
                 parent_run_id: None,
+                execution_backend: ExecutionBackend::NativeInProcess,
                 mode: RunMode::Autonomous,
                 target_key: "test/default".into(),
                 prompt_digest: digest('a'),
@@ -747,7 +787,7 @@ fn recovery_descriptor_read_linearizes_before_ticket_settlement() {
         )
         .unwrap();
     let claim = store
-        .claim_due("alice", "executor", 1, 1)
+        .claim_due("alice", ExecutionBackend::NativeInProcess, "executor", 1, 1)
         .unwrap()
         .remove(0);
     let started = store

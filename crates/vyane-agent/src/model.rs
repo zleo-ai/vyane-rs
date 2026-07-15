@@ -176,6 +176,54 @@ string_enum!(ControllerKind {
     Remote => "remote",
 });
 
+/// Durable discriminator for the execution implementation that may claim a run.
+///
+/// This is intentionally distinct from [`ControllerKind`]: the backend is
+/// frozen while a run is queued, while the controller identifies the live
+/// effect only after execution starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionBackend {
+    /// Migrated v3 records whose original backend cannot be proven.
+    LegacyUnassigned,
+    CliHarnessProcess,
+    NativeInProcess,
+    Remote,
+}
+
+string_enum!(ExecutionBackend {
+    LegacyUnassigned => "legacy_unassigned",
+    CliHarnessProcess => "cli_harness_process",
+    NativeInProcess => "native_in_process",
+    Remote => "remote",
+});
+
+impl ExecutionBackend {
+    #[must_use]
+    pub const fn controller_kind(self) -> Option<ControllerKind> {
+        match self {
+            Self::LegacyUnassigned => None,
+            Self::CliHarnessProcess => Some(ControllerKind::Process),
+            Self::NativeInProcess => Some(ControllerKind::InProcess),
+            Self::Remote => Some(ControllerKind::Remote),
+        }
+    }
+
+    #[must_use]
+    pub const fn for_controller_kind(kind: ControllerKind) -> Self {
+        match kind {
+            ControllerKind::Process => Self::CliHarnessProcess,
+            ControllerKind::InProcess => Self::NativeInProcess,
+            ControllerKind::Remote => Self::Remote,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_claimable(self) -> bool {
+        !matches!(self, Self::LegacyUnassigned)
+    }
+}
+
 /// Secret-free stable controller identity. OS-specific control details remain
 /// in the service/CLI adapter, outside this persistence boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +287,7 @@ pub struct NewAgentRun {
     pub task_id: Option<String>,
     pub trace_id: Option<String>,
     pub parent_run_id: Option<String>,
+    pub execution_backend: ExecutionBackend,
     pub mode: RunMode,
     pub target_key: String,
     /// Domain-separated digest of the transient prompt; never the prompt.
@@ -261,6 +310,11 @@ impl NewAgentRun {
             self.parent_run_id.as_deref(),
             MAX_REFERENCE_BYTES,
         )?;
+        if !self.execution_backend.is_claimable() {
+            return Err(AgentStoreError::InvalidInput(
+                "new runs require an assigned execution backend".into(),
+            ));
+        }
         validate_text("target key", &self.target_key, MAX_TARGET_KEY_BYTES)?;
         validate_digest("prompt digest", &self.prompt_digest)?;
         validate_digest("policy digest", &self.policy_digest)?;
@@ -287,6 +341,7 @@ pub struct AgentRunRecord {
     pub trace_id: Option<String>,
     pub parent_run_id: Option<String>,
     pub resume_of_run_id: Option<String>,
+    pub execution_backend: ExecutionBackend,
     pub state: RunState,
     pub mode: RunMode,
     pub target_key: String,
@@ -435,6 +490,7 @@ pub struct RunCompletionRecord {
     pub run_id: String,
     pub worker_id: String,
     pub worker_generation: u64,
+    pub execution_backend: ExecutionBackend,
     pub completion_id: String,
     pub sink_kind: String,
     pub publication_key: String,

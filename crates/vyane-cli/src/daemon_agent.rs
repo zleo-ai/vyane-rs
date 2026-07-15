@@ -18,8 +18,9 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
 use uuid::Uuid;
 use vyane_agent::{
-    AgentRunRecord, AgentStore, CancelOutcome, CancelRequest, ControllerKind, NewAgentRun,
-    NewWorker, RunCompletionStatus, RunFailureCode, RunMode, RunState, SqliteAgentStore,
+    AgentRunRecord, AgentStore, CancelOutcome, CancelRequest, ControllerKind, ExecutionBackend,
+    NewAgentRun, NewWorker, RunCompletionStatus, RunFailureCode, RunMode, RunState,
+    SqliteAgentStore,
 };
 use vyane_core::{CancellationToken, Sandbox};
 use vyane_service::{
@@ -348,6 +349,7 @@ impl DaemonAgentHost {
             task_id: None,
             trace_id: None,
             parent_run_id: None,
+            execution_backend: ExecutionBackend::CliHarnessProcess,
             mode: RunMode::Autonomous,
             target_key: input.policy.target.clone(),
             prompt_digest: input.prompt_sha256.clone(),
