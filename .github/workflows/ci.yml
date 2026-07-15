@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# Keep only the newest run for each pull request; protected main runs are never
+# cancelled by a later push or by activity on another ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   release-gate:
     runs-on: ubuntu-latest
