@@ -72,6 +72,41 @@ fn write_native_config(directory: &TempDir, endpoint: &str) -> PathBuf {
     path
 }
 
+fn write_mixed_config(directory: &TempDir, endpoint: &str) -> PathBuf {
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            r#"
+            [providers.native]
+            base_url = "https://unused.invalid"
+            auth_style = "x_api_key"
+            protocol = "anthropic_messages"
+            default_model = "test-model"
+
+            [providers.native_http]
+            base_url = "{endpoint}"
+            auth_style = "bearer"
+            protocol = "openai_chat"
+            default_model = "native-test-model"
+
+            [profiles.builder]
+            provider = "native"
+            protocol = "anthropic_messages"
+            harness = "claude-code"
+            model = "test-model"
+
+            [profiles.native]
+            provider = "native_http"
+            protocol = "openai_chat"
+            model = "native-test-model"
+            "#
+        ),
+    )
+    .unwrap();
+    path
+}
+
 fn write_claude(directory: &TempDir, body: &str) -> PathBuf {
     let path = directory.path().join("claude");
     fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
@@ -350,6 +385,55 @@ async fn native_agent_submit_uses_the_shared_resident_lane() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert_eq!(output["output"], "native answer");
+    let retry = submit_native(data_dir.path(), run_id, &workdir).await;
+    assert_eq!(retry.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(retry.json::<Value>().await.unwrap()["state"], "succeeded");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(regular_files_below(&data_dir.path().join("native-agent-inputs")).is_empty());
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn mixed_process_and_native_lanes_run_concurrently_in_one_daemon() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "native-test-model",
+            "choices": [{
+                "message": {"role": "assistant", "content": "native mixed answer"},
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    write_claude(
+        &bin_dir,
+        "printf '%s\\n' '{\"result\":\"process mixed answer\"}'",
+    );
+    let config = write_mixed_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("mixed-native-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+
+    let process_run = "0197f524-7a00-7000-8000-000000000113";
+    let native_run = "0197f524-7a00-7000-8000-000000000114";
+    let (process_submit, native_submit) = tokio::join!(
+        submit(data_dir.path(), process_run, 30),
+        submit_native(data_dir.path(), native_run, &workdir),
+    );
+    assert_eq!(process_submit.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(native_submit.status(), reqwest::StatusCode::ACCEPTED);
+    let (process_done, native_done) = tokio::join!(
+        terminal(data_dir.path(), process_run, Duration::from_secs(15)),
+        terminal(data_dir.path(), native_run, Duration::from_secs(15)),
+    );
+    assert_eq!(process_done["state"], "succeeded");
+    assert_eq!(native_done["state"], "succeeded");
     assert!(daemon.stop().status.success());
 }
 

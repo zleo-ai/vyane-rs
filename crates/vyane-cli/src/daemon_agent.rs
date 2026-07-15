@@ -26,8 +26,8 @@ use vyane_core::{CancellationToken, PinnedWorkdir, Sandbox};
 use vyane_service::{
     AgentControllerAdapter, AgentExecutionOptions, AgentRecoveryOptions, AgentRunExecutor,
     AgentRunRecoveryDriver, AgentSupervisorOptions, ControllerRecoveryContext,
-    InProcessAgentComponents, MessageComponents, OwnerContext, ResidentAgentExecutionLane,
-    ResidentAgentHost, ResidentAgentHostBackend, VyaneService,
+    InProcessAgentComponents, MessageComponents, OwnerContext, ResidentAgentBackend,
+    ResidentAgentHost, VyaneService,
 };
 
 use crate::agent_host::ProcessAgentRunExecutor;
@@ -236,18 +236,11 @@ impl DaemonAgentHost {
         )
         .context("construct native AgentRun lane")?;
         let native_backend = native_components.into_resident_backend();
-        let (native_owner, native_store, native_executor, native_adapters, _) =
-            native_backend.into_parts();
-        let native_controller = native_adapters
-            .first()
-            .cloned()
+        let native_controller = native_backend
+            .adapter(ControllerKind::InProcess)
             .ok_or_else(|| anyhow::anyhow!("native AgentRun lane has no controller adapter"))?;
-        if native_owner != LOCAL_TASK_OWNER || !Arc::ptr_eq(&native_store, &store) {
-            return Err(anyhow::anyhow!("native AgentRun lane owner/store mismatch"));
-        }
         let completion_sinks = vec![messages.completion_sink()];
-        let mut adapters = vec![process_adapter];
-        adapters.extend(native_adapters);
+        let adapters = vec![process_adapter, native_controller.clone()];
         let all_completion_sinks = completion_sinks.clone();
         AgentRunRecoveryDriver::new_with_completion_sinks(
             LOCAL_TASK_OWNER,
@@ -264,21 +257,22 @@ impl DaemonAgentHost {
         cleanup_terminal_process_sidecars(&store, &sidecars, &controller)
             .await
             .context("clean terminal AgentRun process controllers")?;
-        let supervisor = ResidentAgentHost::new(
-            ResidentAgentHostBackend::new(
-                LOCAL_TASK_OWNER,
-                Arc::clone(&store),
-                adapters,
-                all_completion_sinks,
-            ),
+        let process_backend = ResidentAgentBackend::new(
+            LOCAL_TASK_OWNER,
+            Arc::clone(&store),
+            process_executor,
+            vec![adapters[0].clone()],
+            completion_sinks,
+        );
+        let supervisor = ResidentAgentHost::from_backends(
             vec![
-                ResidentAgentExecutionLane::new(
-                    process_executor,
+                (
+                    process_backend,
                     format!("agent-exec-process-{instance_key}"),
                     AgentExecutionOptions::default(),
                 ),
-                ResidentAgentExecutionLane::new(
-                    native_executor,
+                (
+                    native_backend,
                     format!("agent-exec-native-{instance_key}"),
                     AgentExecutionOptions::default(),
                 ),
@@ -525,6 +519,11 @@ impl DaemonAgentHost {
                 if let Some(existing) = existing
                     .filter(|existing| exact_native_retry(existing, &input, &self.native_spool))
                 {
+                    if existing.state.is_terminal() {
+                        self.native_spool
+                            .remove_exact(&input)
+                            .map_err(|_| AgentApiError::unavailable())?;
+                    }
                     self.view(existing).await
                 } else {
                     if spool_create == NativeAgentSpoolCreate::Created {
