@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    AcceptanceVerification, GoalEvent, GoalPursuitCheckpoint, GoalQuery, GoalRecord,
-    GoalVerificationArtifact, NewGoal, Result,
+    AcceptanceVerification, GoalContinuityState, GoalEvent, GoalPursuitCheckpoint, GoalQuery,
+    GoalQuotaEvent, GoalRecord, GoalVerificationArtifact, NewGoal, Result,
 };
 
 pub trait GoalStore: Send + Sync {
@@ -87,6 +87,16 @@ pub trait GoalStore: Send + Sync {
     fn events(&self, owner: &str, id: &str) -> Result<Vec<GoalEvent>>;
 
     fn pursuit_checkpoint(&self, owner: &str, id: &str) -> Result<Option<GoalPursuitCheckpoint>>;
+
+    /// Idempotently turn one normalized quota fact into visible continuity
+    /// state. This records policy intent only and never starts a runtime.
+    fn record_quota_handoff(
+        &self,
+        owner: &str,
+        id: &str,
+        event: &GoalQuotaEvent,
+        at: DateTime<Utc>,
+    ) -> Result<Option<GoalContinuityState>>;
 
     /// CAS-write one lease-fenced checkpoint and append its event in the same
     /// transaction. `Paused` and `Achieved` also perform the matching goal

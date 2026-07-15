@@ -146,6 +146,9 @@ pub struct GoalCreateArgs {
     /// Acceptance descriptor in KIND:TARGET form; repeatable.
     #[arg(long, value_name = "KIND:TARGET")]
     pub acceptance: Vec<String>,
+    /// Typed quota-continuity policy as one JSON object; records intent only.
+    #[arg(long, value_name = "JSON")]
+    pub continuity_policy_json: Option<String>,
     /// Explicit goal id; generated when omitted.
     #[arg(long)]
     pub id: Option<String>,

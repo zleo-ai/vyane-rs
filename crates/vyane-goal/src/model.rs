@@ -4,7 +4,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{GoalStoreError, Result};
+use crate::{GoalContinuityPolicy, GoalContinuityState, GoalStoreError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -186,6 +186,7 @@ pub struct NewGoal {
     pub priority: u8,
     pub parent_goal_id: Option<String>,
     pub acceptance_criteria: Vec<AcceptanceCriterion>,
+    pub continuity_policy: Option<GoalContinuityPolicy>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -199,6 +200,7 @@ impl NewGoal {
             priority: 2,
             parent_goal_id: None,
             acceptance_criteria: Vec::new(),
+            continuity_policy: None,
             created_at,
         }
     }
@@ -225,6 +227,9 @@ impl NewGoal {
         for criterion in &self.acceptance_criteria {
             criterion.validate()?;
         }
+        if let Some(policy) = &self.continuity_policy {
+            policy.validate()?;
+        }
         Ok(())
     }
 }
@@ -239,6 +244,8 @@ pub struct GoalRecord {
     pub priority: u8,
     pub parent_goal_id: Option<String>,
     pub acceptance_criteria: Vec<AcceptanceCriterion>,
+    pub continuity_policy: Option<GoalContinuityPolicy>,
+    pub continuity_state: Option<GoalContinuityState>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
@@ -372,7 +379,7 @@ fn validate_optional_text(field: &str, value: &str, maximum: usize) -> Result<()
     Ok(())
 }
 
-fn validate_text(field: &str, value: &str, maximum: usize) -> Result<()> {
+pub(crate) fn validate_text(field: &str, value: &str, maximum: usize) -> Result<()> {
     if value.trim().is_empty() {
         return Err(GoalStoreError::InvalidInput(format!(
             "{field} must not be empty"

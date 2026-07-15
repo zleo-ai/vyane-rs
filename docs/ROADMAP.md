@@ -28,8 +28,10 @@ current public integration baseline the 53 matrix items are 7 implemented, 21 pa
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
-foreign leases remain untouched. Quota handoff, approval authority, and
-authenticated goal service exposure remain open.
+foreign leases remain untouched. WP-73 adds only typed continuity policy and
+visible idempotent quota-handoff state; it does not authorize a takeover
+runtime. Approval authority, review handback, and authenticated goal service
+exposure remain open.
 
 ## v0.1 — the kernel end to end
 

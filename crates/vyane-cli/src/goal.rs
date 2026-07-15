@@ -258,6 +258,12 @@ fn create(args: GoalCreateArgs) -> Result<ExitCode> {
     new_goal.priority = args.priority;
     new_goal.parent_goal_id = args.parent;
     new_goal.acceptance_criteria = parse_acceptance(&args.acceptance)?;
+    new_goal.continuity_policy = args
+        .continuity_policy_json
+        .as_deref()
+        .map(serde_json::from_str::<vyane_goal::GoalContinuityPolicy>)
+        .transpose()
+        .context("parse continuity policy JSON")?;
     let goal = store
         .create(&args.common.owner, new_goal)
         .context("create goal")?;

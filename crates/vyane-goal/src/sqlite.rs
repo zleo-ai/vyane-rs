@@ -12,22 +12,25 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    AcceptanceCriterion, AcceptanceVerification, GoalEvent, GoalEventKind, GoalPursuitCheckpoint,
-    GoalQuery, GoalRecord, GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact,
-    NewGoal, PursuitCheckpointStatus, Result,
+    AcceptanceCriterion, AcceptanceVerification, GoalContinuityPolicy, GoalContinuityState,
+    GoalEvent, GoalEventKind, GoalPursuitCheckpoint, GoalQuery, GoalQuotaEvent, GoalRecord,
+    GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact, NewGoal,
+    PursuitCheckpointStatus, Result,
+    continuity::state_for_event,
     model::{
         validate_detail, validate_goal_id, validate_lease_seconds, validate_optional_reason,
         validate_owner, validate_stage, validate_worker,
     },
 };
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 const RECORD_SCHEMA: u32 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_0001: &str = include_str!("../migrations/0001_goals.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_claim_lease.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_verification_artifacts.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_pursuit_checkpoint.sql");
+const MIGRATION_0005: &str = include_str!("../migrations/0005_goal_continuity.sql");
 const MAX_VERIFICATION_PAYLOAD_BYTES: usize = 1024 * 1024;
 const VERIFICATION_ARTIFACT_PAGE: i64 = 100;
 
@@ -35,7 +38,8 @@ const GOAL_COLUMNS: &str = "\
     id, owner, title, description, status, priority, parent_goal_id, acceptance_json, \
     created_at_ms, started_at_ms, updated_at_ms, finished_at_ms, revision, \
     completion_summary, failure_reason, pause_reason, cancel_reason, \
-    claimed_by, claim_expires_at_ms, claim_generation";
+    claimed_by, claim_expires_at_ms, claim_generation, continuity_policy_json, \
+    continuity_state_json";
 
 #[derive(Debug, Clone)]
 pub struct SqliteGoalStore {
@@ -85,6 +89,10 @@ impl SqliteGoalStore {
         if found == 3 {
             transaction.execute_batch(MIGRATION_0004)?;
             found = 4;
+        }
+        if found == 4 {
+            transaction.execute_batch(MIGRATION_0005)?;
+            found = 5;
         }
         if found != user_version(&transaction)? {
             transaction.pragma_update(None, "user_version", found)?;
@@ -313,6 +321,8 @@ impl GoalStore for SqliteGoalStore {
             priority: goal.priority,
             parent_goal_id: goal.parent_goal_id,
             acceptance_criteria: goal.acceptance_criteria,
+            continuity_policy: goal.continuity_policy,
+            continuity_state: None,
             created_at: goal.created_at,
             started_at: None,
             updated_at: goal.created_at,
@@ -329,12 +339,18 @@ impl GoalStore for SqliteGoalStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let acceptance_json = serde_json::to_string(&record.acceptance_criteria)?;
+        let continuity_policy_json = record
+            .continuity_policy
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let inserted = transaction.execute(
             "INSERT INTO goals (owner, id, record_schema, title, description, status, priority, \
              parent_goal_id, acceptance_json, created_at_ms, started_at_ms, updated_at_ms, \
              finished_at_ms, revision, completion_summary, failure_reason, pause_reason, \
-             cancel_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?10, \
-             NULL, 0, NULL, NULL, NULL, NULL)",
+             cancel_reason, continuity_policy_json, continuity_state_json) VALUES \
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?10, NULL, 0, NULL, NULL, \
+              NULL, NULL, ?11, NULL)",
             params![
                 record.owner,
                 record.id,
@@ -346,6 +362,7 @@ impl GoalStore for SqliteGoalStore {
                 record.parent_goal_id,
                 acceptance_json,
                 record.created_at.timestamp_millis(),
+                continuity_policy_json,
             ],
         );
         if let Err(error) = inserted {
@@ -747,6 +764,43 @@ impl GoalStore for SqliteGoalStore {
             )
             .optional()
             .map_err(GoalStoreError::from)
+    }
+
+    fn record_quota_handoff(
+        &self,
+        owner: &str,
+        id: &str,
+        event: &GoalQuotaEvent,
+        at: DateTime<Utc>,
+    ) -> Result<Option<crate::GoalContinuityState>> {
+        validate_owner(owner)?;
+        validate_goal_id(id)?;
+        event.validate()?;
+        let at = normalize_timestamp(at)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before = get_in_transaction(&transaction, owner, id)?
+            .ok_or_else(|| GoalStoreError::NotFound { id: id.to_string() })?;
+        let Some(state) = state_for_event(&before, event)? else {
+            return Ok(None);
+        };
+        let persisted = state.clone();
+        let (after, _) = mutate_in_transaction(
+            &transaction,
+            &before,
+            GoalEventKind::Progress,
+            "record quota handoff",
+            at,
+            move |_before, after, _effective_at| {
+                after.continuity_state = Some(persisted);
+                Ok((
+                    Some("quota_handoff".into()),
+                    Some(format!("quota event {}", event.event_id)),
+                ))
+            },
+        )?;
+        transaction.commit()?;
+        Ok(after.continuity_state)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1175,12 +1229,22 @@ fn update_snapshot(
     after: &GoalRecord,
 ) -> Result<()> {
     let acceptance_json = serde_json::to_string(&after.acceptance_criteria)?;
+    let continuity_policy_json = after
+        .continuity_policy
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let continuity_state_json = after
+        .continuity_state
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let changed = transaction.execute(
         "UPDATE goals SET status = ?1, started_at_ms = ?2, updated_at_ms = ?3, \
          finished_at_ms = ?4, revision = ?5, completion_summary = ?6, failure_reason = ?7, \
          pause_reason = ?8, cancel_reason = ?9, acceptance_json = ?10, claimed_by = ?11, \
-         claim_expires_at_ms = ?12, claim_generation = ?13 \
-         WHERE owner = ?14 AND id = ?15 AND revision = ?16",
+         claim_expires_at_ms = ?12, claim_generation = ?13, continuity_policy_json = ?14, \
+         continuity_state_json = ?15 WHERE owner = ?16 AND id = ?17 AND revision = ?18",
         params![
             after.status.as_str(),
             after.started_at.map(|value| value.timestamp_millis()),
@@ -1195,6 +1259,8 @@ fn update_snapshot(
             after.claimed_by,
             after.claim_expires_at.map(|value| value.timestamp_millis()),
             counter_to_i64(after.claim_generation, "claim generation")?,
+            continuity_policy_json,
+            continuity_state_json,
             after.owner,
             after.id,
             counter_to_i64(before.revision, "revision")?,
@@ -1261,6 +1327,18 @@ fn row_to_record(row: &Row<'_>) -> rusqlite::Result<GoalRecord> {
     let priority = u8::try_from(priority_raw).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(5, Type::Integer, Box::new(error))
     })?;
+    let continuity_policy: Option<GoalContinuityPolicy> = optional_json_column(row, 20)?;
+    let continuity_state: Option<GoalContinuityState> = optional_json_column(row, 21)?;
+    if let Some(policy) = &continuity_policy {
+        policy.validate().map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(20, Type::Text, Box::new(error))
+        })?;
+    }
+    if let Some(state) = &continuity_state {
+        state.validate().map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(21, Type::Text, Box::new(error))
+        })?;
+    }
     Ok(GoalRecord {
         id: row.get(0)?,
         owner: row.get(1)?,
@@ -1270,6 +1348,8 @@ fn row_to_record(row: &Row<'_>) -> rusqlite::Result<GoalRecord> {
         priority,
         parent_goal_id: row.get(6)?,
         acceptance_criteria,
+        continuity_policy,
+        continuity_state,
         created_at: timestamp_column(row, 8)?,
         started_at: optional_timestamp_column(row, 9)?,
         updated_at: timestamp_column(row, 10)?,
@@ -1283,6 +1363,19 @@ fn row_to_record(row: &Row<'_>) -> rusqlite::Result<GoalRecord> {
         claim_expires_at: optional_timestamp_column(row, 18)?,
         claim_generation: counter_column(row, 19)?,
     })
+}
+
+fn optional_json_column<T>(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    row.get::<_, Option<String>>(index)?
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(error))
+            })
+        })
+        .transpose()
 }
 
 fn row_to_event(row: &Row<'_>) -> rusqlite::Result<GoalEvent> {

@@ -475,6 +475,8 @@ mod tests {
             priority: 2,
             parent_goal_id: None,
             acceptance_criteria: criteria,
+            continuity_policy: None,
+            continuity_state: None,
             created_at: Utc::now(),
             started_at: None,
             updated_at: Utc::now(),

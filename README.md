@@ -102,7 +102,7 @@ reference implementation.
 | durable, secret-free task metadata | `vyane-task` | [x] schema v2 keys snapshots, events and CAS by `(owner,id)` with transactional v1 migration; built-in frontends still select explicit `local` |
 | durable owner-scoped AgentRun queue, worker topology and recovery truth | `vyane-agent` | [~] exact leases/deadlines, active permits, bounded tree cancel, body-free completion receipts/outbox, and resident execution/recovery/publication are production-assembled for a narrow Linux `Process` path with an authenticated loopback submit/status/output/cancel API. `Remote`, native production execution, sessions/resume, distinct principals, live pause/resume, and automatic replay remain absent |
 | owner-scoped transactional message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO, delayed/idempotent delivery, fenced leases, TTL, ack/nack, body-free outbox, external-receipt reconciliation, hidden staged completion publication, bounded mailbox pages, and exact mailbox claim exist |
-| owner-scoped goal lifecycle and progress truth | `vyane-goal` | [~] one SQLite transaction updates the current snapshot and appends an immutable event; WP-68 adds bounded local acceptance verification, WP-69 preserves immutable evidence, WP-70 adds explicit bounded manual pursuit through fresh production dispatch segments, WP-71 adds durable lease-fenced restart checkpoints, and WP-72 composes opt-in single-goal automatic pursuit into the resident daemon; approval, quota handoff and authenticated goal service remain future layers |
+| owner-scoped goal lifecycle and progress truth | `vyane-goal` | [~] one SQLite transaction updates the current snapshot and appends an immutable event; WP-68 adds bounded local acceptance verification, WP-69 preserves immutable evidence, WP-70 adds explicit bounded manual pursuit through fresh production dispatch segments, WP-71 adds durable lease-fenced restart checkpoints, WP-72 composes opt-in single-goal automatic pursuit into the resident daemon, and WP-73 adds typed policy plus visible idempotent quota-handoff state; approval/takeover execution, review handback and authenticated goal service remain future layers |
 | bounded replay-safe delivery broker + body-free EventLog projectors | `vyane-broker` | [~] fake-adapter contracts, message/AgentRun lifecycle projection with stable source event IDs, and the explicit non-`Clone` `ResidentBrokerSupervisor` are assembled into the resident daemon with an intentionally empty delivery lane set; worker/message glue and remote A2A/Channels adapters remain absent |
 | declarative workflow engine (DAG + journal/resume/replay) | `vyane-workflow` | [x] exact-plan replay creates a new run and reuses a journal-recorded all-success prefix |
 | resident workflow and Process AgentRun daemon (authenticated local control) | `vyane-cli` | [x] workflow control plus fresh sessionless CLI-harness AgentRun submit/status/output/cancel on Linux; no automatic replay or live pause/resume |
@@ -453,8 +453,8 @@ perform quota/approval handoff. The resident daemon can separately opt in to the
 same pursuer as described below.
 The production CLI currently accepts only the `local` single-user owner so goal
 and dispatch ledger authority cannot silently diverge.
-See [WP-70](docs/plan/WP-70.md), [WP-71](docs/plan/WP-71.md), and
-[WP-72](docs/plan/WP-72.md).
+See [WP-70](docs/plan/WP-70.md), [WP-71](docs/plan/WP-71.md),
+[WP-72](docs/plan/WP-72.md), and [WP-73](docs/plan/WP-73.md).
 
 ### REST API
 
