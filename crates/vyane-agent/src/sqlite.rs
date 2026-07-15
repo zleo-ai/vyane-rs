@@ -26,14 +26,14 @@ use crate::{
     ActiveCompletionPermit, ActiveExecutionPermit, AgentEvent, AgentEventKind, AgentRunRecord,
     AgentStore, AgentStoreError, CancelOutcome, CancelPlan, CancelRequest, CancelTicket,
     ClaimedRun, CompletionPermitSnapshot, ControllerKind, ControllerRef, EnqueueResume,
-    ExecutionPermitSnapshot, NativeExecutionScope, NewAgentRun, NewRunCompletion, NewWorker,
-    OutboxPage, PreparedRunCompletion, ProjectionDeferReason, ProjectionQuarantineReason,
-    RecoveryReason, RecoveryTicket, Result, ResumeSessionProof, RunCompletionRecord,
-    RunCompletionStatus, RunFailureCode, RunLease, RunLeaseReceipt, RunSettlement, RunState,
-    WorkerLifecycle, WorkerRecord, WorkerTopology,
+    ExecutionBackend, ExecutionPermitSnapshot, NativeExecutionScope, NewAgentRun, NewRunCompletion,
+    NewWorker, OutboxPage, PreparedRunCompletion, ProjectionDeferReason,
+    ProjectionQuarantineReason, RecoveryReason, RecoveryTicket, Result, ResumeSessionProof,
+    RunCompletionRecord, RunCompletionStatus, RunFailureCode, RunLease, RunLeaseReceipt,
+    RunSettlement, RunState, WorkerLifecycle, WorkerRecord, WorkerTopology,
 };
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 const RECORD_SCHEMA: u32 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
@@ -48,6 +48,7 @@ const MAX_PROJECTION_DEFER_SECONDS: u64 = 24 * 60 * 60;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_agent.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_completion.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_projection_dispositions.sql");
+const MIGRATION_0004: &str = include_str!("../migrations/0004_execution_backend.sql");
 
 const WORKER_COLUMNS: &str = "owner, id, parent_id, logical_session_id, lifecycle, \
     created_at_ms, updated_at_ms, released_at_ms, revision, record_schema";
@@ -60,13 +61,26 @@ const RUN_COLUMNS: &str = "owner, id, worker_id, task_id, trace_id, parent_run_i
     updated_at_ms, finished_at_ms, revision, worker_generation, controller_kind, \
     controller_id, controller_fingerprint, lease_owner, lease_expires_at_ms, \
     lease_token_hash, last_heartbeat_at_ms, last_activity_at_ms, failure_code, \
-    resume_binding_digest, deadline_at_ms, record_schema";
+    resume_binding_digest, deadline_at_ms, record_schema, execution_backend";
+const RUN_COLUMNS_V3: &str = "owner, id, worker_id, task_id, trace_id, parent_run_id, \
+    resume_of_run_id, state, mode, target_key, prompt_digest, policy_digest, available_at_ms, \
+    timeout_ms, max_resume_attempts, resume_attempt, created_at_ms, started_at_ms, \
+    updated_at_ms, finished_at_ms, revision, worker_generation, controller_kind, \
+    controller_id, controller_fingerprint, lease_owner, lease_expires_at_ms, \
+    lease_token_hash, last_heartbeat_at_ms, last_activity_at_ms, failure_code, \
+    resume_binding_digest, deadline_at_ms, record_schema, \
+    'legacy_unassigned' AS execution_backend";
 const EVENT_COLUMNS: &str = "sequence, event_id, owner, worker_id, run_id, occurred_at_ms, \
     event_type, worker_revision, run_revision, run_state, worker_lifecycle";
 const COMPLETION_COLUMNS: &str = "owner, run_id, worker_id, worker_generation, completion_id, \
     sink_kind, publication_key, content_digest, content_bytes, status, prepared_at_ms, \
     prepared_run_revision, committed_at_ms, committed_run_revision, abandoned_at_ms, \
-    abandoned_run_revision, committed_by_operation_id, revision, record_schema";
+    abandoned_run_revision, committed_by_operation_id, revision, record_schema, execution_backend";
+const COMPLETION_COLUMNS_V3: &str = "owner, run_id, worker_id, worker_generation, completion_id, \
+    sink_kind, publication_key, content_digest, content_bytes, status, prepared_at_ms, \
+    prepared_run_revision, committed_at_ms, committed_run_revision, abandoned_at_ms, \
+    abandoned_run_revision, committed_by_operation_id, revision, record_schema, \
+    'legacy_unassigned' AS execution_backend";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SchemaObject {
@@ -203,6 +217,8 @@ static EXPECTED_SCHEMA_V1: OnceLock<std::result::Result<Vec<SchemaObject>, Strin
     OnceLock::new();
 static EXPECTED_SCHEMA_V2: OnceLock<std::result::Result<Vec<SchemaObject>, String>> =
     OnceLock::new();
+static EXPECTED_SCHEMA_V3: OnceLock<std::result::Result<Vec<SchemaObject>, String>> =
+    OnceLock::new();
 
 /// Store-owned clock. Production lifecycle timestamps are never caller supplied.
 pub trait AgentClock: Send + Sync {
@@ -324,6 +340,7 @@ impl SqliteAgentStore {
             transaction.transaction().execute_batch(MIGRATION_0001)?;
             transaction.transaction().execute_batch(MIGRATION_0002)?;
             transaction.transaction().execute_batch(MIGRATION_0003)?;
+            transaction.transaction().execute_batch(MIGRATION_0004)?;
             transaction
                 .transaction()
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -332,6 +349,7 @@ impl SqliteAgentStore {
             audit_database_integrity_v1(transaction.transaction())?;
             transaction.transaction().execute_batch(MIGRATION_0002)?;
             transaction.transaction().execute_batch(MIGRATION_0003)?;
+            transaction.transaction().execute_batch(MIGRATION_0004)?;
             transaction
                 .transaction()
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -339,6 +357,14 @@ impl SqliteAgentStore {
             validate_schema_definition_v2(transaction.transaction())?;
             audit_database_integrity_v2(transaction.transaction())?;
             transaction.transaction().execute_batch(MIGRATION_0003)?;
+            transaction.transaction().execute_batch(MIGRATION_0004)?;
+            transaction
+                .transaction()
+                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        } else if found == 3 {
+            validate_schema_definition_v3(transaction.transaction())?;
+            audit_database_integrity_v3(transaction.transaction())?;
+            transaction.transaction().execute_batch(MIGRATION_0004)?;
             transaction
                 .transaction()
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -683,11 +709,17 @@ impl AgentStore for SqliteAgentStore {
     fn claim_due(
         &self,
         owner: &str,
+        execution_backend: ExecutionBackend,
         lease_owner: &str,
         lease_seconds: u64,
         limit: usize,
     ) -> Result<Vec<ClaimedRun>> {
         validate_owner(owner)?;
+        if !execution_backend.is_claimable() {
+            return Err(AgentStoreError::InvalidInput(
+                "claim requires an assigned execution backend".into(),
+            ));
+        }
         validate_text("lease owner", lease_owner, 256)?;
         validate_lease_seconds(lease_seconds)?;
         validate_limit(limit, "claim limit")?;
@@ -697,7 +729,8 @@ impl AgentStore for SqliteAgentStore {
         let expires_at = add_seconds(now, lease_seconds, "run lease")?;
         let sql = "SELECT r.id FROM agent_runs r \
             JOIN workers w ON w.owner = r.owner AND w.id = r.worker_id \
-            WHERE r.owner = ?1 AND r.state = 'queued' AND r.available_at_ms <= ?2 \
+            WHERE r.owner = ?1 AND r.execution_backend = ?3 \
+              AND r.state = 'queued' AND r.available_at_ms <= ?2 \
               AND w.lifecycle = 'open' \
               AND NOT EXISTS (SELECT 1 FROM agent_runs active \
                   WHERE active.owner = r.owner AND active.worker_id = r.worker_id \
@@ -708,13 +741,14 @@ impl AgentStore for SqliteAgentStore {
                     AND (earlier.available_at_ms < r.available_at_ms \
                       OR (earlier.available_at_ms = r.available_at_ms \
                         AND earlier.queue_sequence < r.queue_sequence))) \
-            ORDER BY r.available_at_ms, r.queue_sequence LIMIT ?3";
+            ORDER BY r.available_at_ms, r.queue_sequence LIMIT ?4";
         let mut statement = transaction.transaction().prepare(sql)?;
         let ids = statement
             .query_map(
                 params![
                     owner,
                     now.timestamp_millis(),
+                    execution_backend.to_string(),
                     usize_to_i64(limit, "claim limit")?
                 ],
                 |row| row.get::<_, String>(0),
@@ -799,6 +833,11 @@ impl AgentStore for SqliteAgentStore {
             &[RunState::Starting],
         )?;
         let worker = require_worker(transaction.transaction(), owner, &before.worker_id)?;
+        if before.execution_backend.controller_kind() != Some(controller.kind) {
+            return Err(AgentStoreError::InvalidInput(
+                "controller kind does not match the frozen execution backend".into(),
+            ));
+        }
         let mut after = before.clone();
         after.state = RunState::Running;
         after.controller = Some(controller.clone());
@@ -1152,6 +1191,7 @@ impl AgentStore for SqliteAgentStore {
             run_id: run.id.clone(),
             worker_id: run.worker_id.clone(),
             worker_generation: run.worker_generation,
+            execution_backend: run.execution_backend,
             completion_id: completion.id.clone(),
             sink_kind: completion.sink_kind.clone(),
             publication_key: completion.publication_key.clone(),
@@ -1204,6 +1244,7 @@ impl AgentStore for SqliteAgentStore {
         if completion.status != RunCompletionStatus::Prepared
             || run.worker_id != completion.worker_id
             || run.worker_generation != completion.worker_generation
+            || run.execution_backend != completion.execution_backend
             || run.state != RunState::Running
             || active_control.is_some()
             || lease.is_none_or(|lease| lease.expires_at <= now)
@@ -1250,6 +1291,7 @@ impl AgentStore for SqliteAgentStore {
             })?;
         if before_completion.status == RunCompletionStatus::Committed
             && before.state == RunState::Succeeded
+            && before.execution_backend == before_completion.execution_backend
         {
             transaction.commit()?;
             return Ok((before, before_completion));
@@ -1257,6 +1299,7 @@ impl AgentStore for SqliteAgentStore {
         if before_completion.status != RunCompletionStatus::Prepared
             || before.worker_id != before_completion.worker_id
             || before.worker_generation != before_completion.worker_generation
+            || before.execution_backend != before_completion.execution_backend
             || before.state != RunState::Running
             || before
                 .lease
@@ -1364,6 +1407,7 @@ impl AgentStore for SqliteAgentStore {
             && before_completion.completion_id == completion_id
             && before_completion.committed_by_operation_id.as_deref()
                 == Some(ticket.operation_id.as_str())
+            && before.execution_backend == before_completion.execution_backend
             && settled_recovery_ticket_matches(transaction.transaction(), owner, ticket)?
         {
             transaction.commit()?;
@@ -1381,6 +1425,7 @@ impl AgentStore for SqliteAgentStore {
             || before_completion.status != RunCompletionStatus::Prepared
             || before_completion.completion_id != completion_id
             || before_completion.worker_generation != ticket.generation
+            || before.execution_backend != before_completion.execution_backend
         {
             return Err(AgentStoreError::InvalidRecoveryTicket {
                 id: ticket.run_id.clone(),
@@ -2173,6 +2218,12 @@ impl AgentStore for SqliteAgentStore {
             });
         }
         let source = require_run(transaction.transaction(), owner, &request.source_run_id)?;
+        if !source.execution_backend.is_claimable() {
+            return Err(AgentStoreError::ResumeRejected {
+                id: source.id,
+                reason: "source execution backend is unassigned".into(),
+            });
+        }
         if !source.is_resume_eligible() {
             return Err(AgentStoreError::ResumeRejected {
                 id: source.id,
@@ -2235,6 +2286,7 @@ impl AgentStore for SqliteAgentStore {
             trace_id: source.trace_id.clone(),
             parent_run_id: source.parent_run_id.clone(),
             resume_of_run_id: Some(source.id.clone()),
+            execution_backend: source.execution_backend,
             state: RunState::Queued,
             mode: source.mode,
             target_key: source.target_key.clone(),
@@ -2464,6 +2516,7 @@ fn new_run_record(owner: &str, run: &NewAgentRun, now: DateTime<Utc>) -> Result<
         trace_id: run.trace_id.clone(),
         parent_run_id: run.parent_run_id.clone(),
         resume_of_run_id: None,
+        execution_backend: run.execution_backend,
         state: RunState::Queued,
         mode: run.mode,
         target_key: run.target_key.clone(),
@@ -2606,10 +2659,11 @@ fn insert_run(connection: &Connection, run: &AgentRunRecord) -> Result<()> {
          started_at_ms, updated_at_ms, finished_at_ms, revision, worker_generation, \
          controller_kind, controller_id, controller_fingerprint, lease_owner, \
          lease_expires_at_ms, lease_token_hash, last_heartbeat_at_ms, last_activity_at_ms, \
-         failure_code, resume_binding_digest, deadline_at_ms, queue_sequence, record_schema) \
+         failure_code, resume_binding_digest, deadline_at_ms, queue_sequence, record_schema, \
+         execution_backend) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, NULL, \
-         ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
+         ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35)",
         params![
             run.owner,
             run.id,
@@ -2649,6 +2703,7 @@ fn insert_run(connection: &Connection, run: &AgentRunRecord) -> Result<()> {
             run.deadline_at.map(|value| value.timestamp_millis()),
             u64_to_i64(queue_sequence, "run queue sequence")?,
             RECORD_SCHEMA,
+            run.execution_backend.to_string(),
         ],
     )?;
     Ok(())
@@ -2665,8 +2720,8 @@ fn insert_completion(
          completion_id, sink_kind, publication_key, content_digest, content_bytes, status, \
          token_hash, prepared_at_ms, prepared_run_revision, committed_at_ms, \
          committed_run_revision, abandoned_at_ms, abandoned_run_revision, \
-         committed_by_operation_id, revision, record_schema) VALUES \
-         (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+         committed_by_operation_id, revision, record_schema, execution_backend) VALUES \
+         (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             completion.owner,
             completion.run_id,
@@ -2701,6 +2756,7 @@ fn insert_completion(
             completion.committed_by_operation_id,
             u64_to_i64(completion.revision, "completion revision")?,
             RECORD_SCHEMA,
+            completion.execution_backend.to_string(),
         ],
     )?;
     Ok(())
@@ -2716,6 +2772,7 @@ fn update_completion(
         || before.run_id != after.run_id
         || before.worker_id != after.worker_id
         || before.worker_generation != after.worker_generation
+        || before.execution_backend != after.execution_backend
         || before.completion_id != after.completion_id
         || before.sink_kind != after.sink_kind
         || before.publication_key != after.publication_key
@@ -2769,6 +2826,7 @@ fn update_run(
         || before.trace_id != after.trace_id
         || before.parent_run_id != after.parent_run_id
         || before.resume_of_run_id != after.resume_of_run_id
+        || before.execution_backend != after.execution_backend
         || before.mode != after.mode
         || before.target_key != after.target_key
         || before.prompt_digest != after.prompt_digest
@@ -2990,6 +3048,7 @@ fn row_to_run(row: &Row<'_>) -> rusqlite::Result<AgentRunRecord> {
     let lease_expires_at = optional_timestamp(row, 26, "run lease expires_at")?;
     let failure_raw: Option<String> = row.get(30)?;
     let schema: i64 = row.get(33)?;
+    let execution_backend_raw: String = row.get(34)?;
     if schema != i64::from(RECORD_SCHEMA) {
         return Err(data_error(33, Type::Integer, "unsupported run schema"));
     }
@@ -3020,6 +3079,7 @@ fn row_to_run(row: &Row<'_>) -> rusqlite::Result<AgentRunRecord> {
         trace_id: row.get(4)?,
         parent_run_id: row.get(5)?,
         resume_of_run_id: row.get(6)?,
+        execution_backend: parse_enum(34, &execution_backend_raw)?,
         state: parse_enum(7, &state_raw)?,
         mode: parse_enum(8, &mode_raw)?,
         target_key: row.get(9)?,
@@ -3079,6 +3139,7 @@ fn row_to_event(row: &Row<'_>) -> rusqlite::Result<AgentEvent> {
 fn row_to_completion(row: &Row<'_>) -> rusqlite::Result<RunCompletionRecord> {
     let status_raw: String = row.get(9)?;
     let record_schema: u32 = stored_u32(row, 18, "completion record schema")?;
+    let execution_backend_raw: String = row.get(19)?;
     if record_schema != RECORD_SCHEMA {
         return Err(data_error(
             18,
@@ -3091,6 +3152,7 @@ fn row_to_completion(row: &Row<'_>) -> rusqlite::Result<RunCompletionRecord> {
         run_id: row.get(1)?,
         worker_id: row.get(2)?,
         worker_generation: stored_u64(row, 3, "completion worker generation")?,
+        execution_backend: parse_enum(19, &execution_backend_raw)?,
         completion_id: row.get(4)?,
         sink_kind: row.get(5)?,
         publication_key: row.get(6)?,
@@ -3291,6 +3353,13 @@ fn validate_stored_run(run: &AgentRunRecord) -> Result<()> {
     }
     if let Some(controller) = &run.controller {
         controller.validate()?;
+        if run.execution_backend.is_claimable()
+            && run.execution_backend.controller_kind() != Some(controller.kind)
+        {
+            return Err(AgentStoreError::CorruptData(
+                "run controller kind contradicts its execution backend".into(),
+            ));
+        }
     }
     if let Some(lease) = &run.lease {
         validate_text("run lease owner", &lease.owner, 256)?;
@@ -4174,8 +4243,43 @@ fn validate_schema_definition_v2(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn validate_schema_definition_v3(connection: &Connection) -> Result<()> {
+    let actual = schema_manifest(connection)?;
+    let expected = expected_schema_v3()?;
+    if actual != expected {
+        return Err(AgentStoreError::CorruptData(
+            "database schema differs from the supported version 3 manifest".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn expected_schema() -> Result<&'static [SchemaObject]> {
     match EXPECTED_SCHEMA.get_or_init(|| {
+        let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+        connection
+            .execute_batch(MIGRATION_0001)
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_batch(MIGRATION_0002)
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_batch(MIGRATION_0003)
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_batch(MIGRATION_0004)
+            .map_err(|error| error.to_string())?;
+        schema_manifest(&connection).map_err(|error| error.to_string())
+    }) {
+        Ok(manifest) => Ok(manifest.as_slice()),
+        Err(error) => Err(AgentStoreError::CorruptData(format!(
+            "cannot construct supported schema manifest: {error}"
+        ))),
+    }
+}
+
+fn expected_schema_v3() -> Result<&'static [SchemaObject]> {
+    match EXPECTED_SCHEMA_V3.get_or_init(|| {
         let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
         connection
             .execute_batch(MIGRATION_0001)
@@ -4190,7 +4294,7 @@ fn expected_schema() -> Result<&'static [SchemaObject]> {
     }) {
         Ok(manifest) => Ok(manifest.as_slice()),
         Err(error) => Err(AgentStoreError::CorruptData(format!(
-            "cannot construct supported schema manifest: {error}"
+            "cannot construct version 3 schema manifest: {error}"
         ))),
     }
 }
@@ -4276,20 +4380,28 @@ fn normalize_schema_sql(sql: &str) -> String {
 }
 
 fn audit_database_integrity_v1(connection: &Connection) -> Result<()> {
-    audit_database_integrity_common(connection, false)
+    audit_database_integrity_common(connection, false, true)
 }
 
 fn audit_database_integrity_v2(connection: &Connection) -> Result<()> {
-    audit_completion_integrity(connection, false)
+    audit_completion_integrity(connection, false, true)
+}
+
+fn audit_database_integrity_v3(connection: &Connection) -> Result<()> {
+    audit_completion_integrity(connection, true, true)
 }
 
 fn audit_database_integrity(connection: &Connection) -> Result<()> {
-    audit_completion_integrity(connection, true)
+    audit_completion_integrity(connection, true, false)
 }
 
-fn audit_completion_integrity(connection: &Connection, disposition_schema: bool) -> Result<()> {
-    audit_database_integrity_common(connection, true)?;
-    let completions = all_completions(connection)?;
+fn audit_completion_integrity(
+    connection: &Connection,
+    disposition_schema: bool,
+    legacy_backend: bool,
+) -> Result<()> {
+    audit_database_integrity_common(connection, true, legacy_backend)?;
+    let completions = all_completions(connection, legacy_backend)?;
     for completion in &completions {
         validate_stored_completion(completion)?;
     }
@@ -4344,6 +4456,20 @@ fn audit_completion_integrity(connection: &Connection, disposition_schema: bool)
         return Err(AgentStoreError::CorruptData(
             "completion contradicts its fenced run".into(),
         ));
+    }
+    if !legacy_backend {
+        let mismatched_backend: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_run_completions c \
+             JOIN agent_runs r ON r.owner = c.owner AND r.id = c.run_id \
+             WHERE c.execution_backend <> r.execution_backend)",
+            [],
+            |row| row.get(0),
+        )?;
+        if mismatched_backend {
+            return Err(AgentStoreError::CorruptData(
+                "completion execution backend contradicts its fenced run".into(),
+            ));
+        }
     }
     if disposition_schema {
         audit_projection_dispositions(connection)?;
@@ -4414,7 +4540,11 @@ fn audit_projection_dispositions(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn audit_database_integrity_common(connection: &Connection, completion_schema: bool) -> Result<()> {
+fn audit_database_integrity_common(
+    connection: &Connection,
+    completion_schema: bool,
+    legacy_backend: bool,
+) -> Result<()> {
     let quick_check: String =
         connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
     if quick_check != "ok" {
@@ -4439,7 +4569,7 @@ fn audit_database_integrity_common(connection: &Connection, completion_schema: b
     audit_topology(&workers)?;
     audit_cancel_tree_plans(connection)?;
 
-    let runs = all_runs(connection)?;
+    let runs = all_runs(connection, legacy_backend)?;
     for run in &runs {
         validate_stored_run(run)?;
     }
@@ -4690,8 +4820,13 @@ fn all_workers(connection: &Connection) -> Result<Vec<WorkerRecord>> {
         .collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
-fn all_runs(connection: &Connection) -> Result<Vec<AgentRunRecord>> {
-    let sql = format!("SELECT {RUN_COLUMNS} FROM agent_runs ORDER BY owner, id");
+fn all_runs(connection: &Connection, legacy_backend: bool) -> Result<Vec<AgentRunRecord>> {
+    let columns = if legacy_backend {
+        RUN_COLUMNS_V3
+    } else {
+        RUN_COLUMNS
+    };
+    let sql = format!("SELECT {columns} FROM agent_runs ORDER BY owner, id");
     let mut statement = connection.prepare(&sql)?;
     Ok(statement
         .query_map([], row_to_run)?
@@ -4706,9 +4841,16 @@ fn all_events(connection: &Connection) -> Result<Vec<AgentEvent>> {
         .collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
-fn all_completions(connection: &Connection) -> Result<Vec<RunCompletionRecord>> {
-    let sql =
-        format!("SELECT {COMPLETION_COLUMNS} FROM agent_run_completions ORDER BY owner, run_id");
+fn all_completions(
+    connection: &Connection,
+    legacy_backend: bool,
+) -> Result<Vec<RunCompletionRecord>> {
+    let columns = if legacy_backend {
+        COMPLETION_COLUMNS_V3
+    } else {
+        COMPLETION_COLUMNS
+    };
+    let sql = format!("SELECT {columns} FROM agent_run_completions ORDER BY owner, run_id");
     let mut statement = connection.prepare(&sql)?;
     Ok(statement
         .query_map([], row_to_completion)?

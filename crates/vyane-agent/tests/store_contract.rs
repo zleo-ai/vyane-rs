@@ -7,10 +7,10 @@ use chrono::{DateTime, TimeDelta, TimeZone as _, Utc};
 use tempfile::TempDir;
 use vyane_agent::{
     AgentClock, AgentEventKind, AgentStore, AgentStoreError, CancelOutcome, CancelRequest,
-    CancelTicket, ControllerKind, ControllerRef, EnqueueResume, MAX_TOPOLOGY_NODES, NewAgentRun,
-    NewRunCompletion, NewWorker, ProjectionDeferReason, ProjectionQuarantineReason, RecoveryReason,
-    ResumeProof, ResumeSessionProof, RunFailureCode, RunMode, RunSettlement, RunState,
-    SqliteAgentStore, WorkerLifecycle,
+    CancelTicket, ControllerKind, ControllerRef, EnqueueResume, ExecutionBackend,
+    MAX_TOPOLOGY_NODES, NewAgentRun, NewRunCompletion, NewWorker, ProjectionDeferReason,
+    ProjectionQuarantineReason, RecoveryReason, ResumeProof, ResumeSessionProof, RunFailureCode,
+    RunMode, RunSettlement, RunState, SqliteAgentStore, WorkerLifecycle,
 };
 
 #[derive(Debug)]
@@ -59,6 +59,7 @@ fn run(id: &str, worker_id: &str, now: DateTime<Utc>) -> NewAgentRun {
         task_id: Some(format!("task-{id}")),
         trace_id: Some(format!("trace-{id}")),
         parent_run_id: None,
+        execution_backend: ExecutionBackend::NativeInProcess,
         mode: RunMode::Autonomous,
         target_key: "codex/default".into(),
         prompt_digest: digest('a'),
@@ -294,7 +295,9 @@ fn concurrent_claim_is_single_winner_and_fifo_per_worker() {
         let barrier = Arc::clone(&barrier);
         threads.push(std::thread::spawn(move || {
             barrier.wait();
-            store.claim_due("alice", consumer, 30, 1).unwrap()
+            store
+                .claim_due("alice", ExecutionBackend::NativeInProcess, consumer, 30, 1)
+                .unwrap()
         }));
     }
     barrier.wait();
@@ -310,7 +313,15 @@ fn concurrent_claim_is_single_winner_and_fifo_per_worker() {
         .start("alice", &claimed.receipt, &controller("one"))
         .unwrap();
     complete(store.as_ref(), "alice", &started);
-    let next = store.claim_due("alice", "supervisor-a", 30, 1).unwrap();
+    let next = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor-a",
+            30,
+            1,
+        )
+        .unwrap();
     assert_eq!(next.len(), 1);
     assert_eq!(next[0].run.id, "second");
     assert_eq!(next[0].run.worker_generation, 2);
@@ -324,7 +335,13 @@ fn stale_revision_generation_token_and_expiry_all_fail_closed() {
         .create_root("alice", &worker("worker", None), &run("run", "worker", now))
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 30, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = store
@@ -367,7 +384,13 @@ fn heartbeat_activity_and_terminal_state_are_revision_fenced() {
         .create_root("alice", &worker("worker", None), &run("run", "worker", now))
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 30, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = store
@@ -515,7 +538,15 @@ fn tree_cancel_is_children_first_two_phase_idempotent_and_lease_fenced() {
     store
         .enqueue_run("alice", &run("queued-root", "root", now))
         .unwrap();
-    let claims = store.claim_due("alice", "supervisor", 60, 10).unwrap();
+    let claims = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            60,
+            10,
+        )
+        .unwrap();
     assert_eq!(claims.len(), 2);
     for claim in &claims {
         store
@@ -627,7 +658,15 @@ fn cancel_operation_id_cannot_expand_shrink_or_move_its_frozen_tree_scope() {
             &run("disjoint-run", "disjoint", now),
         )
         .unwrap();
-    let claims = store.claim_due("alice", "supervisor", 60, 10).unwrap();
+    let claims = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            60,
+            10,
+        )
+        .unwrap();
     for claim in claims {
         store
             .start("alice", &claim.receipt, &controller(&claim.run.id))
@@ -701,7 +740,13 @@ fn strict_resume_binding_rejects_mismatch_and_owner_then_survives_restart() {
         .create_root("alice", &worker("worker", Some("logical")), &initial)
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 60, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            60,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = store
@@ -776,7 +821,13 @@ fn strict_resume_binding_rejects_mismatch_and_owner_then_survives_restart() {
     assert!(resumed.resume_binding_digest.is_some());
 
     let claimed = reopened
-        .claim_due("alice", "supervisor", 60, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            60,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = reopened
@@ -824,7 +875,13 @@ fn only_exact_resumable_interruption_can_resume() {
         )
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 60, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            60,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = store
@@ -1148,7 +1205,10 @@ fn schema_v2_migrates_projection_dispositions_atomically() {
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP INDEX agent_projector_dispositions_due_idx; \
+            "DROP INDEX agent_runs_owner_backend_due_idx; \
+             ALTER TABLE agent_runs DROP COLUMN execution_backend; \
+             ALTER TABLE agent_run_completions DROP COLUMN execution_backend; \
+             DROP INDEX agent_projector_dispositions_due_idx; \
              DROP TABLE agent_projector_dispositions; \
              PRAGMA user_version = 2;",
         )
@@ -1174,7 +1234,307 @@ fn schema_v2_migrates_projection_dispositions_atomically() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, i64::from(vyane_agent::SCHEMA_VERSION));
+}
+
+#[test]
+fn schema_v3_runs_migrate_unassigned_and_fail_closed_for_claim_and_resume() {
+    let (directory, clock, store) = store();
+    let path = directory.path().join("agent.sqlite");
+    let now = clock.now();
+    let mut initial = run("legacy", "worker", now);
+    initial.max_resume_attempts = 1;
+    store
+        .create_root("alice", &worker("worker", Some("logical")), &initial)
+        .unwrap();
+    let claim = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            60,
+            1,
+        )
+        .unwrap()
+        .remove(0);
+    let started = store
+        .start("alice", &claim.receipt, &controller("legacy"))
+        .unwrap();
+    let session = ResumeSessionProof::derive("alice", "logical", "native").unwrap();
+    let bound = store
+        .bind_resume_session("alice", &started.receipt, &session)
+        .unwrap();
+    store
+        .settle(
+            "alice",
+            &bound.receipt,
+            RunSettlement::Interrupted {
+                code: RunFailureCode::ControllerLost,
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX agent_runs_owner_backend_due_idx; \
+             ALTER TABLE agent_runs DROP COLUMN execution_backend; \
+             ALTER TABLE agent_run_completions DROP COLUMN execution_backend; \
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let migrated = SqliteAgentStore::open_with_clock(&path, clock).unwrap();
+    let legacy = migrated.get_run("alice", "legacy").unwrap().unwrap();
+    assert_eq!(legacy.execution_backend, ExecutionBackend::LegacyUnassigned);
+    assert!(matches!(
+        migrated.claim_due(
+            "alice",
+            ExecutionBackend::LegacyUnassigned,
+            "supervisor",
+            60,
+            1,
+        ),
+        Err(AgentStoreError::InvalidInput(_))
+    ));
+    assert!(
+        migrated
+            .claim_due(
+                "alice",
+                ExecutionBackend::NativeInProcess,
+                "supervisor",
+                60,
+                1,
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let proof = ResumeProof::new(session, digest('b')).unwrap();
+    assert!(matches!(
+        migrated.enqueue_resume(
+            "alice",
+            &EnqueueResume {
+                new_run_id: "legacy-resume".into(),
+                source_run_id: "legacy".into(),
+                available_at: now,
+                proof,
+            },
+        ),
+        Err(AgentStoreError::ResumeRejected { .. })
+    ));
+    migrated.audit_integrity().unwrap();
+}
+
+#[test]
+fn backend_claim_filter_preserves_cross_backend_worker_fifo() {
+    let (_directory, clock, store) = store();
+    let now = clock.now();
+    let mut process = run("process-first", "shared", now);
+    process.execution_backend = ExecutionBackend::CliHarnessProcess;
+    store
+        .create_root("alice", &worker("shared", None), &process)
+        .unwrap();
+    store
+        .enqueue_run("alice", &run("native-second", "shared", now))
+        .unwrap();
+    store
+        .create_root(
+            "alice",
+            &worker("independent", None),
+            &run("native-independent", "independent", now),
+        )
+        .unwrap();
+
+    let native = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "native-lane",
+            60,
+            10,
+        )
+        .unwrap();
+    assert_eq!(native.len(), 1);
+    assert_eq!(native[0].run.id, "native-independent");
+
+    let process = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::CliHarnessProcess,
+            "process-lane",
+            60,
+            1,
+        )
+        .unwrap()
+        .remove(0);
+    let process = store
+        .start(
+            "alice",
+            &process.receipt,
+            &ControllerRef {
+                kind: ControllerKind::Process,
+                id: "process-controller".into(),
+                fingerprint: Some("process-fingerprint".into()),
+            },
+        )
+        .unwrap();
+    store
+        .settle(
+            "alice",
+            &process.receipt,
+            RunSettlement::Failed {
+                code: RunFailureCode::DispatchFailed,
+            },
+        )
+        .unwrap();
+
+    let next = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "native-lane",
+            60,
+            10,
+        )
+        .unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].run.id, "native-second");
+}
+
+#[test]
+fn active_run_exclusion_remains_cross_backend_for_every_active_state() {
+    let (_directory, clock, store) = store();
+    let now = clock.now();
+    let mut process = run("process-active", "shared", now);
+    process.execution_backend = ExecutionBackend::CliHarnessProcess;
+    store
+        .create_root("alice", &worker("shared", None), &process)
+        .unwrap();
+    store
+        .enqueue_run("alice", &run("native-after", "shared", now))
+        .unwrap();
+
+    let process = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::CliHarnessProcess,
+            "process-lane",
+            60,
+            1,
+        )
+        .unwrap()
+        .remove(0);
+    assert_eq!(process.run.state, RunState::Starting);
+    assert!(
+        store
+            .claim_due(
+                "alice",
+                ExecutionBackend::NativeInProcess,
+                "native-lane",
+                60,
+                1,
+            )
+            .unwrap()
+            .is_empty()
+    );
+
+    let running = store
+        .start(
+            "alice",
+            &process.receipt,
+            &ControllerRef {
+                kind: ControllerKind::Process,
+                id: "process-controller".into(),
+                fingerprint: Some("process-fingerprint".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(running.run.state, RunState::Running);
+    assert!(
+        store
+            .claim_due(
+                "alice",
+                ExecutionBackend::NativeInProcess,
+                "native-lane",
+                60,
+                1,
+            )
+            .unwrap()
+            .is_empty()
+    );
+
+    let cancel = store
+        .request_cancel_tree(
+            "alice",
+            "shared",
+            &cancel_request("cancel-process", Vec::new()),
+        )
+        .unwrap();
+    assert_eq!(cancel.tickets.len(), 1);
+    assert_eq!(
+        store
+            .get_run("alice", "process-active")
+            .unwrap()
+            .unwrap()
+            .state,
+        RunState::Cancelling
+    );
+    assert!(
+        store
+            .claim_due(
+                "alice",
+                ExecutionBackend::NativeInProcess,
+                "native-lane",
+                60,
+                1,
+            )
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .settle_cancel("alice", &cancel.tickets[0], CancelOutcome::Cancelled)
+        .unwrap();
+    store.audit_integrity().unwrap();
+}
+
+#[test]
+fn controller_backend_tamper_without_completion_fails_integrity_audit() {
+    let (directory, clock, store) = store();
+    let path = directory.path().join("agent.sqlite");
+    store
+        .create_root(
+            "alice",
+            &worker("worker", None),
+            &run("run", "worker", clock.now()),
+        )
+        .unwrap();
+    let claimed = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "native-lane",
+            60,
+            1,
+        )
+        .unwrap()
+        .remove(0);
+    store
+        .start("alice", &claimed.receipt, &controller("native"))
+        .unwrap();
+
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection
+        .execute(
+            "UPDATE agent_runs SET execution_backend = 'remote' \
+             WHERE owner = 'alice' AND id = 'run'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(store.audit_integrity().is_err());
 }
 
 #[test]
@@ -1231,7 +1591,13 @@ fn expired_active_run_recovery_is_single_winner_and_unblocks_fifo() {
         .enqueue_run("alice", &run("second", "worker", now))
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 5, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            5,
+            1,
+        )
         .unwrap()
         .remove(0);
     assert_eq!(claimed.run.state, RunState::Starting);
@@ -1267,7 +1633,15 @@ fn expired_active_run_recovery_is_single_winner_and_unblocks_fifo() {
     assert_eq!(recovered.state, RunState::Interrupted);
     assert_eq!(recovered.failure_code, Some(RunFailureCode::ControllerLost));
 
-    let next = store.claim_due("alice", "supervisor", 30, 1).unwrap();
+    let next = store
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
+        .unwrap();
     assert_eq!(next.len(), 1);
     assert_eq!(next[0].run.id, "second");
     store.audit_integrity().unwrap();
@@ -1283,7 +1657,13 @@ fn fixed_execution_deadline_wins_over_renewed_heartbeat_lease() {
         .create_root("alice", &worker("worker", None), &timed)
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 30, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
         .unwrap()
         .remove(0);
     let fixed_deadline = claimed.run.deadline_at.unwrap();
@@ -1338,7 +1718,13 @@ fn late_start_fails_closed_then_starting_crash_recovers_as_timeout() {
         .create_root("alice", &worker("worker", None), &timed)
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 30, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
         .unwrap()
         .remove(0);
     clock.advance(2);
@@ -1365,7 +1751,13 @@ fn expired_recovery_ticket_is_reclaimed_and_survives_restart_before_confirm() {
         .create_root("alice", &worker("worker", None), &run("run", "worker", now))
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 5, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            5,
+            1,
+        )
         .unwrap()
         .remove(0);
     store
@@ -1403,7 +1795,13 @@ fn abandoned_cancel_is_recovered_without_persisting_plaintext_capability() {
         .create_root("alice", &worker("worker", None), &run("run", "worker", now))
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 60, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            60,
+            1,
+        )
         .unwrap()
         .remove(0);
     store
@@ -1487,7 +1885,13 @@ fn clock_rollback_never_regresses_records_events_or_projection_time() {
         .unwrap();
     clock.advance(10);
     let claimed = store
-        .claim_due("alice", "supervisor", 60, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            60,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = store

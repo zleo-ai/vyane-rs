@@ -7,8 +7,8 @@ use static_assertions::{assert_impl_all, assert_not_impl_any};
 use tempfile::TempDir;
 use vyane_agent::{
     ActiveExecutionPermit, AgentClock, AgentStore, AgentStoreError, CancelOutcome, CancelRequest,
-    ControllerKind, ControllerRef, ExecutionPermitSnapshot, NativeExecutionScope, NewAgentRun,
-    NewWorker, ResumeSessionProof, RunMode, SqliteAgentStore,
+    ControllerKind, ControllerRef, ExecutionBackend, ExecutionPermitSnapshot, NativeExecutionScope,
+    NewAgentRun, NewWorker, ResumeSessionProof, RunMode, SqliteAgentStore,
 };
 
 assert_not_impl_any!(ActiveExecutionPermit: serde::Serialize, serde::de::DeserializeOwned, Clone);
@@ -50,6 +50,7 @@ fn new_run(id: &str, worker_id: &str, now: DateTime<Utc>, timeout_seconds: u64) 
         task_id: Some(format!("task-{id}")),
         trace_id: Some(format!("trace-{id}")),
         parent_run_id: None,
+        execution_backend: ExecutionBackend::NativeInProcess,
         mode: RunMode::Autonomous,
         target_key: "codex/default".into(),
         prompt_digest: digest('a'),
@@ -99,7 +100,13 @@ fn issuance_requires_exact_running_receipt_owner_and_policy() {
         )
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 30, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
         .unwrap()
         .remove(0);
 
@@ -156,7 +163,13 @@ fn permit_survives_heartbeat_and_activity_revision_changes() {
         )
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 30, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = store
@@ -218,7 +231,13 @@ fn cancelling_and_terminal_runs_revoke_execution_permit() {
         )
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 60, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            60,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = store
@@ -266,7 +285,13 @@ fn lease_and_fixed_deadline_expiry_revoke_execution_permits() {
             )
             .unwrap();
         let claimed = store
-            .claim_due("alice", "supervisor", lease, 1)
+            .claim_due(
+                "alice",
+                ExecutionBackend::NativeInProcess,
+                "supervisor",
+                lease,
+                1,
+            )
             .unwrap()
             .remove(0);
         let started = store
@@ -296,7 +321,13 @@ fn in_memory_permit_can_be_revalidated_after_store_restart() {
         )
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 30, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = store
@@ -369,7 +400,13 @@ fn native_permit_binds_target_prompt_policy_and_logical_session() {
         )
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 30, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = store
@@ -444,7 +481,13 @@ fn native_permit_requires_the_exact_frozen_resume_binding() {
         )
         .unwrap();
     let claimed = store
-        .claim_due("alice", "supervisor", 30, 1)
+        .claim_due(
+            "alice",
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
         .unwrap()
         .remove(0);
     let started = store

@@ -365,6 +365,7 @@ mod tests {
             task_id: None,
             trace_id: None,
             parent_run_id: None,
+            execution_backend: vyane_agent::ExecutionBackend::NativeInProcess,
             mode: RunMode::Autonomous,
             target_key: "provider/model".into(),
             prompt_digest: digest('a'),
@@ -375,7 +376,13 @@ mod tests {
         };
         store.create_root("owner-canary", &worker, &run).unwrap();
         let claimed = store
-            .claim_due("owner-canary", "supervisor-canary", 30, 1)
+            .claim_due(
+                "owner-canary",
+                vyane_agent::ExecutionBackend::NativeInProcess,
+                "supervisor-canary",
+                30,
+                1,
+            )
             .unwrap()
             .remove(0);
         let started = store

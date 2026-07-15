@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt as _;
-use vyane_agent::AgentStore;
+use vyane_agent::{AgentStore, ControllerKind};
 use vyane_core::CancellationToken;
 
 use crate::{
@@ -98,6 +98,7 @@ pub struct ResidentAgentSupervisor {
     owner: String,
     store: Arc<dyn AgentStore>,
     executor: Arc<dyn AgentRunExecutor>,
+    executor_kind: ControllerKind,
     adapters: Vec<Arc<dyn AgentControllerAdapter>>,
     completion_sinks: Vec<Arc<dyn AgentCompletionSink>>,
     lease_owner: String,
@@ -126,6 +127,13 @@ struct RecoveryLoopBackend {
     store: Arc<dyn AgentStore>,
     adapters: Vec<Arc<dyn AgentControllerAdapter>>,
     completion_sinks: Vec<Arc<dyn AgentCompletionSink>>,
+}
+
+struct ExecutionLoopBackend {
+    owner: String,
+    store: Arc<dyn AgentStore>,
+    executor: Arc<dyn AgentRunExecutor>,
+    executor_kind: ControllerKind,
 }
 
 impl ResidentAgentBackend {
@@ -174,12 +182,15 @@ impl ResidentAgentSupervisor {
         let lease_owner = lease_owner.into();
         let reconciler = reconciler.into();
         validate_schedule(&schedule)?;
-        AgentRunExecutionDriver::new(
+        let executor_kind = catch_unwind(AssertUnwindSafe(|| executor.kind()))
+            .map_err(|_| AgentSupervisorError::InvalidExecution)?;
+        AgentRunExecutionDriver::new_with_executor_kind(
             owner.clone(),
             Arc::clone(&store),
             lease_owner.clone(),
             execution.clone(),
             Arc::clone(&executor),
+            executor_kind,
         )
         .map_err(|_| AgentSupervisorError::InvalidExecution)?;
         AgentRunRecoveryDriver::new_with_completion_sinks(
@@ -191,8 +202,6 @@ impl ResidentAgentSupervisor {
             completion_sinks.clone(),
         )
         .map_err(|_| AgentSupervisorError::InvalidRecovery)?;
-        let executor_kind = catch_unwind(AssertUnwindSafe(|| executor.kind()))
-            .map_err(|_| AgentSupervisorError::InvalidExecution)?;
         let matching_adapter = adapters.iter().any(|adapter| {
             catch_unwind(AssertUnwindSafe(|| adapter.kind()))
                 .is_ok_and(|kind| kind == executor_kind)
@@ -212,6 +221,7 @@ impl ResidentAgentSupervisor {
             owner,
             store,
             executor,
+            executor_kind,
             adapters,
             completion_sinks,
             lease_owner,
@@ -237,6 +247,7 @@ impl ResidentAgentSupervisor {
             owner,
             store,
             executor,
+            executor_kind,
             adapters,
             completion_sinks,
             lease_owner,
@@ -247,9 +258,12 @@ impl ResidentAgentSupervisor {
             schedule,
         } = self;
         let execution_loop = run_execution_loop(
-            owner.clone(),
-            Arc::clone(&store),
-            executor,
+            ExecutionLoopBackend {
+                owner: owner.clone(),
+                store: Arc::clone(&store),
+                executor,
+                executor_kind,
+            },
             lease_owner,
             execution,
             schedule.clone(),
@@ -416,14 +430,18 @@ impl fmt::Debug for ResidentInProcessAgentSupervisor {
 }
 
 async fn run_execution_loop(
-    owner: String,
-    store: Arc<dyn AgentStore>,
-    executor: Arc<dyn AgentRunExecutor>,
+    backend: ExecutionLoopBackend,
     lease_owner: String,
     options: AgentExecutionOptions,
     schedule: AgentSupervisorOptions,
     cancel: CancellationToken,
 ) -> AgentSupervisorLoopExit {
+    let ExecutionLoopBackend {
+        owner,
+        store,
+        executor,
+        executor_kind,
+    } = backend;
     let mut stats = AgentSupervisorLoopExit::default();
     let mut backoff = Backoff::new(schedule.initial_error_backoff, schedule.max_error_backoff);
     loop {
@@ -431,12 +449,13 @@ async fn run_execution_loop(
             break;
         }
         stats.cycles = stats.cycles.saturating_add(1);
-        let driver = AgentRunExecutionDriver::new(
+        let driver = AgentRunExecutionDriver::new_with_executor_kind(
             owner.clone(),
             Arc::clone(&store),
             lease_owner.clone(),
             options.clone(),
             Arc::clone(&executor),
+            executor_kind,
         );
         let next = match driver {
             Ok(driver) => {
@@ -747,6 +766,30 @@ mod tests {
         }
 
         fn enqueue(&self, owner: &str, suffix: &str, max_resume_attempts: u32) {
+            self.enqueue_for_backend(
+                owner,
+                suffix,
+                max_resume_attempts,
+                vyane_agent::ExecutionBackend::CliHarnessProcess,
+            );
+        }
+
+        fn enqueue_in_process(&self, owner: &str, suffix: &str, max_resume_attempts: u32) {
+            self.enqueue_for_backend(
+                owner,
+                suffix,
+                max_resume_attempts,
+                vyane_agent::ExecutionBackend::NativeInProcess,
+            );
+        }
+
+        fn enqueue_for_backend(
+            &self,
+            owner: &str,
+            suffix: &str,
+            max_resume_attempts: u32,
+            execution_backend: vyane_agent::ExecutionBackend,
+        ) {
             let worker = NewWorker {
                 id: format!("worker-{suffix}"),
                 logical_session_id: None,
@@ -761,6 +804,7 @@ mod tests {
                         task_id: None,
                         trace_id: None,
                         parent_run_id: None,
+                        execution_backend,
                         mode: RunMode::Autonomous,
                         target_key: "http:test/model".into(),
                         prompt_digest: "a".repeat(64),
@@ -1072,7 +1116,13 @@ mod tests {
         assert!(
             fixture
                 .store
-                .claim_due(OWNER_BOUNDS, "probe", 1, 1)
+                .claim_due(
+                    OWNER_BOUNDS,
+                    vyane_agent::ExecutionBackend::CliHarnessProcess,
+                    "probe",
+                    1,
+                    1,
+                )
                 .unwrap()
                 .is_empty()
         );
@@ -1191,7 +1241,7 @@ mod tests {
     #[tokio::test]
     async fn host_cancellation_reaches_an_active_in_process_executor() {
         let fixture = Fixture::new();
-        fixture.enqueue(OWNER_DRAIN, "drain", 0);
+        fixture.enqueue_in_process(OWNER_DRAIN, "drain", 0);
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let operation = Arc::new(BlockingOperation {
@@ -1239,7 +1289,7 @@ mod tests {
     #[tokio::test]
     async fn resident_supervisor_publishes_committed_completion() {
         let fixture = Fixture::new();
-        fixture.enqueue(OWNER_COMPLETION, "publish", 0);
+        fixture.enqueue_in_process(OWNER_COMPLETION, "publish", 0);
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let operation = Arc::new(BlockingOperation {
@@ -1302,7 +1352,7 @@ mod tests {
     #[tokio::test]
     async fn uncertain_execution_is_recovered_without_automatic_resume() {
         let fixture = Fixture::new();
-        fixture.enqueue(OWNER_RECOVERY, "recover", 1);
+        fixture.enqueue_in_process(OWNER_RECOVERY, "recover", 1);
         let entered = Arc::new(Notify::new());
         let operation = Arc::new(UnknownOperation {
             owner: OWNER_RECOVERY,
@@ -1358,7 +1408,13 @@ mod tests {
         assert!(
             fixture
                 .store
-                .claim_due(OWNER_RECOVERY, "probe", 1, 10)
+                .claim_due(
+                    OWNER_RECOVERY,
+                    vyane_agent::ExecutionBackend::NativeInProcess,
+                    "probe",
+                    1,
+                    10,
+                )
                 .unwrap()
                 .is_empty()
         );

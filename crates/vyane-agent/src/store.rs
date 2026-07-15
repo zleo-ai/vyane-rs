@@ -3,8 +3,8 @@ use std::time::Duration;
 use crate::{
     ActiveCompletionPermit, ActiveExecutionPermit, AgentRunRecord, CancelOutcome, CancelPlan,
     CancelRequest, CancelTicket, ClaimedRun, CompletionPermitSnapshot, ControllerRef,
-    EnqueueResume, ExecutionPermitSnapshot, NativeExecutionScope, NewAgentRun, NewRunCompletion,
-    NewWorker, OutboxPage, PreparedRunCompletion, ProjectionDeferReason,
+    EnqueueResume, ExecutionBackend, ExecutionPermitSnapshot, NativeExecutionScope, NewAgentRun,
+    NewRunCompletion, NewWorker, OutboxPage, PreparedRunCompletion, ProjectionDeferReason,
     ProjectionQuarantineReason, RecoveryTicket, Result, ResumeSessionProof, RunCompletionRecord,
     RunLeaseReceipt, RunSettlement, WorkerRecord, WorkerTopology,
 };
@@ -39,6 +39,7 @@ pub trait AgentStore: Send + Sync {
     fn claim_due(
         &self,
         owner: &str,
+        execution_backend: ExecutionBackend,
         lease_owner: &str,
         lease_seconds: u64,
         limit: usize,

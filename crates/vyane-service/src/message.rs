@@ -359,6 +359,7 @@ mod tests {
                     task_id: None,
                     trace_id: None,
                     parent_run_id: None,
+                    execution_backend: vyane_agent::ExecutionBackend::CliHarnessProcess,
                     mode: RunMode::Autonomous,
                     target_key: "profile-1".into(),
                     prompt_digest: "a".repeat(64),
@@ -370,7 +371,13 @@ mod tests {
             )
             .unwrap();
         let claim = agent_store
-            .claim_due("owner-a", "host-1", 30, 1)
+            .claim_due(
+                "owner-a",
+                vyane_agent::ExecutionBackend::CliHarnessProcess,
+                "host-1",
+                30,
+                1,
+            )
             .unwrap()
             .remove(0);
         let started = agent_store
@@ -439,6 +446,7 @@ mod tests {
                     task_id: None,
                     trace_id: None,
                     parent_run_id: None,
+                    execution_backend: vyane_agent::ExecutionBackend::CliHarnessProcess,
                     mode: RunMode::Autonomous,
                     target_key: "profile-output".into(),
                     prompt_digest: "c".repeat(64),
@@ -450,7 +458,13 @@ mod tests {
             )
             .unwrap();
         let claim = agent_store
-            .claim_due("owner-a", "host-output", 30, 1)
+            .claim_due(
+                "owner-a",
+                vyane_agent::ExecutionBackend::CliHarnessProcess,
+                "host-output",
+                30,
+                1,
+            )
             .unwrap()
             .remove(0);
         let started = agent_store

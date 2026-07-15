@@ -16,12 +16,12 @@ pub use error::{AgentStoreError, Result};
 pub use model::{
     ActiveCompletionPermit, ActiveExecutionPermit, AgentEvent, AgentEventKind, AgentRunRecord,
     CancelOutcome, CancelPlan, CancelRequest, CancelTicket, ClaimedRun, CompletionPermitSnapshot,
-    ControllerKind, ControllerRef, EnqueueResume, ExecutionPermitSnapshot, NativeExecutionScope,
-    NewAgentRun, NewRunCompletion, NewWorker, OutboxPage, PreparedRunCompletion,
-    ProjectionDeferReason, ProjectionQuarantineReason, RecoveryReason, RecoveryTicket, ResumeProof,
-    ResumeSessionProof, RunCompletionRecord, RunCompletionStatus, RunFailureCode, RunLease,
-    RunLeaseReceipt, RunMode, RunSettlement, RunState, WorkerLifecycle, WorkerRecord,
-    WorkerTopology,
+    ControllerKind, ControllerRef, EnqueueResume, ExecutionBackend, ExecutionPermitSnapshot,
+    NativeExecutionScope, NewAgentRun, NewRunCompletion, NewWorker, OutboxPage,
+    PreparedRunCompletion, ProjectionDeferReason, ProjectionQuarantineReason, RecoveryReason,
+    RecoveryTicket, ResumeProof, ResumeSessionProof, RunCompletionRecord, RunCompletionStatus,
+    RunFailureCode, RunLease, RunLeaseReceipt, RunMode, RunSettlement, RunState, WorkerLifecycle,
+    WorkerRecord, WorkerTopology,
 };
 pub use model::{MAX_TOPOLOGY_NODES, MAX_TREE_CANCEL_RUNS};
 pub use sqlite::{AgentClock, SCHEMA_VERSION, SqliteAgentStore, SystemAgentClock};

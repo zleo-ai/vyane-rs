@@ -524,6 +524,7 @@ mod tests {
                     task_id: None,
                     trace_id: None,
                     parent_run_id: None,
+                    execution_backend: vyane_agent::ExecutionBackend::NativeInProcess,
                     mode: RunMode::Autonomous,
                     target_key: "test/default".into(),
                     prompt_digest: digest('a'),
@@ -535,7 +536,13 @@ mod tests {
             )
             .unwrap();
         let claimed = store
-            .claim_due("owner-a", "lease-a", 30, 1)
+            .claim_due(
+                "owner-a",
+                vyane_agent::ExecutionBackend::NativeInProcess,
+                "lease-a",
+                30,
+                1,
+            )
             .unwrap()
             .remove(0);
         let started = store
