@@ -22,7 +22,7 @@ use vyane_agent::{
     NewAgentRun, NewWorker, RunCompletionStatus, RunFailureCode, RunMode, RunState,
     SqliteAgentStore,
 };
-use vyane_core::{CancellationToken, Sandbox};
+use vyane_core::{CancellationToken, PinnedWorkdir, Sandbox};
 use vyane_service::{
     AgentControllerAdapter, AgentExecutionOptions, AgentRecoveryOptions, AgentRunExecutor,
     AgentRunRecoveryDriver, AgentSupervisorOptions, InProcessAgentComponents, MessageComponents,
@@ -38,8 +38,10 @@ use crate::agent_spool::{
     AgentInputSpool, AgentSpoolCreate, AgentSpoolInput, AgentSpoolPolicy, AgentSpoolSandbox,
 };
 use crate::daemon::DaemonHttpState;
-use crate::native_agent::FreshNativeAgentOperation;
-use crate::native_agent_spool::NativeAgentInputSpool;
+use crate::native_agent::{
+    FreshNativeAgentOperation, NativeSubmissionDetails, native_input_for_submission,
+};
+use crate::native_agent_spool::{NativeAgentInput, NativeAgentInputSpool, NativeAgentSpoolCreate};
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
 
@@ -68,6 +70,16 @@ pub(crate) struct AgentRunSubmitRequest {
     pub(crate) timeout_seconds: Option<u64>,
     #[serde(default)]
     pub(crate) labels: Vec<String>,
+    #[serde(default)]
+    pub(crate) execution_backend: AgentExecutionBackend,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentExecutionBackend {
+    #[default]
+    CliHarnessProcess,
+    NativeInProcess,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +106,7 @@ pub(crate) struct DaemonAgentHost {
     service: Arc<VyaneService>,
     store: Arc<dyn AgentStore>,
     spool: AgentInputSpool,
+    native_spool: NativeAgentInputSpool,
     messages: MessageComponents,
     controller: Arc<ProcessAgentControllerAdapter>,
     submissions: Arc<SubmissionGate>,
@@ -215,7 +228,7 @@ impl DaemonAgentHost {
             Arc::new(FreshNativeAgentOperation::new(
                 LOCAL_TASK_OWNER,
                 service.scope(OwnerContext::single_user_local()),
-                native_spool,
+                native_spool.clone(),
                 messages.clone(),
             )),
             Vec::new(),
@@ -275,6 +288,7 @@ impl DaemonAgentHost {
                 service,
                 store,
                 spool,
+                native_spool,
                 messages,
                 controller,
                 submissions: Arc::new(SubmissionGate::new()),
@@ -316,6 +330,12 @@ impl DaemonAgentHost {
             return Err(AgentApiError::bad_request());
         }
         let timeout_seconds = request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
+        if matches!(
+            request.execution_backend,
+            AgentExecutionBackend::NativeInProcess
+        ) {
+            return self.submit_native_admitted(request, timeout_seconds).await;
+        }
         let sandbox = match request.sandbox {
             AgentSpoolSandbox::ReadOnly => Sandbox::ReadOnly,
             AgentSpoolSandbox::Write => Sandbox::Write,
@@ -415,6 +435,94 @@ impl DaemonAgentHost {
                 } else {
                     if spool_create == AgentSpoolCreate::Created {
                         let _ = self.spool.remove(&run_id, &input.worker_id);
+                    }
+                    Err(AgentApiError::conflict())
+                }
+            }
+        }
+    }
+
+    async fn submit_native_admitted(
+        &self,
+        request: AgentRunSubmitRequest,
+        timeout_seconds: u64,
+    ) -> Result<AgentRunView, AgentApiError> {
+        if request.sandbox != AgentSpoolSandbox::ReadOnly {
+            return Err(AgentApiError::bad_request());
+        }
+        let workdir = request
+            .workdir
+            .ok_or_else(AgentApiError::bad_request)
+            .and_then(|path| PinnedWorkdir::open(path).map_err(|_| AgentApiError::bad_request()))?;
+        let scoped = self.service.scope(OwnerContext::single_user_local());
+        let chain = scoped
+            .resolve(&request.target)
+            .map_err(|_| AgentApiError::bad_request())?;
+        if chain.chain.len() != 1 {
+            return Err(AgentApiError::bad_request());
+        }
+        let run_id = request.run_id.to_string();
+        let worker_id = worker_id(&run_id);
+        let input = native_input_for_submission(
+            LOCAL_TASK_OWNER,
+            &run_id,
+            &worker_id,
+            NativeSubmissionDetails {
+                prompt: request.task,
+                selector: &request.target,
+                bound: &chain.chain[0],
+                workdir: &workdir,
+                system: request.system,
+                timeout_seconds,
+            },
+        )
+        .map_err(|_| AgentApiError::bad_request())?;
+        let spool_create = self
+            .native_spool
+            .create(&input)
+            .map_err(|_| AgentApiError::unavailable())?;
+        let run = NewAgentRun {
+            id: run_id.clone(),
+            worker_id: worker_id.clone(),
+            task_id: None,
+            trace_id: None,
+            parent_run_id: None,
+            execution_backend: ExecutionBackend::NativeInProcess,
+            mode: RunMode::Autonomous,
+            target_key: input.policy.target_selector.clone(),
+            prompt_digest: input.prompt_sha256.clone(),
+            policy_digest: input.policy_sha256.clone(),
+            available_at: Utc::now(),
+            timeout_seconds,
+            max_resume_attempts: 0,
+        };
+        let worker = NewWorker {
+            id: worker_id,
+            logical_session_id: None,
+        };
+        let store = Arc::clone(&self.store);
+        let created =
+            tokio::task::spawn_blocking(move || store.create_root(LOCAL_TASK_OWNER, &worker, &run))
+                .await
+                .map_err(|_| AgentApiError::unavailable())?;
+        match created {
+            Ok((_, record)) => self.view(record).await,
+            Err(_) => {
+                let store = Arc::clone(&self.store);
+                let lookup = run_id.clone();
+                let existing =
+                    tokio::task::spawn_blocking(move || store.get_run(LOCAL_TASK_OWNER, &lookup))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .flatten();
+                if let Some(existing) = existing
+                    .filter(|existing| exact_native_retry(existing, &input, &self.native_spool))
+                {
+                    self.view(existing).await
+                } else {
+                    if spool_create == NativeAgentSpoolCreate::Created {
+                        let _ = self.native_spool.remove_exact(&input);
                     }
                     Err(AgentApiError::conflict())
                 }
@@ -733,6 +841,26 @@ fn exact_retry(record: &AgentRunRecord, input: &AgentSpoolInput) -> bool {
         && record.policy_digest == input.policy_sha256
         && record.timeout_seconds == input.policy.timeout_seconds.unwrap_or_default()
         && record.max_resume_attempts == 0
+}
+
+fn exact_native_retry(
+    record: &AgentRunRecord,
+    input: &NativeAgentInput,
+    spool: &NativeAgentInputSpool,
+) -> bool {
+    record.execution_backend == ExecutionBackend::NativeInProcess
+        && record.owner == input.owner
+        && record.id == input.run_id
+        && record.worker_id == input.worker_id
+        && record.parent_run_id.is_none()
+        && record.target_key == input.policy.target_selector
+        && record.prompt_digest == input.prompt_sha256
+        && record.policy_digest == input.policy_sha256
+        && record.timeout_seconds == input.policy.timeout_seconds
+        && record.max_resume_attempts == 0
+        && spool
+            .read(&input.run_id, &input.worker_id)
+            .is_ok_and(|stored| stored == *input)
 }
 
 const fn exact_retry_backend(backend: ExecutionBackend) -> bool {

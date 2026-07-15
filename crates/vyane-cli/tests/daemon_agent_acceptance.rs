@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const VYANE_BIN: &str = env!("CARGO_BIN_EXE_vyane");
 const SUCCESS_RUN: &str = "0197f524-7a00-7000-8000-000000000101";
@@ -42,6 +44,29 @@ fn write_config(directory: &TempDir) -> PathBuf {
         harness = "claude-code"
         model = "test-model"
         "#,
+    )
+    .unwrap();
+    path
+}
+
+fn write_native_config(directory: &TempDir, endpoint: &str) -> PathBuf {
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            r#"
+            [providers.native_http]
+            base_url = "{endpoint}"
+            auth_style = "bearer"
+            protocol = "openai_chat"
+            default_model = "native-test-model"
+
+            [profiles.native]
+            provider = "native_http"
+            protocol = "openai_chat"
+            model = "native-test-model"
+            "#
+        ),
     )
     .unwrap();
     path
@@ -140,6 +165,24 @@ async fn submit(data_dir: &Path, run_id: &str, timeout: u64) -> reqwest::Respons
             "task": "return a bounded answer",
             "target": "builder",
             "timeout_seconds": timeout
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn submit_native(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
+    let (base, token) = control(data_dir);
+    reqwest::Client::new()
+        .post(format!("{base}/v1/agent-runs"))
+        .bearer_auth(token)
+        .json(&json!({
+            "run_id": run_id,
+            "task": "return native answer",
+            "target": "native",
+            "sandbox": "read_only",
+            "workdir": workdir,
+            "execution_backend": "native_in_process"
         }))
         .send()
         .await
@@ -258,6 +301,54 @@ async fn process_agent_success_is_idempotent_and_publishes_exact_output() {
         regular_files_below(&data_dir.path().join("agent-inputs")).is_empty(),
         "an exact terminal retry must not recreate a durable prompt spool"
     );
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn native_agent_submit_uses_the_shared_resident_lane() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "native-test-model",
+            "choices": [{
+                "message": {"role": "assistant", "content": "native answer"},
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+
+    let response = submit_native(
+        data_dir.path(),
+        "0197f524-7a00-7000-8000-000000000110",
+        &workdir,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let run_id = "0197f524-7a00-7000-8000-000000000110";
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(15)).await;
+    assert_eq!(done["state"], "succeeded");
+    assert_eq!(done["completion_status"], "committed");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let output = loop {
+        let (status, body) =
+            get_json(data_dir.path(), &format!("/v1/agent-runs/{run_id}/output")).await;
+        if status == reqwest::StatusCode::OK {
+            break body;
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(output["output"], "native answer");
     assert!(daemon.stop().status.success());
 }
 
