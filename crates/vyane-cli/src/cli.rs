@@ -526,6 +526,8 @@ pub struct DaemonRunArgs {
     /// Loopback listen address. Port 0 selects an ephemeral port.
     #[arg(long, default_value = "127.0.0.1:9722")]
     pub addr: String,
+    #[command(flatten)]
+    pub goals: DaemonGoalArgs,
 }
 
 #[derive(Debug, Args)]
@@ -533,6 +535,50 @@ pub struct DaemonStartArgs {
     /// Loopback listen address. Port 0 selects an ephemeral port.
     #[arg(long, default_value = "127.0.0.1:9722")]
     pub addr: String,
+    #[command(flatten)]
+    pub goals: DaemonGoalArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DaemonGoalArgs {
+    /// Opt in to bounded resident pursuit of local goals.
+    #[arg(
+        long,
+        requires_all = ["goal_target", "goal_workdir"]
+    )]
+    pub goal_auto_pursue: bool,
+    /// Target used for each fresh automatic pursuit segment.
+    #[arg(long, value_name = "TARGET", requires = "goal_auto_pursue")]
+    pub goal_target: Option<String>,
+    /// Canonical workdir shared by automatic verifier commands and segments.
+    #[arg(long, value_name = "PATH", requires = "goal_auto_pursue")]
+    pub goal_workdir: Option<PathBuf>,
+    /// Workspace permission for each fresh automatic pursuit segment.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = SandboxArg::ReadOnly,
+        requires = "goal_auto_pursue"
+    )]
+    pub goal_sandbox: SandboxArg,
+    /// Overall budget for one automatic pursuit invocation, in seconds.
+    #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..=vyane_goal::MAX_PURSUIT_TIMEOUT.as_secs()), requires = "goal_auto_pursue")]
+    pub goal_overall_timeout_seconds: u64,
+    /// Runtime budget per fresh automatic segment, in seconds.
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=vyane_goal::MAX_SEGMENT_TIMEOUT.as_secs()), requires = "goal_auto_pursue")]
+    pub goal_segment_timeout_seconds: u64,
+    /// Runtime budget per automatic acceptance command, in seconds.
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=300), requires = "goal_auto_pursue")]
+    pub goal_verifier_timeout_seconds: u64,
+    /// Maximum lifetime fresh segments for one goal.
+    #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u16).range(1..=i64::from(vyane_goal::MAX_PURSUIT_SEGMENTS)), requires = "goal_auto_pursue")]
+    pub goal_max_segments: u16,
+    /// Pause after this many consecutive verifier/runtime failures.
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=i64::from(vyane_goal::MAX_PURSUIT_FAILURES)), requires = "goal_auto_pursue")]
+    pub goal_max_failures: u16,
+    /// Delay between idle scans for eligible goals, in milliseconds.
+    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(50..=60_000), requires = "goal_auto_pursue")]
+    pub goal_poll_millis: u64,
 }
 
 #[derive(Debug, Args)]
@@ -850,6 +896,8 @@ impl From<RunStatusArg> for RunStatus {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     const RUN_ID: &str = "01890f3e-7b7c-7cc2-98d2-3f9a2b6c7d8e";
@@ -994,5 +1042,53 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn daemon_goal_pursuit_is_explicit_and_bounded_at_parse_time() {
+        assert!(Cli::try_parse_from(["vyane", "daemon", "run"]).is_ok());
+        assert!(Cli::try_parse_from(["vyane", "daemon", "run", "--goal-auto-pursue"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "vyane",
+                "daemon",
+                "run",
+                "--goal-target",
+                "builder",
+                "--goal-workdir",
+                ".",
+            ])
+            .is_err()
+        );
+
+        for mode in ["run", "start"] {
+            let parsed = Cli::try_parse_from([
+                "vyane",
+                "daemon",
+                mode,
+                "--goal-auto-pursue",
+                "--goal-target",
+                "builder",
+                "--goal-workdir",
+                ".",
+                "--goal-sandbox",
+                "read-only",
+                "--goal-max-segments",
+                "3",
+                "--goal-poll-millis",
+                "50",
+            ])
+            .unwrap();
+            let goals = match parsed.command {
+                Command::Daemon(DaemonCommand::Run(args)) => args.goals,
+                Command::Daemon(DaemonCommand::Start(args)) => args.goals,
+                _ => panic!("expected daemon command"),
+            };
+            assert!(goals.goal_auto_pursue);
+            assert_eq!(goals.goal_target.as_deref(), Some("builder"));
+            assert_eq!(goals.goal_workdir.as_deref(), Some(Path::new(".")));
+            assert_eq!(goals.goal_max_segments, 3);
+            assert_eq!(goals.goal_poll_millis, 50);
+        }
     }
 }

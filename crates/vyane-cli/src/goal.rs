@@ -1,6 +1,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -160,11 +161,27 @@ pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<E
     }
 }
 
-struct DispatchGoalRuntime {
-    service: VyaneService,
+pub(crate) struct DispatchGoalRuntime {
+    service: Arc<VyaneService>,
     target: String,
     sandbox: Sandbox,
     cancel: CancellationToken,
+}
+
+impl DispatchGoalRuntime {
+    pub(crate) fn new(
+        service: Arc<VyaneService>,
+        target: String,
+        sandbox: Sandbox,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            service,
+            target,
+            sandbox,
+            cancel,
+        }
+    }
 }
 
 #[async_trait]
@@ -254,17 +271,14 @@ async fn pursue(config_path: Option<PathBuf>, args: GoalPursueArgs) -> Result<Ex
         max_failures: args.max_failures,
     };
     config.validate().context("validate goal pursuit")?;
-    let service = VyaneService::load(config_path.as_deref()).context("load pursuit runtime")?;
+    let service =
+        Arc::new(VyaneService::load(config_path.as_deref()).context("load pursuit runtime")?);
     service
         .resolve(&args.target)
         .context("resolve pursuit target")?;
     let (cancel, signal_task) = cancellation_token();
-    let runtime = DispatchGoalRuntime {
-        service,
-        target: args.target.clone(),
-        sandbox: args.sandbox.into(),
-        cancel,
-    };
+    let runtime =
+        DispatchGoalRuntime::new(service, args.target.clone(), args.sandbox.into(), cancel);
     let pursuer =
         GoalPursuer::new(&store, &runtime, &verifier, config).context("construct goal pursuer")?;
     let outcome = pursuer.pursue(&args.common.owner, &args.id).await;
