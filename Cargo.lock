@@ -2400,6 +2400,7 @@ dependencies = [
  "predicates",
  "process-wrap",
  "reqwest",
+ "rmcp",
  "rustix",
  "serde",
  "serde_json",

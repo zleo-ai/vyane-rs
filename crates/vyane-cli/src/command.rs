@@ -124,7 +124,11 @@ async fn run_serve(config_path: Option<PathBuf>, args: ServeArgs) -> Result<Exit
 /// transport stream clean.
 async fn run_mcp(config_path: Option<PathBuf>) -> Result<ExitCode> {
     let service = VyaneService::load(config_path.as_deref())?;
-    vyane_mcp::run_stdio(service).await?;
+    let execution_cwd = canonical_workflow_submission_cwd()?;
+    let workflow_control = Arc::new(crate::mcp_workflow::AuthenticatedWorkflowControl::new(
+        execution_cwd,
+    ));
+    vyane_mcp::run_stdio_with_workflow_control(service, workflow_control).await?;
     Ok(ExitCode::SUCCESS)
 }
 

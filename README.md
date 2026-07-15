@@ -110,7 +110,7 @@ reference implementation.
 | CLI (check / dispatch / broadcast / history / session / sessions / workflow / task / daemon / a2a / goal) | `vyane-cli` | [x] revision-aware session control, local `a2a send/inbox/read`, and owner-scoped `goal` lifecycle/progress commands; legacy `sessions` remains compatible |
 | shared service layer | `vyane-service` | [x] `OwnerContextFactory` authenticates and resolves a reserved-local-safe authority; `OwnerScopedService` freezes dispatch/stream/query/session/reset. AgentRun components include prepared authorized harness dispatch, paired backends, exact message-completion handback, and the generic resident supervisor used by the daemon's Linux Process host; ordinary dispatch starts none of them |
 | **REST API** (`vyane serve` — dispatch/broadcast/runs/sessions/health) | `vyane-cli` + `axum` | [x] per-start bearer capability, loopback Host/Origin enforcement, non-loopback bind rejection, allowlisted views, and one assembly-frozen local service scope; the bearer still is not a distinct principal or hostile same-UID/multi-user boundary |
-| **MCP server** (`vyane mcp` — six tools) | `vyane-mcp` + `rmcp` | [x] dispatch/broadcast/history/sessions plus two bounded diagnostics: `route` preview and static-only `check`; generic success output has a 1 MiB cap |
+| **MCP server** (`vyane mcp` — nine tools) | `vyane-mcp` + `rmcp` | [x] six base tools plus authenticated durable workflow submit/status/cancel; generic success output has a 1 MiB cap |
 | pluggable routing | `vyane-router` | [x] |
 | solution-review workflow (implement → fan-out review → synthesize) | `vyane-cli` (review module) | [x] not yet the original system's structured git diff/PR review product |
 
@@ -336,8 +336,9 @@ Vyane supports three interchangeable front-ends, all sharing the same
 | **REST API** | `vyane serve --addr 127.0.0.1:9721` | programmatic access from any HTTP client |
 | **MCP** | `vyane mcp` | let other agents (Claude, Codex, …) call vyane as a tool |
 
-The MCP surface contains six tools: dispatch, broadcast, history, sessions,
-`vyane_route`, and `vyane_check`. Generic success payloads have a 1 MiB cap;
+The production CLI MCP surface contains nine tools: dispatch, broadcast,
+history, sessions, `vyane_route`, `vyane_check`, and authenticated durable
+workflow submit/status/cancel. Generic success payloads have a 1 MiB cap;
 the two new diagnostics use stricter, smaller bounds. `vyane_route` is a
 Rust-side deterministic preview extension, not a same-name parity claim
 against the fixed reference baseline. `vyane_check` performs static
@@ -348,6 +349,14 @@ uniform field-level input budgets. If execution completed but detail exceeded
 the ceiling, dispatch/broadcast returns bounded run receipts with
 `operation_status="completed"` and `detail_omitted=true`; callers must not retry
 those receipts as though execution failed.
+
+Workflow callers provide a canonical UUIDv7 plus a bounded self-contained
+source bundle. The MCP layer cannot provide owner, controller, token, or an
+execution path. The CLI freezes its own startup directory and re-authenticates
+the exact resident daemon for every workflow operation. Responses contain only
+the caller id, lifecycle state, and a closed failure code. This is durable
+workflow control, not general task, board, collaboration, or multi-principal
+MCP parity.
 
 ### Local A2A inbox
 
@@ -673,7 +682,7 @@ layer. Seventeen crates:
 | `vyane-router` | target selection / routing policy (grows into pluggable routing) |
 | `vyane-workflow` | declarative DAG execution, templates, atomic journals, and resume |
 | `vyane-service` | shared construction and operation layer used by front-ends; also exports principal-derived owner scope, the unwired native fresh-sessionless bridge, explicit AgentRun projection assembly, one-shot recovery/execution drivers, paired backends, and the generic resident supervisor used by the daemon's Linux Process host |
-| `vyane-mcp` | six-tool MCP server for dispatch, broadcast, history, sessions, deterministic route preview, and static configuration checks |
+| `vyane-mcp` | six base MCP tools plus an injectable, credential-free workflow-control port; the CLI exposes nine tools over stdio |
 | `vyane-cli` | the assembler and entry point: wires the crates together behind a command-line UI |
 
 ## Usage

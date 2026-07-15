@@ -4,10 +4,11 @@
 //! history, session, and static diagnostic operations as callable tools.
 //!
 //! The server is transport-agnostic: it wraps a [`vyane_service::VyaneService`]
-//! and registers six tools (`vyane_dispatch`, `vyane_broadcast`, `vyane_history`,
-//! `vyane_sessions`, `vyane_route`, and `vyane_check`). A front-end wires it onto
-//! a transport; today the only entry point is [`run_stdio`], driven by the
-//! `vyane mcp` CLI subcommand.
+//! and registers six base tools (`vyane_dispatch`, `vyane_broadcast`,
+//! `vyane_history`, `vyane_sessions`, `vyane_route`, and `vyane_check`). An
+//! embedding process may inject an authenticated [`WorkflowControl`] port to
+//! add workflow submit/status/cancel without giving this crate daemon discovery
+//! or credentials. The `vyane mcp` CLI injects that port and exposes nine tools.
 //!
 //! ## Tool result contract
 //!
@@ -51,12 +52,18 @@ use vyane_service::{
 };
 use vyane_workflow::{WorkflowRunId, WorkflowSourceBundle, WorkflowSourceEntry};
 
-const SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch server. \
+const BASE_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch server. \
     Use vyane_dispatch to run a task against a configured target (profile name, provider/model, or auto), \
     vyane_broadcast to fan one task out to several targets concurrently, \
     vyane_history to query the run ledger, vyane_sessions to list saved sessions, \
     vyane_route to preview deterministic routing, and vyane_check for a static-only redacted config check. \
     A result with operation_status=completed is final even when detail_omitted=true; use its run receipt and never retry it as an execution failure.";
+
+const WORKFLOW_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch and durable workflow server. \
+    The execution, history, session, route, and check tools retain their base contracts. \
+    Use vyane_workflow_submit with a caller-owned canonical UUIDv7 and bounded source bundle; \
+    use workflow status before retrying an outcome_unknown submission, and workflow cancel for idempotent cancellation. \
+    A result with operation_status=completed is final even when detail_omitted=true; never retry it as an execution failure.";
 
 /// The MCP server. Holds one clone-cheap [`VyaneService`] and the macro-generated
 /// tool router. Cloning is fine: `VyaneService` is itself `Clone` (everything
@@ -905,7 +912,14 @@ impl rmcp::ServerHandler for VyaneMcpServer {
                 name: "vyane".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
             },
-            instructions: Some(SERVER_INSTRUCTIONS.into()),
+            instructions: Some(
+                if self.workflow_control.is_some() {
+                    WORKFLOW_SERVER_INSTRUCTIONS
+                } else {
+                    BASE_SERVER_INSTRUCTIONS
+                }
+                .into(),
+            ),
         }
     }
 }

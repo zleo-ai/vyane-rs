@@ -57,6 +57,7 @@ rustix = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+rmcp = { workspace = true, features = ["client"] }
 tempfile = { workspace = true }
 vyane-provider = { workspace = true }
 vyane-router = { workspace = true }
