@@ -814,7 +814,7 @@ fn pursue_dispatches_fresh_segment_reverifies_and_completes() {
             "--title",
             "Pursued goal",
             "--acceptance",
-            "custom:cmd:/usr/bin/test -f done.txt",
+            "custom:cmd:/bin/test -f done.txt",
         ],
         0,
     );
