@@ -12,6 +12,7 @@ rust-version.workspace = true
 [dependencies]
 vyane-core = { workspace = true }
 vyane-service = { workspace = true }
+vyane-workflow = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
