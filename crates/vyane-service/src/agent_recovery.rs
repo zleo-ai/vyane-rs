@@ -259,6 +259,10 @@ pub struct AgentRunRecoveryDriver {
 }
 
 impl AgentRunRecoveryDriver {
+    pub(crate) fn registered_adapter_kinds(&self) -> Vec<ControllerKind> {
+        self.adapters.iter().map(|adapter| adapter.kind).collect()
+    }
+
     /// Freeze an owner, non-null trait-object store, bounds, and at most one
     /// trusted adapter per controller kind. `Arc<dyn AgentStore>` is non-null by
     /// construction; the driver intentionally performs no probing store call

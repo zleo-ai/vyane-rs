@@ -65,8 +65,10 @@ pub use agent_recovery::{
     ControllerRecoveryObservation,
 };
 pub use agent_supervisor::{
-    AgentSupervisorError, AgentSupervisorExit, AgentSupervisorLoopExit, AgentSupervisorOptions,
-    ResidentAgentBackend, ResidentAgentSupervisor, ResidentInProcessAgentSupervisor,
+    AgentExecutionLaneExit, AgentSupervisorError, AgentSupervisorExit, AgentSupervisorLoopExit,
+    AgentSupervisorOptions, ResidentAgentBackend, ResidentAgentExecutionLane, ResidentAgentHost,
+    ResidentAgentHostBackend, ResidentAgentHostExit, ResidentAgentSupervisor,
+    ResidentInProcessAgentSupervisor,
 };
 pub use config::{LoadedConfig, Runtime, StoragePaths, load_config};
 pub use diagnostics::{
