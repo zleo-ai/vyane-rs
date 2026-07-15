@@ -25,6 +25,7 @@ use vyane_workflow::WORKFLOW_SOURCE_MAX_TOTAL_BYTES;
 use crate::cli::{DaemonRunArgs, DaemonStartArgs, DaemonStatusArgs};
 use crate::daemon_workflow::{DaemonWorkflowSupervisor, WORKFLOW_VARS_MAX_TOTAL_BYTES};
 use crate::supervisor::{PreparedShutdownSignal, acquire_task_supervisor_lock};
+use crate::task::LOCAL_TASK_OWNER;
 use crate::task::proc::{
     IdentityCheck, SIGKILL, SIGTERM, pgid_of, process_birth_fingerprint, process_start_time,
     signal_process, spawn_tokio_in_session, verify_controller_identity,
@@ -221,6 +222,12 @@ pub(crate) async fn run_daemon(
         agent_supervisor,
         agent_cancel.clone(),
     ));
+    let broker_supervisor = service
+        .resident_broker(LOCAL_TASK_OWNER)
+        .context("construct daemon broker supervisor")?;
+    let broker_cancel = vyane_core::CancellationToken::new();
+    let broker_task_cancel = broker_cancel.clone();
+    let broker_task = tokio::spawn(async move { broker_supervisor.run(broker_task_cancel).await });
     let app = daemon_router(
         &descriptor.instance_id,
         &token,
@@ -238,11 +245,13 @@ pub(crate) async fn run_daemon(
     let shutdown_workflows = workflows.clone();
     #[cfg(target_os = "linux")]
     let shutdown_agents = agents.clone();
+    let shutdown_broker_cancel = broker_cancel.clone();
     let graceful_shutdown = async move {
         shutdown.wait().await;
         shutdown_workflows.begin_shutdown();
         #[cfg(target_os = "linux")]
         shutdown_agents.begin_shutdown();
+        shutdown_broker_cancel.cancel();
         let _ = signal_seen_tx.send(());
     };
     let serve_result = {
@@ -277,15 +286,27 @@ pub(crate) async fn run_daemon(
         agents.begin_shutdown();
         agents.drain_submissions().await;
         agent_cancel.cancel();
-        let (workflow_result, agent_result) =
-            tokio::join!(workflows.shutdown_and_drain(), agent_task);
+        broker_cancel.cancel();
+        let (workflow_result, agent_result, broker_result) =
+            tokio::join!(workflows.shutdown_and_drain(), agent_task, broker_task);
         if agent_result.is_err() {
             tracing::warn!("daemon AgentRun supervisor task failed during shutdown");
+        }
+        if broker_result.is_err() {
+            tracing::warn!("daemon broker supervisor task failed during shutdown");
         }
         workflow_result
     };
     #[cfg(not(target_os = "linux"))]
-    let drain_result = workflows.shutdown_and_drain().await;
+    let drain_result = {
+        broker_cancel.cancel();
+        let (workflow_result, broker_result) =
+            tokio::join!(workflows.shutdown_and_drain(), broker_task);
+        if broker_result.is_err() {
+            tracing::warn!("daemon broker supervisor task failed during shutdown");
+        }
+        workflow_result
+    };
     serve_result.with_context(|| format!("serve daemon on {addr}"))?;
     drain_result.context("drain daemon workflows during shutdown")?;
     Ok(ExitCode::SUCCESS)
