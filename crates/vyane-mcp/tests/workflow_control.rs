@@ -114,11 +114,12 @@ async fn optional_workflow_port_preserves_six_tool_default_and_enables_strict_co
     .await?;
     assert_eq!(submit["caller_id"], caller_id);
     assert_eq!(submit["state"], "queued");
-    let requests = fake.submissions.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].caller_id.as_str(), caller_id);
-    assert_eq!(requests[0].vars["mode"], "review");
-    drop(requests);
+    {
+        let requests = fake.submissions.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].caller_id.as_str(), caller_id);
+        assert_eq!(requests[0].vars["mode"], "review");
+    }
 
     let status = call(
         &client,
