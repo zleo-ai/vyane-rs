@@ -353,6 +353,48 @@ async fn native_agent_submit_uses_the_shared_resident_lane() {
 }
 
 #[tokio::test]
+async fn native_agent_cancel_uses_the_exact_in_process_controller() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(5))
+                .set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "late answer"},
+                        "finish_reason": "stop"
+                    }]
+                })),
+        )
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-cancel-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+
+    let run_id = "0197f524-7a00-7000-8000-000000000111";
+    assert_eq!(
+        submit_native(data_dir.path(), run_id, &workdir)
+            .await
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (status, body) =
+        post_json(data_dir.path(), &format!("/v1/agent-runs/{run_id}/cancel")).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "cancel body: {body}");
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(10)).await;
+    assert_eq!(done["state"], "cancelled");
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
 async fn read_only_explicit_workdir_is_the_fake_harness_cwd() {
     let config_dir = TempDir::new().unwrap();
     let data_dir = TempDir::new().unwrap();

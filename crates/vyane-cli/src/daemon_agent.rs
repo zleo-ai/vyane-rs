@@ -25,9 +25,9 @@ use vyane_agent::{
 use vyane_core::{CancellationToken, PinnedWorkdir, Sandbox};
 use vyane_service::{
     AgentControllerAdapter, AgentExecutionOptions, AgentRecoveryOptions, AgentRunExecutor,
-    AgentRunRecoveryDriver, AgentSupervisorOptions, InProcessAgentComponents, MessageComponents,
-    OwnerContext, ResidentAgentExecutionLane, ResidentAgentHost, ResidentAgentHostBackend,
-    VyaneService,
+    AgentRunRecoveryDriver, AgentSupervisorOptions, ControllerRecoveryContext,
+    InProcessAgentComponents, MessageComponents, OwnerContext, ResidentAgentExecutionLane,
+    ResidentAgentHost, ResidentAgentHostBackend, VyaneService,
 };
 
 use crate::agent_host::ProcessAgentRunExecutor;
@@ -109,6 +109,7 @@ pub(crate) struct DaemonAgentHost {
     native_spool: NativeAgentInputSpool,
     messages: MessageComponents,
     controller: Arc<ProcessAgentControllerAdapter>,
+    native_controller: Arc<dyn AgentControllerAdapter>,
     submissions: Arc<SubmissionGate>,
     cancel_gate: Arc<Mutex<()>>,
     cancel_owner: Arc<str>,
@@ -237,6 +238,10 @@ impl DaemonAgentHost {
         let native_backend = native_components.into_resident_backend();
         let (native_owner, native_store, native_executor, native_adapters, _) =
             native_backend.into_parts();
+        let native_controller = native_adapters
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("native AgentRun lane has no controller adapter"))?;
         if native_owner != LOCAL_TASK_OWNER || !Arc::ptr_eq(&native_store, &store) {
             return Err(anyhow::anyhow!("native AgentRun lane owner/store mismatch"));
         }
@@ -291,6 +296,7 @@ impl DaemonAgentHost {
                 native_spool,
                 messages,
                 controller,
+                native_controller,
                 submissions: Arc::new(SubmissionGate::new()),
                 cancel_gate: Arc::new(Mutex::new(())),
                 cancel_owner: Arc::from(format!("agent-cancel-{instance_key}")),
@@ -597,24 +603,48 @@ impl DaemonAgentHost {
         .map_err(|_| AgentApiError::conflict())?;
         let mut root = None;
         for ticket in plan.tickets {
-            let (outcome, confirmed_gone) = match ticket.controller.clone() {
-                None => (CancelOutcome::Cancelled, None),
+            let (outcome, confirmed_gone, confirmed_adapter) = match ticket.controller.clone() {
+                None => (CancelOutcome::Cancelled, None, None),
                 Some(controller) if controller.kind == ControllerKind::Process => {
                     match self
                         .controller
                         .stop_exact(Instant::now() + CANCEL_CONTROL_TIMEOUT, controller.clone())
                         .await
                     {
-                        vyane_service::ControllerRecoveryObservation::Gone => {
-                            (CancelOutcome::Cancelled, Some(controller))
-                        }
+                        vyane_service::ControllerRecoveryObservation::Gone => (
+                            CancelOutcome::Cancelled,
+                            Some(controller),
+                            Some(self.controller.clone() as Arc<dyn AgentControllerAdapter>),
+                        ),
                         vyane_service::ControllerRecoveryObservation::StillPresent
                         | vyane_service::ControllerRecoveryObservation::Unavailable => {
-                            (CancelOutcome::ControllerUnavailable, None)
+                            (CancelOutcome::ControllerUnavailable, None, None)
                         }
                     }
                 }
-                Some(_) => (CancelOutcome::ControllerUnavailable, None),
+                Some(controller) if controller.kind == ControllerKind::InProcess => {
+                    match self
+                        .native_controller
+                        .observe_gone(
+                            ControllerRecoveryContext::with_deadline(
+                                Instant::now() + CANCEL_CONTROL_TIMEOUT,
+                            ),
+                            controller.clone(),
+                        )
+                        .await
+                    {
+                        vyane_service::ControllerRecoveryObservation::Gone => (
+                            CancelOutcome::Cancelled,
+                            Some(controller),
+                            Some(self.native_controller.clone()),
+                        ),
+                        vyane_service::ControllerRecoveryObservation::StillPresent
+                        | vyane_service::ControllerRecoveryObservation::Unavailable => {
+                            (CancelOutcome::ControllerUnavailable, None, None)
+                        }
+                    }
+                }
+                Some(_) => (CancelOutcome::ControllerUnavailable, None, None),
             };
             let store = Arc::clone(&self.store);
             let settled = tokio::task::spawn_blocking(move || {
@@ -623,8 +653,7 @@ impl DaemonAgentHost {
             .await
             .map_err(|_| AgentApiError::unavailable())?
             .map_err(|_| AgentApiError::unavailable())?;
-            if let Some(controller) = confirmed_gone {
-                let adapter = self.controller.clone();
+            if let (Some(controller), Some(adapter)) = (confirmed_gone, confirmed_adapter) {
                 // Durable cancellation now owns terminal truth, so the exact
                 // no-longer-live controller evidence can be retired.
                 let _ =
