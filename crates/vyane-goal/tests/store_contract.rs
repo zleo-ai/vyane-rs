@@ -814,6 +814,83 @@ fn achieved_checkpoint_and_goal_completion_are_one_atomic_transition() {
 }
 
 #[test]
+fn paused_checkpoint_rolls_back_goal_and_event_when_checkpoint_insert_fails() {
+    let (directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("atomic-paused", "Atomic paused", 2, at))
+        .expect("create");
+    let claimed = store
+        .claim(OWNER_A, "atomic-paused", "worker-a", 60, at)
+        .expect("claim");
+    let checkpoint = GoalPursuitCheckpoint {
+        owner: OWNER_A.into(),
+        goal_id: "atomic-paused".into(),
+        checkpoint_revision: 0,
+        goal_revision: claimed.revision,
+        claim_generation: claimed.claim_generation,
+        worker_id: "worker-a".into(),
+        runtime: "builder".into(),
+        workdir: directory.path().canonicalize().expect("canonical workdir"),
+        started_at: at,
+        updated_at: at,
+        segments_started: 1,
+        segments_completed: 1,
+        consecutive_failures: 0,
+        status: PursuitCheckpointStatus::Paused,
+        last_run_id: Some("run-1".into()),
+        last_verification_id: Some("verification-test".into()),
+    };
+    let before_events = store
+        .events(OWNER_A, "atomic-paused")
+        .expect("events before");
+    let connection =
+        Connection::open(directory.path().join("goals.sqlite3")).expect("open raw database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_paused_checkpoint
+             BEFORE INSERT ON goal_pursuit_checkpoints
+             BEGIN
+               SELECT RAISE(ABORT, 'injected checkpoint failure');
+             END;",
+        )
+        .expect("install failure trigger");
+    drop(connection);
+
+    assert!(matches!(
+        store.record_pursuit_checkpoint(
+            OWNER_A,
+            "atomic-paused",
+            "worker-a",
+            &checkpoint,
+            "pursuit.paused",
+            "pause atomically",
+            at + TimeDelta::seconds(1),
+        ),
+        Err(GoalStoreError::Sqlite(_))
+    ));
+    let unchanged = store
+        .get(OWNER_A, "atomic-paused")
+        .expect("get unchanged")
+        .expect("unchanged goal");
+    assert_eq!(unchanged.status, GoalStatus::InProgress);
+    assert_eq!(unchanged.revision, claimed.revision);
+    assert_eq!(unchanged.claimed_by.as_deref(), Some("worker-a"));
+    assert!(
+        store
+            .pursuit_checkpoint(OWNER_A, "atomic-paused")
+            .expect("checkpoint after rollback")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .events(OWNER_A, "atomic-paused")
+            .expect("events after rollback"),
+        before_events
+    );
+}
+
+#[test]
 fn v2_database_migrates_current_goal_features_without_losing_goals() {
     let (directory, store) = fixture();
     let path = directory.path().join("goals.sqlite3");

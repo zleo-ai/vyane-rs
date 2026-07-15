@@ -88,6 +88,17 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
     (config, bin)
 }
 
+#[cfg(unix)]
+const fn pursuit_test_sandbox() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "write"
+    } else {
+        // Mutating harness admission intentionally fails closed outside Linux;
+        // these fixtures test the pursuit loop with a non-enforcing fake CLI.
+        "read-only"
+    }
+}
+
 #[test]
 fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
     let directory = TempDir::new().unwrap();
@@ -841,7 +852,7 @@ fn pursue_dispatches_fresh_segment_reverifies_and_completes() {
             "--target",
             "builder",
             "--sandbox",
-            "read-only",
+            pursuit_test_sandbox(),
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--max-segments",
@@ -959,7 +970,7 @@ fn pursue_reports_runtime_error_as_paused_exit_three() {
             "--target",
             "builder",
             "--sandbox",
-            "read-only",
+            pursuit_test_sandbox(),
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--max-failures",
@@ -1061,7 +1072,7 @@ fn pursue_missing_acceptance_returns_paused_exit_three() {
             "--target",
             "builder",
             "--sandbox",
-            "read-only",
+            pursuit_test_sandbox(),
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--worker",
@@ -1148,7 +1159,7 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
             "--target",
             "builder",
             "--sandbox",
-            "read-only",
+            pursuit_test_sandbox(),
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--worker",
@@ -1298,7 +1309,7 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
             "--target",
             "builder",
             "--sandbox",
-            "read-only",
+            pursuit_test_sandbox(),
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--overall-timeout-seconds",
