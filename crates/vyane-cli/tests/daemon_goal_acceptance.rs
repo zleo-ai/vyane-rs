@@ -376,7 +376,7 @@ fn resident_daemon_settles_queued_goals_sequentially_by_priority() {
 }
 
 #[test]
-fn pursuit_transaction_error_backs_off_and_allows_next_goal() {
+fn pursuit_transaction_error_allows_next_goal_during_cooldown() {
     let fixture = TempDir::new().unwrap();
     let data = TempDir::new().unwrap();
     let workdir = TempDir::new().unwrap();

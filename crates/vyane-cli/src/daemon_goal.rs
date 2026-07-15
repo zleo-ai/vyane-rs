@@ -566,9 +566,9 @@ mod tests {
     }
 
     #[test]
-    fn quarantined_goal_stays_skipped_and_lease_duration_clamps() {
+    fn quarantined_goal_stays_skipped() {
         let directory = TempDir::new().unwrap();
-        let (store, mut config) = supervisor_store(&directory);
+        let (store, config) = supervisor_store(&directory);
         create(&store, "quarantined", 0);
         store
             .claim(
@@ -592,7 +592,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(next.id, "next");
+    }
 
+    #[test]
+    fn lease_duration_clamps_at_maximum_pursuit_timeout() {
+        let directory = TempDir::new().unwrap();
+        let mut config = config(&directory);
         config.pursuit.overall_timeout = vyane_goal::MAX_PURSUIT_TIMEOUT;
         assert_eq!(config.lease_seconds(), MAX_LEASE_SECONDS);
     }
