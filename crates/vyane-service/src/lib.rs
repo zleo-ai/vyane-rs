@@ -66,7 +66,7 @@ pub use agent_recovery::{
 };
 pub use agent_supervisor::{
     AgentSupervisorError, AgentSupervisorExit, AgentSupervisorLoopExit, AgentSupervisorOptions,
-    ResidentInProcessAgentSupervisor,
+    ResidentAgentBackend, ResidentAgentSupervisor, ResidentInProcessAgentSupervisor,
 };
 pub use config::{LoadedConfig, Runtime, StoragePaths, load_config};
 pub use diagnostics::{
@@ -86,7 +86,9 @@ pub use inprocess_agent::{
     InProcessEffectPermit, InProcessNativeAuthority, InProcessNativeBindError,
     InProcessPreparedCompletion,
 };
-pub use message::MessageComponents;
+pub use message::{
+    AgentMessageCompletionReadError, AgentMessageCompletionStageError, MessageComponents,
+};
 pub use native_authority::AgentRunModelToolAuthority;
 pub use owner::{
     AuthenticatedPrincipal, OwnerContext, OwnerContextError, OwnerContextFactory,
@@ -98,8 +100,8 @@ pub use routing::{
 };
 pub use selector::{resolve_target_chain, split_targets};
 pub use service::{
-    BroadcastParams, DispatchParams, HistoryFilter, OwnerScopedService, RUN_VIEW_SCHEMA,
-    RunAttemptOutcomeView, RunAttemptView, RunView, SESSION_VIEW_SCHEMA, SessionNativeState,
-    SessionView, VyaneService,
+    BroadcastParams, DispatchParams, HistoryFilter, OwnerScopedService, PreparedHarnessDispatch,
+    RUN_VIEW_SCHEMA, RunAttemptOutcomeView, RunAttemptView, RunView, SESSION_VIEW_SCHEMA,
+    SessionNativeState, SessionView, VyaneService,
 };
 pub use task::{build_task_spec, parse_labels, validate_user_routing_labels};

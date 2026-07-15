@@ -16,10 +16,11 @@ use serde::Serialize;
 use vyane_config::ResolvedConfig;
 use vyane_core::{
     AdapterTransport, AttemptOutcome, BoundTarget, CancellationToken, ErrorKind,
-    NativeSessionState, NativeSessionTransition, ProviderId, RunQuery, RunRecord, RunStatus,
-    Sandbox, SessionRef, SessionSnapshot, Target, TaskSpec, Usage,
+    HarnessLifecycleReporter, HarnessSpawnAuthority, NativeSessionState, NativeSessionTransition,
+    ProviderId, RunQuery, RunRecord, RunStatus, Sandbox, SessionRef, SessionSnapshot, Target,
+    TaskSpec, Usage,
 };
-use vyane_kernel::{DispatchOutcome, StreamDispatchEvent};
+use vyane_kernel::{DispatchOutcome, PreparedDispatch, StreamDispatchEvent};
 
 use crate::config::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::diagnostics::{
@@ -46,6 +47,37 @@ pub struct DispatchParams {
     pub system: Option<String>,
     pub timeout_secs: Option<u64>,
     pub labels: Vec<String>,
+}
+
+/// One side-effect-free, fresh CLI-harness dispatch frozen for an immediate
+/// authorized execution. The resolved chain is retained alongside the exact
+/// kernel plan so trusted hosts can compare private submission evidence
+/// without planning twice.
+pub struct PreparedHarnessDispatch {
+    task: TaskSpec,
+    resolved_chain: Vec<BoundTarget>,
+    prepared: PreparedDispatch,
+}
+
+impl PreparedHarnessDispatch {
+    #[must_use]
+    pub fn resolved_chain(&self) -> &[BoundTarget] {
+        &self.resolved_chain
+    }
+
+    #[must_use]
+    pub fn capability_snapshot(&self) -> &vyane_kernel::CapabilityPlanSnapshot {
+        self.prepared.capability_snapshot()
+    }
+}
+
+impl std::fmt::Debug for PreparedHarnessDispatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedHarnessDispatch")
+            .field("targets", &self.resolved_chain.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Parameters for a multi-target broadcast.
@@ -406,6 +438,23 @@ impl VyaneService {
             .await
     }
 
+    /// Dispatch one local, fresh CLI-harness task under live spawn authority.
+    ///
+    /// Direct-HTTP targets and logical sessions are rejected before executor
+    /// construction. Protocol hosts with authenticated owners must use the
+    /// corresponding [`OwnerScopedService`] method.
+    pub async fn dispatch_harness_authorized(
+        &self,
+        params: DispatchParams,
+        spawn_authority: HarnessSpawnAuthority,
+        lifecycle_reporter: HarnessLifecycleReporter,
+        cancel: CancellationToken,
+    ) -> Result<DispatchOutcome> {
+        self.scope(OwnerContext::single_user_local())
+            .dispatch_harness_authorized(params, spawn_authority, lifecycle_reporter, cancel)
+            .await
+    }
+
     /// Stream one local single-target dispatch.
     ///
     /// Authenticated protocol hosts must use the corresponding method on
@@ -463,6 +512,75 @@ impl VyaneService {
         let plan = self.plan_dispatch(&selector, &mut task)?;
         dispatcher
             .dispatch(&task, plan.chain, cancel)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn dispatch_harness_authorized_with(
+        &self,
+        dispatcher: &vyane_kernel::Dispatcher,
+        params: DispatchParams,
+        spawn_authority: HarnessSpawnAuthority,
+        lifecycle_reporter: HarnessLifecycleReporter,
+        cancel: CancellationToken,
+    ) -> Result<DispatchOutcome> {
+        let prepared = self.prepare_harness_dispatch_with(dispatcher, params)?;
+        self.execute_prepared_harness_authorized_with(
+            dispatcher,
+            prepared,
+            spawn_authority,
+            lifecycle_reporter,
+            cancel,
+        )
+        .await
+    }
+
+    fn prepare_harness_dispatch_with(
+        &self,
+        dispatcher: &vyane_kernel::Dispatcher,
+        params: DispatchParams,
+    ) -> Result<PreparedHarnessDispatch> {
+        if params.session.is_some() {
+            anyhow::bail!("authorized harness dispatch supports only fresh sessionless execution");
+        }
+        let selector = params.target.clone();
+        let mut task = self.task_from_dispatch(params)?;
+        validate_user_routing_labels(&task.labels)?;
+        let plan = self.plan_dispatch(&selector, &mut task)?;
+        if plan
+            .chain
+            .iter()
+            .any(|target| target.transport != AdapterTransport::CliWrap)
+        {
+            return Err(anyhow::Error::from(vyane_core::VyaneError::unsupported(
+                "authorized harness dispatch supports only CLI harness targets",
+            )));
+        }
+        let resolved_chain = plan.chain.clone();
+        let prepared = dispatcher.prepare(&task, plan.chain)?;
+        Ok(PreparedHarnessDispatch {
+            task,
+            resolved_chain,
+            prepared,
+        })
+    }
+
+    async fn execute_prepared_harness_authorized_with(
+        &self,
+        dispatcher: &vyane_kernel::Dispatcher,
+        prepared: PreparedHarnessDispatch,
+        spawn_authority: HarnessSpawnAuthority,
+        lifecycle_reporter: HarnessLifecycleReporter,
+        cancel: CancellationToken,
+    ) -> Result<DispatchOutcome> {
+        dispatcher
+            .dispatch_prepared_harness_authorized(
+                &prepared.task,
+                prepared.prepared,
+                spawn_authority,
+                lifecycle_reporter,
+                cancel,
+            )
             .await
             .map_err(anyhow::Error::from)
     }
@@ -740,6 +858,58 @@ impl OwnerScopedService {
     ) -> Result<DispatchOutcome> {
         self.service
             .dispatch_with(&self.dispatcher, params, cancel)
+            .await
+    }
+
+    /// Dispatch one fresh CLI-harness task under the frozen owner and live
+    /// subprocess-spawn authority. Runtime callbacks remain process-local and
+    /// are not copied into durable task or run metadata.
+    pub async fn dispatch_harness_authorized(
+        &self,
+        params: DispatchParams,
+        spawn_authority: HarnessSpawnAuthority,
+        lifecycle_reporter: HarnessLifecycleReporter,
+        cancel: CancellationToken,
+    ) -> Result<DispatchOutcome> {
+        self.service
+            .dispatch_harness_authorized_with(
+                &self.dispatcher,
+                params,
+                spawn_authority,
+                lifecycle_reporter,
+                cancel,
+            )
+            .await
+    }
+
+    /// Freeze one fresh CLI-only dispatch without constructing an executor or
+    /// touching a model/harness. The returned plan must be consumed by the
+    /// matching `execute_prepared_harness_authorized` method on this facade.
+    pub fn prepare_harness_dispatch(
+        &self,
+        params: DispatchParams,
+    ) -> Result<PreparedHarnessDispatch> {
+        self.service
+            .prepare_harness_dispatch_with(&self.dispatcher, params)
+    }
+
+    /// Consume a plan produced by this owner-scoped facade under live process
+    /// spawn and lifecycle authority.
+    pub async fn execute_prepared_harness_authorized(
+        &self,
+        prepared: PreparedHarnessDispatch,
+        spawn_authority: HarnessSpawnAuthority,
+        lifecycle_reporter: HarnessLifecycleReporter,
+        cancel: CancellationToken,
+    ) -> Result<DispatchOutcome> {
+        self.service
+            .execute_prepared_harness_authorized_with(
+                &self.dispatcher,
+                prepared,
+                spawn_authority,
+                lifecycle_reporter,
+                cancel,
+            )
             .await
     }
 
@@ -1275,6 +1445,44 @@ mod tests {
         assert_eq!(a_shared[0].owner, "tenant-a");
         assert_eq!(b_shared.len(), 1);
         assert_eq!(b_shared[0].owner, "tenant-b");
+    }
+
+    #[tokio::test]
+    async fn authorized_service_dispatch_rejects_http_and_sessions_without_a_run() {
+        let directory = TempDir::new().unwrap();
+        let service = executable_service(&directory);
+        let scoped = service.scope(owner_context("authorized"));
+        let authority = || HarnessSpawnAuthority::new(|| true);
+        let reporter = || HarnessLifecycleReporter::new(|_| Ok(()));
+
+        let error = scoped
+            .dispatch_harness_authorized(
+                dispatch_params(Vec::new()),
+                authority(),
+                reporter(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        let typed = error
+            .downcast_ref::<vyane_core::VyaneError>()
+            .expect("kernel rejection retains its typed error");
+        assert_eq!(typed.kind, ErrorKind::Unsupported);
+
+        let mut session = dispatch_params(Vec::new());
+        session.session = Some("existing".into());
+        let error = scoped
+            .dispatch_harness_authorized(session, authority(), reporter(), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("fresh sessionless execution"));
+        assert!(
+            scoped
+                .history(HistoryFilter::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

@@ -129,6 +129,8 @@ struct DaemonStatusView<'a> {
 pub(crate) struct DaemonHttpState {
     pub(crate) instance_id: Arc<str>,
     pub(crate) workflows: DaemonWorkflowSupervisor,
+    #[cfg(target_os = "linux")]
+    pub(crate) agents: Option<crate::daemon_agent::DaemonAgentHost>,
 }
 
 #[derive(Clone)]
@@ -207,7 +209,25 @@ pub(crate) async fn run_daemon(
     if recovered > 0 {
         tracing::warn!(recovered, "marked abandoned daemon workflows interrupted");
     }
-    let app = daemon_router(&descriptor.instance_id, &token, workflows.clone());
+    #[cfg(target_os = "linux")]
+    let (agents, agent_supervisor) =
+        crate::daemon_agent::DaemonAgentHost::open(Arc::clone(&service), &descriptor.instance_id)
+            .await
+            .context("open daemon AgentRun host")?;
+    #[cfg(target_os = "linux")]
+    let agent_cancel = vyane_core::CancellationToken::new();
+    #[cfg(target_os = "linux")]
+    let agent_task = tokio::spawn(crate::daemon_agent::run_supervisor(
+        agent_supervisor,
+        agent_cancel.clone(),
+    ));
+    let app = daemon_router(
+        &descriptor.instance_id,
+        &token,
+        workflows.clone(),
+        #[cfg(target_os = "linux")]
+        Some(agents.clone()),
+    );
     let shutdown = PreparedShutdownSignal::install()
         .context("install daemon shutdown handlers before control publication")?;
 
@@ -216,9 +236,13 @@ pub(crate) async fn run_daemon(
     eprintln!("vyane daemon listening on {addr}");
     let (signal_seen_tx, signal_seen_rx) = tokio::sync::oneshot::channel();
     let shutdown_workflows = workflows.clone();
+    #[cfg(target_os = "linux")]
+    let shutdown_agents = agents.clone();
     let graceful_shutdown = async move {
         shutdown.wait().await;
         shutdown_workflows.begin_shutdown();
+        #[cfg(target_os = "linux")]
+        shutdown_agents.begin_shutdown();
         let _ = signal_seen_tx.send(());
     };
     let serve_result = {
@@ -248,6 +272,19 @@ pub(crate) async fn run_daemon(
     // Stop advertising the endpoint as soon as its listener closes. The
     // supervisor lock remains held until all admitted work has drained.
     remove_control_if_matches(&paths, &descriptor.instance_id);
+    #[cfg(target_os = "linux")]
+    let drain_result = {
+        agents.begin_shutdown();
+        agents.drain_submissions().await;
+        agent_cancel.cancel();
+        let (workflow_result, agent_result) =
+            tokio::join!(workflows.shutdown_and_drain(), agent_task);
+        if agent_result.is_err() {
+            tracing::warn!("daemon AgentRun supervisor task failed during shutdown");
+        }
+        workflow_result
+    };
+    #[cfg(not(target_os = "linux"))]
     let drain_result = workflows.shutdown_and_drain().await;
     serve_result.with_context(|| format!("serve daemon on {addr}"))?;
     drain_result.context("drain daemon workflows during shutdown")?;
@@ -441,23 +478,41 @@ pub(crate) async fn stop_daemon() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn daemon_router(instance_id: &str, token: &str, workflows: DaemonWorkflowSupervisor) -> Router {
-    daemon_router_with_body_limit(instance_id, token, workflows, DAEMON_BODY_LIMIT)
+fn daemon_router(
+    instance_id: &str,
+    token: &str,
+    workflows: DaemonWorkflowSupervisor,
+    #[cfg(target_os = "linux")] agents: Option<crate::daemon_agent::DaemonAgentHost>,
+) -> Router {
+    daemon_router_with_body_limit(
+        instance_id,
+        token,
+        workflows,
+        #[cfg(target_os = "linux")]
+        agents,
+        DAEMON_BODY_LIMIT,
+    )
 }
 
 fn daemon_router_with_body_limit(
     instance_id: &str,
     token: &str,
     workflows: DaemonWorkflowSupervisor,
+    #[cfg(target_os = "linux")] agents: Option<crate::daemon_agent::DaemonAgentHost>,
     body_limit: usize,
 ) -> Router {
     let state = DaemonHttpState {
         instance_id: Arc::from(instance_id),
         workflows,
+        #[cfg(target_os = "linux")]
+        agents,
     };
-    Router::new()
+    let router = Router::new()
         .route("/health", get(daemon_health))
-        .merge(crate::daemon_workflow::routes())
+        .merge(crate::daemon_workflow::routes());
+    #[cfg(target_os = "linux")]
+    let router = router.merge(crate::daemon_agent::routes());
+    router
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
         .layer(middleware::from_fn_with_state(
@@ -1034,7 +1089,13 @@ mod tests {
     async fn health_requires_the_exact_bearer_token() {
         let directory = tempfile::tempdir().unwrap();
         let workflows = test_workflow_supervisor(directory.path(), INSTANCE_A).await;
-        let app = daemon_router(INSTANCE_A, &"a".repeat(64), workflows);
+        let app = daemon_router(
+            INSTANCE_A,
+            &"a".repeat(64),
+            workflows,
+            #[cfg(target_os = "linux")]
+            None,
+        );
         for authorization in [None, Some("Bearer wrong")] {
             let mut request = HttpRequest::get("/health");
             if let Some(value) = authorization {
@@ -1065,7 +1126,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workflows = test_workflow_supervisor(directory.path(), INSTANCE_A).await;
         let token = "a".repeat(64);
-        let app = daemon_router_with_body_limit(INSTANCE_A, &token, workflows, 32);
+        let app = daemon_router_with_body_limit(
+            INSTANCE_A,
+            &token,
+            workflows,
+            #[cfg(target_os = "linux")]
+            None,
+            32,
+        );
 
         let preflight = app
             .clone()

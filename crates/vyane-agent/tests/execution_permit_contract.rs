@@ -180,6 +180,8 @@ fn permit_survives_heartbeat_and_activity_revision_changes() {
         heartbeat.run.worker_generation
     );
     assert_eq!(after_heartbeat.lease_owner(), "supervisor");
+    assert_eq!(after_heartbeat.target_key(), "codex/default");
+    assert_eq!(after_heartbeat.prompt_digest(), digest('a'));
     assert_eq!(after_heartbeat.policy_digest(), policy);
     assert_eq!(
         after_heartbeat.lease_expires_at(),
@@ -197,6 +199,8 @@ fn permit_survives_heartbeat_and_activity_revision_changes() {
         .validate_execution_permit("alice", &permit, &policy)
         .unwrap();
     assert_eq!(after_activity.run_revision(), activity.run.revision);
+    assert_eq!(after_activity.target_key(), "codex/default");
+    assert_eq!(after_activity.prompt_digest(), digest('a'));
 }
 
 #[test]

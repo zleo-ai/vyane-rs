@@ -619,6 +619,8 @@ pub struct ExecutionPermitSnapshot {
     generation: u64,
     run_revision: u64,
     lease_owner: String,
+    target_key: String,
+    prompt_digest: String,
     policy_digest: String,
     lease_expires_at: DateTime<Utc>,
     deadline_at: DateTime<Utc>,
@@ -640,6 +642,8 @@ impl ExecutionPermitSnapshot {
             generation: run.worker_generation,
             run_revision: run.revision,
             lease_owner: lease_owner.to_string(),
+            target_key: run.target_key.clone(),
+            prompt_digest: run.prompt_digest.clone(),
             policy_digest: run.policy_digest.clone(),
             lease_expires_at,
             deadline_at,
@@ -675,6 +679,16 @@ impl ExecutionPermitSnapshot {
     #[must_use]
     pub fn lease_owner(&self) -> &str {
         &self.lease_owner
+    }
+
+    #[must_use]
+    pub fn target_key(&self) -> &str {
+        &self.target_key
+    }
+
+    #[must_use]
+    pub fn prompt_digest(&self) -> &str {
+        &self.prompt_digest
     }
 
     #[must_use]

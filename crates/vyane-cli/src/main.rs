@@ -2,11 +2,19 @@
 //! harnesses, kernel orchestration and local persistence behind a CLI.
 
 mod a2a;
+#[cfg(target_os = "linux")]
+mod agent_host;
+#[cfg(target_os = "linux")]
+mod agent_process;
+#[cfg(target_os = "linux")]
+mod agent_spool;
 mod api;
 mod app;
 mod cli;
 mod command;
 mod daemon;
+#[cfg(target_os = "linux")]
+mod daemon_agent;
 mod daemon_client;
 mod daemon_workflow;
 mod factory;

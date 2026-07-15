@@ -781,6 +781,29 @@ exit 0
 }
 
 #[tokio::test]
+async fn claude_exit_zero_without_terminal_result_is_harness_failed() {
+    let dir = TempDir::new().unwrap();
+    let bin = write_script(
+        &dir,
+        "fake-claude",
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"partial answer"}]}}'
+exit 0
+"#,
+    );
+
+    let err = ClaudeCodeHarness::with_binary(bin.to_string_lossy())
+        .run(base_job("fail closed"), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::HarnessFailed);
+    assert!(err.message.contains("missing_result"));
+    assert!(err.message.contains("terminal result"));
+    assert!(!err.message.contains("partial answer"));
+}
+
+#[tokio::test]
 async fn codex_missing_last_message_file_is_harness_failed() {
     let dir = TempDir::new().unwrap();
     let bin = write_script(

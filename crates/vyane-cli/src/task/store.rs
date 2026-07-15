@@ -176,6 +176,7 @@ impl WorkerEnvelope {
 /// deliberately excluded, while every routing-relevant target field and
 /// generation parameter is retained for drift detection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TargetSnapshot {
     pub target: Target,
     pub transport: AdapterTransport,
@@ -197,6 +198,7 @@ pub struct TargetSnapshot {
 /// Provider-specific `extra` values are represented only by a digest because
 /// arbitrary passthrough JSON can contain sensitive custom fields.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GenParamsSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,

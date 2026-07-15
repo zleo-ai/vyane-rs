@@ -15,11 +15,12 @@ use futures::future::pending;
 use vyane_core::{
     AdapterTransport, AttemptOutcome, BoundTarget, CancellationToken, ChatClient, ChatMessage,
     ChatOutcome, ChatRequest, Endpoint, ErrorKind, GenParams, Harness, HarnessExecutionContext,
-    HarnessJob, HarnessKind, HarnessOutcome, HarnessStreamEvent, Ledger, ModelId,
-    NativeSessionBinding, NativeSessionDomain, NativeSessionState, NativeSessionTransition,
-    Protocol, ProviderId, Result, Role, RunQuery, RunRecord, RunStatus, Sandbox,
-    SessionExecutionLease, SessionRecord, SessionRef, SessionSnapshot, SessionStore, SessionUpdate,
-    Target, TaskSpec, Usage, VyaneError, WorkdirIdentity,
+    HarnessJob, HarnessKind, HarnessLifecycleEvent, HarnessLifecycleReporter, HarnessOutcome,
+    HarnessSpawnAuthority, HarnessStreamEvent, Ledger, ModelId, NativeSessionBinding,
+    NativeSessionDomain, NativeSessionState, NativeSessionTransition, Protocol, ProviderId, Result,
+    Role, RunQuery, RunRecord, RunStatus, Sandbox, SessionExecutionLease, SessionRecord,
+    SessionRef, SessionSnapshot, SessionStore, SessionUpdate, Target, TaskSpec, Usage, VyaneError,
+    WorkdirIdentity,
 };
 use vyane_kernel::{
     AttemptScope, CapabilityAdmissionDecision, CapabilityAdmissionError,
@@ -43,6 +44,7 @@ struct Probe {
     active_max: AtomicUsize,
     chat_requests: Mutex<Vec<ChatRequest>>,
     harness_jobs: Mutex<Vec<HarnessJob>>,
+    scoped_contexts: Mutex<Vec<(bool, Option<std::path::PathBuf>)>>,
 }
 
 impl Probe {
@@ -70,6 +72,11 @@ impl Probe {
 
     fn harness_jobs(&self) -> Vec<HarnessJob> {
         self.harness_jobs.lock().unwrap().clone()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scoped_contexts(&self) -> Vec<(bool, Option<std::path::PathBuf>)> {
+        self.scoped_contexts.lock().unwrap().clone()
     }
 }
 
@@ -256,9 +263,20 @@ impl Harness for MockHarnessImpl {
     async fn run_scoped(
         &self,
         job: HarnessJob,
-        _context: HarnessExecutionContext,
+        context: HarnessExecutionContext,
         cancel: CancellationToken,
     ) -> Result<HarnessOutcome> {
+        self.probe.scoped_contexts.lock().unwrap().push((
+            context
+                .spawn_authority()
+                .is_some_and(HarnessSpawnAuthority::revalidate),
+            context
+                .pinned_workdir()
+                .map(|workdir| workdir.canonical_path().to_path_buf()),
+        ));
+        if let Some(reporter) = job.harness_lifecycle_reporter.as_ref() {
+            reporter.report(HarnessLifecycleEvent::Started { pid: 41, pgid: 41 })?;
+        }
         self.run(job, cancel).await
     }
 }
@@ -1062,6 +1080,117 @@ async fn direct_http_mutating_sandboxes_are_rejected_before_make() {
             CapabilityAdmissionDecision::Rejected(expected_reason)
         );
     }
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn authorized_prepared_harness_dispatch_carries_live_context_and_pinned_workdir() {
+    let workdir = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(workdir.path()).unwrap();
+    let factory = MockFactory::new().on("authorized", Behaviour::succeed("done"));
+    let probe = factory.probe();
+    let dispatcher = dispatcher(factory.into_arc(), MockLedger::new(), MockSessions::new());
+    let task = TaskSpec::new("edit")
+        .with_sandbox(Sandbox::Write)
+        .with_workdir(workdir.path());
+    let prepared = dispatcher
+        .prepare(&task, vec![cli_target("local", "authorized")])
+        .unwrap();
+    let lifecycle_seen = Arc::new(AtomicBool::new(false));
+    let reporter_seen = Arc::clone(&lifecycle_seen);
+
+    let outcome = dispatcher
+        .dispatch_prepared_harness_authorized(
+            &task,
+            prepared,
+            HarnessSpawnAuthority::new(|| true),
+            HarnessLifecycleReporter::new(move |event| {
+                if matches!(event, HarnessLifecycleEvent::Started { .. }) {
+                    reporter_seen.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.output.as_deref(), Some("done"));
+    assert!(lifecycle_seen.load(Ordering::SeqCst));
+    assert_eq!(probe.scoped_contexts(), vec![(true, Some(canonical))]);
+    let jobs = probe.harness_jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].resume, None);
+    assert_eq!(jobs[0].workdir.as_deref(), Some(workdir.path()));
+    assert!(jobs[0].harness_lifecycle_reporter.is_some());
+}
+
+#[tokio::test]
+async fn authorized_prepared_harness_dispatch_rejects_http_and_sessions_before_make() {
+    let factory = MockFactory::new().on("http", Behaviour::succeed("must-not-run"));
+    let make_calls = factory.make_calls();
+    let sessions = MockSessions::new();
+    let dispatcher = dispatcher(factory.into_arc(), MockLedger::new(), sessions.clone());
+    let task = TaskSpec::new("fresh only");
+    let prepared = dispatcher
+        .prepare(&task, vec![http_target("remote", "http")])
+        .unwrap();
+    let error = dispatcher
+        .dispatch_prepared_harness_authorized(
+            &task,
+            prepared,
+            HarnessSpawnAuthority::new(|| true),
+            HarnessLifecycleReporter::new(|_| Ok(())),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+
+    let mixed = dispatcher
+        .prepare(
+            &task,
+            vec![
+                cli_target("local", "authorized-primary"),
+                http_target("remote", "http-fallback"),
+            ],
+        )
+        .unwrap();
+    let error = dispatcher
+        .dispatch_prepared_harness_authorized(
+            &task,
+            mixed,
+            HarnessSpawnAuthority::new(|| true),
+            HarnessLifecycleReporter::new(|_| Ok(())),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+
+    let mut session_task = TaskSpec::new("no continuation");
+    session_task.session = Some(SessionRef::new("existing"));
+    let prepared = dispatcher
+        .prepare(
+            &session_task,
+            vec![cli_target("local", "authorized-session")],
+        )
+        .unwrap();
+    let error = dispatcher
+        .dispatch_prepared_harness_authorized(
+            &session_task,
+            prepared,
+            HarnessSpawnAuthority::new(|| true),
+            HarnessLifecycleReporter::new(|_| Ok(())),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(sessions.load_calls(), 0);
 }
 
 #[tokio::test]

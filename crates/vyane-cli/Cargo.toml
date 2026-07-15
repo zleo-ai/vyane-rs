@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 vyane-core = { workspace = true }
+vyane-agent = { workspace = true }
 vyane-task = { workspace = true }
 vyane-config = { workspace = true }
 vyane-protocol = { workspace = true }
