@@ -11,13 +11,13 @@ mod sqlite;
 mod store;
 
 pub use acceptance::{
-    AcceptanceVerification, AcceptanceVerifier, CriterionResult, CriterionStatus,
-    MAX_OUTPUT_TAIL_BYTES, MAX_VERIFIER_TIMEOUT, criterion_key,
+    AcceptanceVerifier, MAX_OUTPUT_TAIL_BYTES, MAX_VERIFIER_TIMEOUT, criterion_key,
 };
 pub use error::{GoalStoreError, Result};
 pub use model::{
-    AcceptanceCriterion, GoalEvent, GoalEventKind, GoalQuery, GoalRecord, GoalStatus,
-    MAX_LEASE_SECONDS, NewGoal,
+    AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalEvent,
+    GoalEventKind, GoalQuery, GoalRecord, GoalStatus, GoalVerificationArtifact, MAX_LEASE_SECONDS,
+    NewGoal,
 };
 pub use sqlite::{SCHEMA_VERSION, SqliteGoalStore};
 pub use store::GoalStore;

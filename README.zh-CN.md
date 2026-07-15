@@ -71,7 +71,7 @@ difference。运行 `python3 .github/scripts/parity-report.py --format markdown`
 | 不含敏感正文的持久化 task metadata | `vyane-task` | [x] schema v2 以 `(owner,id)` 隔离 snapshot/event/CAS，并事务迁移 v1；内置前端仍显式选择 `local` |
 | owner-scoped 持久 AgentRun queue、worker topology 与 recovery 真相 | `vyane-agent` | [~] exact lease/deadline、active permit、有界 tree cancel、无正文 completion receipt/outbox 及 resident execution/recovery/publication 已为一条窄 Linux `Process` 路径完成生产 assembly，并提供 authenticated loopback submit/status/output/cancel API。仍无 `Remote`、native production execution、session/resume、distinct principal、live pause/resume 或自动 replay |
 | owner-scoped 事务型 message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO、延迟/幂等投递、fenced lease、TTL、ack/nack、无正文 outbox、外部 receipt 对账、隐藏 staged completion publication、有界 mailbox page 与 exact mailbox claim 已具备 |
-| owner-scoped goal 生命周期与进度真相源 | `vyane-goal` | [~] 同一 SQLite 事务更新当前快照并追加不可变事件；WP-68 增加有界本地 acceptance verifier，并通过 fenced mutation 持久化通过项；自动 pursuit、approval、quota handoff 与 authenticated goal service 仍待后续层 |
+| owner-scoped goal 生命周期与进度真相源 | `vyane-goal` | [~] 同一 SQLite 事务更新当前快照并追加不可变事件；WP-68 增加有界本地 acceptance verifier，WP-69 保存 owner-scoped 不可变 verification artifact；自动 pursuit、approval、quota handoff 与 authenticated goal service 仍待后续层 |
 | 有界 replay-safe delivery broker + 无正文 EventLog projectors | `vyane-broker` | [~] fake-adapter 契约、复用 stable source event id 的 message/AgentRun lifecycle 投影，以及 daemon 内显式 non-`Clone` `ResidentBrokerSupervisor` 已具备；当前 delivery lane 刻意为空，worker/message glue 与远程 A2A/Channels adapter 仍缺 |
 | 声明式 workflow 引擎（DAG + journal/resume/replay） | `vyane-workflow` | [x] exact-plan replay 新建 run 并复用 journal 记录的全成功前缀 |
 | 常驻 workflow 与 Process AgentRun daemon（带认证的本地控制面） | `vyane-cli` | [x] workflow 控制，以及 Linux fresh sessionless CLI-harness AgentRun submit/status/output/cancel；无自动 replay 或 live pause/resume |
@@ -295,9 +295,12 @@ vyane goal done <goal-id> --summary "all checks passed" --json
 
 acceptance 的 `KIND:TARGET` 仍是持久化 descriptor。`goal verify` 只执行显式本地 `cmd:`
 检查：固定 canonical workdir、清理继承环境、限制时间与输出，并在 Unix 上用独立 process group
-清理超时子树；通过项再走现有 lease-fenced mutation。它不会自动完成或 pursuit goal，也不会
+清理超时子树；通过项再走现有 lease-fenced mutation。goal 必须处于 `in_progress`，存在 active
+lease 时必须传匹配的 `--worker`。它不会自动完成或 pursuit goal，也不会
 暗中调用网络/看板 adapter、quota handoff 或 goal REST/MCP service。精确边界见
-[WP-60](docs/plan/WP-60.md) 与 [WP-68](docs/plan/WP-68.md)。
+[WP-60](docs/plan/WP-60.md)、[WP-68](docs/plan/WP-68.md) 与
+[WP-69](docs/plan/WP-69.md)。每次 verification 都会保存为私有、不可变、带 digest
+校验的 artifact，并由 `goal get --json` 返回；它只是证据，不是完成权限。
 
 `vyane serve` 会拒绝非 loopback bind；每次启动都会生成 256-bit bearer capability，并把它原子写入
 启动日志所示的私有 `serve.token`（Unix 上为 mode-0600，数据目录为 mode-0700），所有 endpoint

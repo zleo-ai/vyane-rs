@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
 
-use crate::{GoalEvent, GoalQuery, GoalRecord, NewGoal, Result};
+use crate::{
+    AcceptanceVerification, GoalEvent, GoalQuery, GoalRecord, GoalVerificationArtifact, NewGoal,
+    Result,
+};
 
 pub trait GoalStore: Send + Sync {
     fn create(&self, owner: &str, goal: NewGoal) -> Result<GoalRecord>;
@@ -66,6 +69,20 @@ pub trait GoalStore: Send + Sync {
         index: usize,
         at: DateTime<Utc>,
     ) -> Result<GoalRecord>;
+
+    /// Append one immutable, owner-scoped verification artifact. The goal must
+    /// be in progress and an active lease, if present, must belong to
+    /// `worker_id`.
+    fn record_verification(
+        &self,
+        owner: &str,
+        id: &str,
+        worker_id: Option<&str>,
+        verification: &AcceptanceVerification,
+        at: DateTime<Utc>,
+    ) -> Result<GoalVerificationArtifact>;
+
+    fn verifications(&self, owner: &str, id: &str) -> Result<Vec<GoalVerificationArtifact>>;
 
     fn events(&self, owner: &str, id: &str) -> Result<Vec<GoalEvent>>;
 

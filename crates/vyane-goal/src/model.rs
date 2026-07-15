@@ -129,6 +129,40 @@ pub struct AcceptanceCriterion {
     pub satisfied_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CriterionStatus {
+    Satisfied,
+    Unsatisfied,
+    Inconclusive,
+    ManualRequired,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CriterionResult {
+    pub criterion_index: usize,
+    pub criterion_key: String,
+    pub kind: String,
+    pub target: String,
+    pub status: CriterionStatus,
+    pub command: Vec<String>,
+    pub cwd: String,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptanceVerification {
+    pub goal_id: String,
+    pub all_satisfied: bool,
+    pub results: Vec<CriterionResult>,
+    pub summary: String,
+}
+
 impl AcceptanceCriterion {
     pub fn new(kind: impl Into<String>, target: impl Into<String>) -> Self {
         Self {
@@ -243,6 +277,22 @@ pub struct GoalEvent {
     pub to_status: GoalStatus,
     pub stage: Option<String>,
     pub detail: Option<String>,
+}
+
+/// Immutable evidence captured for one acceptance-verification attempt.
+///
+/// The verification is stored as canonical JSON separately from the mutable
+/// goal snapshot so repeated attempts remain auditable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalVerificationArtifact {
+    pub sequence: u64,
+    pub verification_id: String,
+    pub owner: String,
+    pub goal_id: String,
+    pub recorded_at: DateTime<Utc>,
+    pub worker_id: Option<String>,
+    pub verification: AcceptanceVerification,
+    pub payload_sha256: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

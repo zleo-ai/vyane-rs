@@ -11,47 +11,15 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::{AcceptanceCriterion, GoalRecord, Result};
+use crate::{
+    AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalRecord,
+    Result,
+};
 
 pub const MAX_VERIFIER_TIMEOUT: Duration = Duration::from_secs(300);
 pub const MAX_OUTPUT_TAIL_BYTES: usize = 4_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CriterionStatus {
-    Satisfied,
-    Unsatisfied,
-    Inconclusive,
-    ManualRequired,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CriterionResult {
-    pub criterion_index: usize,
-    pub criterion_key: String,
-    pub kind: String,
-    pub target: String,
-    pub status: CriterionStatus,
-    pub command: Vec<String>,
-    pub cwd: String,
-    pub exit_code: Option<i32>,
-    pub duration_ms: u64,
-    pub stdout_tail: String,
-    pub stderr_tail: String,
-    pub detail: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcceptanceVerification {
-    pub goal_id: String,
-    pub all_satisfied: bool,
-    pub results: Vec<CriterionResult>,
-    pub summary: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct AcceptanceVerifier {
