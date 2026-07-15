@@ -10,6 +10,7 @@ use std::process::Output;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -371,5 +372,36 @@ fn resident_daemon_settles_queued_goals_sequentially_by_priority() {
     assert_eq!(low["pursuit_checkpoint"]["segments_started"], 0);
     assert_eq!(high["goal"]["claim_generation"], 1);
     assert_eq!(low["goal"]["claim_generation"], 1);
+    assert!(daemon.stop().status.success());
+}
+
+#[test]
+fn pursuit_transaction_error_backs_off_and_allows_next_goal() {
+    let fixture = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let workdir = TempDir::new().unwrap();
+    let config = write_config(&fixture);
+    let bin = write_fake_harness(&fixture);
+    create_goal_named(data.path(), workdir.path(), "resident-failing", "0");
+    create_goal_named(data.path(), workdir.path(), "resident-next", "1");
+    Connection::open(data.path().join("goals.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_failing_pursuit_event \
+             BEFORE INSERT ON goal_events \
+             WHEN NEW.goal_id = 'resident-failing' \
+              AND NEW.stage = 'pursuit.started' \
+             BEGIN SELECT RAISE(ABORT, 'injected pursuit failure'); END;",
+        )
+        .unwrap();
+
+    let mut daemon = DaemonGuard::start(data.path(), &config, workdir.path(), &bin);
+    let next = wait_for_completion_named(data.path(), "resident-next", Duration::from_secs(15));
+    let failing = goal_detail_named(data.path(), "resident-failing").unwrap();
+
+    assert_eq!(next["goal"]["status"], "completed");
+    assert_eq!(failing["goal"]["status"], "in_progress");
+    assert_eq!(failing["goal"]["claimed_by"], "daemon-goal:auto-v1");
+    assert_eq!(failing["pursuit_checkpoint"], Value::Null);
     assert!(daemon.stop().status.success());
 }

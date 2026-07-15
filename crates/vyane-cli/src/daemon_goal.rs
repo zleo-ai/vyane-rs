@@ -566,6 +566,38 @@ mod tests {
     }
 
     #[test]
+    fn quarantined_goal_stays_skipped_and_lease_duration_clamps() {
+        let directory = TempDir::new().unwrap();
+        let (store, mut config) = supervisor_store(&directory);
+        create(&store, "quarantined", 0);
+        store
+            .claim(
+                LOCAL_TASK_OWNER,
+                "quarantined",
+                DAEMON_GOAL_WORKER,
+                60,
+                Utc::now(),
+            )
+            .unwrap();
+        create(&store, "next", 1);
+
+        let retries = HashMap::from([(
+            "quarantined".into(),
+            PursuitRetry {
+                errors: MAX_PURSUIT_ERRORS_PER_GENERATION,
+                eligible_at: None,
+            },
+        )]);
+        let next = acquire_from_store(&store, &config, &retries)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.id, "next");
+
+        config.pursuit.overall_timeout = vyane_goal::MAX_PURSUIT_TIMEOUT;
+        assert_eq!(config.lease_seconds(), MAX_LEASE_SECONDS);
+    }
+
+    #[test]
     fn only_expected_claim_races_are_treated_as_retryable() {
         for error in [
             GoalStoreError::NotFound { id: "g".into() },
