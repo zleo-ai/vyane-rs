@@ -50,7 +50,11 @@ use vyane_service::{
     BroadcastParams, DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError, DiagnosticErrorKind,
     DispatchParams, HistoryFilter, RoutePreviewParams, RunView, VyaneService,
 };
-use vyane_workflow::{WorkflowRunId, WorkflowSourceBundle, WorkflowSourceEntry};
+use vyane_workflow::{
+    WORKFLOW_SOURCE_MAX_ENTRIES, WORKFLOW_SOURCE_MAX_PATH_BYTES, WORKFLOW_SOURCE_MAX_PROMPT_BYTES,
+    WORKFLOW_SOURCE_MAX_TOML_BYTES, WORKFLOW_SOURCE_MAX_TOTAL_BYTES, WorkflowRunId,
+    WorkflowSourceBundle, WorkflowSourceEntry,
+};
 
 const BASE_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch server. \
     Use vyane_dispatch to run a task against a configured target (profile name, provider/model, or auto), \
@@ -366,11 +370,11 @@ impl Default for HistoryArgs {
 const MAX_HISTORY_LIMIT: usize = 1_000;
 const MAX_BROADCAST_TARGETS: usize = 64;
 const MAX_BROADCAST_TARGETS_BYTES: usize = 64 * 1024;
-const MAX_WORKFLOW_TOML_BYTES: usize = 1024 * 1024;
-const MAX_WORKFLOW_PROMPT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_WORKFLOW_SOURCE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_WORKFLOW_SOURCES: usize = 128;
-const MAX_WORKFLOW_SOURCE_PATH_BYTES: usize = 4096;
+const MAX_WORKFLOW_TOML_BYTES: usize = WORKFLOW_SOURCE_MAX_TOML_BYTES;
+const MAX_WORKFLOW_PROMPT_BYTES: usize = WORKFLOW_SOURCE_MAX_PROMPT_BYTES;
+const MAX_WORKFLOW_SOURCE_BYTES: usize = WORKFLOW_SOURCE_MAX_TOTAL_BYTES;
+const MAX_WORKFLOW_SOURCES: usize = WORKFLOW_SOURCE_MAX_ENTRIES;
+const MAX_WORKFLOW_SOURCE_PATH_BYTES: usize = WORKFLOW_SOURCE_MAX_PATH_BYTES;
 const MAX_WORKFLOW_VARS: usize = 128;
 const MAX_WORKFLOW_VAR_KEY_BYTES: usize = 256;
 const MAX_WORKFLOW_VAR_VALUE_BYTES: usize = 1024 * 1024;
@@ -1320,6 +1324,126 @@ mod tests {
             error: None,
             labels: Default::default(),
         })
+    }
+
+    fn workflow_args(
+        workflow_toml: String,
+        prompt_files: Vec<WorkflowPromptSourceArgs>,
+        vars: BTreeMap<String, String>,
+    ) -> WorkflowSubmitArgs {
+        WorkflowSubmitArgs {
+            caller_id: WorkflowRunId::generate().to_string(),
+            workflow_toml,
+            prompt_files,
+            vars,
+        }
+    }
+
+    #[test]
+    fn workflow_submission_runtime_budgets_cover_each_field_and_aggregate() {
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".repeat(MAX_WORKFLOW_TOML_BYTES),
+                Vec::new(),
+                BTreeMap::new(),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".repeat(MAX_WORKFLOW_TOML_BYTES + 1),
+                Vec::new(),
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+
+        let max_prompt = WorkflowPromptSourceArgs {
+            path: "prompt.txt".to_string(),
+            content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES),
+        };
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                vec![max_prompt],
+                BTreeMap::new(),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                vec![WorkflowPromptSourceArgs {
+                    path: "prompt.txt".to_string(),
+                    content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES + 1),
+                }],
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                vec![WorkflowPromptSourceArgs {
+                    path: "../escape".to_string(),
+                    content: String::new(),
+                }],
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                (0..=MAX_WORKFLOW_SOURCES)
+                    .map(|index| WorkflowPromptSourceArgs {
+                        path: format!("{index}.txt"),
+                        content: String::new(),
+                    })
+                    .collect(),
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                (0..4)
+                    .map(|index| WorkflowPromptSourceArgs {
+                        path: format!("{index}.txt"),
+                        content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES),
+                    })
+                    .collect(),
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+
+        let max_vars = (0..MAX_WORKFLOW_VARS)
+            .map(|index| (format!("k{index}"), "v".to_string()))
+            .collect();
+        assert!(
+            workflow_submit_request(workflow_args("x".to_string(), Vec::new(), max_vars,)).is_ok()
+        );
+        let too_many_vars = (0..=MAX_WORKFLOW_VARS)
+            .map(|index| (format!("k{index}"), "v".to_string()))
+            .collect();
+        assert!(
+            workflow_submit_request(workflow_args("x".to_string(), Vec::new(), too_many_vars,))
+                .is_err()
+        );
+        let oversized_vars = (0..4)
+            .map(|index| {
+                (
+                    format!("key-{index}"),
+                    "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES),
+                )
+            })
+            .collect();
+        assert!(
+            workflow_submit_request(workflow_args("x".to_string(), Vec::new(), oversized_vars,))
+                .is_err()
+        );
     }
 
     #[test]

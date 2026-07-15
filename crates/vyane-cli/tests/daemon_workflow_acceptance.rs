@@ -312,6 +312,29 @@ async fn mcp_workflow_tools_use_the_authenticated_resident_daemon() -> anyhow::R
     assert!(names.iter().any(|name| name == "vyane_workflow_submit"));
 
     let source = fs::read_to_string(workflow)?;
+    for policy_line in [
+        r#"workdir = "/outside""#,
+        r#"workdir = "../../outside""#,
+        r#"sandbox = "full""#,
+    ] {
+        let restricted = source.replace(
+            "prompt = \"answer {{vars.topic}}\"",
+            &format!("prompt = \"answer {{{{vars.topic}}}}\"\n        {policy_line}"),
+        );
+        let rejected = mcp_call(
+            &client,
+            "vyane_workflow_submit",
+            json!({
+                "caller_id": MCP_RUN_ID,
+                "workflow_toml": restricted,
+                "vars": { "topic": "daemon" }
+            }),
+        )
+        .await?;
+        assert_eq!(rejected["status"], "error");
+        assert_eq!(rejected["error"]["code"], "invalid_argument");
+    }
+
     let submitted = mcp_call(
         &client,
         "vyane_workflow_submit",

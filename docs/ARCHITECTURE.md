@@ -533,6 +533,8 @@ resident daemon on every operation, and projects daemon task records into an
 allowlist containing only caller id, lifecycle state, and a closed failure
 code. The caller cannot supply execution cwd, owner, controller, lease, or
 token fields.
+The initial production adapter additionally rejects every explicit step
+workdir and any sandbox above read-only before daemon contact.
 
 Both diagnostic tools use strict schemas and bounded inputs, configuration
 rows, identifiers, failover legs, metadata and serialized output. Their wire

@@ -18,6 +18,7 @@ struct FakeWorkflowControl {
     submissions: Mutex<Vec<WorkflowSubmitRequest>>,
     statuses: Mutex<Vec<WorkflowRunId>>,
     cancellations: Mutex<Vec<WorkflowRunId>>,
+    status_error: Mutex<Option<WorkflowControlError>>,
 }
 
 impl FakeWorkflowControl {
@@ -48,6 +49,9 @@ impl WorkflowControl for FakeWorkflowControl {
     ) -> WorkflowControlFuture<'_, Result<WorkflowView, WorkflowControlError>> {
         Box::pin(async move {
             self.statuses.lock().unwrap().push(caller_id.clone());
+            if let Some(error) = self.status_error.lock().unwrap().take() {
+                return Err(error);
+            }
             Ok(WorkflowView {
                 caller_id,
                 state: WorkflowState::Failed,
@@ -107,7 +111,7 @@ async fn optional_workflow_port_preserves_six_tool_default_and_enables_strict_co
         "vyane_workflow_submit",
         serde_json::json!({
             "caller_id": caller_id,
-            "workflow_toml": "[workflow]\nname = \"safe\"\n[[steps]]\nid = \"one\"\ntask = \"hello\"\ntarget = \"default\"",
+            "workflow_toml": "[workflow]\nname = \"safe\"\n[[step]]\nid = \"one\"\nprompt = \"hello\"\ntarget = \"default\"",
             "vars": { "mode": "review" }
         }),
     )
@@ -129,6 +133,26 @@ async fn optional_workflow_port_preserves_six_tool_default_and_enables_strict_co
     .await?;
     assert_eq!(status["state"], "failed");
     assert_eq!(status["failure_code"], "dispatch_failed");
+
+    for (error, code) in [
+        (WorkflowControlError::InvalidRequest, "invalid_argument"),
+        (WorkflowControlError::NotFound, "not_found"),
+        (WorkflowControlError::Conflict, "conflict"),
+        (WorkflowControlError::Unavailable, "unavailable"),
+        (WorkflowControlError::OutcomeUnknown, "outcome_unknown"),
+        (WorkflowControlError::Internal, "internal"),
+    ] {
+        *fake.status_error.lock().unwrap() = Some(error);
+        let failed = call(
+            &client,
+            "vyane_workflow_status",
+            serde_json::json!({ "caller_id": caller_id }),
+        )
+        .await?;
+        assert_eq!(failed["status"], "error");
+        assert_eq!(failed["error"]["code"], code);
+        assert_eq!(failed["error"].as_object().unwrap().len(), 2);
+    }
 
     for _ in 0..2 {
         let cancelled = call(

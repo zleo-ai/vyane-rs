@@ -354,7 +354,8 @@ Workflow callers provide a canonical UUIDv7 plus a bounded self-contained
 source bundle. The MCP layer cannot provide owner, controller, token, or an
 execution path. The CLI freezes its own startup directory and re-authenticates
 the exact resident daemon for every workflow operation. Responses contain only
-the caller id, lifecycle state, and a closed failure code. This is durable
+the caller id, lifecycle state, and a closed failure code. Explicit step
+workdirs and sandboxes above read-only are rejected before daemon contact. This is durable
 workflow control, not general task, board, collaboration, or multi-principal
 MCP parity.
 
