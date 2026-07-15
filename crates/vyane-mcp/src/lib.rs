@@ -1385,12 +1385,47 @@ mod tests {
             workflow_submit_request(workflow_args(
                 "x".to_string(),
                 vec![WorkflowPromptSourceArgs {
+                    path: "p".repeat(MAX_WORKFLOW_SOURCE_PATH_BYTES),
+                    content: String::new(),
+                }],
+                BTreeMap::new(),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                vec![WorkflowPromptSourceArgs {
+                    path: "p".repeat(MAX_WORKFLOW_SOURCE_PATH_BYTES + 1),
+                    content: String::new(),
+                }],
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                vec![WorkflowPromptSourceArgs {
                     path: "../escape".to_string(),
                     content: String::new(),
                 }],
                 BTreeMap::new(),
             ))
             .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                (0..MAX_WORKFLOW_SOURCES)
+                    .map(|index| WorkflowPromptSourceArgs {
+                        path: format!("{index}.txt"),
+                        content: String::new(),
+                    })
+                    .collect(),
+                BTreeMap::new(),
+            ))
+            .is_ok()
         );
         assert!(
             workflow_submit_request(workflow_args(
@@ -1404,6 +1439,32 @@ mod tests {
                 BTreeMap::new(),
             ))
             .is_err()
+        );
+        let exact_source_total = vec![
+            WorkflowPromptSourceArgs {
+                path: "0".to_string(),
+                content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES),
+            },
+            WorkflowPromptSourceArgs {
+                path: "1".to_string(),
+                content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES),
+            },
+            WorkflowPromptSourceArgs {
+                path: "2".to_string(),
+                content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES),
+            },
+            WorkflowPromptSourceArgs {
+                path: "3".to_string(),
+                content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES - 5),
+            },
+        ];
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                exact_source_total,
+                BTreeMap::new(),
+            ))
+            .is_ok()
         );
         assert!(
             workflow_submit_request(workflow_args(
@@ -1432,14 +1493,63 @@ mod tests {
             workflow_submit_request(workflow_args("x".to_string(), Vec::new(), too_many_vars,))
                 .is_err()
         );
-        let oversized_vars = (0..4)
-            .map(|index| {
-                (
-                    format!("key-{index}"),
-                    "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES),
-                )
-            })
-            .collect();
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                Vec::new(),
+                BTreeMap::from([("k".repeat(MAX_WORKFLOW_VAR_KEY_BYTES), "v".to_string(),)]),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                Vec::new(),
+                BTreeMap::from([("k".repeat(MAX_WORKFLOW_VAR_KEY_BYTES + 1), "v".to_string(),)]),
+            ))
+            .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                Vec::new(),
+                BTreeMap::from([("k".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES),)]),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                Vec::new(),
+                BTreeMap::from([(
+                    "k".to_string(),
+                    "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES + 1),
+                )]),
+            ))
+            .is_err()
+        );
+        let exact_vars = BTreeMap::from([
+            ("a".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            ("b".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            ("c".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            (
+                "d".to_string(),
+                "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES - 4),
+            ),
+        ]);
+        assert!(
+            workflow_submit_request(workflow_args("x".to_string(), Vec::new(), exact_vars,))
+                .is_ok()
+        );
+        let oversized_vars = BTreeMap::from([
+            ("a".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            ("b".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            ("c".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            (
+                "d".to_string(),
+                "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES - 3),
+            ),
+        ]);
         assert!(
             workflow_submit_request(workflow_args("x".to_string(), Vec::new(), oversized_vars,))
                 .is_err()
