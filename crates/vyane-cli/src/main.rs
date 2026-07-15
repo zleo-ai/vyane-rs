@@ -19,6 +19,7 @@ mod daemon_client;
 mod daemon_workflow;
 mod factory;
 mod goal;
+mod mcp_workflow;
 mod output;
 mod review;
 mod supervisor;

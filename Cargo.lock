@@ -2400,6 +2400,7 @@ dependencies = [
  "predicates",
  "process-wrap",
  "reqwest",
+ "rmcp",
  "rustix",
  "serde",
  "serde_json",
@@ -2544,6 +2545,7 @@ dependencies = [
  "tokio-util",
  "vyane-core",
  "vyane-service",
+ "vyane-workflow",
 ]
 
 [[package]]

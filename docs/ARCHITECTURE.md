@@ -111,8 +111,8 @@ Two consequences:
 | `vyane-router` | `vyane-core` | target selection / routing policy |
 | `vyane-workflow` | `vyane-kernel` | declarative DAG execution, bounded source bundles, atomic journals, and explicit resume |
 | `vyane-service` | `vyane-agent`, `vyane-kernel`, `vyane-config`, `vyane-ledger`, `vyane-message`, `vyane-broker` | shared facade plus principal-derived `OwnerScopedService`, allowlisted run/session views, owner-scoped session control, explicit projection construction, the fresh-sessionless authority bridge, fixed-owner one-shot drivers, a paired in-process backend and its resident library supervisor; ordinary dispatch constructs none of the optional AgentRun components |
-| `vyane-mcp` | `vyane-service`, `rmcp` | six-tool MCP server over stdio: dispatch/broadcast/history/sessions plus two bounded diagnostics, route preview and static configuration check; generic success output has a 1 MiB cap |
-| `vyane-cli` | `vyane-service`, `vyane-workflow`, `vyane-task`, `vyane-goal`, `vyane-mcp`, `axum` | assembler: CLI + bearer-authenticated loopback-only REST API (`vyane serve`, Host/Origin checked and non-loopback rejected) + authenticated local workflow daemon + MCP launcher (`vyane mcp`) |
+| `vyane-mcp` | `vyane-service`, `vyane-workflow`, `rmcp` | six base tools plus an object-safe workflow-control port; it owns no daemon descriptor or credential |
+| `vyane-cli` | `vyane-service`, `vyane-workflow`, `vyane-task`, `vyane-goal`, `vyane-mcp`, `axum` | assembler: CLI + bearer-authenticated loopback-only REST API + authenticated local workflow daemon + nine-tool MCP launcher with a verified daemon adapter |
 
 `ChatClient::complete_turn` is an additive typed boundary. Its default fallback
 keeps text-only clients source-compatible but delegates only when the request
@@ -514,7 +514,7 @@ policy remain open.
 
 ## Static MCP diagnostics
 
-The MCP front-end exposes six tools. Four execute or query the established
+The MCP library exposes six base tools. Four execute or query the established
 service surface (`vyane_dispatch`, `vyane_broadcast`, `vyane_history`, and
 `vyane_sessions`). `vyane_route` is a Rust-specific deterministic route
 preview extension; it is not evidence of a same-name tool or equivalent
@@ -524,6 +524,17 @@ assembler-supported transport/protocol/harness combinations, credential
 *presence*, and the same HTTP base-URL contract used by protocol clients. It
 does not open a network connection, probe a model, spawn a harness, or validate
 whether a credential works.
+
+The CLI assembler injects an object-safe `WorkflowControl` adapter and therefore
+adds three tools: durable workflow submit, status, and idempotent cancel. The
+MCP crate never reads daemon control files or credentials. The CLI adapter
+freezes the server startup directory, verifies and authenticates the exact
+resident daemon on every operation, and projects daemon task records into an
+allowlist containing only caller id, lifecycle state, and a closed failure
+code. The caller cannot supply execution cwd, owner, controller, lease, or
+token fields.
+The initial production adapter additionally rejects every explicit step
+workdir and any sandbox above read-only before daemon contact.
 
 Both diagnostic tools use strict schemas and bounded inputs, configuration
 rows, identifiers, failover legs, metadata and serialized output. Their wire

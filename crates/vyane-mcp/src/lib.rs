@@ -4,10 +4,11 @@
 //! history, session, and static diagnostic operations as callable tools.
 //!
 //! The server is transport-agnostic: it wraps a [`vyane_service::VyaneService`]
-//! and registers six tools (`vyane_dispatch`, `vyane_broadcast`, `vyane_history`,
-//! `vyane_sessions`, `vyane_route`, and `vyane_check`). A front-end wires it onto
-//! a transport; today the only entry point is [`run_stdio`], driven by the
-//! `vyane mcp` CLI subcommand.
+//! and registers six base tools (`vyane_dispatch`, `vyane_broadcast`,
+//! `vyane_history`, `vyane_sessions`, `vyane_route`, and `vyane_check`). An
+//! embedding process may inject an authenticated [`WorkflowControl`] port to
+//! add workflow submit/status/cancel without giving this crate daemon discovery
+//! or credentials. The `vyane mcp` CLI injects that port and exposes nine tools.
 //!
 //! ## Tool result contract
 //!
@@ -28,7 +29,7 @@
 //! an `invalid_argument` envelope. Validation happens before the service is
 //! called.
 
-use std::future::Future;
+use std::{collections::BTreeMap, future::Future, pin::Pin, str::FromStr, sync::Arc};
 
 use anyhow::Result;
 use rmcp::{
@@ -49,13 +50,24 @@ use vyane_service::{
     BroadcastParams, DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError, DiagnosticErrorKind,
     DispatchParams, HistoryFilter, RoutePreviewParams, RunView, VyaneService,
 };
+use vyane_workflow::{
+    WORKFLOW_SOURCE_MAX_ENTRIES, WORKFLOW_SOURCE_MAX_PATH_BYTES, WORKFLOW_SOURCE_MAX_PROMPT_BYTES,
+    WORKFLOW_SOURCE_MAX_TOML_BYTES, WORKFLOW_SOURCE_MAX_TOTAL_BYTES, WorkflowRunId,
+    WorkflowSourceBundle, WorkflowSourceEntry,
+};
 
-const SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch server. \
+const BASE_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch server. \
     Use vyane_dispatch to run a task against a configured target (profile name, provider/model, or auto), \
     vyane_broadcast to fan one task out to several targets concurrently, \
     vyane_history to query the run ledger, vyane_sessions to list saved sessions, \
     vyane_route to preview deterministic routing, and vyane_check for a static-only redacted config check. \
     A result with operation_status=completed is final even when detail_omitted=true; use its run receipt and never retry it as an execution failure.";
+
+const WORKFLOW_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch and durable workflow server. \
+    The execution, history, session, route, and check tools retain their base contracts. \
+    Use vyane_workflow_submit with a caller-owned canonical UUIDv7 and bounded source bundle; \
+    use workflow status before retrying an outcome_unknown submission, and workflow cancel for idempotent cancellation. \
+    A result with operation_status=completed is final even when detail_omitted=true; never retry it as an execution failure.";
 
 /// The MCP server. Holds one clone-cheap [`VyaneService`] and the macro-generated
 /// tool router. Cloning is fine: `VyaneService` is itself `Clone` (everything
@@ -63,8 +75,103 @@ const SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch server. \
 #[derive(Clone)]
 pub struct VyaneMcpServer {
     service: VyaneService,
+    workflow_control: Option<Arc<dyn WorkflowControl>>,
     tool_router: ToolRouter<Self>,
 }
+
+/// Boxed future used by the object-safe workflow control boundary.
+pub type WorkflowControlFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Narrow control-plane port supplied by the process that owns workflow
+/// authentication and lifecycle. The MCP crate never discovers daemon state
+/// or reads a control descriptor or bearer token itself.
+pub trait WorkflowControl: Send + Sync {
+    fn submit(
+        &self,
+        request: WorkflowSubmitRequest,
+    ) -> WorkflowControlFuture<'_, Result<WorkflowView, WorkflowControlError>>;
+
+    fn status(
+        &self,
+        caller_id: WorkflowRunId,
+    ) -> WorkflowControlFuture<'_, Result<WorkflowView, WorkflowControlError>>;
+
+    fn cancel(
+        &self,
+        caller_id: WorkflowRunId,
+    ) -> WorkflowControlFuture<'_, Result<WorkflowView, WorkflowControlError>>;
+}
+
+/// Fully bounded workflow submission passed to the injected control plane.
+#[derive(Debug, Clone)]
+pub struct WorkflowSubmitRequest {
+    pub caller_id: WorkflowRunId,
+    pub bundle: WorkflowSourceBundle,
+    pub vars: BTreeMap<String, String>,
+}
+
+/// Public lifecycle projection. Deliberately excludes ownership, controller,
+/// lease, authentication, paths, prompts, and raw error fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkflowView {
+    pub caller_id: WorkflowRunId,
+    pub state: WorkflowState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<WorkflowFailureCode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowState {
+    Queued,
+    Running,
+    Cancelling,
+    Succeeded,
+    Failed,
+    TimedOut,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowFailureCode {
+    DispatchFailed,
+    SpawnFailed,
+    Configuration,
+    ControlUnavailable,
+    WorkerLost,
+    LeaseExpired,
+    Cancelled,
+    TimedOut,
+    Internal,
+}
+
+/// Closed error taxonomy. Source messages cannot cross this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowControlError {
+    InvalidRequest,
+    NotFound,
+    Conflict,
+    Unavailable,
+    OutcomeUnknown,
+    Internal,
+}
+
+impl std::fmt::Display for WorkflowControlError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidRequest => "workflow request is invalid",
+            Self::NotFound => "workflow was not found",
+            Self::Conflict => "workflow request conflicts with existing state",
+            Self::Unavailable => "workflow control is unavailable",
+            Self::OutcomeUnknown => "workflow submission outcome is unknown",
+            Self::Internal => "workflow operation failed",
+        })
+    }
+}
+
+impl std::error::Error for WorkflowControlError {}
 
 // ---- tool parameter schemas -------------------------------------------------
 //
@@ -205,6 +312,47 @@ pub struct RouteArgs {
 #[serde(deny_unknown_fields)]
 pub struct CheckArgs {}
 
+/// One in-memory prompt source included in a workflow submission.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowPromptSourceArgs {
+    /// Canonical relative `/`-separated path declared by the workflow.
+    #[schemars(length(min = 1, max = 4096))]
+    pub path: String,
+    /// UTF-8 prompt content.
+    #[schemars(length(max = 4194304))]
+    pub content: String,
+}
+
+/// Arguments for `vyane_workflow_submit`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowSubmitArgs {
+    /// Caller-selected canonical lowercase UUIDv7. Reuse only when retrying the
+    /// identical intended submission after an indeterminate outcome.
+    #[schemars(length(min = 36, max = 36))]
+    pub caller_id: String,
+    /// Declarative workflow TOML source.
+    #[schemars(length(min = 1, max = 1048576))]
+    pub workflow_toml: String,
+    /// Prompt files referenced by the workflow.
+    #[serde(default)]
+    #[schemars(length(max = 128))]
+    pub prompt_files: Vec<WorkflowPromptSourceArgs>,
+    /// Workflow template variables.
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
+}
+
+/// Arguments shared by workflow status and cancellation.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowIdArgs {
+    /// Canonical lowercase UUIDv7 workflow caller id.
+    #[schemars(length(min = 36, max = 36))]
+    pub caller_id: String,
+}
+
 fn default_history_limit() -> usize {
     20
 }
@@ -222,6 +370,15 @@ impl Default for HistoryArgs {
 const MAX_HISTORY_LIMIT: usize = 1_000;
 const MAX_BROADCAST_TARGETS: usize = 64;
 const MAX_BROADCAST_TARGETS_BYTES: usize = 64 * 1024;
+const MAX_WORKFLOW_TOML_BYTES: usize = WORKFLOW_SOURCE_MAX_TOML_BYTES;
+const MAX_WORKFLOW_PROMPT_BYTES: usize = WORKFLOW_SOURCE_MAX_PROMPT_BYTES;
+const MAX_WORKFLOW_SOURCE_BYTES: usize = WORKFLOW_SOURCE_MAX_TOTAL_BYTES;
+const MAX_WORKFLOW_SOURCES: usize = WORKFLOW_SOURCE_MAX_ENTRIES;
+const MAX_WORKFLOW_SOURCE_PATH_BYTES: usize = WORKFLOW_SOURCE_MAX_PATH_BYTES;
+const MAX_WORKFLOW_VARS: usize = 128;
+const MAX_WORKFLOW_VAR_KEY_BYTES: usize = 256;
+const MAX_WORKFLOW_VAR_VALUE_BYTES: usize = 1024 * 1024;
+const MAX_WORKFLOW_VARS_BYTES: usize = 4 * 1024 * 1024;
 /// Hard cap for every non-diagnostic MCP success payload. Diagnostics keep a
 /// smaller dedicated budget below. Oversized content is replaced by a stable
 /// limit error rather than being copied into one tool result.
@@ -234,6 +391,10 @@ enum PublicErrorCode {
     ConfigInvalid,
     LimitExceeded,
     Cancelled,
+    NotFound,
+    Conflict,
+    Unavailable,
+    OutcomeUnknown,
     Internal,
 }
 
@@ -391,13 +552,63 @@ impl SafeToolError {
             message: "tool result safety limit exceeded",
         }
     }
+
+    const fn workflow_control(error: WorkflowControlError) -> Self {
+        match error {
+            WorkflowControlError::InvalidRequest => Self {
+                code: PublicErrorCode::InvalidArgument,
+                message: "workflow request is invalid",
+            },
+            WorkflowControlError::NotFound => Self {
+                code: PublicErrorCode::NotFound,
+                message: "workflow was not found",
+            },
+            WorkflowControlError::Conflict => Self {
+                code: PublicErrorCode::Conflict,
+                message: "workflow request conflicts with existing state",
+            },
+            WorkflowControlError::Unavailable => Self {
+                code: PublicErrorCode::Unavailable,
+                message: "workflow control is unavailable",
+            },
+            WorkflowControlError::OutcomeUnknown => Self {
+                code: PublicErrorCode::OutcomeUnknown,
+                message: "workflow submission outcome is unknown",
+            },
+            WorkflowControlError::Internal => Self {
+                code: PublicErrorCode::Internal,
+                message: "workflow operation failed",
+            },
+        }
+    }
 }
 
 #[tool_router]
 impl VyaneMcpServer {
     pub fn new(service: VyaneService) -> Self {
+        let mut tool_router = Self::tool_router();
+        for name in [
+            "vyane_workflow_submit",
+            "vyane_workflow_status",
+            "vyane_workflow_cancel",
+        ] {
+            tool_router.map.remove(name);
+        }
         Self {
             service,
+            workflow_control: None,
+            tool_router,
+        }
+    }
+
+    /// Create a server with the three workflow control tools enabled.
+    pub fn with_workflow_control(
+        service: VyaneService,
+        workflow_control: Arc<dyn WorkflowControl>,
+    ) -> Self {
+        Self {
+            service,
+            workflow_control: Some(workflow_control),
             tool_router: Self::tool_router(),
         }
     }
@@ -616,6 +827,83 @@ impl VyaneMcpServer {
             Err(error) => Ok(error_json(classify_service_error(&error))),
         }
     }
+
+    /// Submit one bounded, self-contained workflow source bundle.
+    #[tool(
+        description = "Submit a bounded workflow source bundle using a caller-selected canonical UUIDv7. The response is a redacted lifecycle view; reuse caller_id only for an identical retry after an outcome_unknown result.",
+        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<WorkflowSubmitArgs>()
+    )]
+    async fn vyane_workflow_submit(
+        &self,
+        arguments: JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        let args: WorkflowSubmitArgs = match parse_arguments(arguments) {
+            Ok(args) => args,
+            Err(error) => return Ok(error_json(error)),
+        };
+        let request = match workflow_submit_request(args) {
+            Ok(request) => request,
+            Err(error) => return Ok(error_json(error)),
+        };
+        let Some(control) = &self.workflow_control else {
+            return Ok(error_json(SafeToolError::workflow_control(
+                WorkflowControlError::Unavailable,
+            )));
+        };
+        match control.submit(request).await {
+            Ok(view) => Ok(success_json(&view)),
+            Err(error) => Ok(error_json(SafeToolError::workflow_control(error))),
+        }
+    }
+
+    /// Read one workflow's redacted lifecycle view.
+    #[tool(
+        description = "Return the redacted lifecycle state for one canonical UUIDv7 workflow caller id.",
+        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<WorkflowIdArgs>()
+    )]
+    async fn vyane_workflow_status(
+        &self,
+        arguments: JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        let caller_id = match workflow_caller_id(arguments) {
+            Ok(caller_id) => caller_id,
+            Err(error) => return Ok(error_json(error)),
+        };
+        let Some(control) = &self.workflow_control else {
+            return Ok(error_json(SafeToolError::workflow_control(
+                WorkflowControlError::Unavailable,
+            )));
+        };
+        match control.status(caller_id).await {
+            Ok(view) => Ok(success_json(&view)),
+            Err(error) => Ok(error_json(SafeToolError::workflow_control(error))),
+        }
+    }
+
+    /// Request cancellation. Repeated requests are idempotent: an already
+    /// cancelling or terminal workflow is returned as a successful view.
+    #[tool(
+        description = "Idempotently request cancellation for one canonical UUIDv7 workflow caller id. Cancelling and terminal states are successful responses.",
+        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<WorkflowIdArgs>()
+    )]
+    async fn vyane_workflow_cancel(
+        &self,
+        arguments: JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        let caller_id = match workflow_caller_id(arguments) {
+            Ok(caller_id) => caller_id,
+            Err(error) => return Ok(error_json(error)),
+        };
+        let Some(control) = &self.workflow_control else {
+            return Ok(error_json(SafeToolError::workflow_control(
+                WorkflowControlError::Unavailable,
+            )));
+        };
+        match control.cancel(caller_id).await {
+            Ok(view) => Ok(success_json(&view)),
+            Err(error) => Ok(error_json(SafeToolError::workflow_control(error))),
+        }
+    }
 }
 
 #[tool_handler]
@@ -628,7 +916,14 @@ impl rmcp::ServerHandler for VyaneMcpServer {
                 name: "vyane".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
             },
-            instructions: Some(SERVER_INSTRUCTIONS.into()),
+            instructions: Some(
+                if self.workflow_control.is_some() {
+                    WORKFLOW_SERVER_INSTRUCTIONS
+                } else {
+                    BASE_SERVER_INSTRUCTIONS
+                }
+                .into(),
+            ),
         }
     }
 }
@@ -637,6 +932,18 @@ impl rmcp::ServerHandler for VyaneMcpServer {
 /// transport errors. Intended as the body of the `vyane mcp` subcommand.
 pub async fn run_stdio(service: VyaneService) -> Result<()> {
     let server = VyaneMcpServer::new(service);
+    let running = server.serve(stdio()).await?;
+    running.waiting().await?;
+    Ok(())
+}
+
+/// Run stdio MCP with an injected workflow control plane. Authentication and
+/// daemon discovery remain the embedding process's responsibility.
+pub async fn run_stdio_with_workflow_control(
+    service: VyaneService,
+    workflow_control: Arc<dyn WorkflowControl>,
+) -> Result<()> {
+    let server = VyaneMcpServer::with_workflow_control(service, workflow_control);
     let running = server.serve(stdio()).await?;
     running.waiting().await?;
     Ok(())
@@ -653,6 +960,107 @@ where
 {
     serde_json::from_value(serde_json::Value::Object(arguments))
         .map_err(|_| SafeToolError::invalid_argument("arguments do not match the tool schema"))
+}
+
+fn workflow_caller_id(arguments: JsonObject) -> std::result::Result<WorkflowRunId, SafeToolError> {
+    let args: WorkflowIdArgs = parse_arguments(arguments)?;
+    WorkflowRunId::from_str(&args.caller_id).map_err(|_| {
+        SafeToolError::invalid_argument("caller_id must be a canonical lowercase UUIDv7")
+    })
+}
+
+fn workflow_submit_request(
+    args: WorkflowSubmitArgs,
+) -> std::result::Result<WorkflowSubmitRequest, SafeToolError> {
+    let caller_id = WorkflowRunId::from_str(&args.caller_id).map_err(|_| {
+        SafeToolError::invalid_argument("caller_id must be a canonical lowercase UUIDv7")
+    })?;
+    if args.workflow_toml.is_empty() || args.workflow_toml.len() > MAX_WORKFLOW_TOML_BYTES {
+        return Err(SafeToolError::invalid_argument(
+            "workflow_toml exceeds the workflow safety limit",
+        ));
+    }
+    if args.prompt_files.len() > MAX_WORKFLOW_SOURCES {
+        return Err(SafeToolError::invalid_argument(
+            "prompt_files exceed the workflow safety limit",
+        ));
+    }
+
+    let mut source_bytes = args.workflow_toml.len();
+    let mut prompt_files = Vec::with_capacity(args.prompt_files.len());
+    for source in args.prompt_files {
+        if source.path.is_empty()
+            || source.path.len() > MAX_WORKFLOW_SOURCE_PATH_BYTES
+            || source.content.len() > MAX_WORKFLOW_PROMPT_BYTES
+        {
+            return Err(SafeToolError::invalid_argument(
+                "prompt_files exceed the workflow safety limit",
+            ));
+        }
+        source_bytes = source_bytes
+            .checked_add(source.path.len())
+            .and_then(|total| total.checked_add(source.content.len()))
+            .ok_or_else(|| {
+                SafeToolError::invalid_argument("workflow sources exceed the workflow safety limit")
+            })?;
+        if source_bytes > MAX_WORKFLOW_SOURCE_BYTES {
+            return Err(SafeToolError::invalid_argument(
+                "workflow sources exceed the workflow safety limit",
+            ));
+        }
+        let path = source.path.parse().map_err(|_| {
+            SafeToolError::invalid_argument("prompt source path must be canonical and relative")
+        })?;
+        prompt_files.push(WorkflowSourceEntry {
+            path,
+            content: source.content,
+        });
+    }
+
+    validate_workflow_vars(&args.vars)?;
+    Ok(WorkflowSubmitRequest {
+        caller_id,
+        bundle: WorkflowSourceBundle {
+            workflow_toml: args.workflow_toml,
+            prompt_files,
+        },
+        vars: args.vars,
+    })
+}
+
+fn validate_workflow_vars(
+    vars: &BTreeMap<String, String>,
+) -> std::result::Result<(), SafeToolError> {
+    if vars.len() > MAX_WORKFLOW_VARS {
+        return Err(SafeToolError::invalid_argument(
+            "vars exceed the workflow safety limit",
+        ));
+    }
+    let mut total = 0usize;
+    for (key, value) in vars {
+        if key.is_empty()
+            || key.len() > MAX_WORKFLOW_VAR_KEY_BYTES
+            || key.contains('\0')
+            || value.len() > MAX_WORKFLOW_VAR_VALUE_BYTES
+            || value.contains('\0')
+        {
+            return Err(SafeToolError::invalid_argument(
+                "vars exceed the workflow safety limit",
+            ));
+        }
+        total = total
+            .checked_add(key.len())
+            .and_then(|size| size.checked_add(value.len()))
+            .ok_or_else(|| {
+                SafeToolError::invalid_argument("vars exceed the workflow safety limit")
+            })?;
+        if total > MAX_WORKFLOW_VARS_BYTES {
+            return Err(SafeToolError::invalid_argument(
+                "vars exceed the workflow safety limit",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parse the MCP sandbox spelling without silently weakening caller intent.
@@ -916,6 +1324,236 @@ mod tests {
             error: None,
             labels: Default::default(),
         })
+    }
+
+    fn workflow_args(
+        workflow_toml: String,
+        prompt_files: Vec<WorkflowPromptSourceArgs>,
+        vars: BTreeMap<String, String>,
+    ) -> WorkflowSubmitArgs {
+        WorkflowSubmitArgs {
+            caller_id: WorkflowRunId::generate().to_string(),
+            workflow_toml,
+            prompt_files,
+            vars,
+        }
+    }
+
+    #[test]
+    fn workflow_submission_runtime_budgets_cover_each_field_and_aggregate() {
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".repeat(MAX_WORKFLOW_TOML_BYTES),
+                Vec::new(),
+                BTreeMap::new(),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".repeat(MAX_WORKFLOW_TOML_BYTES + 1),
+                Vec::new(),
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+
+        let max_prompt = WorkflowPromptSourceArgs {
+            path: "prompt.txt".to_string(),
+            content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES),
+        };
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                vec![max_prompt],
+                BTreeMap::new(),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                vec![WorkflowPromptSourceArgs {
+                    path: "prompt.txt".to_string(),
+                    content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES + 1),
+                }],
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                vec![WorkflowPromptSourceArgs {
+                    path: "p".repeat(MAX_WORKFLOW_SOURCE_PATH_BYTES),
+                    content: String::new(),
+                }],
+                BTreeMap::new(),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                vec![WorkflowPromptSourceArgs {
+                    path: "p".repeat(MAX_WORKFLOW_SOURCE_PATH_BYTES + 1),
+                    content: String::new(),
+                }],
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                vec![WorkflowPromptSourceArgs {
+                    path: "../escape".to_string(),
+                    content: String::new(),
+                }],
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                (0..MAX_WORKFLOW_SOURCES)
+                    .map(|index| WorkflowPromptSourceArgs {
+                        path: format!("{index}.txt"),
+                        content: String::new(),
+                    })
+                    .collect(),
+                BTreeMap::new(),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                (0..=MAX_WORKFLOW_SOURCES)
+                    .map(|index| WorkflowPromptSourceArgs {
+                        path: format!("{index}.txt"),
+                        content: String::new(),
+                    })
+                    .collect(),
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+        let exact_source_total = vec![
+            WorkflowPromptSourceArgs {
+                path: "0".to_string(),
+                content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES),
+            },
+            WorkflowPromptSourceArgs {
+                path: "1".to_string(),
+                content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES),
+            },
+            WorkflowPromptSourceArgs {
+                path: "2".to_string(),
+                content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES),
+            },
+            WorkflowPromptSourceArgs {
+                path: "3".to_string(),
+                content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES - 5),
+            },
+        ];
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                exact_source_total,
+                BTreeMap::new(),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                (0..4)
+                    .map(|index| WorkflowPromptSourceArgs {
+                        path: format!("{index}.txt"),
+                        content: "x".repeat(MAX_WORKFLOW_PROMPT_BYTES),
+                    })
+                    .collect(),
+                BTreeMap::new(),
+            ))
+            .is_err()
+        );
+
+        let max_vars = (0..MAX_WORKFLOW_VARS)
+            .map(|index| (format!("k{index}"), "v".to_string()))
+            .collect();
+        assert!(
+            workflow_submit_request(workflow_args("x".to_string(), Vec::new(), max_vars,)).is_ok()
+        );
+        let too_many_vars = (0..=MAX_WORKFLOW_VARS)
+            .map(|index| (format!("k{index}"), "v".to_string()))
+            .collect();
+        assert!(
+            workflow_submit_request(workflow_args("x".to_string(), Vec::new(), too_many_vars,))
+                .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                Vec::new(),
+                BTreeMap::from([("k".repeat(MAX_WORKFLOW_VAR_KEY_BYTES), "v".to_string(),)]),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                Vec::new(),
+                BTreeMap::from([("k".repeat(MAX_WORKFLOW_VAR_KEY_BYTES + 1), "v".to_string(),)]),
+            ))
+            .is_err()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                Vec::new(),
+                BTreeMap::from([("k".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES),)]),
+            ))
+            .is_ok()
+        );
+        assert!(
+            workflow_submit_request(workflow_args(
+                "x".to_string(),
+                Vec::new(),
+                BTreeMap::from([(
+                    "k".to_string(),
+                    "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES + 1),
+                )]),
+            ))
+            .is_err()
+        );
+        let exact_vars = BTreeMap::from([
+            ("a".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            ("b".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            ("c".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            (
+                "d".to_string(),
+                "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES - 4),
+            ),
+        ]);
+        assert!(
+            workflow_submit_request(workflow_args("x".to_string(), Vec::new(), exact_vars,))
+                .is_ok()
+        );
+        let oversized_vars = BTreeMap::from([
+            ("a".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            ("b".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            ("c".to_string(), "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES)),
+            (
+                "d".to_string(),
+                "v".repeat(MAX_WORKFLOW_VAR_VALUE_BYTES - 3),
+            ),
+        ]);
+        assert!(
+            workflow_submit_request(workflow_args("x".to_string(), Vec::new(), oversized_vars,))
+                .is_err()
+        );
     }
 
     #[test]

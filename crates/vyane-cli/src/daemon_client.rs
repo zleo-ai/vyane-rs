@@ -158,6 +158,15 @@ pub(crate) struct DaemonWorkflowClient {
     token: Arc<str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DaemonWorkflowControlError {
+    InvalidRequest,
+    NotFound,
+    Conflict,
+    Unavailable,
+    Internal,
+}
+
 impl DaemonWorkflowClient {
     pub(crate) async fn connect() -> Result<Self> {
         let control = read_verified_client_control()?;
@@ -285,6 +294,69 @@ impl DaemonWorkflowClient {
             API_RESPONSE_LIMIT,
         )
         .await
+    }
+
+    pub(crate) async fn status_for_control(
+        &self,
+        id: &WorkflowRunId,
+    ) -> std::result::Result<WorkflowTaskView, DaemonWorkflowControlError> {
+        self.send_control_json(
+            self.request(Method::GET, &format!("/v1/workflows/{id}")),
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    pub(crate) async fn cancel_for_control(
+        &self,
+        id: &WorkflowRunId,
+    ) -> std::result::Result<TaskRecord, DaemonWorkflowControlError> {
+        self.send_control_json(
+            self.request(Method::POST, &format!("/v1/workflows/{id}/cancel")),
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    async fn send_control_json<T>(
+        &self,
+        request: reqwest::RequestBuilder,
+        expected: StatusCode,
+    ) -> std::result::Result<T, DaemonWorkflowControlError>
+    where
+        T: DeserializeOwned,
+    {
+        let response = request
+            .send()
+            .await
+            .map_err(|_| DaemonWorkflowControlError::Unavailable)?;
+        let status = response.status();
+        let bytes = read_response_limited(response, API_RESPONSE_LIMIT)
+            .await
+            .map_err(|_| DaemonWorkflowControlError::Unavailable)?;
+        if status != expected {
+            let code = serde_json::from_slice::<ErrorResponse>(&bytes)
+                .ok()
+                .map(|error| error.code);
+            return Err(match (status, code.as_deref()) {
+                (StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN, _) => {
+                    DaemonWorkflowControlError::Unavailable
+                }
+                (StatusCode::NOT_FOUND, _) | (_, Some("not_found")) => {
+                    DaemonWorkflowControlError::NotFound
+                }
+                (StatusCode::CONFLICT, _) | (_, Some("conflict")) => {
+                    DaemonWorkflowControlError::Conflict
+                }
+                (status, Some("invalid_request")) if status.is_client_error() => {
+                    DaemonWorkflowControlError::InvalidRequest
+                }
+                (StatusCode::TOO_MANY_REQUESTS, _) => DaemonWorkflowControlError::Unavailable,
+                (status, _) if status.is_server_error() => DaemonWorkflowControlError::Unavailable,
+                _ => DaemonWorkflowControlError::Internal,
+            });
+        }
+        serde_json::from_slice(&bytes).map_err(|_| DaemonWorkflowControlError::Internal)
     }
 
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
@@ -771,5 +843,64 @@ prompt = "{PRIVATE_PROMPT}"
         assert!(rendered.contains("HTTP status: unavailable"));
         assert!(rendered.contains("check status first"));
         assert!(rendered.len() < 1_024);
+    }
+
+    #[tokio::test]
+    async fn workflow_control_status_maps_missing_without_echoing_daemon_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/workflows/{RUN_ID}")))
+            .and(header("authorization", format!("Bearer {TOKEN}")))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "code": "not_found",
+                "message": PRIVATE_PROMPT,
+            })))
+            .mount(&server)
+            .await;
+
+        let client = DaemonWorkflowClient::for_test(*server.address(), TOKEN);
+        let id: WorkflowRunId = RUN_ID.parse().unwrap();
+        assert_eq!(
+            client.status_for_control(&id).await.unwrap_err(),
+            DaemonWorkflowControlError::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_control_cancel_rejects_malformed_success_as_internal() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/workflows/{RUN_ID}/cancel")))
+            .and(header("authorization", format!("Bearer {TOKEN}")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(PRIVATE_PROMPT))
+            .mount(&server)
+            .await;
+
+        let client = DaemonWorkflowClient::for_test(*server.address(), TOKEN);
+        let id: WorkflowRunId = RUN_ID.parse().unwrap();
+        assert_eq!(
+            client.cancel_for_control(&id).await.unwrap_err(),
+            DaemonWorkflowControlError::Internal
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_control_treats_authentication_drift_as_unavailable() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/workflows/{RUN_ID}")))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "code": "unauthorized",
+                "message": PRIVATE_PROMPT,
+            })))
+            .mount(&server)
+            .await;
+
+        let client = DaemonWorkflowClient::for_test(*server.address(), TOKEN);
+        let id: WorkflowRunId = RUN_ID.parse().unwrap();
+        assert_eq!(
+            client.status_for_control(&id).await.unwrap_err(),
+            DaemonWorkflowControlError::Unavailable
+        );
     }
 }

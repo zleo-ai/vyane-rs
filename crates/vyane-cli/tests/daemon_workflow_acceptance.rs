@@ -8,9 +8,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+use rmcp::model::{CallToolRequestParam, CallToolResult};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
@@ -18,6 +20,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const VYANE_BIN: &str = env!("CARGO_BIN_EXE_vyane");
 const EXPLICIT_RUN_ID: &str = "0197f524-7a00-7000-8000-000000000001";
+const MCP_RUN_ID: &str = "0197f524-7a00-7000-8000-000000000002";
 
 fn vyane() -> Command {
     Command::new(VYANE_BIN)
@@ -258,4 +261,154 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["labels"]["routing.profile"], "worker");
     assert_eq!(records[0]["labels"]["routing.effort"], "high");
+}
+
+#[tokio::test]
+async fn mcp_workflow_tools_use_the_authenticated_resident_daemon() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-mcp-daemon-acceptance",
+            "model": "test-model",
+            "choices": [{
+                "message": { "role": "assistant", "content": "mcp daemon answer" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 3, "completion_tokens": 2 }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let config_dir = TempDir::new()?;
+    let data_dir = TempDir::new()?;
+    let config = write_config(&config_dir, &server);
+    let workflow = write_workflow(&config_dir);
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config);
+
+    let mut child = tokio::process::Command::new(VYANE_BIN)
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .env("VYANE_DAEMON_ACCEPTANCE_KEY", "sk-test")
+        .arg("--config")
+        .arg(&config)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let stdout = child.stdout.take().expect("piped MCP stdout");
+    let stdin = child.stdin.take().expect("piped MCP stdin");
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), (stdout, stdin)).await?;
+
+    let names = client
+        .list_all_tools()
+        .await?
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), 9);
+    assert!(names.iter().any(|name| name == "vyane_workflow_submit"));
+
+    let source = fs::read_to_string(workflow)?;
+    for policy_line in [
+        r#"workdir = "/outside""#,
+        r#"workdir = "../../outside""#,
+        r#"sandbox = "full""#,
+    ] {
+        let restricted = source.replace(
+            "prompt = \"answer {{vars.topic}}\"",
+            &format!("prompt = \"answer {{{{vars.topic}}}}\"\n        {policy_line}"),
+        );
+        let rejected = mcp_call(
+            &client,
+            "vyane_workflow_submit",
+            json!({
+                "caller_id": MCP_RUN_ID,
+                "workflow_toml": restricted,
+                "vars": { "topic": "daemon" }
+            }),
+        )
+        .await?;
+        assert_eq!(rejected["status"], "error");
+        assert_eq!(rejected["error"]["code"], "invalid_argument");
+    }
+
+    let submitted = mcp_call(
+        &client,
+        "vyane_workflow_submit",
+        json!({
+            "caller_id": MCP_RUN_ID,
+            "workflow_toml": source,
+            "vars": { "topic": "daemon" }
+        }),
+    )
+    .await?;
+    assert_eq!(submitted["caller_id"], MCP_RUN_ID);
+    assert!(matches!(
+        submitted["state"].as_str(),
+        Some("queued" | "running" | "succeeded")
+    ));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let terminal = loop {
+        let status = mcp_call(
+            &client,
+            "vyane_workflow_status",
+            json!({ "caller_id": MCP_RUN_ID }),
+        )
+        .await?;
+        if status["state"] == "succeeded" {
+            break status;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "MCP workflow did not reach success: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(terminal["caller_id"], MCP_RUN_ID);
+    assert!(terminal.get("owner").is_none());
+    assert!(terminal.get("controller").is_none());
+
+    for _ in 0..2 {
+        let cancelled = mcp_call(
+            &client,
+            "vyane_workflow_cancel",
+            json!({ "caller_id": MCP_RUN_ID }),
+        )
+        .await?;
+        assert_eq!(cancelled["state"], "succeeded");
+    }
+
+    client.cancel().await?;
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await??;
+    assert!(status.success(), "MCP child did not exit cleanly: {status}");
+    assert!(daemon.stop().status.success());
+    Ok(())
+}
+
+async fn mcp_call(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    name: &str,
+    arguments: Value,
+) -> anyhow::Result<Value> {
+    let result = client
+        .call_tool(CallToolRequestParam {
+            name: name.to_owned().into(),
+            arguments: Some(arguments.as_object().expect("object arguments").clone()),
+        })
+        .await?;
+    Ok(mcp_result_payload(result))
+}
+
+fn mcp_result_payload(result: CallToolResult) -> Value {
+    let wire = serde_json::to_value(result).expect("serialize MCP result");
+    serde_json::from_str(
+        wire["content"][0]["text"]
+            .as_str()
+            .expect("MCP JSON text result"),
+    )
+    .expect("parse MCP JSON result")
 }
