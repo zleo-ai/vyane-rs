@@ -1090,5 +1090,31 @@ mod tests {
             assert_eq!(goals.goal_max_segments, 3);
             assert_eq!(goals.goal_poll_millis, 50);
         }
+
+        for (flag, value) in [
+            ("--goal-overall-timeout-seconds", "0"),
+            ("--goal-segment-timeout-seconds", "0"),
+            ("--goal-verifier-timeout-seconds", "301"),
+            ("--goal-max-segments", "0"),
+            ("--goal-max-failures", "0"),
+            ("--goal-poll-millis", "49"),
+        ] {
+            let argv = vec![
+                "vyane",
+                "daemon",
+                "run",
+                "--goal-auto-pursue",
+                "--goal-target",
+                "builder",
+                "--goal-workdir",
+                ".",
+                flag,
+                value,
+            ];
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{flag} accepted {value}"
+            );
+        }
     }
 }

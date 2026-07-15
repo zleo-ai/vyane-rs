@@ -288,3 +288,38 @@ fn daemon_restart_adopts_running_checkpoint_without_implicit_pause() {
     assert_eq!(completed["pursuit_checkpoint"]["segments_completed"], 1);
     assert!(second.stop().status.success());
 }
+
+#[test]
+fn repeated_auto_start_requires_stopping_the_existing_daemon_first() {
+    let fixture = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let workdir = TempDir::new().unwrap();
+    let config = write_config(&fixture);
+    let bin = write_fake_harness(&fixture);
+    let mut daemon = DaemonGuard::start(data.path(), &config, workdir.path(), &bin);
+
+    let second = vyane()
+        .env("VYANE_DATA_DIR", data.path())
+        .env("PATH", inherited_path(&bin))
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "daemon",
+            "start",
+            "--addr",
+            "127.0.0.1:0",
+            "--goal-auto-pursue",
+            "--goal-target",
+            "builder",
+            "--goal-workdir",
+        ])
+        .arg(workdir.path())
+        .output()
+        .unwrap();
+    assert!(!second.status.success());
+    assert!(
+        String::from_utf8_lossy(&second.stderr)
+            .contains("stop it before changing or reasserting automatic goal pursuit")
+    );
+    assert!(daemon.stop().status.success());
+}

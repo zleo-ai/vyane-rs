@@ -1,8 +1,8 @@
 //! Opt-in resident assembly for bounded goal pursuit.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashMap, time::Instant};
 
 use anyhow::{Context as _, Result};
 use chrono::Utc;
@@ -14,15 +14,13 @@ use vyane_goal::{
 use vyane_service::VyaneService;
 
 use crate::cli::DaemonGoalArgs;
-use crate::goal::DispatchGoalRuntime;
+use crate::goal_runtime::DispatchGoalRuntime;
 use crate::task::LOCAL_TASK_OWNER;
 
 const DAEMON_GOAL_WORKER: &str = "daemon-goal:auto-v1";
 
 #[derive(Debug, Clone)]
 pub(crate) struct DaemonGoalConfig {
-    target: String,
-    workdir: PathBuf,
     sandbox: Sandbox,
     pursuit: PursuitConfig,
     verifier_timeout: Duration,
@@ -61,8 +59,6 @@ impl DaemonGoalConfig {
             .validate()
             .context("validate automatic goal pursuit")?;
         Ok(Some(Self {
-            target,
-            workdir,
             sandbox: args.goal_sandbox.into(),
             pursuit,
             verifier_timeout: Duration::from_secs(args.goal_verifier_timeout_seconds),
@@ -84,6 +80,7 @@ pub(crate) struct DaemonGoalSupervisor {
     store: SqliteGoalStore,
     verifier: AcceptanceVerifier,
     config: DaemonGoalConfig,
+    retry_after: HashMap<String, Instant>,
 }
 
 impl DaemonGoalSupervisor {
@@ -91,17 +88,18 @@ impl DaemonGoalSupervisor {
         let path = service.storage_paths().goal_db_path();
         let store = SqliteGoalStore::open(&path)
             .with_context(|| format!("open goal database {}", path.display()))?;
-        let verifier = AcceptanceVerifier::new(&config.workdir, config.verifier_timeout)
+        let verifier = AcceptanceVerifier::new(&config.pursuit.workdir, config.verifier_timeout)
             .context("construct automatic goal verifier")?;
         Ok(Self {
             service,
             store,
             verifier,
             config,
+            retry_after: HashMap::new(),
         })
     }
 
-    pub(crate) async fn run(self, cancel: CancellationToken) -> Result<()> {
+    pub(crate) async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         loop {
             if cancel.is_cancelled() {
                 return Ok(());
@@ -124,7 +122,7 @@ impl DaemonGoalSupervisor {
             let shutdown_cancel = runtime_cancel.clone();
             let runtime = DispatchGoalRuntime::new(
                 Arc::clone(&self.service),
-                self.config.target.clone(),
+                self.config.pursuit.runtime.clone(),
                 self.config.sandbox,
                 runtime_cancel,
             );
@@ -158,6 +156,10 @@ impl DaemonGoalSupervisor {
                                 error = %error,
                                 "resident goal pursuit stopped with an error"
                             );
+                            self.retry_after.insert(
+                                goal.id.clone(),
+                                Instant::now() + Duration::from_secs(1),
+                            );
                             true
                         }
                     }
@@ -177,13 +179,14 @@ impl DaemonGoalSupervisor {
     }
 
     fn acquire_next(&self) -> Result<Option<GoalRecord>> {
-        acquire_from_store(&self.store, &self.config)
+        acquire_from_store(&self.store, &self.config, &self.retry_after)
     }
 }
 
 fn acquire_from_store<S: GoalStore>(
     store: &S,
     config: &DaemonGoalConfig,
+    retry_after: &HashMap<String, Instant>,
 ) -> Result<Option<GoalRecord>> {
     let query = GoalQuery {
         statuses: vec![GoalStatus::InProgress],
@@ -191,6 +194,12 @@ fn acquire_from_store<S: GoalStore>(
         limit: 1_000,
     };
     for goal in store.list(LOCAL_TASK_OWNER, &query)? {
+        if retry_after
+            .get(&goal.id)
+            .is_some_and(|until| *until > Instant::now())
+        {
+            continue;
+        }
         let now = Utc::now();
         if goal.lease_active(now) {
             if goal.claimed_by.as_deref() == Some(DAEMON_GOAL_WORKER) {
@@ -247,8 +256,48 @@ fn acquisition_raced(error: &GoalStoreError) -> bool {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+    use std::path::Path;
     use tempfile::TempDir;
     use vyane_goal::{NewGoal, PursuitConfig};
+
+    use crate::cli::{DaemonGoalArgs, SandboxArg};
+
+    fn cli_args(target: &str, workdir: &Path) -> DaemonGoalArgs {
+        DaemonGoalArgs {
+            goal_auto_pursue: true,
+            goal_target: Some(target.into()),
+            goal_workdir: Some(workdir.to_path_buf()),
+            goal_sandbox: SandboxArg::ReadOnly,
+            goal_overall_timeout_seconds: 60,
+            goal_segment_timeout_seconds: 10,
+            goal_verifier_timeout_seconds: 5,
+            goal_max_segments: 3,
+            goal_max_failures: 2,
+            goal_poll_millis: 50,
+        }
+    }
+
+    fn service(directory: &TempDir) -> VyaneService {
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [providers.native]
+            base_url = "https://unused.invalid"
+            auth_style = "x_api_key"
+            protocol = "anthropic_messages"
+            default_model = "test-model"
+
+            [profiles.builder]
+            provider = "native"
+            protocol = "anthropic_messages"
+            harness = "claude-code"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        VyaneService::load(Some(&path)).unwrap()
+    }
 
     fn config(directory: &TempDir) -> DaemonGoalConfig {
         let pursuit = PursuitConfig {
@@ -261,8 +310,6 @@ mod tests {
             max_failures: 2,
         };
         DaemonGoalConfig {
-            target: "builder".into(),
-            workdir: directory.path().to_path_buf(),
             sandbox: Sandbox::ReadOnly,
             pursuit,
             verifier_timeout: Duration::from_secs(5),
@@ -277,6 +324,26 @@ mod tests {
         )
     }
 
+    #[test]
+    fn config_from_args_rejects_unknown_target_and_missing_workdir() {
+        let directory = TempDir::new().unwrap();
+        let runtime = service(&directory);
+        let unknown = cli_args("missing", directory.path());
+        assert!(DaemonGoalConfig::from_args(&runtime, &unknown).is_err());
+
+        let missing = cli_args("builder", &directory.path().join("missing-workdir"));
+        assert!(DaemonGoalConfig::from_args(&runtime, &missing).is_err());
+    }
+
+    #[test]
+    fn config_from_args_rejects_invalid_pursuit_bounds() {
+        let directory = TempDir::new().unwrap();
+        let runtime = service(&directory);
+        let mut args = cli_args("builder", directory.path());
+        args.goal_overall_timeout_seconds = 0;
+        assert!(DaemonGoalConfig::from_args(&runtime, &args).is_err());
+    }
+
     fn create(store: &SqliteGoalStore, id: &str, priority: u8) -> GoalRecord {
         let mut goal = NewGoal::new(id, Utc::now());
         goal.id = Some(id.into());
@@ -285,7 +352,7 @@ mod tests {
     }
 
     fn acquire(store: &SqliteGoalStore, config: &DaemonGoalConfig) -> Option<GoalRecord> {
-        acquire_from_store(store, config).unwrap()
+        acquire_from_store(store, config, &HashMap::new()).unwrap()
     }
 
     #[test]

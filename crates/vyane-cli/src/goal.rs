@@ -4,18 +4,16 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use async_trait::async_trait;
 use chrono::Utc;
 use serde::Serialize;
-use vyane_core::{CancellationToken, RunStatus, Sandbox};
+use vyane_core::CancellationToken;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus, GoalEvent,
-    GoalPursuer, GoalPursuitCheckpoint, GoalQuery, GoalRecord, GoalSegmentRuntime, GoalStatus,
-    GoalStore, GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, PursuitConfig,
-    PursuitOutcome, PursuitSegmentRequest, PursuitSegmentResult, PursuitSegmentStatus,
+    GoalPursuer, GoalPursuitCheckpoint, GoalQuery, GoalRecord, GoalStatus, GoalStore,
+    GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, PursuitConfig, PursuitOutcome,
     PursuitStatus, SqliteGoalStore,
 };
-use vyane_service::{DispatchParams, VyaneService};
+use vyane_service::VyaneService;
 
 use crate::app::StoragePaths;
 use crate::cli::{
@@ -23,6 +21,7 @@ use crate::cli::{
     GoalFailArgs, GoalGetArgs, GoalIdArgs, GoalListArgs, GoalNextArgs, GoalProgressArgs,
     GoalPursueArgs, GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs, GoalStatusArg, GoalVerifyArgs,
 };
+use crate::goal_runtime::DispatchGoalRuntime;
 
 #[derive(Debug, Serialize)]
 struct GoalOutput {
@@ -158,70 +157,6 @@ pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<E
             }
             Ok(ExitCode::from(2))
         }
-    }
-}
-
-pub(crate) struct DispatchGoalRuntime {
-    service: Arc<VyaneService>,
-    target: String,
-    sandbox: Sandbox,
-    cancel: CancellationToken,
-}
-
-impl DispatchGoalRuntime {
-    pub(crate) fn new(
-        service: Arc<VyaneService>,
-        target: String,
-        sandbox: Sandbox,
-        cancel: CancellationToken,
-    ) -> Self {
-        Self {
-            service,
-            target,
-            sandbox,
-            cancel,
-        }
-    }
-}
-
-#[async_trait]
-impl GoalSegmentRuntime for DispatchGoalRuntime {
-    async fn run_segment(&self, request: PursuitSegmentRequest) -> PursuitSegmentResult {
-        let outcome = self
-            .service
-            .dispatch(
-                DispatchParams {
-                    task: request.prompt,
-                    target: self.target.clone(),
-                    workdir: Some(request.workdir),
-                    sandbox: self.sandbox,
-                    session: None,
-                    system: None,
-                    timeout_secs: Some(request.timeout.as_secs().max(1)),
-                    labels: Vec::new(),
-                },
-                self.cancel.child_token(),
-            )
-            .await;
-        match outcome {
-            Ok(outcome) => PursuitSegmentResult {
-                status: pursuit_segment_status(outcome.record.status),
-                run_id: Some(outcome.record.run_id),
-            },
-            Err(_) => PursuitSegmentResult {
-                status: PursuitSegmentStatus::Error,
-                run_id: None,
-            },
-        }
-    }
-}
-
-const fn pursuit_segment_status(status: RunStatus) -> PursuitSegmentStatus {
-    match status {
-        RunStatus::Success => PursuitSegmentStatus::Success,
-        RunStatus::Timeout => PursuitSegmentStatus::Timeout,
-        RunStatus::Cancelled => PursuitSegmentStatus::Cancelled,
-        RunStatus::Error => PursuitSegmentStatus::Error,
     }
 }
 
@@ -815,7 +750,10 @@ impl From<GoalStatusArg> for GoalStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use vyane_core::RunStatus;
+    use vyane_goal::PursuitSegmentStatus;
+
+    use crate::goal_runtime::pursuit_segment_status;
 
     #[test]
     fn every_run_status_has_an_exact_pursuit_status() {
