@@ -45,35 +45,25 @@ fn nonempty_string(v: Option<&Value>) -> Option<String> {
 /// is the sum of direct + cache-creation + cache-read (so token accounting
 /// isn't undercounted).
 ///
-/// If the payload isn't the expected object (e.g. an error dump), `text` falls
-/// back to the raw trimmed output so the caller still surfaces *something*, and
-/// classification happens upstream from the exit code.
+/// A zero exit code is not terminal evidence by itself. Malformed output, a
+/// non-object document, or an object without a string `result` field is mapped
+/// to a typed `missing_result` error. The field may contain an empty string:
+/// its typed presence, rather than answer length, is the terminal proof.
 pub(crate) fn parse_claude_json(stdout: &str) -> Parsed {
     let trimmed = stdout.trim();
     let root: Value = match serde_json::from_str(trimmed) {
         Ok(v) => v,
-        Err(_) => {
-            return Parsed {
-                text: trimmed.to_string(),
-                ..Default::default()
-            };
-        }
+        Err(_) => return missing_claude_result("one-shot output was not valid JSON"),
     };
     let obj = match root.as_object() {
         Some(o) => o,
-        None => {
-            return Parsed {
-                text: trimmed.to_string(),
-                ..Default::default()
-            };
-        }
+        None => return missing_claude_result("one-shot output was not a JSON object"),
     };
 
-    let text = obj
-        .get("result")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let Some(text) = obj.get("result").and_then(Value::as_str) else {
+        return missing_claude_result("one-shot output had no string result field");
+    };
+    let text = text.to_string();
 
     let native_session_id = nonempty_string(obj.get("session_id"));
     let is_error = obj
@@ -105,6 +95,15 @@ pub(crate) fn parse_claude_json(stdout: &str) -> Parsed {
         usage,
         is_error,
         subtype,
+    }
+}
+
+fn missing_claude_result(detail: &'static str) -> Parsed {
+    Parsed {
+        text: format!("claude output ended without a terminal result envelope: {detail}"),
+        is_error: true,
+        subtype: Some("missing_result".to_string()),
+        ..Default::default()
     }
 }
 
@@ -283,11 +282,27 @@ mod tests {
     }
 
     #[test]
-    fn claude_json_non_object_falls_back_to_raw() {
+    fn claude_json_non_object_is_missing_terminal_result() {
         let p = parse_claude_json("not json at all");
-        assert_eq!(p.text, "not json at all");
+        assert!(p.text.contains("terminal result"));
+        assert!(!p.text.contains("not json at all"));
+        assert!(p.is_error);
+        assert_eq!(p.subtype.as_deref(), Some("missing_result"));
         assert!(p.native_session_id.is_none());
         assert!(p.usage.is_none());
+    }
+
+    #[test]
+    fn claude_json_requires_a_string_result_field_but_allows_empty_result() {
+        for out in ["{}", r#"{"type":"assistant"}"#, r#"{"result":null}"#] {
+            let parsed = parse_claude_json(out);
+            assert!(parsed.is_error);
+            assert_eq!(parsed.subtype.as_deref(), Some("missing_result"));
+        }
+
+        let parsed = parse_claude_json(r#"{"type":"result","result":""}"#);
+        assert!(!parsed.is_error);
+        assert_eq!(parsed.text, "");
     }
 
     #[test]

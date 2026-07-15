@@ -1,20 +1,24 @@
-//! Explicit resident polling over one paired in-process AgentRun backend.
+//! Explicit resident polling over one paired AgentRun execution/recovery backend.
 //!
 //! The supervisor owns no runtime, task, channel, payload queue, or resume
-//! policy. Host cancellation stops scheduling new passes and interrupts waits;
-//! it deliberately does not cancel a pass that already owns controller work.
+//! policy. Host cancellation stops scheduling new passes, interrupts waits,
+//! and cooperatively signals a pass that already owns controller work. The
+//! pass remains awaited so its executor can quiesce before host exit.
 
 use std::fmt;
-use std::panic::AssertUnwindSafe;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt as _;
+use vyane_agent::AgentStore;
 use vyane_core::CancellationToken;
 
 use crate::{
     AgentCompletionProjectionStatus, AgentCompletionPublisher, AgentCompletionPublisherOptions,
-    AgentExecutionItemStatus, AgentExecutionOptions, AgentRecoveryItemStatus, AgentRecoveryOptions,
-    InProcessAgentComponents,
+    AgentCompletionSink, AgentControllerAdapter, AgentExecutionItemStatus, AgentExecutionOptions,
+    AgentRecoveryItemStatus, AgentRecoveryOptions, AgentRunExecutionDriver, AgentRunExecutor,
+    AgentRunRecoveryDriver, InProcessAgentComponents,
 };
 
 const MAX_SCHEDULE_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -81,20 +85,216 @@ pub struct AgentSupervisorExit {
     pub completion: AgentSupervisorLoopExit,
 }
 
-/// Non-cloneable resident driver over one exact paired in-process backend.
+/// Non-cloneable resident driver over one exact paired execution/recovery backend.
 ///
-/// Cancelling the host token prevents a new pass and interrupts a scheduling
-/// delay. A pass already in progress receives its own uncancelled token and is
-/// awaited to completion. Dropping [`Self::run`] forfeits that graceful-drain
-/// guarantee, and a blocking custom store call can outlive its async waiter.
-pub struct ResidentInProcessAgentSupervisor {
-    components: InProcessAgentComponents,
+/// Cancelling the host token prevents a new pass, interrupts a scheduling
+/// delay, and is propagated into a pass already in progress. Once an executor
+/// has been polled, the execution driver continues to own and await it so a
+/// process executor can terminate and reap its group and publish lifecycle
+/// evidence before returning. Dropping [`Self::run`] forfeits that
+/// graceful-drain guarantee, and a blocking custom store call can outlive its
+/// async waiter.
+pub struct ResidentAgentSupervisor {
+    owner: String,
+    store: Arc<dyn AgentStore>,
+    executor: Arc<dyn AgentRunExecutor>,
+    adapters: Vec<Arc<dyn AgentControllerAdapter>>,
+    completion_sinks: Vec<Arc<dyn AgentCompletionSink>>,
     lease_owner: String,
     reconciler: String,
     execution: AgentExecutionOptions,
     recovery: AgentRecoveryOptions,
     completion: AgentCompletionPublisher,
     schedule: AgentSupervisorOptions,
+}
+
+/// Exact execution/recovery ports retained by a resident AgentRun host.
+///
+/// The value owns no runtime and starts no work. Keeping the complete paired
+/// backend in one value makes it difficult for a process host to accidentally
+/// construct execution and recovery over different stores or owners.
+pub struct ResidentAgentBackend {
+    owner: String,
+    store: Arc<dyn AgentStore>,
+    executor: Arc<dyn AgentRunExecutor>,
+    adapters: Vec<Arc<dyn AgentControllerAdapter>>,
+    completion_sinks: Vec<Arc<dyn AgentCompletionSink>>,
+}
+
+struct RecoveryLoopBackend {
+    owner: String,
+    store: Arc<dyn AgentStore>,
+    adapters: Vec<Arc<dyn AgentControllerAdapter>>,
+    completion_sinks: Vec<Arc<dyn AgentCompletionSink>>,
+}
+
+impl ResidentAgentBackend {
+    #[must_use]
+    pub fn new(
+        owner: impl Into<String>,
+        store: Arc<dyn AgentStore>,
+        executor: Arc<dyn AgentRunExecutor>,
+        adapters: Vec<Arc<dyn AgentControllerAdapter>>,
+        completion_sinks: Vec<Arc<dyn AgentCompletionSink>>,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            store,
+            executor,
+            adapters,
+            completion_sinks,
+        }
+    }
+}
+
+impl fmt::Debug for ResidentAgentBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResidentAgentBackend")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ResidentAgentSupervisor {
+    pub fn new(
+        backend: ResidentAgentBackend,
+        lease_owner: impl Into<String>,
+        reconciler: impl Into<String>,
+        execution: AgentExecutionOptions,
+        recovery: AgentRecoveryOptions,
+        schedule: AgentSupervisorOptions,
+    ) -> Result<Self, AgentSupervisorError> {
+        let ResidentAgentBackend {
+            owner,
+            store,
+            executor,
+            adapters,
+            completion_sinks,
+        } = backend;
+        let lease_owner = lease_owner.into();
+        let reconciler = reconciler.into();
+        validate_schedule(&schedule)?;
+        AgentRunExecutionDriver::new(
+            owner.clone(),
+            Arc::clone(&store),
+            lease_owner.clone(),
+            execution.clone(),
+            Arc::clone(&executor),
+        )
+        .map_err(|_| AgentSupervisorError::InvalidExecution)?;
+        AgentRunRecoveryDriver::new_with_completion_sinks(
+            owner.clone(),
+            Arc::clone(&store),
+            reconciler.clone(),
+            recovery.clone(),
+            adapters.clone(),
+            completion_sinks.clone(),
+        )
+        .map_err(|_| AgentSupervisorError::InvalidRecovery)?;
+        let executor_kind = catch_unwind(AssertUnwindSafe(|| executor.kind()))
+            .map_err(|_| AgentSupervisorError::InvalidExecution)?;
+        let matching_adapter = adapters.iter().any(|adapter| {
+            catch_unwind(AssertUnwindSafe(|| adapter.kind()))
+                .is_ok_and(|kind| kind == executor_kind)
+        });
+        if !matching_adapter {
+            return Err(AgentSupervisorError::InvalidRecovery);
+        }
+        let completion = AgentCompletionPublisher::new(
+            owner.clone(),
+            COMPLETION_PROJECTOR_ID,
+            Arc::clone(&store),
+            completion_sinks.clone(),
+            AgentCompletionPublisherOptions::default(),
+        )
+        .map_err(|_| AgentSupervisorError::InvalidCompletion)?;
+        Ok(Self {
+            owner,
+            store,
+            executor,
+            adapters,
+            completion_sinks,
+            lease_owner,
+            reconciler,
+            execution,
+            recovery,
+            completion,
+            schedule,
+        })
+    }
+
+    /// Poll execution, recovery, and completion publication independently
+    /// until host cancellation. Completion publication remains live while the
+    /// execution and recovery loops drain, then receives one final durable
+    /// outbox pass so a completion committed by the last active execution is
+    /// not skipped merely because host shutdown arrived first.
+    ///
+    /// This method creates no task or runtime. Cancellation is a host-drain
+    /// signal, not a durable AgentRun tree-cancel request, and never requests
+    /// automatic resume.
+    pub async fn run(self, cancel: CancellationToken) -> AgentSupervisorExit {
+        let Self {
+            owner,
+            store,
+            executor,
+            adapters,
+            completion_sinks,
+            lease_owner,
+            reconciler,
+            execution,
+            recovery,
+            completion,
+            schedule,
+        } = self;
+        let execution_loop = run_execution_loop(
+            owner.clone(),
+            Arc::clone(&store),
+            executor,
+            lease_owner,
+            execution,
+            schedule.clone(),
+            cancel.clone(),
+        );
+        let recovery_loop = run_recovery_loop(
+            RecoveryLoopBackend {
+                owner,
+                store,
+                adapters,
+                completion_sinks,
+            },
+            reconciler,
+            recovery,
+            schedule.clone(),
+            cancel,
+        );
+        let completion_stop = CancellationToken::new();
+        let completion_loop =
+            run_completion_loop(&completion, schedule, completion_stop.clone(), true);
+        let work_loops = async move {
+            let (execution, recovery) = tokio::join!(execution_loop, recovery_loop);
+            completion_stop.cancel();
+            (execution, recovery)
+        };
+        let ((execution, recovery), completion) = tokio::join!(work_loops, completion_loop);
+        AgentSupervisorExit {
+            execution,
+            recovery,
+            completion,
+        }
+    }
+}
+
+impl fmt::Debug for ResidentAgentSupervisor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResidentAgentSupervisor")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Backwards-compatible in-process facade over the generic resident host.
+pub struct ResidentInProcessAgentSupervisor {
+    inner: ResidentAgentSupervisor,
 }
 
 impl ResidentInProcessAgentSupervisor {
@@ -106,61 +306,19 @@ impl ResidentInProcessAgentSupervisor {
         recovery: AgentRecoveryOptions,
         schedule: AgentSupervisorOptions,
     ) -> Result<Self, AgentSupervisorError> {
-        validate_schedule(&schedule)?;
-        components
-            .execution_driver(lease_owner.clone(), execution.clone())
-            .map_err(|_| AgentSupervisorError::InvalidExecution)?;
-        components
-            .recovery_driver(reconciler.clone(), recovery.clone())
-            .map_err(|_| AgentSupervisorError::InvalidRecovery)?;
-        let completion = components
-            .completion_publisher(
-                COMPLETION_PROJECTOR_ID,
-                AgentCompletionPublisherOptions::default(),
-            )
-            .map_err(|_| AgentSupervisorError::InvalidCompletion)?;
-        Ok(Self {
-            components,
+        ResidentAgentSupervisor::new(
+            components.into_resident_backend(),
             lease_owner,
             reconciler,
             execution,
             recovery,
-            completion,
             schedule,
-        })
+        )
+        .map(|inner| Self { inner })
     }
 
-    /// Poll execution, recovery, and completion publication independently
-    /// until host cancellation.
-    ///
-    /// This method creates no task or runtime. Cancellation is a host-drain
-    /// signal, not AgentRun cancellation, and never requests automatic resume.
     pub async fn run(self, cancel: CancellationToken) -> AgentSupervisorExit {
-        let Self {
-            components,
-            lease_owner,
-            reconciler,
-            execution,
-            recovery,
-            completion,
-            schedule,
-        } = self;
-        let execution_loop = run_execution_loop(
-            &components,
-            lease_owner,
-            execution,
-            schedule.clone(),
-            cancel.clone(),
-        );
-        let completion_loop = run_completion_loop(&completion, schedule.clone(), cancel.clone());
-        let recovery_loop = run_recovery_loop(&components, reconciler, recovery, schedule, cancel);
-        let (execution, recovery, completion) =
-            tokio::join!(execution_loop, recovery_loop, completion_loop);
-        AgentSupervisorExit {
-            execution,
-            recovery,
-            completion,
-        }
+        self.inner.run(cancel).await
     }
 }
 
@@ -168,11 +326,15 @@ async fn run_completion_loop(
     publisher: &AgentCompletionPublisher,
     schedule: AgentSupervisorOptions,
     cancel: CancellationToken,
+    final_drain: bool,
 ) -> AgentSupervisorLoopExit {
     let mut stats = AgentSupervisorLoopExit::default();
     let mut backoff = Backoff::new(schedule.initial_error_backoff, schedule.max_error_backoff);
     loop {
         if cancel.is_cancelled() {
+            if final_drain {
+                drain_completion_once(publisher, &mut stats).await;
+            }
             break;
         }
         stats.cycles = stats.cycles.saturating_add(1);
@@ -209,11 +371,40 @@ async fn run_completion_loop(
                 NextStep::Delay(backoff.failure_delay())
             }
         };
-        if cancel.is_cancelled() || !perform_next(next, &cancel).await {
-            break;
+        if cancel.is_cancelled() {
+            continue;
+        }
+        if !perform_next(next, &cancel).await {
+            continue;
         }
     }
     stats
+}
+
+async fn drain_completion_once(
+    publisher: &AgentCompletionPublisher,
+    stats: &mut AgentSupervisorLoopExit,
+) {
+    stats.cycles = stats.cycles.saturating_add(1);
+    match AssertUnwindSafe(publisher.project_once())
+        .catch_unwind()
+        .await
+    {
+        Ok(Ok(report)) => {
+            stats.successful_cycles = stats.successful_cycles.saturating_add(1);
+            stats.claimed = add_usize(stats.claimed, report.scanned);
+            stats.degraded_items = add_usize(
+                stats.degraded_items,
+                report
+                    .items
+                    .iter()
+                    .filter(|status| completion_degraded(**status))
+                    .count(),
+            );
+        }
+        Ok(Err(_)) => stats.failed_cycles = stats.failed_cycles.saturating_add(1),
+        Err(_) => stats.panicked_cycles = stats.panicked_cycles.saturating_add(1),
+    }
 }
 
 impl fmt::Debug for ResidentInProcessAgentSupervisor {
@@ -225,7 +416,9 @@ impl fmt::Debug for ResidentInProcessAgentSupervisor {
 }
 
 async fn run_execution_loop(
-    components: &InProcessAgentComponents,
+    owner: String,
+    store: Arc<dyn AgentStore>,
+    executor: Arc<dyn AgentRunExecutor>,
     lease_owner: String,
     options: AgentExecutionOptions,
     schedule: AgentSupervisorOptions,
@@ -238,12 +431,19 @@ async fn run_execution_loop(
             break;
         }
         stats.cycles = stats.cycles.saturating_add(1);
-        let driver = components.execution_driver(lease_owner.clone(), options.clone());
+        let driver = AgentRunExecutionDriver::new(
+            owner.clone(),
+            Arc::clone(&store),
+            lease_owner.clone(),
+            options.clone(),
+            Arc::clone(&executor),
+        );
         let next = match driver {
             Ok(driver) => {
-                let cycle = AssertUnwindSafe(driver.execute_once(CancellationToken::new()))
-                    .catch_unwind()
-                    .await;
+                let cycle =
+                    AssertUnwindSafe(driver.execute_once_cooperative_shutdown(cancel.clone()))
+                        .catch_unwind()
+                        .await;
                 match cycle {
                     Ok(Ok(report)) => {
                         stats.successful_cycles = stats.successful_cycles.saturating_add(1);
@@ -288,12 +488,18 @@ async fn run_execution_loop(
 }
 
 async fn run_recovery_loop(
-    components: &InProcessAgentComponents,
+    backend: RecoveryLoopBackend,
     reconciler: String,
     options: AgentRecoveryOptions,
     schedule: AgentSupervisorOptions,
     cancel: CancellationToken,
 ) -> AgentSupervisorLoopExit {
+    let RecoveryLoopBackend {
+        owner,
+        store,
+        adapters,
+        completion_sinks,
+    } = backend;
     let mut stats = AgentSupervisorLoopExit::default();
     let mut backoff = Backoff::new(schedule.initial_error_backoff, schedule.max_error_backoff);
     loop {
@@ -301,7 +507,14 @@ async fn run_recovery_loop(
             break;
         }
         stats.cycles = stats.cycles.saturating_add(1);
-        let driver = components.recovery_driver(reconciler.clone(), options.clone());
+        let driver = AgentRunRecoveryDriver::new_with_completion_sinks(
+            owner.clone(),
+            Arc::clone(&store),
+            reconciler.clone(),
+            options.clone(),
+            adapters.clone(),
+            completion_sinks.clone(),
+        );
         let next = match driver {
             Ok(driver) => {
                 let cycle = AssertUnwindSafe(driver.recover_once(CancellationToken::new()))
@@ -447,7 +660,7 @@ impl Backoff {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -455,8 +668,8 @@ mod tests {
     use static_assertions::{assert_impl_all, assert_not_impl_any};
     use tokio::sync::Notify;
     use vyane_agent::{
-        AgentClock, AgentStore, NewAgentRun, NewRunCompletion, NewWorker, RunMode, RunState,
-        SqliteAgentStore,
+        ActiveExecutionPermit, AgentClock, AgentStore, ControllerKind, ControllerRef, NewAgentRun,
+        NewRunCompletion, NewWorker, RunFailureCode, RunMode, RunState, SqliteAgentStore,
     };
 
     use super::*;
@@ -470,6 +683,8 @@ mod tests {
     const OWNER_DRAIN: &str = "supervisor-drain";
     const OWNER_RECOVERY: &str = "supervisor-recovery";
     const OWNER_COMPLETION: &str = "supervisor-completion";
+    const OWNER_PROCESS: &str = "supervisor-process";
+    const OWNER_PROCESS_SHUTDOWN: &str = "supervisor-process-shutdown";
 
     #[test]
     fn completed_reconciliation_outcomes_are_not_degraded() {
@@ -625,6 +840,109 @@ mod tests {
         entered: Arc<Notify>,
     }
 
+    struct ProcessStyleExecutor;
+
+    struct ShutdownAwareProcessExecutor {
+        entered: Arc<Notify>,
+        cancellation_seen: Arc<Notify>,
+        returned: Arc<AtomicBool>,
+        dropped_before_return: Arc<AtomicBool>,
+    }
+
+    struct ExecutorReturnGuard {
+        returned: Arc<AtomicBool>,
+        dropped_before_return: Arc<AtomicBool>,
+    }
+
+    impl Drop for ExecutorReturnGuard {
+        fn drop(&mut self) {
+            if !self.returned.load(Ordering::SeqCst) {
+                self.dropped_before_return.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunExecutor for ProcessStyleExecutor {
+        fn kind(&self) -> ControllerKind {
+            ControllerKind::Process
+        }
+
+        fn admit_controller(
+            &self,
+            _identity: &AgentExecutionIdentity,
+            controller: &ControllerRef,
+        ) -> bool {
+            controller.kind == ControllerKind::Process && controller.fingerprint.is_some()
+        }
+
+        async fn execute(
+            &self,
+            _context: crate::AgentExecutionContext,
+            _identity: AgentExecutionIdentity,
+            _permit: ActiveExecutionPermit,
+        ) -> AgentExecutorOutcome {
+            AgentExecutorOutcome::Quiesced(AgentExecutionSettlement::Failed {
+                code: RunFailureCode::DispatchFailed,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunExecutor for ShutdownAwareProcessExecutor {
+        fn kind(&self) -> ControllerKind {
+            ControllerKind::Process
+        }
+
+        fn admit_controller(
+            &self,
+            _identity: &AgentExecutionIdentity,
+            controller: &ControllerRef,
+        ) -> bool {
+            controller.kind == ControllerKind::Process && controller.fingerprint.is_some()
+        }
+
+        async fn execute(
+            &self,
+            context: crate::AgentExecutionContext,
+            _identity: AgentExecutionIdentity,
+            _permit: ActiveExecutionPermit,
+        ) -> AgentExecutorOutcome {
+            let _guard = ExecutorReturnGuard {
+                returned: Arc::clone(&self.returned),
+                dropped_before_return: Arc::clone(&self.dropped_before_return),
+            };
+            self.entered.notify_one();
+            context.cancellation().cancelled().await;
+            self.cancellation_seen.notify_one();
+            self.returned.store(true, Ordering::SeqCst);
+            AgentExecutorOutcome::Quiesced(AgentExecutionSettlement::Failed {
+                code: RunFailureCode::DispatchFailed,
+            })
+        }
+    }
+
+    struct ProcessStyleAdapter;
+
+    #[async_trait]
+    impl AgentControllerAdapter for ProcessStyleAdapter {
+        fn name(&self) -> &str {
+            "process-style-test"
+        }
+
+        fn kind(&self) -> ControllerKind {
+            ControllerKind::Process
+        }
+
+        async fn observe_gone(
+            &self,
+            _context: crate::ControllerRecoveryContext,
+            _controller: ControllerRef,
+        ) -> crate::ControllerRecoveryObservation {
+            crate::ControllerRecoveryObservation::Gone
+        }
+    }
+
     struct PublishingSink {
         published: AtomicUsize,
         notification: Notify,
@@ -726,6 +1044,10 @@ mod tests {
 
     #[test]
     fn surface_is_non_clone_and_rejects_invalid_bounds_without_store_work() {
+        assert_impl_all!(ResidentAgentBackend: Send, Sync);
+        assert_impl_all!(ResidentAgentSupervisor: Send, Sync);
+        assert_not_impl_any!(ResidentAgentBackend: Clone);
+        assert_not_impl_any!(ResidentAgentSupervisor: Clone);
         assert_impl_all!(ResidentInProcessAgentSupervisor: Send, Sync);
         assert_not_impl_any!(ResidentInProcessAgentSupervisor: Clone);
 
@@ -757,7 +1079,117 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_cancellation_drains_active_pass_without_cancelling_the_run() {
+    async fn generic_surface_drives_process_style_executor_and_adapter() {
+        let fixture = Fixture::new();
+        fixture.enqueue(OWNER_PROCESS, "process", 0);
+        let store: Arc<dyn AgentStore> = fixture.store.clone();
+        let executor: Arc<dyn AgentRunExecutor> = Arc::new(ProcessStyleExecutor);
+        let adapter: Arc<dyn AgentControllerAdapter> = Arc::new(ProcessStyleAdapter);
+        let supervisor = ResidentAgentSupervisor::new(
+            ResidentAgentBackend::new(OWNER_PROCESS, store, executor, vec![adapter], Vec::new()),
+            "lease",
+            "reconciler",
+            execution_options(),
+            recovery_options(),
+            schedule(),
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(supervisor.run(cancel.clone()));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let run = fixture
+                    .store
+                    .get_run(OWNER_PROCESS, "run-process")
+                    .unwrap()
+                    .unwrap();
+                if run.state == RunState::Failed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+        let exit = task.await.unwrap();
+
+        assert_eq!(exit.execution.claimed, 1);
+        assert_eq!(exit.execution.degraded_items, 0);
+        assert_eq!(
+            fixture
+                .store
+                .get_run(OWNER_PROCESS, "run-process")
+                .unwrap()
+                .unwrap()
+                .failure_code,
+            Some(RunFailureCode::DispatchFailed)
+        );
+    }
+
+    #[tokio::test]
+    async fn host_cancellation_is_cooperative_for_an_active_process_executor() {
+        let fixture = Fixture::new();
+        fixture.enqueue(OWNER_PROCESS_SHUTDOWN, "shutdown", 0);
+        let entered = Arc::new(Notify::new());
+        let cancellation_seen = Arc::new(Notify::new());
+        let returned = Arc::new(AtomicBool::new(false));
+        let dropped_before_return = Arc::new(AtomicBool::new(false));
+        let executor: Arc<dyn AgentRunExecutor> = Arc::new(ShutdownAwareProcessExecutor {
+            entered: Arc::clone(&entered),
+            cancellation_seen: Arc::clone(&cancellation_seen),
+            returned: Arc::clone(&returned),
+            dropped_before_return: Arc::clone(&dropped_before_return),
+        });
+        let store: Arc<dyn AgentStore> = fixture.store.clone();
+        let adapter: Arc<dyn AgentControllerAdapter> = Arc::new(ProcessStyleAdapter);
+        let supervisor = ResidentAgentSupervisor::new(
+            ResidentAgentBackend::new(
+                OWNER_PROCESS_SHUTDOWN,
+                store,
+                executor,
+                vec![adapter],
+                Vec::new(),
+            ),
+            "lease",
+            "reconciler",
+            execution_options(),
+            recovery_options(),
+            schedule(),
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(supervisor.run(cancel.clone()));
+
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+            .await
+            .unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(returned.load(Ordering::SeqCst));
+        assert!(!dropped_before_return.load(Ordering::SeqCst));
+        assert_eq!(exit.execution.claimed, 1);
+        assert_eq!(
+            fixture
+                .store
+                .get_run(OWNER_PROCESS_SHUTDOWN, "run-shutdown")
+                .unwrap()
+                .unwrap()
+                .failure_code,
+            Some(RunFailureCode::DispatchFailed)
+        );
+    }
+
+    #[tokio::test]
+    async fn host_cancellation_reaches_an_active_in_process_executor() {
         let fixture = Fixture::new();
         fixture.enqueue(OWNER_DRAIN, "drain", 0);
         let entered = Arc::new(Notify::new());
@@ -785,16 +1217,13 @@ mod tests {
             .await
             .unwrap();
         cancel.cancel();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!task.is_finished());
-        release.notify_one();
 
         let exit = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(exit.execution.claimed, 1);
-        assert_eq!(exit.execution.degraded_items, 0);
+        assert_eq!(exit.execution.degraded_items, 1);
         assert_eq!(
             fixture
                 .store
@@ -802,8 +1231,9 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            RunState::Succeeded
+            RunState::Running
         );
+        release.notify_one();
     }
 
     #[tokio::test]

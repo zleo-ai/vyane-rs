@@ -2410,6 +2410,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "vyane-agent",
  "vyane-config",
  "vyane-core",
  "vyane-goal",

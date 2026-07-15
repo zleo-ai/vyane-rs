@@ -33,7 +33,8 @@ use crate::{
     AgentExecutionIdentity, AgentExecutionOptions, AgentExecutorOutcome, AgentRecoveryError,
     AgentRecoveryOptions, AgentRunExecutionDriver, AgentRunExecutor, AgentRunRecoveryDriver,
     AgentSupervisorError, AgentSupervisorOptions, ControllerRecoveryContext,
-    ControllerRecoveryObservation, ResidentInProcessAgentSupervisor, StagedRunCompletion,
+    ControllerRecoveryObservation, ResidentAgentBackend, ResidentInProcessAgentSupervisor,
+    StagedRunCompletion,
 };
 
 const MAX_OWNER_BYTES: usize = 256;
@@ -746,6 +747,18 @@ struct AssemblyRegistration {
 static LIVE_ASSEMBLIES: OnceLock<Mutex<Vec<AssemblyRegistration>>> = OnceLock::new();
 
 impl InProcessAgentComponents {
+    pub(crate) fn into_resident_backend(self) -> ResidentAgentBackend {
+        let executor: Arc<dyn AgentRunExecutor> = self.backend.clone();
+        let adapter: Arc<dyn AgentControllerAdapter> = self.backend;
+        ResidentAgentBackend::new(
+            self.owner,
+            self.store,
+            executor,
+            vec![adapter],
+            self.completion_sinks,
+        )
+    }
+
     pub fn new(
         owner: impl Into<String>,
         store: Arc<dyn AgentStore>,

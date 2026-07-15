@@ -18,8 +18,9 @@ use serde::Serialize;
 use vyane_core::{
     AdapterTransport, Attempt, AttemptOutcome, BoundTarget, CancellationToken, ChatClient,
     ChatMessage, ChatRequest, EnvPolicy, ErrorKind, Harness, HarnessExecutionContext, HarnessJob,
-    Ledger, NativeSessionState, PinnedWorkdir, Result, RunRecord, RunStatus, SessionExecutionLease,
-    SessionStore, SessionUpdate, Target, TaskSpec, Usage, VyaneError,
+    HarnessLifecycleReporter, HarnessSpawnAuthority, Ledger, NativeSessionState, PinnedWorkdir,
+    Result, RunRecord, RunStatus, SessionExecutionLease, SessionStore, SessionUpdate, Target,
+    TaskSpec, Usage, VyaneError,
 };
 
 use crate::digest::task_digest;
@@ -106,6 +107,14 @@ struct AttemptOk {
     /// the CLI owns its own history and Vyane must not fabricate a transcript
     /// for it.
     transcript_delta: Option<(ChatMessage, ChatMessage)>,
+}
+
+/// Process-local capabilities supplied only to the authorized harness seam.
+/// Executable callbacks must never become part of `PreparedDispatch` because
+/// prepared plans may outlive the caller that performs the live revalidation.
+struct AuthorizedHarnessDispatch {
+    spawn_authority: HarnessSpawnAuthority,
+    lifecycle_reporter: HarnessLifecycleReporter,
 }
 
 /// Session continuity context loaded once, before the attempt loop.
@@ -536,11 +545,66 @@ impl Dispatcher {
         prepared: PreparedDispatch,
         cancel: CancellationToken,
     ) -> Result<DispatchOutcome> {
+        self.dispatch_prepared_inner(task, prepared, None, cancel)
+            .await
+    }
+
+    /// Execute one prepared, fresh CLI-harness plan under live spawn authority.
+    ///
+    /// This process-local seam is intentionally narrower than ordinary
+    /// dispatch: it rejects logical sessions and any direct-HTTP leg before
+    /// constructing an executor. The lifecycle reporter is installed on every
+    /// harness attempt and the spawn authority is combined with the same
+    /// pinned workdir retained by [`PreparedDispatch`]. Neither callback is
+    /// persisted or exposed in the run ledger.
+    pub async fn dispatch_prepared_harness_authorized(
+        &self,
+        task: &TaskSpec,
+        prepared: PreparedDispatch,
+        spawn_authority: HarnessSpawnAuthority,
+        lifecycle_reporter: HarnessLifecycleReporter,
+        cancel: CancellationToken,
+    ) -> Result<DispatchOutcome> {
+        self.dispatch_prepared_inner(
+            task,
+            prepared,
+            Some(AuthorizedHarnessDispatch {
+                spawn_authority,
+                lifecycle_reporter,
+            }),
+            cancel,
+        )
+        .await
+    }
+
+    async fn dispatch_prepared_inner(
+        &self,
+        task: &TaskSpec,
+        prepared: PreparedDispatch,
+        authorized_harness: Option<AuthorizedHarnessDispatch>,
+        cancel: CancellationToken,
+    ) -> Result<DispatchOutcome> {
         self.validate_prepared_provenance(&prepared)?;
         if task.sandbox != prepared.execution_scope.requested_sandbox {
             return Err(VyaneError::config(
                 "prepared dispatch sandbox does not match the execution task",
             ));
+        }
+        if authorized_harness.is_some() {
+            if task.session.is_some() {
+                return Err(VyaneError::unsupported(
+                    "authorized harness dispatch supports only fresh sessionless execution",
+                ));
+            }
+            if prepared
+                .admitted
+                .iter()
+                .any(|target| target.bound.transport != AdapterTransport::CliWrap)
+            {
+                return Err(VyaneError::unsupported(
+                    "authorized harness dispatch does not support direct HTTP targets",
+                ));
+            }
         }
         let session_ctx = self
             .load_session_context(task, prepared.execution_id())
@@ -554,6 +618,9 @@ impl Dispatcher {
             ..
         } = prepared;
         let mut execution_task = task.clone();
+        if let Some(authorized) = authorized_harness.as_ref() {
+            execution_task.harness_lifecycle_reporter = Some(authorized.lifecycle_reporter.clone());
+        }
         if let Some(workdir) = execution_scope.canonical_workdir.as_ref() {
             execution_task.workdir = Some(workdir.clone());
         }
@@ -611,12 +678,18 @@ impl Dispatcher {
             // binary) and is gated for failover like any execution error.
             let outcome = match self.factory.make_scoped(bound, &admitted.scope) {
                 Ok(executor) => {
+                    let harness_context = harness_execution_context(
+                        pinned_workdir.as_ref(),
+                        authorized_harness
+                            .as_ref()
+                            .map(|authorized| &authorized.spawn_authority),
+                    );
                     self.run_attempt(
                         executor,
                         task,
                         bound,
                         &session_ctx,
-                        pinned_workdir.as_ref(),
+                        harness_context,
                         &cancel,
                     )
                     .await
@@ -1367,7 +1440,7 @@ impl Dispatcher {
         task: &TaskSpec,
         bound: &BoundTarget,
         session_ctx: &SessionContext,
-        pinned_workdir: Option<&PinnedWorkdir>,
+        harness_context: HarnessExecutionContext,
         cancel: &CancellationToken,
     ) -> std::result::Result<AttemptOk, VyaneError> {
         match executor {
@@ -1443,11 +1516,7 @@ impl Dispatcher {
                 // Await the harness directly: racing it in `drive` would drop
                 // the process-owning future before it can reap/kill the group.
                 let child = cancel.clone();
-                let context = pinned_workdir
-                    .cloned()
-                    .map(HarnessExecutionContext::with_pinned_workdir)
-                    .unwrap_or_default();
-                let out = harness.run_scoped(job, context, child).await?;
+                let out = harness.run_scoped(job, harness_context, child).await?;
                 Ok(AttemptOk {
                     text: out.text,
                     usage: out.usage,
@@ -1570,6 +1639,20 @@ fn validate_native_resume(prepared: &PreparedDispatch, session_ctx: &SessionCont
 /// system text has to ride along inside the single prompt string. When there is
 /// no system text the prompt is passed through unchanged. Pinned by a test so
 /// the format cannot drift.
+fn harness_execution_context(
+    pinned_workdir: Option<&PinnedWorkdir>,
+    spawn_authority: Option<&HarnessSpawnAuthority>,
+) -> HarnessExecutionContext {
+    match (pinned_workdir.cloned(), spawn_authority.cloned()) {
+        (Some(workdir), Some(authority)) => {
+            HarnessExecutionContext::with_pinned_workdir_and_spawn_authority(workdir, authority)
+        }
+        (Some(workdir), None) => HarnessExecutionContext::with_pinned_workdir(workdir),
+        (None, Some(authority)) => HarnessExecutionContext::with_spawn_authority(authority),
+        (None, None) => HarnessExecutionContext::default(),
+    }
+}
+
 fn compose_harness_prompt(prompt: &str, system: Option<&str>) -> String {
     match system {
         Some(system) => format!("{prompt}{HARNESS_SYSTEM_HEADING}{system}"),

@@ -37,7 +37,7 @@ const MAX_IDENTITY_BYTES: usize = 64;
 const CONTROLLER_PREFIX: &str = "vyane-exec-v1:";
 
 /// Immutable, body-free input available while admitting a prospective handle.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AgentExecutionIdentity {
     run_id: String,
     worker_id: String,
@@ -190,6 +190,23 @@ pub trait AgentRunExecutor: Send + Sync {
         controller: &ControllerRef,
     ) -> bool;
 
+    /// Durably reserve recovery evidence for the prospective controller.
+    ///
+    /// This bounded, synchronous hook is invoked on Tokio's blocking pool and
+    /// fully awaited before the store may publish `Running`. The default is a
+    /// no-op for controller kinds whose identity is intrinsically recoverable.
+    fn reserve_controller(
+        &self,
+        _identity: &AgentExecutionIdentity,
+        _controller: &ControllerRef,
+    ) -> bool {
+        true
+    }
+
+    /// Release executor-local recovery evidence after durable settlement.
+    /// The driver invokes this bounded synchronous hook on its blocking pool.
+    fn confirmed_controller_gone(&self, _controller: &ControllerRef) {}
+
     async fn execute(
         &self,
         context: AgentExecutionContext,
@@ -319,6 +336,33 @@ impl AgentRunExecutionDriver {
         self,
         cancellation: CancellationToken,
     ) -> Result<AgentExecutionReport, AgentExecutionError> {
+        self.execute_once_with_cancellation(cancellation, ActiveCancellation::DropExecutor)
+            .await
+    }
+
+    /// Claim and drive one bounded resident-host batch while cooperatively
+    /// draining an executor that has already been polled.
+    ///
+    /// Cancellation still prevents a claim or executor start when observed at
+    /// the existing pre-effect fences. Once an executor future has been
+    /// created, however, the same token is delivered through
+    /// [`AgentExecutionContext`] and the future remains owned and polled until
+    /// it returns. This is the shutdown path for process-owning executors:
+    /// dropping their future on host cancellation would bypass their
+    /// terminate-and-reap and lifecycle-reporting guards.
+    pub(crate) async fn execute_once_cooperative_shutdown(
+        self,
+        cancellation: CancellationToken,
+    ) -> Result<AgentExecutionReport, AgentExecutionError> {
+        self.execute_once_with_cancellation(cancellation, ActiveCancellation::AwaitExecutor)
+            .await
+    }
+
+    async fn execute_once_with_cancellation(
+        self,
+        cancellation: CancellationToken,
+        active_cancellation: ActiveCancellation,
+    ) -> Result<AgentExecutionReport, AgentExecutionError> {
         if cancellation.is_cancelled() {
             return Ok(AgentExecutionReport {
                 claimed: 0,
@@ -354,13 +398,17 @@ impl AgentRunExecutionDriver {
         let store = self.store;
         let executor = self.executor;
         let options = self.options;
+        let execution_cancellation = ExecutionCancellation {
+            token: cancellation,
+            active: active_cancellation,
+        };
         let items = stream::iter(prepared.into_iter().map(|prepared| {
             execute_one(
                 owner.clone(),
                 Arc::clone(&store),
                 Arc::clone(&executor),
                 prepared,
-                cancellation.clone(),
+                execution_cancellation.clone(),
                 options.clone(),
                 base,
             )
@@ -374,6 +422,18 @@ impl AgentRunExecutionDriver {
             cancelled_before_claim: false,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveCancellation {
+    DropExecutor,
+    AwaitExecutor,
+}
+
+#[derive(Clone)]
+struct ExecutionCancellation {
+    token: CancellationToken,
+    active: ActiveCancellation,
 }
 
 struct PreparedRun {
@@ -429,7 +489,7 @@ async fn execute_one(
     store: Arc<dyn AgentStore>,
     executor: Arc<dyn AgentRunExecutor>,
     prepared: PreparedRun,
-    cancellation: CancellationToken,
+    cancellation: ExecutionCancellation,
     options: AgentExecutionOptions,
     base: Instant,
 ) -> AgentExecutionItemStatus {
@@ -444,8 +504,32 @@ async fn execute_one(
     if Instant::now() >= deadline {
         return AgentExecutionItemStatus::TimedOut;
     }
-    if cancellation.is_cancelled() {
+    if cancellation.token.is_cancelled() {
         return AgentExecutionItemStatus::Cancelled;
+    }
+    let reserved = {
+        let executor = Arc::clone(&executor);
+        let identity = identity.clone();
+        let controller = controller.clone();
+        tokio::task::spawn_blocking(move || {
+            catch_unwind(AssertUnwindSafe(|| {
+                executor.reserve_controller(&identity, &controller)
+            }))
+        })
+        .await
+    };
+    match reserved {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => return AgentExecutionItemStatus::InvalidController,
+        Ok(Err(_)) | Err(_) => return AgentExecutionItemStatus::ControllerReservationPanicked,
+    }
+    if cancellation.token.is_cancelled() || Instant::now() >= deadline {
+        blocking_confirmed_controller_gone(Arc::clone(&executor), controller.clone()).await;
+        return if cancellation.token.is_cancelled() {
+            AgentExecutionItemStatus::Cancelled
+        } else {
+            AgentExecutionItemStatus::TimedOut
+        };
     }
     let started = match blocking_start(
         Arc::clone(&store),
@@ -461,7 +545,7 @@ async fn execute_one(
     if !valid_start_transition(&claim, &started, &owner, &controller) {
         return AgentExecutionItemStatus::StartFailed;
     }
-    if cancellation.is_cancelled() {
+    if cancellation.token.is_cancelled() {
         return AgentExecutionItemStatus::Cancelled;
     }
     if Instant::now() >= deadline {
@@ -482,7 +566,7 @@ async fn execute_one(
     if !valid_permit(&permit, &started, &owner) {
         return AgentExecutionItemStatus::PermitFailed;
     }
-    if cancellation.is_cancelled() {
+    if cancellation.token.is_cancelled() {
         return AgentExecutionItemStatus::Cancelled;
     }
     if Instant::now() >= deadline {
@@ -505,7 +589,7 @@ async fn execute_one(
         return AgentExecutionItemStatus::HeartbeatFailed;
     }
     let mut current = heartbeat;
-    if cancellation.is_cancelled() {
+    if cancellation.token.is_cancelled() {
         return AgentExecutionItemStatus::Cancelled;
     }
     if Instant::now() >= deadline {
@@ -516,7 +600,7 @@ async fn execute_one(
             AgentExecutionContext {
                 deadline,
                 controller: controller.clone(),
-                cancellation: cancellation.clone(),
+                cancellation: cancellation.token.clone(),
             },
             identity,
             permit,
@@ -531,14 +615,37 @@ async fn execute_one(
     loop {
         tokio::select! {
             biased;
-            () = cancellation.cancelled() => return AgentExecutionItemStatus::Cancelled,
+            () = cancellation.token.cancelled(), if cancellation.active == ActiveCancellation::AwaitExecutor => {
+                // The executor owns controller quiescence from its first poll.
+                // Keep polling it directly after cooperative shutdown instead
+                // of letting a heartbeat or deadline branch drop the future.
+                let outcome = call.await;
+                return match outcome {
+                    Err(_) => AgentExecutionItemStatus::ExecutorPanicked,
+                    Ok(AgentExecutorOutcome::Unknown) => AgentExecutionItemStatus::ControllerUnknown,
+                    Ok(AgentExecutorOutcome::Quiesced(settlement)) => {
+                        let status = settle_run(store, owner, receipt, current.run.clone(), settlement).await;
+                        if status == AgentExecutionItemStatus::Settled {
+                            blocking_confirmed_controller_gone(Arc::clone(&executor), controller.clone()).await;
+                        }
+                        status
+                    }
+                };
+            }
+            () = cancellation.token.cancelled(), if cancellation.active == ActiveCancellation::DropExecutor => {
+                return AgentExecutionItemStatus::Cancelled;
+            }
             () = sleep_until(deadline) => return AgentExecutionItemStatus::TimedOut,
             outcome = &mut call => {
                 return match outcome {
                     Err(_) => AgentExecutionItemStatus::ExecutorPanicked,
                     Ok(AgentExecutorOutcome::Unknown) => AgentExecutionItemStatus::ControllerUnknown,
                     Ok(AgentExecutorOutcome::Quiesced(settlement)) => {
-                        settle_run(store, owner, receipt, current.run.clone(), settlement).await
+                        let status = settle_run(store, owner, receipt, current.run.clone(), settlement).await;
+                        if status == AgentExecutionItemStatus::Settled {
+                            blocking_confirmed_controller_gone(Arc::clone(&executor), controller.clone()).await;
+                        }
+                        status
                     }
                 };
             }
@@ -567,6 +674,18 @@ async fn blocking_start(
         .await
         .ok()?
         .ok()
+}
+
+async fn blocking_confirmed_controller_gone(
+    executor: Arc<dyn AgentRunExecutor>,
+    controller: ControllerRef,
+) {
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            executor.confirmed_controller_gone(&controller);
+        }));
+    })
+    .await;
 }
 
 async fn blocking_permit(
@@ -1444,6 +1563,13 @@ mod tests {
             _identity: &AgentExecutionIdentity,
             _controller: &ControllerRef,
         ) -> bool {
+            true
+        }
+        fn reserve_controller(
+            &self,
+            _identity: &AgentExecutionIdentity,
+            _controller: &ControllerRef,
+        ) -> bool {
             panic!("body-free reservation panic")
         }
         async fn execute(
@@ -1460,12 +1586,15 @@ mod tests {
     async fn reservation_panic_is_caught_before_start() {
         let fixture = Fixture::new();
         fixture.enqueue("reserve-panic", 30);
-        let error = fixture
+        let report = fixture
             .driver(Arc::new(ReservePanic), options())
             .execute_once(CancellationToken::new())
             .await
-            .unwrap_err();
-        assert_eq!(error, AgentExecutionError::ExecutorMetadataPanicked);
+            .unwrap();
+        assert_eq!(
+            report.items,
+            [AgentExecutionItemStatus::ControllerReservationPanicked]
+        );
         let run = fixture
             .store
             .get_run(OWNER, "run-reserve-panic")
@@ -2016,6 +2145,13 @@ mod tests {
             ControllerKind::InProcess
         }
         fn admit_controller(
+            &self,
+            _identity: &AgentExecutionIdentity,
+            _controller: &ControllerRef,
+        ) -> bool {
+            true
+        }
+        fn reserve_controller(
             &self,
             _identity: &AgentExecutionIdentity,
             _controller: &ControllerRef,
