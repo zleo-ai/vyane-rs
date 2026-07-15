@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     AcceptanceCriterion, AcceptanceVerification, GoalEvent, GoalEventKind, GoalPursuitCheckpoint,
     GoalQuery, GoalRecord, GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact,
-    NewGoal, Result,
+    NewGoal, PursuitCheckpointStatus, Result,
     model::{
         validate_detail, validate_goal_id, validate_lease_seconds, validate_optional_reason,
         validate_owner, validate_stage, validate_worker,
@@ -815,13 +815,47 @@ impl GoalStore for SqliteGoalStore {
                 return Err(GoalStoreError::CheckpointConflict { id: id.to_string() });
             }
         };
+        let (event_kind, operation) = match checkpoint.status {
+            PursuitCheckpointStatus::Running => {
+                (GoalEventKind::Progress, "record pursuit checkpoint for")
+            }
+            PursuitCheckpointStatus::Paused => (GoalEventKind::Paused, "pause pursuit for"),
+            PursuitCheckpointStatus::Achieved => (GoalEventKind::Completed, "complete pursuit for"),
+        };
         let (after, event) = mutate_in_transaction(
             &transaction,
             &before,
-            GoalEventKind::Progress,
-            "record pursuit checkpoint for",
+            event_kind,
+            operation,
             occurred_at,
-            |_before, _after, _effective_at| {
+            |before, after, effective_at| {
+                match checkpoint.status {
+                    PursuitCheckpointStatus::Running => {}
+                    PursuitCheckpointStatus::Paused => {
+                        ensure_transition(before, GoalStatus::Paused, "pause")?;
+                        after.status = GoalStatus::Paused;
+                        clear_lease(after);
+                        after.pause_reason = Some(detail.to_string());
+                    }
+                    PursuitCheckpointStatus::Achieved => {
+                        ensure_transition(before, GoalStatus::Completed, "complete")?;
+                        let remaining = before
+                            .acceptance_criteria
+                            .iter()
+                            .filter(|criterion| criterion.satisfied_at.is_none())
+                            .count();
+                        if remaining > 0 {
+                            return Err(GoalStoreError::CriteriaUnsatisfied {
+                                id: id.to_string(),
+                                remaining,
+                            });
+                        }
+                        after.status = GoalStatus::Completed;
+                        after.finished_at = Some(effective_at);
+                        clear_lease(after);
+                        after.completion_summary = Some(detail.to_string());
+                    }
+                }
                 Ok((Some(stage.to_string()), Some(detail.to_string())))
             },
         )?;

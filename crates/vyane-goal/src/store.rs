@@ -88,9 +88,10 @@ pub trait GoalStore: Send + Sync {
 
     fn pursuit_checkpoint(&self, owner: &str, id: &str) -> Result<Option<GoalPursuitCheckpoint>>;
 
-    /// CAS-write one lease-fenced checkpoint and append its progress event in
-    /// the same transaction. A checkpoint from an older lease may be adopted
-    /// only by presenting the current goal revision and claim generation.
+    /// CAS-write one lease-fenced checkpoint and append its event in the same
+    /// transaction. `Paused` and `Achieved` also perform the matching goal
+    /// lifecycle transition atomically. A checkpoint from an older lease may
+    /// be adopted only with the current goal revision and claim generation.
     #[allow(clippy::too_many_arguments)]
     fn record_pursuit_checkpoint(
         &self,

@@ -684,6 +684,24 @@ fn pursuit_checkpoint_is_revision_and_lease_generation_fenced() {
     assert_eq!(second.checkpoint_revision, 1);
     assert_eq!(second.claim_generation, reclaimed.claim_generation);
     assert_eq!(second.worker_id, "worker-b");
+    let current = store
+        .get(OWNER_A, "checkpoint")
+        .expect("get current goal")
+        .expect("current goal");
+    let mut stale_cas = adopted.clone();
+    stale_cas.goal_revision = current.revision;
+    assert!(matches!(
+        store.record_pursuit_checkpoint(
+            OWNER_A,
+            "checkpoint",
+            "worker-b",
+            &stale_cas,
+            "pursuit.segment.completed",
+            "pure checkpoint CAS conflict",
+            at + TimeDelta::seconds(122),
+        ),
+        Err(GoalStoreError::CheckpointConflict { .. })
+    ));
     let mut stale_worker = adopted;
     stale_worker.worker_id = "worker-a".into();
     assert!(matches!(
@@ -698,6 +716,101 @@ fn pursuit_checkpoint_is_revision_and_lease_generation_fenced() {
         ),
         Err(GoalStoreError::LeaseHeld { .. })
     ));
+}
+
+#[test]
+fn achieved_checkpoint_and_goal_completion_are_one_atomic_transition() {
+    let (directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    let mut goal = new_goal("atomic-achieved", "Atomic achieved", 2, at);
+    goal.acceptance_criteria = vec![AcceptanceCriterion::new("custom", "cmd:true")];
+    store.create(OWNER_A, goal).expect("create");
+    let claimed = store
+        .claim(OWNER_A, "atomic-achieved", "worker-a", 60, at)
+        .expect("claim");
+    let mut checkpoint = GoalPursuitCheckpoint {
+        owner: OWNER_A.into(),
+        goal_id: "atomic-achieved".into(),
+        checkpoint_revision: 0,
+        goal_revision: claimed.revision,
+        claim_generation: claimed.claim_generation,
+        worker_id: "worker-a".into(),
+        runtime: "builder".into(),
+        workdir: directory.path().canonicalize().expect("canonical workdir"),
+        started_at: at,
+        updated_at: at,
+        segments_started: 0,
+        segments_completed: 0,
+        consecutive_failures: 0,
+        status: PursuitCheckpointStatus::Achieved,
+        last_run_id: None,
+        last_verification_id: Some("verification-test".into()),
+    };
+    let before_events = store
+        .events(OWNER_A, "atomic-achieved")
+        .expect("events before");
+
+    assert!(matches!(
+        store.record_pursuit_checkpoint(
+            OWNER_A,
+            "atomic-achieved",
+            "worker-a",
+            &checkpoint,
+            "pursuit.achieved",
+            "acceptance satisfied",
+            at + TimeDelta::seconds(1),
+        ),
+        Err(GoalStoreError::CriteriaUnsatisfied { remaining: 1, .. })
+    ));
+    assert!(
+        store
+            .pursuit_checkpoint(OWNER_A, "atomic-achieved")
+            .expect("checkpoint after rollback")
+            .is_none()
+    );
+    let unchanged = store
+        .get(OWNER_A, "atomic-achieved")
+        .expect("get unchanged")
+        .expect("unchanged goal");
+    assert_eq!(unchanged.status, GoalStatus::InProgress);
+    assert_eq!(unchanged.revision, claimed.revision);
+    assert_eq!(
+        store
+            .events(OWNER_A, "atomic-achieved")
+            .expect("events after rollback"),
+        before_events
+    );
+
+    let satisfied = store
+        .satisfy_criterion(
+            OWNER_A,
+            "atomic-achieved",
+            Some("worker-a"),
+            0,
+            at + TimeDelta::seconds(2),
+        )
+        .expect("satisfy criterion");
+    checkpoint.goal_revision = satisfied.revision;
+    let (recorded, event) = store
+        .record_pursuit_checkpoint(
+            OWNER_A,
+            "atomic-achieved",
+            "worker-a",
+            &checkpoint,
+            "pursuit.achieved",
+            "acceptance satisfied",
+            at + TimeDelta::seconds(3),
+        )
+        .expect("complete with checkpoint");
+    assert_eq!(recorded.status, PursuitCheckpointStatus::Achieved);
+    assert_eq!(event.kind, GoalEventKind::Completed);
+    let completed = store
+        .get(OWNER_A, "atomic-achieved")
+        .expect("get completed")
+        .expect("completed goal");
+    assert_eq!(completed.status, GoalStatus::Completed);
+    assert_eq!(completed.revision, recorded.goal_revision);
+    assert_eq!(completed.claimed_by, None);
 }
 
 #[test]

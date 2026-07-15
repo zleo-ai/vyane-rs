@@ -372,14 +372,12 @@ where
                     "pursuit.achieved",
                     &verification.summary,
                 )?;
-                let completed = self.store.done(
-                    owner,
-                    goal_id,
-                    Some(&self.config.worker_id),
-                    Some(&verification.summary),
-                    None,
-                    Utc::now(),
-                )?;
+                let completed =
+                    self.store
+                        .get(owner, goal_id)?
+                        .ok_or_else(|| GoalStoreError::NotFound {
+                            id: goal_id.to_string(),
+                        })?;
                 return Ok(outcome(
                     &completed,
                     PursuitStatus::Achieved,
@@ -704,13 +702,12 @@ where
     ) -> Result<PursuitOutcome> {
         checkpoint.status = PursuitCheckpointStatus::Paused;
         self.record_checkpoint(owner, goal_id, checkpoint, "pursuit.paused", reason)?;
-        let paused = self.store.pause(
-            owner,
-            goal_id,
-            Some(&self.config.worker_id),
-            Some(reason),
-            Utc::now(),
-        )?;
+        let paused = self
+            .store
+            .get(owner, goal_id)?
+            .ok_or_else(|| GoalStoreError::NotFound {
+                id: goal_id.to_string(),
+            })?;
         let summary = verification
             .as_ref()
             .map_or_else(|| reason.to_string(), |value| value.summary.clone());

@@ -840,6 +840,8 @@ fn pursue_dispatches_fresh_segment_reverifies_and_completes() {
             "--json",
             "--target",
             "builder",
+            "--sandbox",
+            "read-only",
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--max-segments",
@@ -885,6 +887,13 @@ fn pursue_dispatches_fresh_segment_reverifies_and_completes() {
         detail["verifications"].as_array().expect("artifacts").len(),
         2
     );
+    let checkpoint = detail["pursuit_checkpoint"]
+        .as_object()
+        .expect("checkpoint view");
+    assert_eq!(checkpoint["status"], "achieved");
+    assert!(!checkpoint.contains_key("workdir"));
+    assert!(!checkpoint.contains_key("worker_id"));
+    assert!(!checkpoint.contains_key("runtime"));
 }
 
 #[cfg(unix)]
@@ -949,6 +958,8 @@ fn pursue_reports_runtime_error_as_paused_exit_three() {
             "--json",
             "--target",
             "builder",
+            "--sandbox",
+            "read-only",
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--max-failures",
@@ -1049,6 +1060,8 @@ fn pursue_missing_acceptance_returns_paused_exit_three() {
             "--json",
             "--target",
             "builder",
+            "--sandbox",
+            "read-only",
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--worker",
@@ -1134,6 +1147,8 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
             "--json",
             "--target",
             "builder",
+            "--sandbox",
+            "read-only",
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--worker",
@@ -1282,6 +1297,8 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
             "--json",
             "--target",
             "builder",
+            "--sandbox",
+            "read-only",
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--overall-timeout-seconds",
