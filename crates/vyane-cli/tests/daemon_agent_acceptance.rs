@@ -182,7 +182,8 @@ async fn submit_native(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest
             "target": "native",
             "sandbox": "read_only",
             "workdir": workdir,
-            "execution_backend": "native_in_process"
+            "execution_backend": "native_in_process",
+            "timeout_seconds": 2
         }))
         .send()
         .await
@@ -593,6 +594,54 @@ async fn restart_recovers_exact_controller_without_replay() {
     let done = terminal(data_dir.path(), RESTART_RUN, Duration::from_secs(15)).await;
     assert_ne!(done["state"], "succeeded");
     assert_eq!(fs::read(&invocation).unwrap(), b"x");
+    assert!(second.stop().status.success());
+}
+
+#[tokio::test]
+async fn restart_settles_expired_native_controller_without_replaying_private_input() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(30))
+                .set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "late answer"},
+                        "finish_reason": "stop"
+                    }]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-restart-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let run_id = "0197f524-7a00-7000-8000-000000000112";
+    let mut first = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    assert_eq!(
+        submit_native(data_dir.path(), run_id, &workdir)
+            .await
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.received_requests().await.unwrap().is_empty() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    first.kill();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let mut second = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(15)).await;
+    assert_eq!(done["state"], "timed_out");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
     assert!(second.stop().status.success());
 }
 
