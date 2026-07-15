@@ -10,8 +10,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::FutureExt as _;
-use vyane_agent::{AgentStore, ControllerKind};
+use futures::{FutureExt as _, StreamExt as _, stream::FuturesUnordered};
+use vyane_agent::{AgentStore, ControllerKind, ExecutionBackend};
 use vyane_core::CancellationToken;
 
 use crate::{
@@ -51,6 +51,10 @@ pub enum AgentSupervisorError {
     InvalidExecution,
     InvalidRecovery,
     InvalidCompletion,
+    InvalidLaneCount,
+    DuplicateExecutionBackend,
+    DuplicateLeaseOwner,
+    MissingRecoveryAdapter,
 }
 
 impl fmt::Display for AgentSupervisorError {
@@ -60,6 +64,12 @@ impl fmt::Display for AgentSupervisorError {
             Self::InvalidExecution => "AgentRun execution configuration is invalid",
             Self::InvalidRecovery => "AgentRun recovery configuration is invalid",
             Self::InvalidCompletion => "AgentRun completion configuration is invalid",
+            Self::InvalidLaneCount => "AgentRun execution lane count is invalid",
+            Self::DuplicateExecutionBackend => "AgentRun execution backend is duplicated",
+            Self::DuplicateLeaseOwner => "AgentRun execution lease owner is duplicated",
+            Self::MissingRecoveryAdapter => {
+                "AgentRun execution lane has no matching recovery adapter"
+            }
         })
     }
 }
@@ -83,6 +93,279 @@ pub struct AgentSupervisorExit {
     pub execution: AgentSupervisorLoopExit,
     pub recovery: AgentSupervisorLoopExit,
     pub completion: AgentSupervisorLoopExit,
+}
+
+/// Body-free counters for one exact durable execution backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentExecutionLaneExit {
+    pub backend: ExecutionBackend,
+    pub execution: AgentSupervisorLoopExit,
+}
+
+/// Body-free summary returned after every lane and both shared loops drain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentAgentHostExit {
+    pub lanes: Vec<AgentExecutionLaneExit>,
+    pub recovery: AgentSupervisorLoopExit,
+    pub completion: AgentSupervisorLoopExit,
+}
+
+/// One closed exact-backend execution lane.
+///
+/// Metadata is frozen by [`ResidentAgentHost::new`]. The value starts no work
+/// and performs no store operation.
+pub struct ResidentAgentExecutionLane {
+    executor: Arc<dyn AgentRunExecutor>,
+    lease_owner: String,
+    execution: AgentExecutionOptions,
+}
+
+/// Shared owner/store and recovery/publication ports for a multi-lane host.
+pub struct ResidentAgentHostBackend {
+    owner: String,
+    store: Arc<dyn AgentStore>,
+    adapters: Vec<Arc<dyn AgentControllerAdapter>>,
+    completion_sinks: Vec<Arc<dyn AgentCompletionSink>>,
+}
+
+impl ResidentAgentHostBackend {
+    #[must_use]
+    pub fn new(
+        owner: impl Into<String>,
+        store: Arc<dyn AgentStore>,
+        adapters: Vec<Arc<dyn AgentControllerAdapter>>,
+        completion_sinks: Vec<Arc<dyn AgentCompletionSink>>,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            store,
+            adapters,
+            completion_sinks,
+        }
+    }
+}
+
+impl fmt::Debug for ResidentAgentHostBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResidentAgentHostBackend")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ResidentAgentExecutionLane {
+    #[must_use]
+    pub fn new(
+        executor: Arc<dyn AgentRunExecutor>,
+        lease_owner: impl Into<String>,
+        execution: AgentExecutionOptions,
+    ) -> Self {
+        Self {
+            executor,
+            lease_owner: lease_owner.into(),
+            execution,
+        }
+    }
+}
+
+impl fmt::Debug for ResidentAgentExecutionLane {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResidentAgentExecutionLane")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Non-cloneable multi-lane resident substrate over one owner and store.
+///
+/// Each exact backend receives one isolated execution loop. Recovery is a
+/// single union loop over all lane adapters, and completion projection is a
+/// single shared loop. This is a service substrate: constructing it does not
+/// install a native or remote production runtime.
+pub struct ResidentAgentHost {
+    owner: String,
+    store: Arc<dyn AgentStore>,
+    lanes: Vec<FrozenExecutionLane>,
+    recovery_template: AgentRunRecoveryDriver,
+    completion: AgentCompletionPublisher,
+    schedule: AgentSupervisorOptions,
+}
+
+struct FrozenExecutionLane {
+    executor: Arc<dyn AgentRunExecutor>,
+    executor_kind: ControllerKind,
+    backend: ExecutionBackend,
+    lease_owner: String,
+    execution: AgentExecutionOptions,
+}
+
+impl ResidentAgentHost {
+    pub fn new(
+        shared: ResidentAgentHostBackend,
+        lanes: Vec<ResidentAgentExecutionLane>,
+        reconciler: impl Into<String>,
+        recovery: AgentRecoveryOptions,
+        schedule: AgentSupervisorOptions,
+    ) -> Result<Self, AgentSupervisorError> {
+        validate_schedule(&schedule)?;
+        if lanes.is_empty() || lanes.len() > 3 {
+            return Err(AgentSupervisorError::InvalidLaneCount);
+        }
+
+        let ResidentAgentHostBackend {
+            owner,
+            store,
+            adapters,
+            completion_sinks,
+        } = shared;
+        let reconciler = reconciler.into();
+        let mut frozen = Vec::with_capacity(lanes.len());
+        let mut backends = Vec::with_capacity(lanes.len());
+        let mut lease_owners = Vec::with_capacity(lanes.len());
+        for lane in lanes {
+            let executor_kind = catch_unwind(AssertUnwindSafe(|| lane.executor.kind()))
+                .map_err(|_| AgentSupervisorError::InvalidExecution)?;
+            let backend = ExecutionBackend::for_controller_kind(executor_kind);
+            if backends.contains(&backend) {
+                return Err(AgentSupervisorError::DuplicateExecutionBackend);
+            }
+            if lease_owners.contains(&lane.lease_owner) {
+                return Err(AgentSupervisorError::DuplicateLeaseOwner);
+            }
+            AgentRunExecutionDriver::new_with_executor_kind(
+                owner.clone(),
+                Arc::clone(&store),
+                lane.lease_owner.clone(),
+                lane.execution.clone(),
+                Arc::clone(&lane.executor),
+                executor_kind,
+            )
+            .map_err(|_| AgentSupervisorError::InvalidExecution)?;
+            backends.push(backend);
+            lease_owners.push(lane.lease_owner.clone());
+            frozen.push(FrozenExecutionLane {
+                executor: lane.executor,
+                executor_kind,
+                backend,
+                lease_owner: lane.lease_owner,
+                execution: lane.execution,
+            });
+        }
+
+        // Validate the complete adapter union only after every lane has been
+        // frozen. The constructor performs no store operation.
+        let recovery_validation = AgentRunRecoveryDriver::new_with_completion_sinks(
+            owner.clone(),
+            Arc::clone(&store),
+            reconciler.clone(),
+            recovery.clone(),
+            adapters.clone(),
+            completion_sinks.clone(),
+        )
+        .map_err(|_| AgentSupervisorError::InvalidRecovery)?;
+        let adapter_kinds = recovery_validation.registered_adapter_kinds();
+        if frozen
+            .iter()
+            .any(|lane| !adapter_kinds.contains(&lane.executor_kind))
+        {
+            return Err(AgentSupervisorError::MissingRecoveryAdapter);
+        }
+        let completion = AgentCompletionPublisher::new(
+            owner.clone(),
+            COMPLETION_PROJECTOR_ID,
+            Arc::clone(&store),
+            completion_sinks.clone(),
+            AgentCompletionPublisherOptions::default(),
+        )
+        .map_err(|_| AgentSupervisorError::InvalidCompletion)?;
+
+        Ok(Self {
+            owner,
+            store,
+            lanes: frozen,
+            recovery_template: recovery_validation,
+            completion,
+            schedule,
+        })
+    }
+
+    /// Run all exact-backend lanes with one union recovery loop and one
+    /// completion projector. Shutdown first stops claims and drains every
+    /// execution lane, then stops recovery, then performs completion's final
+    /// durable outbox pass.
+    pub async fn run(self, cancel: CancellationToken) -> ResidentAgentHostExit {
+        let Self {
+            owner,
+            store,
+            lanes,
+            recovery_template,
+            completion,
+            schedule,
+        } = self;
+
+        let lane_futures = FuturesUnordered::new();
+        for lane in lanes {
+            let backend = lane.backend;
+            let lane_owner = owner.clone();
+            let lane_store = Arc::clone(&store);
+            let lane_schedule = schedule.clone();
+            let lane_cancel = cancel.clone();
+            lane_futures.push(async move {
+                let execution = run_execution_loop(
+                    ExecutionLoopBackend {
+                        owner: lane_owner,
+                        store: lane_store,
+                        executor: lane.executor,
+                        executor_kind: lane.executor_kind,
+                    },
+                    lane.lease_owner,
+                    lane.execution,
+                    lane_schedule,
+                    lane_cancel,
+                )
+                .await;
+                AgentExecutionLaneExit { backend, execution }
+            });
+        }
+
+        let recovery_stop = CancellationToken::new();
+        let recovery_loop =
+            run_frozen_recovery_loop(recovery_template, schedule.clone(), recovery_stop.clone());
+        let lanes_then_stop_recovery = async move {
+            let lanes = lane_futures.collect::<Vec<_>>().await;
+            recovery_stop.cancel();
+            lanes
+        };
+        let completion_stop = CancellationToken::new();
+        let completion_loop =
+            run_completion_loop(&completion, schedule, completion_stop.clone(), true);
+        let work_loops = async move {
+            let (mut lanes, recovery) = tokio::join!(lanes_then_stop_recovery, recovery_loop);
+            lanes.sort_by_key(|lane| match lane.backend {
+                ExecutionBackend::LegacyUnassigned => 0,
+                ExecutionBackend::CliHarnessProcess => 1,
+                ExecutionBackend::NativeInProcess => 2,
+                ExecutionBackend::Remote => 3,
+            });
+            completion_stop.cancel();
+            (lanes, recovery)
+        };
+        let ((lanes, recovery), completion) = tokio::join!(work_loops, completion_loop);
+        ResidentAgentHostExit {
+            lanes,
+            recovery,
+            completion,
+        }
+    }
+}
+
+impl fmt::Debug for ResidentAgentHost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResidentAgentHost")
+            .field("lanes", &self.lanes.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Non-cloneable resident driver over one exact paired execution/recovery backend.
@@ -513,12 +796,44 @@ async fn run_recovery_loop(
     schedule: AgentSupervisorOptions,
     cancel: CancellationToken,
 ) -> AgentSupervisorLoopExit {
-    let RecoveryLoopBackend {
-        owner,
-        store,
-        adapters,
-        completion_sinks,
-    } = backend;
+    run_recovery_loop_source(
+        RecoveryLoopSource::Raw {
+            backend,
+            reconciler,
+            options,
+        },
+        schedule,
+        cancel,
+    )
+    .await
+}
+
+async fn run_frozen_recovery_loop(
+    template: AgentRunRecoveryDriver,
+    schedule: AgentSupervisorOptions,
+    cancel: CancellationToken,
+) -> AgentSupervisorLoopExit {
+    run_recovery_loop_source(RecoveryLoopSource::Frozen(template), schedule, cancel).await
+}
+
+enum RecoveryLoopSource {
+    Raw {
+        backend: RecoveryLoopBackend,
+        reconciler: String,
+        options: AgentRecoveryOptions,
+    },
+    Frozen(AgentRunRecoveryDriver),
+}
+
+async fn run_recovery_loop_source(
+    source: RecoveryLoopSource,
+    schedule: AgentSupervisorOptions,
+    cancel: CancellationToken,
+) -> AgentSupervisorLoopExit {
+    let options = match &source {
+        RecoveryLoopSource::Raw { options, .. } => options.clone(),
+        RecoveryLoopSource::Frozen(template) => template.options_for_supervisor(),
+    };
     let mut stats = AgentSupervisorLoopExit::default();
     let mut backoff = Backoff::new(schedule.initial_error_backoff, schedule.max_error_backoff);
     loop {
@@ -526,14 +841,21 @@ async fn run_recovery_loop(
             break;
         }
         stats.cycles = stats.cycles.saturating_add(1);
-        let driver = AgentRunRecoveryDriver::new_with_completion_sinks(
-            owner.clone(),
-            Arc::clone(&store),
-            reconciler.clone(),
-            options.clone(),
-            adapters.clone(),
-            completion_sinks.clone(),
-        );
+        let driver = match &source {
+            RecoveryLoopSource::Raw {
+                backend,
+                reconciler,
+                options,
+            } => AgentRunRecoveryDriver::new_with_completion_sinks(
+                backend.owner.clone(),
+                Arc::clone(&backend.store),
+                reconciler.clone(),
+                options.clone(),
+                backend.adapters.clone(),
+                backend.completion_sinks.clone(),
+            ),
+            RecoveryLoopSource::Frozen(template) => Ok(template.clone_frozen()),
+        };
         let next = match driver {
             Ok(driver) => {
                 let cycle = AssertUnwindSafe(driver.recover_once(CancellationToken::new()))
@@ -886,6 +1208,242 @@ mod tests {
 
     struct ProcessStyleExecutor;
 
+    struct StaticExecutor {
+        kind: ControllerKind,
+    }
+
+    struct StaticAdapter {
+        name: &'static str,
+        kind: ControllerKind,
+    }
+
+    struct PanickingExecutor;
+
+    struct PanickingRuntimeExecutor;
+
+    struct PanickingAdapter;
+
+    struct CountingAdapter {
+        name: &'static str,
+        kind: ControllerKind,
+        observations: Arc<AtomicUsize>,
+    }
+
+    struct FlappingAdapter {
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct LateCompletionExecutor {
+        owner: &'static str,
+        store: Arc<dyn AgentStore>,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl AgentRunExecutor for StaticExecutor {
+        fn kind(&self) -> ControllerKind {
+            self.kind
+        }
+
+        fn admit_controller(
+            &self,
+            _identity: &AgentExecutionIdentity,
+            controller: &ControllerRef,
+        ) -> bool {
+            controller.kind == self.kind
+        }
+
+        async fn execute(
+            &self,
+            _context: crate::AgentExecutionContext,
+            _identity: AgentExecutionIdentity,
+            _permit: ActiveExecutionPermit,
+        ) -> AgentExecutorOutcome {
+            AgentExecutorOutcome::Quiesced(AgentExecutionSettlement::Failed {
+                code: RunFailureCode::DispatchFailed,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunExecutor for PanickingExecutor {
+        fn kind(&self) -> ControllerKind {
+            panic!("metadata panic")
+        }
+
+        fn admit_controller(
+            &self,
+            _identity: &AgentExecutionIdentity,
+            _controller: &ControllerRef,
+        ) -> bool {
+            false
+        }
+
+        async fn execute(
+            &self,
+            _context: crate::AgentExecutionContext,
+            _identity: AgentExecutionIdentity,
+            _permit: ActiveExecutionPermit,
+        ) -> AgentExecutorOutcome {
+            AgentExecutorOutcome::Unknown
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunExecutor for PanickingRuntimeExecutor {
+        fn kind(&self) -> ControllerKind {
+            ControllerKind::Process
+        }
+
+        fn admit_controller(
+            &self,
+            _identity: &AgentExecutionIdentity,
+            controller: &ControllerRef,
+        ) -> bool {
+            controller.kind == ControllerKind::Process
+        }
+
+        async fn execute(
+            &self,
+            _context: crate::AgentExecutionContext,
+            _identity: AgentExecutionIdentity,
+            _permit: ActiveExecutionPermit,
+        ) -> AgentExecutorOutcome {
+            panic!("runtime panic")
+        }
+    }
+
+    #[async_trait]
+    impl AgentControllerAdapter for StaticAdapter {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn kind(&self) -> ControllerKind {
+            self.kind
+        }
+
+        async fn observe_gone(
+            &self,
+            _context: crate::ControllerRecoveryContext,
+            _controller: ControllerRef,
+        ) -> crate::ControllerRecoveryObservation {
+            crate::ControllerRecoveryObservation::Gone
+        }
+    }
+
+    #[async_trait]
+    impl AgentControllerAdapter for PanickingAdapter {
+        fn name(&self) -> &str {
+            "panicking"
+        }
+
+        fn kind(&self) -> ControllerKind {
+            panic!("adapter metadata panic")
+        }
+
+        async fn observe_gone(
+            &self,
+            _context: crate::ControllerRecoveryContext,
+            _controller: ControllerRef,
+        ) -> crate::ControllerRecoveryObservation {
+            crate::ControllerRecoveryObservation::Unavailable
+        }
+    }
+
+    #[async_trait]
+    impl AgentControllerAdapter for CountingAdapter {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn kind(&self) -> ControllerKind {
+            self.kind
+        }
+
+        async fn observe_gone(
+            &self,
+            _context: crate::ControllerRecoveryContext,
+            _controller: ControllerRef,
+        ) -> crate::ControllerRecoveryObservation {
+            self.observations.fetch_add(1, Ordering::SeqCst);
+            crate::ControllerRecoveryObservation::Gone
+        }
+    }
+
+    #[async_trait]
+    impl AgentControllerAdapter for FlappingAdapter {
+        fn name(&self) -> &str {
+            "flapping"
+        }
+
+        fn kind(&self) -> ControllerKind {
+            if self.calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                ControllerKind::Process
+            } else {
+                ControllerKind::InProcess
+            }
+        }
+
+        async fn observe_gone(
+            &self,
+            _context: crate::ControllerRecoveryContext,
+            _controller: ControllerRef,
+        ) -> crate::ControllerRecoveryObservation {
+            crate::ControllerRecoveryObservation::Gone
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunExecutor for LateCompletionExecutor {
+        fn kind(&self) -> ControllerKind {
+            ControllerKind::InProcess
+        }
+
+        fn admit_controller(
+            &self,
+            _identity: &AgentExecutionIdentity,
+            controller: &ControllerRef,
+        ) -> bool {
+            controller.kind == ControllerKind::InProcess
+        }
+
+        async fn execute(
+            &self,
+            _context: crate::AgentExecutionContext,
+            identity: AgentExecutionIdentity,
+            permit: ActiveExecutionPermit,
+        ) -> AgentExecutorOutcome {
+            self.entered.notify_one();
+            self.release.notified().await;
+            let prepared = match self.store.prepare_completion(
+                self.owner,
+                &permit,
+                &NewRunCompletion {
+                    id: format!("completion-{}", identity.run_id()),
+                    sink_kind: "test-sink".into(),
+                    publication_key: format!("result.{}", identity.run_id()),
+                    content_digest: "c".repeat(64),
+                    content_bytes: 1,
+                },
+            ) {
+                Ok(prepared) => prepared,
+                Err(_) => return AgentExecutorOutcome::Unknown,
+            };
+            if self
+                .store
+                .validate_completion_permit(self.owner, &prepared.permit)
+                .is_err()
+            {
+                return AgentExecutorOutcome::Unknown;
+            }
+            AgentExecutorOutcome::Quiesced(AgentExecutionSettlement::CompletionStaged(
+                crate::StagedRunCompletion::new(prepared.permit),
+            ))
+        }
+    }
+
     struct ShutdownAwareProcessExecutor {
         entered: Arc<Notify>,
         cancellation_seen: Arc<Notify>,
@@ -1084,6 +1642,527 @@ mod tests {
             settlement_margin: Duration::from_millis(100),
             operation_lease_seconds: 1,
         }
+    }
+
+    fn static_lane(kind: ControllerKind, lease_owner: &str) -> ResidentAgentExecutionLane {
+        ResidentAgentExecutionLane::new(
+            Arc::new(StaticExecutor { kind }),
+            lease_owner,
+            execution_options(),
+        )
+    }
+
+    fn static_adapter(name: &'static str, kind: ControllerKind) -> Arc<dyn AgentControllerAdapter> {
+        Arc::new(StaticAdapter { name, kind })
+    }
+
+    #[test]
+    fn multi_lane_construction_is_closed_and_side_effect_free() {
+        assert_impl_all!(ResidentAgentExecutionLane: Send, Sync);
+        assert_impl_all!(ResidentAgentHost: Send, Sync);
+        assert_not_impl_any!(ResidentAgentExecutionLane: Clone);
+        assert_not_impl_any!(ResidentAgentHost: Clone);
+
+        let fixture = Fixture::new();
+        fixture.enqueue(OWNER_BOUNDS, "construction", 0);
+        let store: Arc<dyn AgentStore> = fixture.store.clone();
+        let make = |lanes, adapters| {
+            ResidentAgentHost::new(
+                ResidentAgentHostBackend::new(
+                    OWNER_BOUNDS,
+                    Arc::clone(&store),
+                    adapters,
+                    Vec::new(),
+                ),
+                lanes,
+                "reconciler",
+                recovery_options(),
+                schedule(),
+            )
+        };
+
+        assert!(matches!(
+            make(Vec::new(), Vec::new()),
+            Err(AgentSupervisorError::InvalidLaneCount)
+        ));
+        assert!(matches!(
+            make(
+                vec![
+                    static_lane(ControllerKind::Process, "lease-a"),
+                    static_lane(ControllerKind::InProcess, "lease-b"),
+                    static_lane(ControllerKind::Remote, "lease-c"),
+                    static_lane(ControllerKind::Process, "lease-d"),
+                ],
+                Vec::new(),
+            ),
+            Err(AgentSupervisorError::InvalidLaneCount)
+        ));
+        assert!(matches!(
+            make(
+                vec![
+                    static_lane(ControllerKind::Process, "lease-a"),
+                    static_lane(ControllerKind::Process, "lease-b"),
+                ],
+                vec![static_adapter("process", ControllerKind::Process)],
+            ),
+            Err(AgentSupervisorError::DuplicateExecutionBackend)
+        ));
+        assert!(matches!(
+            make(
+                vec![
+                    static_lane(ControllerKind::Process, "lease"),
+                    static_lane(ControllerKind::InProcess, "lease"),
+                ],
+                vec![
+                    static_adapter("process", ControllerKind::Process),
+                    static_adapter("native", ControllerKind::InProcess),
+                ],
+            ),
+            Err(AgentSupervisorError::DuplicateLeaseOwner)
+        ));
+        assert!(matches!(
+            make(
+                vec![static_lane(ControllerKind::InProcess, "lease")],
+                vec![static_adapter("process", ControllerKind::Process)],
+            ),
+            Err(AgentSupervisorError::MissingRecoveryAdapter)
+        ));
+        assert!(matches!(
+            make(
+                vec![static_lane(ControllerKind::Process, "lease")],
+                vec![
+                    static_adapter("process-a", ControllerKind::Process),
+                    static_adapter("process-b", ControllerKind::Process),
+                ],
+            ),
+            Err(AgentSupervisorError::InvalidRecovery)
+        ));
+        assert!(matches!(
+            make(
+                vec![static_lane(ControllerKind::Process, "lease")],
+                vec![Arc::new(PanickingAdapter)],
+            ),
+            Err(AgentSupervisorError::InvalidRecovery)
+        ));
+        assert!(matches!(
+            make(
+                vec![ResidentAgentExecutionLane::new(
+                    Arc::new(PanickingExecutor),
+                    "lease",
+                    execution_options(),
+                )],
+                vec![static_adapter("process", ControllerKind::Process)],
+            ),
+            Err(AgentSupervisorError::InvalidExecution)
+        ));
+
+        // Every rejected constructor leaves the queued run untouched.
+        assert_eq!(
+            fixture
+                .store
+                .get_run(OWNER_BOUNDS, "run-construction")
+                .unwrap()
+                .unwrap()
+                .state,
+            RunState::Queued
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_lane_host_drives_exact_backends_with_shared_loops() {
+        let fixture = Fixture::new();
+        fixture.enqueue_for_backend(
+            OWNER_PROCESS,
+            "multi-process",
+            0,
+            vyane_agent::ExecutionBackend::CliHarnessProcess,
+        );
+        fixture.enqueue_for_backend(
+            OWNER_PROCESS,
+            "multi-native",
+            0,
+            vyane_agent::ExecutionBackend::NativeInProcess,
+        );
+        let store: Arc<dyn AgentStore> = fixture.store.clone();
+        let host = ResidentAgentHost::new(
+            ResidentAgentHostBackend::new(
+                OWNER_PROCESS,
+                store,
+                vec![
+                    static_adapter("process", ControllerKind::Process),
+                    static_adapter("native", ControllerKind::InProcess),
+                    // Historical adapters remain valid even without an active lane.
+                    static_adapter("remote-history", ControllerKind::Remote),
+                ],
+                Vec::new(),
+            ),
+            vec![
+                static_lane(ControllerKind::Process, "process-lease"),
+                static_lane(ControllerKind::InProcess, "native-lease"),
+            ],
+            "reconciler",
+            recovery_options(),
+            schedule(),
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(host.run(cancel.clone()));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let process = fixture
+                    .store
+                    .get_run(OWNER_PROCESS, "run-multi-process")
+                    .unwrap()
+                    .unwrap();
+                let native = fixture
+                    .store
+                    .get_run(OWNER_PROCESS, "run-multi-native")
+                    .unwrap()
+                    .unwrap();
+                if process.state == RunState::Failed && native.state == RunState::Failed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+        let exit = task.await.unwrap();
+
+        assert_eq!(exit.lanes.len(), 2);
+        assert_eq!(exit.lanes[0].backend, ExecutionBackend::CliHarnessProcess);
+        assert_eq!(exit.lanes[0].execution.claimed, 1);
+        assert_eq!(exit.lanes[1].backend, ExecutionBackend::NativeInProcess);
+        assert_eq!(exit.lanes[1].execution.claimed, 1);
+        assert!(exit.recovery.cycles > 0);
+        assert!(exit.completion.cycles > 0);
+    }
+
+    #[tokio::test]
+    async fn recovery_uses_frozen_adapter_metadata_without_runtime_rereads() {
+        let fixture = Fixture::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store: Arc<dyn AgentStore> = fixture.store.clone();
+        let host = ResidentAgentHost::new(
+            ResidentAgentHostBackend::new(
+                OWNER_PROCESS,
+                store,
+                vec![Arc::new(FlappingAdapter {
+                    calls: Arc::clone(&calls),
+                })],
+                Vec::new(),
+            ),
+            vec![static_lane(ControllerKind::Process, "process-lease")],
+            "reconciler",
+            recovery_options(),
+            schedule(),
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(host.run(cancel.clone()));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancel.cancel();
+        let exit = task.await.unwrap();
+
+        assert!(exit.recovery.successful_cycles > 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn one_union_recovery_loop_routes_both_controller_kinds_once() {
+        let fixture = Fixture::new();
+        for (suffix, backend, kind, lease) in [
+            (
+                "union-process",
+                ExecutionBackend::CliHarnessProcess,
+                ControllerKind::Process,
+                "seed-process",
+            ),
+            (
+                "union-native",
+                ExecutionBackend::NativeInProcess,
+                ControllerKind::InProcess,
+                "seed-native",
+            ),
+        ] {
+            fixture.enqueue_for_backend(OWNER_RECOVERY, suffix, 0, backend);
+            let claimed = fixture
+                .store
+                .claim_due(OWNER_RECOVERY, backend, lease, 1, 1)
+                .unwrap()
+                .remove(0);
+            fixture
+                .store
+                .start(
+                    OWNER_RECOVERY,
+                    &claimed.receipt,
+                    &ControllerRef {
+                        kind,
+                        id: format!("controller-{suffix}"),
+                        fingerprint: Some(format!("fingerprint-{suffix}")),
+                    },
+                )
+                .unwrap();
+        }
+        fixture.clock.advance(2);
+        let process_observations = Arc::new(AtomicUsize::new(0));
+        let native_observations = Arc::new(AtomicUsize::new(0));
+        let store: Arc<dyn AgentStore> = fixture.store.clone();
+        let host = ResidentAgentHost::new(
+            ResidentAgentHostBackend::new(
+                OWNER_RECOVERY,
+                store,
+                vec![
+                    Arc::new(CountingAdapter {
+                        name: "count-process",
+                        kind: ControllerKind::Process,
+                        observations: Arc::clone(&process_observations),
+                    }),
+                    Arc::new(CountingAdapter {
+                        name: "count-native",
+                        kind: ControllerKind::InProcess,
+                        observations: Arc::clone(&native_observations),
+                    }),
+                ],
+                Vec::new(),
+            ),
+            vec![
+                static_lane(ControllerKind::Process, "process-lease"),
+                static_lane(ControllerKind::InProcess, "native-lease"),
+            ],
+            "reconciler",
+            AgentRecoveryOptions {
+                batch_limit: 2,
+                max_in_flight: 2,
+                ..recovery_options()
+            },
+            schedule(),
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(host.run(cancel.clone()));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while process_observations.load(Ordering::SeqCst) != 1
+                || native_observations.load(Ordering::SeqCst) != 1
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel.cancel();
+        let exit = task.await.unwrap();
+
+        assert_eq!(process_observations.load(Ordering::SeqCst), 1);
+        assert_eq!(native_observations.load(Ordering::SeqCst), 1);
+        assert_eq!(exit.recovery.claimed, 2);
+    }
+
+    #[tokio::test]
+    async fn multi_lane_shutdown_final_pass_publishes_late_completion_once() {
+        let fixture = Fixture::new();
+        fixture.enqueue_in_process(OWNER_COMPLETION, "host-final", 0);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let sink = Arc::new(PublishingSink {
+            published: AtomicUsize::new(0),
+            notification: Notify::new(),
+        });
+        let store: Arc<dyn AgentStore> = fixture.store.clone();
+        let sink_port: Arc<dyn AgentCompletionSink> = sink.clone();
+        let executor: Arc<dyn AgentRunExecutor> = Arc::new(LateCompletionExecutor {
+            owner: OWNER_COMPLETION,
+            store: Arc::clone(&store),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let host = ResidentAgentHost::new(
+            ResidentAgentHostBackend::new(
+                OWNER_COMPLETION,
+                store,
+                vec![
+                    static_adapter("native", ControllerKind::InProcess),
+                    Arc::new(ProcessStyleAdapter),
+                ],
+                vec![sink_port],
+            ),
+            vec![
+                ResidentAgentExecutionLane::new(executor, "native-lease", execution_options()),
+                static_lane(ControllerKind::Process, "process-lease"),
+            ],
+            "reconciler",
+            recovery_options(),
+            AgentSupervisorOptions {
+                recovery_poll_interval: Duration::from_secs(1),
+                ..schedule()
+            },
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(host.run(cancel.clone()));
+
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        // The shared projector has completed its empty startup pass and is
+        // sleeping well beyond the remainder of this test.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel.cancel();
+        release.notify_one();
+        let exit = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let final_run = fixture
+            .store
+            .get_run(OWNER_COMPLETION, "run-host-final")
+            .unwrap()
+            .unwrap();
+        assert_eq!(sink.published.load(Ordering::SeqCst), 1);
+        assert_eq!(exit.completion.cycles, 2);
+        assert!(exit.completion.claimed > 0);
+        assert_eq!(exit.completion.degraded_items, 0);
+        assert_eq!(final_run.state, RunState::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn one_degraded_lane_does_not_block_another_backend() {
+        let fixture = Fixture::new();
+        fixture.enqueue_for_backend(
+            OWNER_PROCESS,
+            "isolated-process",
+            0,
+            ExecutionBackend::CliHarnessProcess,
+        );
+        fixture.enqueue_for_backend(
+            OWNER_PROCESS,
+            "isolated-native",
+            0,
+            ExecutionBackend::NativeInProcess,
+        );
+        let store: Arc<dyn AgentStore> = fixture.store.clone();
+        let host = ResidentAgentHost::new(
+            ResidentAgentHostBackend::new(
+                OWNER_PROCESS,
+                store,
+                vec![
+                    static_adapter("process", ControllerKind::Process),
+                    static_adapter("native", ControllerKind::InProcess),
+                ],
+                Vec::new(),
+            ),
+            vec![
+                ResidentAgentExecutionLane::new(
+                    Arc::new(PanickingRuntimeExecutor),
+                    "process-lease",
+                    execution_options(),
+                ),
+                static_lane(ControllerKind::InProcess, "native-lease"),
+            ],
+            "reconciler",
+            recovery_options(),
+            schedule(),
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(host.run(cancel.clone()));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let native = fixture
+                    .store
+                    .get_run(OWNER_PROCESS, "run-isolated-native")
+                    .unwrap()
+                    .unwrap();
+                if native.state == RunState::Failed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+        let exit = task.await.unwrap();
+
+        let process = exit
+            .lanes
+            .iter()
+            .find(|lane| lane.backend == ExecutionBackend::CliHarnessProcess)
+            .unwrap();
+        let native = exit
+            .lanes
+            .iter()
+            .find(|lane| lane.backend == ExecutionBackend::NativeInProcess)
+            .unwrap();
+        assert_eq!(process.execution.claimed, 1);
+        assert_eq!(process.execution.degraded_items, 1);
+        assert_eq!(native.execution.claimed, 1);
+        assert_eq!(native.execution.degraded_items, 0);
+    }
+
+    #[tokio::test]
+    async fn exact_lane_cannot_skip_earlier_other_backend_on_same_worker() {
+        let fixture = Fixture::new();
+        fixture.enqueue_for_backend(
+            OWNER_PROCESS,
+            "fifo",
+            0,
+            vyane_agent::ExecutionBackend::CliHarnessProcess,
+        );
+        let second = NewAgentRun {
+            id: "run-fifo-native".into(),
+            worker_id: "worker-fifo".into(),
+            task_id: None,
+            trace_id: None,
+            parent_run_id: None,
+            execution_backend: ExecutionBackend::NativeInProcess,
+            mode: RunMode::Autonomous,
+            target_key: "http:test/model".into(),
+            prompt_digest: "a".repeat(64),
+            policy_digest: "b".repeat(64),
+            available_at: fixture.clock.now(),
+            timeout_seconds: 60,
+            max_resume_attempts: 0,
+        };
+        fixture.store.enqueue_run(OWNER_PROCESS, &second).unwrap();
+        let store: Arc<dyn AgentStore> = fixture.store.clone();
+        let host = ResidentAgentHost::new(
+            ResidentAgentHostBackend::new(
+                OWNER_PROCESS,
+                store,
+                vec![static_adapter("native", ControllerKind::InProcess)],
+                Vec::new(),
+            ),
+            vec![static_lane(ControllerKind::InProcess, "native-lease")],
+            "reconciler",
+            recovery_options(),
+            schedule(),
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(host.run(cancel.clone()));
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        cancel.cancel();
+        let exit = task.await.unwrap();
+
+        assert_eq!(exit.lanes[0].execution.claimed, 0);
+        assert_eq!(
+            fixture
+                .store
+                .get_run(OWNER_PROCESS, "run-fifo-native")
+                .unwrap()
+                .unwrap()
+                .state,
+            RunState::Queued
+        );
     }
 
     #[test]

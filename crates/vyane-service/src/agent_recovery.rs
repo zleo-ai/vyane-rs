@@ -216,12 +216,14 @@ pub struct AgentRecoveryReport {
     pub cancelled_before_claim: bool,
 }
 
+#[derive(Clone)]
 struct RegisteredAdapter {
     kind: ControllerKind,
     _name: String,
     adapter: Arc<dyn AgentControllerAdapter>,
 }
 
+#[derive(Clone)]
 struct RegisteredCompletionSink {
     kind: String,
     sink: Arc<dyn AgentCompletionSink>,
@@ -259,6 +261,29 @@ pub struct AgentRunRecoveryDriver {
 }
 
 impl AgentRunRecoveryDriver {
+    pub(crate) fn registered_adapter_kinds(&self) -> Vec<ControllerKind> {
+        self.adapters.iter().map(|adapter| adapter.kind).collect()
+    }
+
+    /// Duplicate an already validated driver template without consulting raw
+    /// adapter or sink metadata again. The public one-shot driver deliberately
+    /// remains non-`Clone`; this seam is restricted to the resident host that
+    /// owns the frozen template.
+    pub(crate) fn clone_frozen(&self) -> Self {
+        Self {
+            owner: self.owner.clone(),
+            store: Arc::clone(&self.store),
+            reconciler: self.reconciler.clone(),
+            options: self.options.clone(),
+            adapters: self.adapters.clone(),
+            completion_sinks: Arc::clone(&self.completion_sinks),
+        }
+    }
+
+    pub(crate) fn options_for_supervisor(&self) -> AgentRecoveryOptions {
+        self.options.clone()
+    }
+
     /// Freeze an owner, non-null trait-object store, bounds, and at most one
     /// trusted adapter per controller kind. `Arc<dyn AgentStore>` is non-null by
     /// construction; the driver intentionally performs no probing store call

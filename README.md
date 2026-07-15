@@ -264,6 +264,14 @@ generic handback contract is defined in [WP-53](docs/plan/WP-53.md), the
 original resident boundary is in [WP-51](docs/plan/WP-51.md), and the production
 Process scope is in [WP-61](docs/plan/WP-61.md).
 
+`ResidentAgentHost` is the bounded multi-lane service substrate above those
+single-lane facades. It runs one exact durable-backend execution loop per lane
+while sharing one validated recovery-adapter union and one completion
+projector. Lane failures and backoff are isolated, but store ordering remains
+cross-backend. The current daemon does not assemble this into native or Remote
+production execution; it still installs only its Linux Process lane. See
+[WP-64](docs/plan/WP-64.md).
+
 The WP-61 host accepts authenticated loopback AgentRun requests only through
 the workflow daemon. It freezes a private create-only prompt spool together
 with the exact resolved target chain, capability plan, canonical workdir,

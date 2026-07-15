@@ -2713,11 +2713,15 @@ mod tests {
     #[tokio::test]
     async fn guard_drop_after_reap_reports_without_signalling_numeric_group() {
         let dir = tempfile::TempDir::new().unwrap();
-        let heartbeat = dir.path().join("reaped-guard-heartbeat");
+        let ready = dir.path().join("reaped-guard-ready");
+        let trigger = dir.path().join("reaped-guard-trigger");
+        let acknowledged = dir.path().join("reaped-guard-acknowledged");
         let script = format!(
-            "( trap '' HUP TERM; while :; do printf x >> '{}'; /bin/sleep 0.02; done ) & while [ ! -s '{}' ]; do /bin/sleep 0.01; done; exit 0",
-            heartbeat.display(),
-            heartbeat.display()
+            "( trap '' HUP TERM; printf ready > '{}'; while [ ! -e '{}' ]; do /bin/sleep 0.01; done; printf acknowledged > '{}'; while :; do /bin/sleep 1; done ) & while [ ! -s '{}' ]; do /bin/sleep 0.01; done; exit 0",
+            ready.display(),
+            trigger.display(),
+            acknowledged.display(),
+            ready.display()
         );
         let mut command = Command::new("/bin/sh");
         command
@@ -2735,15 +2739,26 @@ mod tests {
 
         let wait_result = child.wait().await;
         guard.leader_wait_returned(wait_result).unwrap();
-        let before = std::fs::metadata(&heartbeat).unwrap().len();
         drop(guard);
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        let after = std::fs::metadata(&heartbeat).unwrap().len();
+        std::fs::write(&trigger, b"trigger").unwrap();
+        for _ in 0..200 {
+            if acknowledged.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let survived_guard_drop = acknowledged.exists();
+        let recorded = events.lock().unwrap().clone();
+
+        signal_group(pgid, SIGKILL);
         assert!(
-            after > before,
+            wait_for_group_exit(pgid, Duration::from_secs(2)).await,
+            "test cleanup could not empty the residual group"
+        );
+        assert!(
+            survived_guard_drop,
             "reaped guard Drop signalled its stale numeric PGID"
         );
-        let recorded = events.lock().unwrap().clone();
         assert_eq!(recorded.len(), 2);
         assert!(matches!(
             recorded[1],
@@ -2753,12 +2768,6 @@ mod tests {
                 group_empty: false,
             } if pid as i32 == pgid && stopped_pgid == pgid
         ));
-
-        signal_group(pgid, SIGKILL);
-        assert!(
-            wait_for_group_exit(pgid, Duration::from_secs(2)).await,
-            "test cleanup could not empty the residual group"
-        );
     }
 
     #[test]

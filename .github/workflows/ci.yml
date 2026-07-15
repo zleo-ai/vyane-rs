@@ -63,10 +63,14 @@ jobs:
         run: |
           # Several CLI fixtures exercise process-global POSIX locking from
           # independent Tokio runtimes. Keep each fixture's internal
-          # concurrency, but do not overlap separate CLI fixtures. Other
-          # packages retain normal scheduling (including paused-time tests
-          # that rely on Tokio's automatic clock advancement).
-          cargo test --workspace --exclude vyane-cli
+          # concurrency, but do not overlap separate CLI fixtures. Service
+          # fixtures are also serialized: they each retain their configured
+          # Tokio runtime, while avoiding cross-fixture starvation in the
+          # resident-loop shutdown tests. Other packages retain normal
+          # scheduling (including paused-time tests that rely on Tokio's
+          # automatic clock advancement).
+          cargo test --workspace --exclude vyane-cli --exclude vyane-service
+          cargo test -p vyane-service -- --test-threads=1
           cargo test -p vyane-cli -- --test-threads=1
 
   coverage:
