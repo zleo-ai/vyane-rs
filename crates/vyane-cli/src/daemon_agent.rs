@@ -25,8 +25,9 @@ use vyane_agent::{
 use vyane_core::{CancellationToken, Sandbox};
 use vyane_service::{
     AgentControllerAdapter, AgentExecutionOptions, AgentRecoveryOptions, AgentRunExecutor,
-    AgentRunRecoveryDriver, AgentSupervisorOptions, MessageComponents, OwnerContext,
-    ResidentAgentBackend, ResidentAgentSupervisor, VyaneService,
+    AgentRunRecoveryDriver, AgentSupervisorOptions, InProcessAgentComponents, MessageComponents,
+    OwnerContext, ResidentAgentExecutionLane, ResidentAgentHost, ResidentAgentHostBackend,
+    VyaneService,
 };
 
 use crate::agent_host::ProcessAgentRunExecutor;
@@ -37,10 +38,13 @@ use crate::agent_spool::{
     AgentInputSpool, AgentSpoolCreate, AgentSpoolInput, AgentSpoolPolicy, AgentSpoolSandbox,
 };
 use crate::daemon::DaemonHttpState;
+use crate::native_agent::FreshNativeAgentOperation;
+use crate::native_agent_spool::NativeAgentInputSpool;
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
 
 const INPUT_DIR: &str = "agent-inputs";
+const NATIVE_INPUT_DIR: &str = "native-agent-inputs";
 const CONTROLLER_DIR: &str = "agent-controllers";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 10 * 60;
 const CANCEL_LEASE_SECONDS: u64 = 30;
@@ -174,7 +178,7 @@ impl DaemonAgentHost {
     pub(crate) async fn open(
         service: Arc<VyaneService>,
         instance_id: &str,
-    ) -> Result<(Self, ResidentAgentSupervisor)> {
+    ) -> Result<(Self, ResidentAgentHost)> {
         let instance_key = opaque_digest(WORKER_DOMAIN, instance_id);
         let instance_key = &instance_key[..32];
         let paths = service.storage_paths().clone();
@@ -192,7 +196,7 @@ impl DaemonAgentHost {
         let messages = MessageComponents::open(&paths, LOCAL_TASK_OWNER)
             .context("open AgentRun completion messages")?;
         let scoped = service.scope(OwnerContext::single_user_local());
-        let executor: Arc<dyn AgentRunExecutor> = Arc::new(ProcessAgentRunExecutor::new(
+        let process_executor: Arc<dyn AgentRunExecutor> = Arc::new(ProcessAgentRunExecutor::new(
             Arc::<str>::from(LOCAL_TASK_OWNER),
             Arc::clone(&store),
             scoped,
@@ -201,15 +205,39 @@ impl DaemonAgentHost {
             messages.clone(),
         ));
         let controller = Arc::new(ProcessAgentControllerAdapter::new(sidecars.clone()));
-        let adapter: Arc<dyn AgentControllerAdapter> = controller.clone();
+        let process_adapter: Arc<dyn AgentControllerAdapter> = controller.clone();
+        let native_spool =
+            NativeAgentInputSpool::open(paths.data_dir.join(NATIVE_INPUT_DIR), LOCAL_TASK_OWNER)
+                .context("open native AgentRun input spool")?;
+        let native_components = InProcessAgentComponents::new_with_completion_sinks(
+            LOCAL_TASK_OWNER,
+            Arc::clone(&store),
+            Arc::new(FreshNativeAgentOperation::new(
+                LOCAL_TASK_OWNER,
+                service.scope(OwnerContext::single_user_local()),
+                native_spool,
+                messages.clone(),
+            )),
+            Vec::new(),
+        )
+        .context("construct native AgentRun lane")?;
+        let native_backend = native_components.into_resident_backend();
+        let (native_owner, native_store, native_executor, native_adapters, _) =
+            native_backend.into_parts();
+        if native_owner != LOCAL_TASK_OWNER || !Arc::ptr_eq(&native_store, &store) {
+            return Err(anyhow::anyhow!("native AgentRun lane owner/store mismatch"));
+        }
         let completion_sinks = vec![messages.completion_sink()];
+        let mut adapters = vec![process_adapter];
+        adapters.extend(native_adapters);
+        let all_completion_sinks = completion_sinks.clone();
         AgentRunRecoveryDriver::new_with_completion_sinks(
             LOCAL_TASK_OWNER,
             Arc::clone(&store),
             format!("agent-startup-{instance_key}"),
             AgentRecoveryOptions::default(),
-            vec![Arc::clone(&adapter)],
-            completion_sinks.clone(),
+            adapters.clone(),
+            all_completion_sinks.clone(),
         )
         .context("construct startup AgentRun recovery")?
         .recover_once(CancellationToken::new())
@@ -218,18 +246,26 @@ impl DaemonAgentHost {
         cleanup_terminal_process_sidecars(&store, &sidecars, &controller)
             .await
             .context("clean terminal AgentRun process controllers")?;
-        let backend = ResidentAgentBackend::new(
-            LOCAL_TASK_OWNER,
-            Arc::clone(&store),
-            executor,
-            vec![adapter],
-            completion_sinks,
-        );
-        let supervisor = ResidentAgentSupervisor::new(
-            backend,
-            format!("agent-exec-{instance_key}"),
+        let supervisor = ResidentAgentHost::new(
+            ResidentAgentHostBackend::new(
+                LOCAL_TASK_OWNER,
+                Arc::clone(&store),
+                adapters,
+                all_completion_sinks,
+            ),
+            vec![
+                ResidentAgentExecutionLane::new(
+                    process_executor,
+                    format!("agent-exec-process-{instance_key}"),
+                    AgentExecutionOptions::default(),
+                ),
+                ResidentAgentExecutionLane::new(
+                    native_executor,
+                    format!("agent-exec-native-{instance_key}"),
+                    AgentExecutionOptions::default(),
+                ),
+            ],
             format!("agent-recovery-{instance_key}"),
-            AgentExecutionOptions::default(),
             AgentRecoveryOptions::default(),
             AgentSupervisorOptions::default(),
         )
@@ -743,7 +779,7 @@ fn freeze_requested_workdir(
     }
 }
 
-pub(crate) async fn run_supervisor(supervisor: ResidentAgentSupervisor, cancel: CancellationToken) {
+pub(crate) async fn run_supervisor(supervisor: ResidentAgentHost, cancel: CancellationToken) {
     let _ = supervisor.run(cancel).await;
 }
 

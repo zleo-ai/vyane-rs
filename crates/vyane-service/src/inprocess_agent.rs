@@ -758,7 +758,7 @@ struct AssemblyRegistration {
 static LIVE_ASSEMBLIES: OnceLock<Mutex<Vec<AssemblyRegistration>>> = OnceLock::new();
 
 impl InProcessAgentComponents {
-    pub(crate) fn into_resident_backend(self) -> ResidentAgentBackend {
+    pub fn into_resident_backend(self) -> ResidentAgentBackend {
         let executor: Arc<dyn AgentRunExecutor> = self.backend.clone();
         let adapter: Arc<dyn AgentControllerAdapter> = self.backend;
         ResidentAgentBackend::new(

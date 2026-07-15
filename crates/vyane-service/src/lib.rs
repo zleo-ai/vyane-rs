@@ -66,9 +66,9 @@ pub use agent_recovery::{
 };
 pub use agent_supervisor::{
     AgentExecutionLaneExit, AgentSupervisorError, AgentSupervisorExit, AgentSupervisorLoopExit,
-    AgentSupervisorOptions, ResidentAgentBackend, ResidentAgentExecutionLane, ResidentAgentHost,
-    ResidentAgentHostBackend, ResidentAgentHostExit, ResidentAgentSupervisor,
-    ResidentInProcessAgentSupervisor,
+    AgentSupervisorOptions, ResidentAgentBackend, ResidentAgentBackendParts,
+    ResidentAgentExecutionLane, ResidentAgentHost, ResidentAgentHostBackend, ResidentAgentHostExit,
+    ResidentAgentSupervisor, ResidentInProcessAgentSupervisor,
 };
 pub use config::{LoadedConfig, Runtime, StoragePaths, load_config};
 pub use diagnostics::{

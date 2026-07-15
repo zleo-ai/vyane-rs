@@ -405,6 +405,16 @@ pub struct ResidentAgentBackend {
     completion_sinks: Vec<Arc<dyn AgentCompletionSink>>,
 }
 
+/// Owned ports extracted from one exact resident backend for multi-lane
+/// assembly. The owner and store must remain identical across merged parts.
+pub type ResidentAgentBackendParts = (
+    String,
+    Arc<dyn AgentStore>,
+    Arc<dyn AgentRunExecutor>,
+    Vec<Arc<dyn AgentControllerAdapter>>,
+    Vec<Arc<dyn AgentCompletionSink>>,
+);
+
 struct RecoveryLoopBackend {
     owner: String,
     store: Arc<dyn AgentStore>,
@@ -435,6 +445,19 @@ impl ResidentAgentBackend {
             adapters,
             completion_sinks,
         }
+    }
+
+    /// Consume the paired backend into the exact ports needed by a resident
+    /// multi-lane host. The host remains responsible for validating that all
+    /// lanes share one owner/store and that backend kinds are unique.
+    pub fn into_parts(self) -> ResidentAgentBackendParts {
+        (
+            self.owner,
+            self.store,
+            self.executor,
+            self.adapters,
+            self.completion_sinks,
+        )
     }
 }
 
