@@ -43,6 +43,9 @@ pub struct AgentExecutionIdentity {
     worker_id: String,
     generation: u64,
     target_key: String,
+    prompt_digest: String,
+    policy_digest: String,
+    timeout_seconds: u64,
 }
 
 impl AgentExecutionIdentity {
@@ -61,6 +64,19 @@ impl AgentExecutionIdentity {
     #[must_use]
     pub fn target_key(&self) -> &str {
         &self.target_key
+    }
+    #[must_use]
+    pub fn prompt_digest(&self) -> &str {
+        &self.prompt_digest
+    }
+    #[must_use]
+    pub fn policy_digest(&self) -> &str {
+        &self.policy_digest
+    }
+    /// Frozen duration used to derive this run's durable claim deadline.
+    #[must_use]
+    pub const fn timeout_seconds(&self) -> u64 {
+        self.timeout_seconds
     }
 }
 
@@ -893,6 +909,9 @@ fn execution_identity(claim: &ClaimedRun) -> AgentExecutionIdentity {
         worker_id: claim.run.worker_id.clone(),
         generation: claim.run.worker_generation,
         target_key: claim.run.target_key.clone(),
+        prompt_digest: claim.run.prompt_digest.clone(),
+        policy_digest: claim.run.policy_digest.clone(),
+        timeout_seconds: claim.run.timeout_seconds,
     }
 }
 

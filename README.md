@@ -95,7 +95,7 @@ reference implementation.
 | config & profiles | `vyane-config` | [x] |
 | OpenAI-Chat + Responses + Anthropic-Messages clients | `vyane-protocol` | [x] baseline clients; [~] bounded typed tool turns and the per-wire authorized path currently cover non-streaming OpenAI Chat only |
 | Claude Code + Codex CLI harnesses, including stdout event streaming | `vyane-harness` | [x] additive scoped execution carries the Linux pinned workdir and an optional live spawn authority; the Process AgentRun host constructs that authority for fresh sessionless CLI runs, and gated capture/streaming revalidate before wrapper spawn and real-target release. This remains adapter-delegated rather than a host sandbox |
-| native permission/tool execution seam (not yet a `Harness` implementation) | `vyane-harness` + `vyane-service` | [~] atomic AgentRun scope validation, per-wire model authorization, an allowed-tool registry gate, a fresh-sessionless permit/store bridge, bounded serial turn driver, lifetime-bound in-process native-scope composition, and a generic crash-consistent completion handback boundary exist as dark components. No concrete product operation or production factory/runtime is wired; session-bearing authority, trusted built-ins, OS sandbox, checkpoint/session commit, approval resume and native resume remain absent |
+| native permission/tool execution seam (not yet a `Harness` implementation) | `vyane-harness` + `vyane-service` | [~] atomic AgentRun scope validation, per-wire model authorization, an allowed-tool registry gate, a fresh-sessionless permit/store bridge, bounded serial turn driver, lifetime-bound in-process native-scope composition, and a generic crash-consistent completion handback boundary exist as dark components. [WP-65](docs/plan/WP-65.md) composes a private-spool, exact fresh-sessionless, tool-free OpenAI Chat operation and durable message-completion E2E; it remains dark and is not registered with a daemon or public API. Session-bearing authority, trusted built-ins, OS sandbox, checkpoint/session commit, approval resume, failover/replay and native resume remain absent |
 | dispatch / broadcast / failover kernel | `vyane-kernel` | [x] early execution id, whole-chain trusted capability admission, one-shot prepared dispatch and original-ordinal failover evidence |
 | append-only run ledger + owner-isolated session records | `vyane-ledger` | [x] direct-HTTP transcript continuation plus strict revisioned V2 snapshots, store-level CAS `Reset` / `ForkFresh` / `Commit`, and an exact local-filesystem execution-period lease; CLI/service control is limited to owner-local list/inspect/reset-native, with no public fork, REST mutation, distributed lease protocol, or production native resume |
 | replayable owner-scoped event store | `vyane-ledger` | [~] storage/cursors, bounded message and AgentRun lifecycle projection, explicit owner-bound projection-only service assembly, and an unwired resident broker driver now exist; dispatch/workflow producers, subscription, retention and a unified timeline remain |
@@ -185,6 +185,13 @@ native resume. Separately, `AgentProjectionComponents::open` provides an
 explicit owner-bound path to the one-shot AgentRun projector while keeping the
 raw store encapsulated. Ordinary dispatch neither opens that database nor
 starts projection or other resident work.
+
+[WP-65](docs/plan/WP-65.md) provides a dark composition slice: a private native
+spool, exact fresh/sessionless scope, authorized OpenAI Chat client, tool-free
+`NativeTurnDriver`, and exact durable message-completion acceptance path. It is
+not a daemon, CLI, REST, or MCP native
+target; it adds no trusted built-ins, sandbox, session/resume/checkpoint or
+approval authority, failover, replay, or general production-parity claim.
 
 `vyane-service::AgentRunRecoveryDriver` is another explicit fixed-owner,
 non-`Clone` one-shot seam. Construction freezes the owner, injected store,

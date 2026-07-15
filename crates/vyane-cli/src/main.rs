@@ -20,6 +20,12 @@ mod daemon_workflow;
 mod factory;
 mod goal;
 mod mcp_workflow;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod native_agent;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod native_agent_spool;
 mod output;
 mod review;
 mod supervisor;

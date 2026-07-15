@@ -10,9 +10,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use vyane_config::ResolvedConfig;
 use vyane_core::{
-    AdapterTransport, BoundTarget, ChatClient, EnvPolicy, ErrorKind, Harness,
-    HarnessExecutionContext, HarnessJob, HarnessKind, HarnessOutcome, HarnessStreamEvent, Protocol,
-    Result, VyaneError,
+    AdapterTransport, AuthorizedToolChatClient, BoundTarget, ChatClient, EnvPolicy, ErrorKind,
+    Harness, HarnessExecutionContext, HarnessJob, HarnessKind, HarnessOutcome, HarnessStreamEvent,
+    Protocol, Result, VyaneError,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 use vyane_kernel::{CapabilityManifest, Executor, ExecutorFactory, IsolationStrength};
@@ -211,6 +211,56 @@ pub fn direct_http_client(bound: &BoundTarget) -> Result<Arc<dyn ChatClient>> {
     Ok(client)
 }
 
+/// Build the guarded tool-chat capability used by an in-process native agent.
+///
+/// This is intentionally narrower than [`direct_http_client`]: the native loop
+/// may only receive the authority-checking trait object, and the initial
+/// production support matrix is limited to direct OpenAI Chat endpoints.  The
+/// complete matrix is checked before cloning endpoint material or constructing
+/// an HTTP client, so unsupported targets cannot cause wire effects.
+pub fn authorized_native_client(bound: &BoundTarget) -> Result<Arc<dyn AuthorizedToolChatClient>> {
+    validate_authorized_native_combo(
+        bound.transport,
+        bound.target.protocol,
+        bound.target.harness.as_ref(),
+    )?;
+    let endpoint = bound.endpoint.clone().ok_or_else(|| {
+        VyaneError::new(
+            ErrorKind::Config,
+            "native model target requires a concrete endpoint",
+        )
+    })?;
+    let options = ClientOptions {
+        // The protocol client owns a bounded three-attempt retry loop and
+        // revalidates native authority before every physical send.
+        retry: RetryConfig::default(),
+        request_timeout: None,
+    };
+    Ok(Arc::new(OpenAiChatClient::with_options(endpoint, options)?))
+}
+
+fn validate_authorized_native_combo(
+    transport: AdapterTransport,
+    protocol: Protocol,
+    harness: Option<&HarnessKind>,
+) -> Result<()> {
+    match (transport, harness, protocol) {
+        (AdapterTransport::DirectHttp, None, Protocol::OpenaiChat) => Ok(()),
+        (AdapterTransport::DirectHttp, Some(_), _) => Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            "native model target cannot use a CLI harness",
+        )),
+        (AdapterTransport::DirectHttp, None, _) => Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            "native model target protocol is not supported",
+        )),
+        _ => Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            "native model target transport is not supported",
+        )),
+    }
+}
+
 fn concrete_harness(kind: HarnessKind) -> Result<Arc<dyn Harness>> {
     match kind {
         HarnessKind::ClaudeCode => Ok(Arc::new(ClaudeCodeHarness::new())),
@@ -289,11 +339,16 @@ impl Harness for EnvPolicyHarness {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::io::ErrorKind as IoErrorKind;
+    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use super::*;
-    use vyane_core::{CancellationToken, GenParams, ModelId, ProviderId, Sandbox, Target};
+    use vyane_core::{
+        AuthMaterial, AuthStyle, CancellationToken, Endpoint, GenParams, ModelId, ProviderId,
+        Sandbox, Secret, Target,
+    };
 
     struct StreamingHarness {
         observed_env: Arc<Mutex<Option<EnvPolicy>>>,
@@ -369,6 +424,23 @@ mod tests {
             endpoint: None,
             params: GenParams::default(),
         }
+    }
+
+    fn endpoint_bound_target(
+        transport: AdapterTransport,
+        harness: Option<HarnessKind>,
+        protocol: Protocol,
+        base_url: impl Into<String>,
+    ) -> BoundTarget {
+        let mut bound = bound_target(transport, harness, protocol);
+        bound.endpoint = Some(Endpoint {
+            base_url: base_url.into(),
+            auth: Some(AuthMaterial {
+                style: AuthStyle::Bearer,
+                secret: Secret::new("TEST_FACTORY_SECRET_CANARY"),
+            }),
+        });
+        bound
     }
 
     #[test]
@@ -470,6 +542,116 @@ mod tests {
         assert_eq!(
             error.message,
             "transport, protocol, and harness combination is not supported"
+        );
+    }
+
+    #[test]
+    fn authorized_native_factory_accepts_only_direct_openai_chat_with_endpoint() {
+        let accepted = endpoint_bound_target(
+            AdapterTransport::DirectHttp,
+            None,
+            Protocol::OpenaiChat,
+            "http://127.0.0.1:1",
+        );
+        assert_eq!(
+            authorized_native_client(&accepted).unwrap().protocol(),
+            Protocol::OpenaiChat
+        );
+
+        let rejected = [
+            bound_target(
+                AdapterTransport::DirectHttp,
+                None,
+                Protocol::OpenaiResponses,
+            ),
+            bound_target(
+                AdapterTransport::DirectHttp,
+                None,
+                Protocol::AnthropicMessages,
+            ),
+            bound_target(
+                AdapterTransport::CliWrap,
+                Some(HarnessKind::CodexCli),
+                Protocol::OpenaiChat,
+            ),
+            bound_target(
+                AdapterTransport::DirectHttp,
+                Some(HarnessKind::Other("custom-harness".into())),
+                Protocol::OpenaiChat,
+            ),
+        ];
+        for bound in rejected {
+            assert_eq!(
+                authorized_native_client(&bound).err().unwrap().kind,
+                ErrorKind::Unsupported
+            );
+        }
+
+        let missing_endpoint =
+            bound_target(AdapterTransport::DirectHttp, None, Protocol::OpenaiChat);
+        assert_eq!(
+            authorized_native_client(&missing_endpoint)
+                .err()
+                .unwrap()
+                .kind,
+            ErrorKind::Config
+        );
+    }
+
+    #[test]
+    fn rejected_native_combinations_have_no_wire_effect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+
+        for protocol in [Protocol::OpenaiResponses, Protocol::AnthropicMessages] {
+            let bound = endpoint_bound_target(
+                AdapterTransport::DirectHttp,
+                None,
+                protocol,
+                endpoint.clone(),
+            );
+            assert!(authorized_native_client(&bound).is_err());
+        }
+        let cli = endpoint_bound_target(
+            AdapterTransport::CliWrap,
+            Some(HarnessKind::CodexCli),
+            Protocol::OpenaiChat,
+            endpoint,
+        );
+        assert!(authorized_native_client(&cli).is_err());
+
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            IoErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn authorized_native_factory_diagnostics_are_static_and_redacted() {
+        let mut bound = endpoint_bound_target(
+            AdapterTransport::DirectHttp,
+            Some(HarnessKind::Other("TEST_FACTORY_HARNESS_CANARY".into())),
+            Protocol::OpenaiChat,
+            "https://TEST_FACTORY_ENDPOINT_CANARY.invalid",
+        );
+        bound.target.provider = ProviderId::new("TEST_FACTORY_PROVIDER_CANARY");
+        bound.target.model = ModelId::new("TEST_FACTORY_MODEL_CANARY");
+
+        let error = authorized_native_client(&bound).err().unwrap();
+        let diagnostic = format!("{error:?} {error}");
+        for canary in [
+            "TEST_FACTORY_SECRET_CANARY",
+            "TEST_FACTORY_HARNESS_CANARY",
+            "TEST_FACTORY_ENDPOINT_CANARY",
+            "TEST_FACTORY_PROVIDER_CANARY",
+            "TEST_FACTORY_MODEL_CANARY",
+        ] {
+            assert!(!diagnostic.contains(canary));
+        }
+        assert_eq!(
+            error.message,
+            "native model target cannot use a CLI harness"
         );
     }
 
