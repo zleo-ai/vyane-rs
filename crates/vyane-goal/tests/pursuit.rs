@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(unix)]
 use std::{fs, os::unix::fs::PermissionsExt as _};
@@ -75,6 +75,26 @@ impl GoalSegmentRuntime for HangingRuntime {
                 status: PursuitSegmentStatus::Success,
                 run_id: None,
             },
+        }
+    }
+}
+
+struct NotifyingHangingRuntime {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl GoalSegmentRuntime for NotifyingHangingRuntime {
+    async fn run_segment(
+        &self,
+        _request: PursuitSegmentRequest,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> PursuitSegmentResult {
+        self.started.notify_one();
+        cancel.cancelled().await;
+        PursuitSegmentResult {
+            status: PursuitSegmentStatus::Cancelled,
+            run_id: None,
         }
     }
 }
@@ -643,17 +663,21 @@ async fn overall_timeout_and_cancellation_pause_without_another_segment() {
     );
     let cancel = tokio_util::sync::CancellationToken::new();
     let cancel_worker = cancel.clone();
+    let runtime_started = Arc::new(tokio::sync::Notify::new());
+    let cancel_started = Arc::clone(&runtime_started);
     let canceller = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel_started.notified().await;
         cancel_worker.cancel();
     });
+    let runtime = NotifyingHangingRuntime {
+        started: runtime_started,
+    };
     let started = std::time::Instant::now();
-    let token_cancelled =
-        GoalPursuer::new(&store, &HangingRuntime, &verifier, config(&directory, 3, 3))
-            .unwrap()
-            .pursue_with_cancel(OWNER, "token-cancelled", cancel)
-            .await
-            .unwrap();
+    let token_cancelled = GoalPursuer::new(&store, &runtime, &verifier, config(&directory, 3, 3))
+        .unwrap()
+        .pursue_with_cancel(OWNER, "token-cancelled", cancel)
+        .await
+        .unwrap();
     canceller.await.unwrap();
     assert!(started.elapsed() < Duration::from_secs(1));
     assert_eq!(token_cancelled.status, PursuitStatus::Paused);
