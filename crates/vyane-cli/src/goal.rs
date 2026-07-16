@@ -164,12 +164,15 @@ struct DispatchGoalRuntime {
     service: VyaneService,
     target: String,
     sandbox: Sandbox,
-    cancel: CancellationToken,
 }
 
 #[async_trait]
 impl GoalSegmentRuntime for DispatchGoalRuntime {
-    async fn run_segment(&self, request: PursuitSegmentRequest) -> PursuitSegmentResult {
+    async fn run_segment(
+        &self,
+        request: PursuitSegmentRequest,
+        cancel: CancellationToken,
+    ) -> PursuitSegmentResult {
         let outcome = self
             .service
             .dispatch(
@@ -183,7 +186,7 @@ impl GoalSegmentRuntime for DispatchGoalRuntime {
                     timeout_secs: Some(request.timeout.as_secs().max(1)),
                     labels: Vec::new(),
                 },
-                self.cancel.child_token(),
+                cancel,
             )
             .await;
         match outcome {
@@ -255,19 +258,22 @@ async fn pursue(config_path: Option<PathBuf>, args: GoalPursueArgs) -> Result<Ex
     };
     config.validate().context("validate goal pursuit")?;
     let service = VyaneService::load(config_path.as_deref()).context("load pursuit runtime")?;
-    service
-        .resolve(&args.target)
-        .context("resolve pursuit target")?;
+    if !args.target.eq_ignore_ascii_case("auto") {
+        service
+            .resolve(&args.target)
+            .context("resolve pursuit target")?;
+    }
     let (cancel, signal_task) = cancellation_token();
     let runtime = DispatchGoalRuntime {
         service,
         target: args.target.clone(),
         sandbox: args.sandbox.into(),
-        cancel,
     };
     let pursuer =
         GoalPursuer::new(&store, &runtime, &verifier, config).context("construct goal pursuer")?;
-    let outcome = pursuer.pursue(&args.common.owner, &args.id).await;
+    let outcome = pursuer
+        .pursue_with_cancel(&args.common.owner, &args.id, cancel)
+        .await;
     signal_task.abort();
     let _ = signal_task.await;
     let outcome = outcome.context("pursue goal")?;

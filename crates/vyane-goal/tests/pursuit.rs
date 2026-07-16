@@ -46,7 +46,11 @@ impl FakeRuntime {
 
 #[async_trait]
 impl GoalSegmentRuntime for FakeRuntime {
-    async fn run_segment(&self, request: PursuitSegmentRequest) -> PursuitSegmentResult {
+    async fn run_segment(
+        &self,
+        request: PursuitSegmentRequest,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> PursuitSegmentResult {
         let result = (self.handler.lock().expect("handler lock"))(&request);
         self.requests.lock().expect("requests lock").push(request);
         result
@@ -57,11 +61,20 @@ struct HangingRuntime;
 
 #[async_trait]
 impl GoalSegmentRuntime for HangingRuntime {
-    async fn run_segment(&self, _request: PursuitSegmentRequest) -> PursuitSegmentResult {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        PursuitSegmentResult {
-            status: PursuitSegmentStatus::Success,
-            run_id: None,
+    async fn run_segment(
+        &self,
+        _request: PursuitSegmentRequest,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> PursuitSegmentResult {
+        tokio::select! {
+            _ = cancel.cancelled() => PursuitSegmentResult {
+                status: PursuitSegmentStatus::Cancelled,
+                run_id: None,
+            },
+            _ = tokio::time::sleep(Duration::from_secs(5)) => PursuitSegmentResult {
+                status: PursuitSegmentStatus::Success,
+                run_id: None,
+            },
         }
     }
 }
@@ -72,7 +85,11 @@ struct CapturingHangingRuntime {
 
 #[async_trait]
 impl GoalSegmentRuntime for CapturingHangingRuntime {
-    async fn run_segment(&self, request: PursuitSegmentRequest) -> PursuitSegmentResult {
+    async fn run_segment(
+        &self,
+        request: PursuitSegmentRequest,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> PursuitSegmentResult {
         self.timeouts
             .lock()
             .expect("timeouts lock")
@@ -467,6 +484,30 @@ async fn overall_timeout_and_cancellation_pause_without_another_segment() {
     assert_eq!(cancelled.reason, "pursuit cancelled");
     assert_eq!(cancelled.segments_started, 1);
     assert_eq!(cancelled_runtime.call_count(), 1);
+
+    running_goal(
+        &store,
+        "token-cancelled",
+        vec![AcceptanceCriterion::new("custom", "cmd:false")],
+    );
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_worker = cancel.clone();
+    let canceller = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel_worker.cancel();
+    });
+    let started = std::time::Instant::now();
+    let token_cancelled =
+        GoalPursuer::new(&store, &HangingRuntime, &verifier, config(&directory, 3, 3))
+            .unwrap()
+            .pursue_with_cancel(OWNER, "token-cancelled", cancel)
+            .await
+            .unwrap();
+    canceller.await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(token_cancelled.status, PursuitStatus::Paused);
+    assert_eq!(token_cancelled.reason, "pursuit cancelled");
+    assert_eq!(token_cancelled.segments_started, 1);
 }
 
 #[tokio::test]
@@ -484,13 +525,17 @@ async fn active_lease_mismatch_rejects_before_verifier_or_runtime() {
     let mut pursuit_config = config(&directory, 3, 2);
     pursuit_config.worker_id = "worker-b".into();
     let pursuer = GoalPursuer::new(&store, &runtime, &verifier, pursuit_config).unwrap();
+    let events_before = store.events(OWNER, "leased").unwrap().len();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
 
     assert!(matches!(
-        pursuer.pursue(OWNER, "leased").await,
+        pursuer.pursue_with_cancel(OWNER, "leased", cancel).await,
         Err(GoalStoreError::LeaseHeld { .. })
     ));
     assert_eq!(runtime.call_count(), 0);
     assert!(store.verifications(OWNER, "leased").unwrap().is_empty());
+    assert_eq!(store.events(OWNER, "leased").unwrap().len(), events_before);
 }
 
 #[tokio::test]
@@ -736,6 +781,83 @@ async fn external_pause_during_verification_stops_before_persistence_or_runtime(
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn authority_change_after_verification_persistence_stops_before_runtime() {
+    let (directory, store) = fixture();
+    running_goal(
+        &store,
+        "post-verify-pause",
+        vec![AcceptanceCriterion::new("custom", "cmd:false")],
+    );
+    let connection = rusqlite::Connection::open(directory.path().join("goals.sqlite3"))
+        .expect("open trigger connection");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER pause_after_verification_progress
+             AFTER INSERT ON goal_events
+             WHEN NEW.goal_id = 'post-verify-pause'
+                  AND NEW.stage = 'acceptance.verify'
+             BEGIN
+                 UPDATE goals
+                 SET status = 'paused', claimed_by = NULL,
+                     claim_expires_at_ms = NULL, pause_reason = 'external pause'
+                 WHERE owner = 'owner-a' AND id = 'post-verify-pause';
+             END;",
+        )
+        .expect("install authority-change trigger");
+    let runtime = FakeRuntime::new(|_| panic!("runtime must not run"));
+    let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
+
+    let outcome = GoalPursuer::new(&store, &runtime, &verifier, config(&directory, 3, 2))
+        .unwrap()
+        .pursue(OWNER, "post-verify-pause")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, PursuitStatus::Stopped);
+    assert_eq!(outcome.reason, "goal status is paused");
+    assert_eq!(outcome.segments_started, 0);
+    assert_eq!(runtime.call_count(), 0);
+}
+
+#[tokio::test]
+async fn same_worker_reclaim_after_verification_stops_before_runtime() {
+    let (directory, store) = fixture();
+    running_goal(
+        &store,
+        "post-verify-reclaim",
+        vec![AcceptanceCriterion::new("custom", "cmd:false")],
+    );
+    let connection = rusqlite::Connection::open(directory.path().join("goals.sqlite3"))
+        .expect("open trigger connection");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reclaim_after_verification_progress
+             AFTER INSERT ON goal_events
+             WHEN NEW.goal_id = 'post-verify-reclaim'
+                  AND NEW.stage = 'acceptance.verify'
+             BEGIN
+                 UPDATE goals
+                 SET claim_generation = claim_generation + 1
+                 WHERE owner = 'owner-a' AND id = 'post-verify-reclaim';
+             END;",
+        )
+        .expect("install authority-change trigger");
+    let runtime = FakeRuntime::new(|_| panic!("runtime must not run"));
+    let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
+
+    let outcome = GoalPursuer::new(&store, &runtime, &verifier, config(&directory, 3, 2))
+        .unwrap()
+        .pursue(OWNER, "post-verify-reclaim")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, PursuitStatus::Stopped);
+    assert_eq!(outcome.reason, "goal lease changed outside pursuit");
+    assert_eq!(outcome.segments_started, 0);
+    assert_eq!(runtime.call_count(), 0);
 }
 
 #[tokio::test]
