@@ -80,9 +80,11 @@ impl DaemonGoalConfig {
             .as_ref()
             .context("--goal-auto-pursue requires --goal-target")?
             .clone();
-        service
-            .resolve(&target)
-            .context("resolve automatic goal pursuit target")?;
+        if !target.eq_ignore_ascii_case("auto") {
+            service
+                .resolve(&target)
+                .context("resolve automatic goal pursuit target")?;
+        }
         let workdir = std::fs::canonicalize(
             args.goal_workdir
                 .as_ref()
@@ -578,6 +580,12 @@ mod tests {
 
         let missing = cli_args("builder", &directory.path().join("missing-workdir"));
         assert!(DaemonGoalConfig::from_args(&runtime, &missing).is_err());
+
+        let auto = cli_args("auto", directory.path());
+        let auto = DaemonGoalConfig::from_args(&runtime, &auto)
+            .unwrap()
+            .expect("auto pursuit config");
+        assert_eq!(auto.pursuit.runtime, "auto");
     }
 
     #[test]
