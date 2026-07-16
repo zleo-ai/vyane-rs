@@ -892,7 +892,6 @@ fn pursuit_config_rejects_non_utf8_workdir_before_checkpoint_io() {
     let path = directory
         .path()
         .join(std::ffi::OsString::from_vec(b"invalid-\xff".to_vec()));
-    std::fs::create_dir(&path).expect("create non-UTF-8 workdir");
     let mut pursuit_config = config(&directory, 3, 2);
     pursuit_config.workdir = path;
 

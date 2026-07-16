@@ -36,7 +36,7 @@ pub struct PursuitConfig {
 
 impl PursuitConfig {
     pub fn validate(&self) -> Result<()> {
-        if !self.workdir.is_absolute() || !self.workdir.is_dir() {
+        if !self.workdir.is_absolute() {
             return Err(GoalStoreError::InvalidInput(
                 "pursuit workdir must be an existing absolute directory".into(),
             ));
@@ -44,6 +44,11 @@ impl PursuitConfig {
         if self.workdir.to_str().is_none() {
             return Err(GoalStoreError::InvalidInput(
                 "pursuit workdir must be valid UTF-8 for durable checkpoints".into(),
+            ));
+        }
+        if !self.workdir.is_dir() {
+            return Err(GoalStoreError::InvalidInput(
+                "pursuit workdir must be an existing absolute directory".into(),
             ));
         }
         if self.runtime.trim().is_empty() || self.runtime.len() > 256 {
