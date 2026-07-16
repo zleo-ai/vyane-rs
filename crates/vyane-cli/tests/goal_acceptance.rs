@@ -288,6 +288,32 @@ fn create_persists_typed_continuity_policy_without_starting_handoff() {
 }
 
 #[test]
+fn malformed_continuity_policy_fails_before_goal_creation() {
+    let directory = TempDir::new().unwrap();
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let output = vyane()
+        .args([
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--id",
+            "bad-continuity",
+            "--title",
+            "Reject malformed policy",
+            "--continuity-policy-json",
+            "{not-json}",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("parse continuity policy JSON"));
+
+    let missing = json_output(&["goal", "get", "--db", &db, "--json", "bad-continuity"], 2);
+    assert_eq!(missing["status"], "error");
+}
+
+#[test]
 fn done_requires_satisfied_criteria_or_an_explicit_waiver() {
     let directory = TempDir::new().unwrap();
     let db = db_text(&directory.path().join("goals.sqlite3"));

@@ -386,7 +386,7 @@ pub(crate) fn state_for_event(
     if applied.len() > MAX_APPLIED_EVENTS {
         applied.drain(..applied.len() - MAX_APPLIED_EVENTS);
     }
-    Ok(Some(GoalContinuityState {
+    let state = GoalContinuityState {
         state: status,
         quota_event_id: event.event_id.clone(),
         observed_at: event.observed_at,
@@ -404,7 +404,9 @@ pub(crate) fn state_for_event(
             steps,
         },
         applied_quota_event_ids: applied,
-    }))
+    };
+    state.validate()?;
+    Ok(Some(state))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -155,6 +155,69 @@ fn unmatched_and_unstarted_goals_are_not_mutated() {
 }
 
 #[test]
+fn quota_target_aliases_provider_or_harness_and_broadcasts_to_all_matches() {
+    let directory = TempDir::new().expect("temporary directory");
+    let store = store(&directory);
+    create_started(&store, "provider-match", policy(true));
+    let mut harness_policy = policy(true);
+    harness_policy.primary.provider = "different-provider".into();
+    create_started(&store, "harness-match", harness_policy);
+
+    let actions = apply_quota_handoff_events(
+        &store,
+        OWNER,
+        &[GoalQuotaEvent {
+            event_id: "quota-broadcast".into(),
+            goal_id: None,
+            provider: "primary-provider".into(),
+            harness: "codex-cli".into(),
+            model: "primary-model".into(),
+            session_id: None,
+            observed_at: at(1_100),
+            estimated_reset_at: None,
+        }],
+        at(1_101),
+    )
+    .expect("apply broadcast quota event");
+
+    assert_eq!(actions.len(), 2);
+    assert_eq!(
+        actions
+            .iter()
+            .map(|action| action.goal_id.as_str())
+            .collect::<Vec<_>>(),
+        ["harness-match", "provider-match"]
+    );
+}
+
+#[test]
+fn policy_validation_rejects_unsafe_or_ambiguous_declarations() {
+    let directory = TempDir::new().expect("temporary directory");
+    let store = store(&directory);
+
+    let mut wrong_role = policy(true);
+    wrong_role.primary.role = "takeover".into();
+    let mut goal = NewGoal::new("wrong role", at(1_000));
+    goal.id = Some("wrong-role".into());
+    goal.continuity_policy = Some(wrong_role);
+    assert!(store.create(OWNER, goal).is_err());
+
+    let mut missing_reviewer = policy(true);
+    missing_reviewer.reviewer = None;
+    let mut goal = NewGoal::new("missing reviewer", at(1_000));
+    goal.id = Some("missing-reviewer".into());
+    goal.continuity_policy = Some(missing_reviewer);
+    assert!(store.create(OWNER, goal).is_err());
+
+    let mut too_many = policy(true);
+    too_many.takeover = vec![target("takeover", "backup", "claude-code", "fallback"); 9];
+    let mut goal = NewGoal::new("too many", at(1_000));
+    goal.id = Some("too-many".into());
+    goal.continuity_policy = Some(too_many);
+    assert!(store.create(OWNER, goal).is_err());
+}
+
+#[test]
 fn missing_takeover_records_a_manual_blocker_without_execution() {
     let directory = TempDir::new().expect("temporary directory");
     let store = store(&directory);
@@ -177,4 +240,47 @@ fn missing_takeover_records_a_manual_blocker_without_execution() {
         GoalContinuityStepStatus::Ready
     );
     assert!(state.handoff_plan.steps[0].target.is_none());
+}
+
+#[test]
+fn optional_review_and_primary_resume_steps_follow_policy_flags() {
+    let directory = TempDir::new().expect("temporary directory");
+    let store = store(&directory);
+    let mut no_review = policy(true);
+    no_review.require_review_before_resume = false;
+    create_started(&store, "no-review", no_review);
+    let action = apply_quota_handoff_events(
+        &store,
+        OWNER,
+        &[quota(Some("no-review"), "quota-no-review")],
+        at(1_101),
+    )
+    .expect("apply no-review event");
+    assert_eq!(
+        action[0]
+            .state
+            .handoff_plan
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<Vec<_>>(),
+        ["takeover", "resume_primary"]
+    );
+    assert_eq!(
+        action[0].state.handoff_plan.steps[1].wait_for,
+        ["quota_reset"]
+    );
+
+    let mut no_resume = policy(true);
+    no_resume.resume_primary_after_reset = false;
+    create_started(&store, "no-resume", no_resume);
+    let action = apply_quota_handoff_events(
+        &store,
+        OWNER,
+        &[quota(Some("no-resume"), "quota-no-resume")],
+        at(1_101),
+    )
+    .expect("apply no-resume event");
+    assert_eq!(action[0].state.handoff_plan.steps.len(), 2);
+    assert_eq!(action[0].state.handoff_plan.steps[1].id, "review_takeover");
 }
