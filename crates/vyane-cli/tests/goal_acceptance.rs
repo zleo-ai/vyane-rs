@@ -76,14 +76,16 @@ fn pursuit_fixture(directory: &TempDir) -> (std::path::PathBuf, TempDir) {
     .expect("write pursuit config");
     let bin = TempDir::new().expect("bin tempdir");
     let claude = bin.path().join("claude");
-    fs::write(
-        &claude,
-        r#"#!/bin/sh
+    #[cfg(target_os = "linux")]
+    let script = r#"#!/bin/sh
 : > "$PWD/done.txt"
 printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
-"#,
-    )
-    .expect("write fake claude");
+"#;
+    #[cfg(not(target_os = "linux"))]
+    let script = r#"#!/bin/sh
+printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
+"#;
+    fs::write(&claude, script).expect("write fake claude");
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).expect("chmod fake claude");
     (config, bin)
 }
@@ -100,6 +102,30 @@ const PURSUIT_SANDBOX: &str = "write";
 // Writable pinned workdirs are currently supported only on Linux.
 #[cfg(all(unix, not(target_os = "linux")))]
 const PURSUIT_SANDBOX: &str = "read-only";
+
+#[cfg(all(unix, target_os = "linux"))]
+fn pursuit_acceptance(_: &TempDir) -> String {
+    "custom:cmd:/usr/bin/test -f done.txt".into()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn pursuit_acceptance(directory: &TempDir) -> String {
+    let check = directory.path().join("pursuit-ready-check");
+    fs::write(
+        &check,
+        r#"#!/bin/sh
+if [ -f pursuit-ready ]; then
+    exit 0
+fi
+: > pursuit-ready
+exit 1
+"#,
+    )
+    .expect("write portable pursuit acceptance check");
+    fs::set_permissions(&check, fs::Permissions::from_mode(0o755))
+        .expect("chmod portable pursuit acceptance check");
+    "custom:cmd:./pursuit-ready-check".into()
+}
 
 #[test]
 fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
@@ -802,6 +828,7 @@ fn pursue_auto_dispatches_fresh_segment_reverifies_and_completes() {
     let data_dir = TempDir::new().expect("data tempdir");
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let (config, bin) = pursuit_fixture(&directory);
+    let acceptance = pursuit_acceptance(&directory);
     json_output(
         &[
             "goal",
@@ -816,7 +843,7 @@ fn pursue_auto_dispatches_fresh_segment_reverifies_and_completes() {
             "--title",
             "Pursued goal",
             "--acceptance",
-            "custom:cmd:/usr/bin/test -f done.txt",
+            &acceptance,
         ],
         0,
     );
