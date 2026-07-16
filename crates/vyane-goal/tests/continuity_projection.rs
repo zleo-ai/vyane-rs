@@ -219,6 +219,68 @@ fn projection_moves_from_queue_to_decide_to_execute_without_mutation() {
 }
 
 #[test]
+fn projection_follows_a_requeued_approval_after_rejection() {
+    let directory = TempDir::new().unwrap();
+    let first_workdir = TempDir::new().unwrap();
+    let replacement_workdir = TempDir::new().unwrap();
+    let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
+    let goal = create_goal(&store, "reject-requeue", true);
+    let rejected = queue_current(&store, &goal, &first_workdir);
+    store
+        .decide_takeover_approval(
+            "local",
+            &rejected.approval_id,
+            TakeoverDecision::Reject,
+            "operator",
+            Some("change the execution boundary"),
+            Utc.timestamp_opt(1_005, 0).unwrap(),
+        )
+        .unwrap();
+
+    let replacement = queue_current(&store, &goal, &replacement_workdir);
+    let approvals = store
+        .list_takeover_approvals("local", Some(&goal.id))
+        .unwrap();
+    let pending = project_continuity_next_action(&goal, &approvals).unwrap();
+    assert_eq!(pending.action, GoalContinuityNextActionKind::DecideApproval);
+    assert_eq!(
+        pending.approval_id.as_deref(),
+        Some(replacement.approval_id.as_str())
+    );
+
+    store
+        .decide_takeover_approval(
+            "local",
+            &replacement.approval_id,
+            TakeoverDecision::Approve,
+            "operator",
+            None,
+            Utc.timestamp_opt(1_006, 0).unwrap(),
+        )
+        .unwrap();
+    store
+        .consume_takeover_approval(
+            "local",
+            &replacement.approval_id,
+            Utc.timestamp_opt(1_007, 0).unwrap(),
+        )
+        .unwrap();
+    let current = store.get("local", &goal.id).unwrap().unwrap();
+    let approvals = store
+        .list_takeover_approvals("local", Some(&goal.id))
+        .unwrap();
+    let in_flight = project_continuity_next_action(&current, &approvals).unwrap();
+    assert_eq!(
+        in_flight.action,
+        GoalContinuityNextActionKind::WaitForExecution
+    );
+    assert_eq!(
+        in_flight.approval_id.as_deref(),
+        Some(replacement.approval_id.as_str())
+    );
+}
+
+#[test]
 fn projection_reports_in_flight_and_blocked_execution_from_durable_evidence() {
     let directory = TempDir::new().unwrap();
     let workdir = TempDir::new().unwrap();

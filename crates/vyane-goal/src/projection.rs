@@ -146,21 +146,53 @@ pub fn project_continuity_next_action(
                 &step.reason,
             ));
         }
-        let mut current = approvals.iter().filter(|approval| {
+        let matches_current_boundary = |approval: &&TakeoverApproval| {
             approval.quota_event_id == state.quota_event_id
                 && approval.step_id == step.id
                 && approval.step_kind == step.kind
                 && approval.goal_revision == goal.revision
                 && approval.plan_snapshot == *state
-        });
+        };
+        let mut current = approvals
+            .iter()
+            .filter(matches_current_boundary)
+            .filter(|approval| {
+                matches!(
+                    approval.status,
+                    TakeoverApprovalStatus::Pending | TakeoverApprovalStatus::Approved
+                )
+            });
         let first = current.next();
         if current.next().is_some() {
             return Err(GoalStoreError::CorruptData(
-                "ready continuity step has multiple approvals for the exact current snapshot"
+                "ready continuity step has multiple actionable approvals for the exact current snapshot"
                     .into(),
             ));
         }
-        let current = first;
+        let current = first.or_else(|| {
+            approvals
+                .iter()
+                .filter(matches_current_boundary)
+                .filter(|approval| approval.status == TakeoverApprovalStatus::Rejected)
+                .max_by(|left, right| approval_evidence_order(left, right))
+        });
+        if current.is_none()
+            && approvals
+                .iter()
+                .filter(matches_current_boundary)
+                .any(|approval| {
+                    matches!(
+                        approval.status,
+                        TakeoverApprovalStatus::InFlight
+                            | TakeoverApprovalStatus::Done
+                            | TakeoverApprovalStatus::Blocked
+                    )
+                })
+        {
+            return Err(GoalStoreError::CorruptData(
+                "ready continuity step has a terminal or consumed current approval".into(),
+            ));
+        }
         return Ok(match current {
             None => {
                 let superseded = approvals
@@ -288,13 +320,18 @@ pub fn project_continuity_next_action(
     let latest_review_signal = state
         .ready_signals
         .iter()
-        .rev()
-        .find(|signal| {
+        .filter(|signal| {
             matches!(
                 signal.kind,
                 GoalContinuitySignalKind::ReviewChecksPassed
                     | GoalContinuitySignalKind::ReviewChecksFailed
             )
+        })
+        .max_by_key(|signal| {
+            signal
+                .review_check
+                .as_ref()
+                .map(|check| check.observation_sequence)
         })
         .map(|signal| signal.kind);
     let review_failure_observed = state
@@ -348,6 +385,7 @@ fn latest_approval<'a>(
             approval.quota_event_id == state.quota_event_id
                 && approval.step_id == step.id
                 && approval.step_kind == step.kind
+                && approval.status == status
         })
         .max_by(|left, right| approval_evidence_order(left, right))
         .ok_or_else(|| {
@@ -356,14 +394,6 @@ fn latest_approval<'a>(
                 step.id
             ))
         })?;
-    if latest.status != status {
-        return Err(GoalStoreError::CorruptData(format!(
-            "{} continuity step is {} but its latest durable approval is {}",
-            step.id,
-            status.as_str(),
-            latest.status.as_str()
-        )));
-    }
     Ok(latest)
 }
 
@@ -375,6 +405,7 @@ fn approval_evidence_order(
         .review_observation_high_water
         .cmp(&right.plan_snapshot.review_observation_high_water)
         .then_with(|| left.goal_revision.cmp(&right.goal_revision))
+        .then_with(|| left.created_at.cmp(&right.created_at))
         .then_with(|| left.approval_id.cmp(&right.approval_id))
 }
 
