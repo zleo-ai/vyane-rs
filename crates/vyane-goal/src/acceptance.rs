@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest as _, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalRecord,
@@ -74,17 +75,93 @@ impl AcceptanceVerifier {
         }
     }
 
+    /// Verify all criteria under one shared wall-clock budget. The final
+    /// command receives only the remaining budget and every later criterion is
+    /// reported as an error without execution once the budget is exhausted.
+    #[must_use]
+    pub fn verify_with_budget(
+        &self,
+        record: &GoalRecord,
+        budget: Duration,
+    ) -> AcceptanceVerification {
+        self.verify_with_budget_and_cancel(record, budget, &CancellationToken::new())
+            .expect("a fresh cancellation token cannot be cancelled")
+    }
+
+    /// Verify all criteria under one shared wall-clock budget, stopping any
+    /// active command process group when `cancel` is triggered. `None` means
+    /// cancellation won the race and no partial verification should be
+    /// persisted by the caller.
+    #[must_use]
+    pub fn verify_with_budget_and_cancel(
+        &self,
+        record: &GoalRecord,
+        budget: Duration,
+        cancel: &CancellationToken,
+    ) -> Option<AcceptanceVerification> {
+        let started = Instant::now();
+        let mut results = Vec::with_capacity(record.acceptance_criteria.len());
+        for (index, criterion) in record.acceptance_criteria.iter().enumerate() {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            let remaining = budget.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                results.push(self.result(
+                    index,
+                    criterion_key(index, criterion),
+                    criterion.kind.trim().to_owned(),
+                    criterion.target.trim().to_owned(),
+                    CriterionStatus::Error,
+                    Vec::new(),
+                    None,
+                    "verification budget exhausted",
+                ));
+                continue;
+            }
+            let verifier = Self {
+                workdir: self.workdir.clone(),
+                timeout: std::cmp::min(self.timeout, remaining),
+            };
+            results.push(verifier.verify_criterion_with_cancel(criterion, index, cancel)?);
+        }
+        let all_satisfied = !results.is_empty()
+            && results
+                .iter()
+                .all(|result| result.status == CriterionStatus::Satisfied);
+        let summary = summarize(&results);
+        Some(AcceptanceVerification {
+            goal_id: record.id.clone(),
+            all_satisfied,
+            results,
+            summary,
+        })
+    }
+
     #[must_use]
     pub fn verify_criterion(
         &self,
         criterion: &AcceptanceCriterion,
         index: usize,
     ) -> CriterionResult {
+        self.verify_criterion_with_cancel(criterion, index, &CancellationToken::new())
+            .expect("a fresh cancellation token cannot be cancelled")
+    }
+
+    fn verify_criterion_with_cancel(
+        &self,
+        criterion: &AcceptanceCriterion,
+        index: usize,
+        cancel: &CancellationToken,
+    ) -> Option<CriterionResult> {
+        if cancel.is_cancelled() {
+            return None;
+        }
         let kind = criterion.kind.trim().to_owned();
         let target = criterion.target.trim().to_owned();
         let key = criterion_key(index, criterion);
         if kind.is_empty() || target.is_empty() {
-            return self.result(
+            return Some(self.result(
                 index,
                 key,
                 kind,
@@ -93,10 +170,10 @@ impl AcceptanceVerifier {
                 Vec::new(),
                 None,
                 "criterion kind and target must be non-empty",
-            );
+            ));
         }
         if criterion.satisfied_at.is_some() {
-            return self.result(
+            return Some(self.result(
                 index,
                 key,
                 kind,
@@ -105,9 +182,9 @@ impl AcceptanceVerifier {
                 Vec::new(),
                 None,
                 "criterion already satisfied",
-            );
+            ));
         }
-        match kind.as_str() {
+        Some(match kind.as_str() {
             "manual-confirm" => self.result(
                 index,
                 key,
@@ -118,7 +195,9 @@ impl AcceptanceVerifier {
                 None,
                 "manual confirmation required",
             ),
-            "test-passes" | "custom" => self.verify_command(index, key, kind, target),
+            "test-passes" | "custom" => {
+                return self.verify_command(index, key, kind, target, cancel);
+            }
             _ => self.result(
                 index,
                 key,
@@ -129,7 +208,7 @@ impl AcceptanceVerifier {
                 None,
                 "unsupported acceptance criterion kind",
             ),
-        }
+        })
     }
 
     fn verify_command(
@@ -138,9 +217,10 @@ impl AcceptanceVerifier {
         key: String,
         kind: String,
         target: String,
-    ) -> CriterionResult {
+        cancel: &CancellationToken,
+    ) -> Option<CriterionResult> {
         #[cfg(not(unix))]
-        return self.result(
+        return Some(self.result(
             index,
             key,
             kind,
@@ -149,9 +229,9 @@ impl AcceptanceVerifier {
             Vec::new(),
             None,
             "command acceptance verification requires Unix process-group support",
-        );
+        ));
         #[cfg(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))]
-        return self.result(
+        return Some(self.result(
             index,
             key,
             kind,
@@ -160,9 +240,9 @@ impl AcceptanceVerifier {
             Vec::new(),
             None,
             "command acceptance verification requires waitid WNOWAIT support",
-        );
+        ));
         let Some(command) = parse_command(&target) else {
-            return self.result(
+            return Some(self.result(
                 index,
                 key,
                 kind,
@@ -171,7 +251,7 @@ impl AcceptanceVerifier {
                 Vec::new(),
                 None,
                 "command criteria require a cmd: prefix and non-empty argv",
-            );
+            ));
         };
         let started = Instant::now();
         let mut process = Command::new(&command[0]);
@@ -189,10 +269,11 @@ impl AcceptanceVerifier {
             process.process_group(0);
         }
         let deadline = started + self.timeout;
-        let mut child = match spawn_with_busy_retry(&mut process, deadline) {
+        let mut child = match spawn_with_busy_retry(&mut process, deadline, cancel) {
             Ok(child) => child,
+            Err(_) if cancel.is_cancelled() => return None,
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-                return self.result(
+                return Some(self.result(
                     index,
                     key,
                     kind,
@@ -201,10 +282,10 @@ impl AcceptanceVerifier {
                     command,
                     None,
                     "acceptance command timed out",
-                );
+                ));
             }
             Err(error) => {
-                return self.result(
+                return Some(self.result(
                     index,
                     key,
                     kind,
@@ -213,12 +294,18 @@ impl AcceptanceVerifier {
                     command,
                     None,
                     &format!("failed to start acceptance command: {error}"),
-                );
+                ));
             }
         };
         let stdout = child.stdout.take().map(spawn_tail_reader);
         let stderr = child.stderr.take().map(spawn_tail_reader);
         loop {
+            if cancel.is_cancelled() {
+                terminate_child_group(&mut child);
+                let _ = join_tail_bounded(stdout);
+                let _ = join_tail_bounded(stderr);
+                return None;
+            }
             match child_exited_without_reap(child.id()) {
                 Ok(true) => {
                     // waitid(WNOWAIT) leaves the exited leader waitable, so its
@@ -232,7 +319,7 @@ impl AcceptanceVerifier {
                         Err(error) => {
                             let _ = join_tail_bounded(stdout);
                             let _ = join_tail_bounded(stderr);
-                            return self.result(
+                            return Some(self.result(
                                 index,
                                 key,
                                 kind,
@@ -241,7 +328,7 @@ impl AcceptanceVerifier {
                                 command,
                                 None,
                                 &format!("failed to reap acceptance command: {error}"),
-                            );
+                            ));
                         }
                     };
                     let stdout = join_tail_bounded(stdout);
@@ -251,7 +338,7 @@ impl AcceptanceVerifier {
                     } else {
                         CriterionStatus::Unsatisfied
                     };
-                    return self.result_with_output(
+                    return Some(self.result_with_output(
                         index,
                         key,
                         kind,
@@ -267,18 +354,16 @@ impl AcceptanceVerifier {
                         } else {
                             "acceptance command failed"
                         },
-                    );
+                    ));
                 }
                 Ok(false) if started.elapsed() < self.timeout => {
                     thread::sleep(Duration::from_millis(10));
                 }
                 Ok(false) => {
-                    kill_process_group(child.id());
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    terminate_child_group(&mut child);
                     let _ = join_tail_bounded(stdout);
                     let _ = join_tail_bounded(stderr);
-                    return self.result(
+                    return Some(self.result(
                         index,
                         key,
                         kind,
@@ -287,15 +372,13 @@ impl AcceptanceVerifier {
                         command,
                         None,
                         "acceptance command timed out",
-                    );
+                    ));
                 }
                 Err(error) => {
-                    kill_process_group(child.id());
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    terminate_child_group(&mut child);
                     let _ = join_tail_bounded(stdout);
                     let _ = join_tail_bounded(stderr);
-                    return self.result(
+                    return Some(self.result(
                         index,
                         key,
                         kind,
@@ -304,7 +387,7 @@ impl AcceptanceVerifier {
                         command,
                         None,
                         &format!("failed to poll acceptance command: {error}"),
-                    );
+                    ));
                 }
             }
         }
@@ -369,9 +452,19 @@ impl AcceptanceVerifier {
     }
 }
 
-fn spawn_with_busy_retry(process: &mut Command, deadline: Instant) -> std::io::Result<Child> {
+fn spawn_with_busy_retry(
+    process: &mut Command,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> std::io::Result<Child> {
     let mut retries = 0;
     loop {
+        if cancel.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "acceptance command cancelled",
+            ));
+        }
         if Instant::now() >= deadline {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -499,6 +592,12 @@ fn kill_process_group(pid: u32) {
 
 #[cfg(not(unix))]
 fn kill_process_group(_pid: u32) {}
+
+fn terminate_child_group(child: &mut Child) {
+    kill_process_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+}
 
 fn summarize(results: &[CriterionResult]) -> String {
     let mut satisfied = 0;
@@ -638,6 +737,54 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        unix,
+        not(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))
+    ))]
+    #[test]
+    fn cancellation_stops_command_and_background_descendants() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("command tempdir");
+        let script = directory.path().join("cancel-background");
+        let started = directory.path().join("started");
+        let escaped = directory.path().join("escaped");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n(sleep 2; : > \"$1\") &\n: > started\nsleep 5\n",
+        )
+        .expect("write background command");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .expect("make background command executable");
+        let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(10))
+            .expect("construct verifier");
+        let cancel = CancellationToken::new();
+        let cancel_worker = cancel.clone();
+        let started_worker = started.clone();
+        let canceller = thread::spawn(move || {
+            while !started_worker.exists() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            cancel_worker.cancel();
+        });
+
+        let result = verifier.verify_with_budget_and_cancel(
+            &record(vec![AcceptanceCriterion::new(
+                "custom",
+                format!("cmd:{} {}", script.display(), escaped.display()),
+            )]),
+            Duration::from_secs(10),
+            &cancel,
+        );
+        canceller.join().expect("join canceller");
+        assert!(result.is_none());
+        thread::sleep(Duration::from_millis(2_200));
+        assert!(
+            !escaped.exists(),
+            "cancelled acceptance command must not escape its process group"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn command_spawn_retries_transient_executable_busy() {
@@ -706,5 +853,20 @@ mod tests {
         let criterion = AcceptanceCriterion::new("custom", "cmd:true");
         assert_eq!(criterion_key(0, &criterion), criterion_key(0, &criterion));
         assert_ne!(criterion_key(0, &criterion), criterion_key(1, &criterion));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_budget_stops_later_criteria_without_execution() {
+        let verifier = AcceptanceVerifier::new(".", Duration::from_secs(1)).expect("cwd");
+        let result = verifier.verify_with_budget(
+            &record(vec![
+                AcceptanceCriterion::new("custom", "cmd:sleep 5"),
+                AcceptanceCriterion::new("custom", "cmd:true"),
+            ]),
+            Duration::from_millis(200),
+        );
+        assert_eq!(result.results[0].detail, "acceptance command timed out");
+        assert_eq!(result.results[1].detail, "verification budget exhausted");
     }
 }

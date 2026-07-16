@@ -7,6 +7,7 @@
 mod acceptance;
 mod error;
 mod model;
+mod pursuit;
 mod sqlite;
 mod store;
 
@@ -18,6 +19,11 @@ pub use model::{
     AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalEvent,
     GoalEventKind, GoalQuery, GoalRecord, GoalStatus, GoalVerificationArtifact, MAX_LEASE_SECONDS,
     NewGoal,
+};
+pub use pursuit::{
+    GoalPursuer, GoalSegmentRuntime, MAX_PURSUIT_FAILURES, MAX_PURSUIT_SEGMENTS,
+    MAX_PURSUIT_TIMEOUT, MAX_SEGMENT_TIMEOUT, PursuitConfig, PursuitOutcome, PursuitSegmentRequest,
+    PursuitSegmentResult, PursuitSegmentStatus, PursuitStatus,
 };
 pub use sqlite::{SCHEMA_VERSION, SqliteGoalStore};
 pub use store::GoalStore;

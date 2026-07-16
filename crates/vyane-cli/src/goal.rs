@@ -3,19 +3,23 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use async_trait::async_trait;
 use chrono::Utc;
 use serde::Serialize;
+use vyane_core::{CancellationToken, RunStatus, Sandbox};
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus, GoalEvent,
-    GoalQuery, GoalRecord, GoalStatus, GoalStore, GoalVerificationArtifact, NewGoal,
-    SqliteGoalStore,
+    GoalPursuer, GoalQuery, GoalRecord, GoalSegmentRuntime, GoalStatus, GoalStore,
+    GoalVerificationArtifact, NewGoal, PursuitConfig, PursuitOutcome, PursuitSegmentRequest,
+    PursuitSegmentResult, PursuitSegmentStatus, PursuitStatus, SqliteGoalStore,
 };
+use vyane_service::{DispatchParams, VyaneService};
 
 use crate::app::StoragePaths;
 use crate::cli::{
     GoalClaimArgs, GoalClaimNextArgs, GoalCommand, GoalCommonArgs, GoalCreateArgs, GoalDoneArgs,
     GoalFailArgs, GoalGetArgs, GoalIdArgs, GoalListArgs, GoalNextArgs, GoalProgressArgs,
-    GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs, GoalStatusArg, GoalVerifyArgs,
+    GoalPursueArgs, GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs, GoalStatusArg, GoalVerifyArgs,
 };
 
 #[derive(Debug, Serialize)]
@@ -67,14 +71,42 @@ struct VerifyOutput {
 }
 
 #[derive(Debug, Serialize)]
+struct PursueOutput {
+    status: &'static str,
+    pursuit: PursuitOutcome,
+    goal: GoalRecord,
+    db: String,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorOutput<'a> {
     status: &'static str,
     error: &'a str,
 }
 
-pub fn run(command: GoalCommand) -> Result<ExitCode> {
+pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<ExitCode> {
     let json = common(&command).json;
-    match run_inner(command) {
+    let result = match command {
+        GoalCommand::Create(args) => create(args),
+        GoalCommand::Get(args) => get(args),
+        GoalCommand::List(args) => list(args),
+        GoalCommand::Next(args) => next(args),
+        GoalCommand::Start(args) => start(args),
+        GoalCommand::Claim(args) => claim(args),
+        GoalCommand::ClaimNext(args) => claim_next(args),
+        GoalCommand::Renew(args) => renew(args),
+        GoalCommand::Reclaim(args) => reclaim(args),
+        GoalCommand::Satisfy(args) => satisfy(args),
+        GoalCommand::Verify(args) => verify(args),
+        GoalCommand::Pursue(args) => pursue(config_path, args).await,
+        GoalCommand::Progress(args) => progress(args),
+        GoalCommand::Pause(args) => pause(args),
+        GoalCommand::Resume(args) => resume(args),
+        GoalCommand::Done(args) => done(args),
+        GoalCommand::Fail(args) => fail(args),
+        GoalCommand::Cancel(args) => cancel(args),
+    };
+    match result {
         Ok(code) => Ok(code),
         Err(error) => {
             let message = format!("{error:#}");
@@ -93,26 +125,151 @@ pub fn run(command: GoalCommand) -> Result<ExitCode> {
     }
 }
 
-fn run_inner(command: GoalCommand) -> Result<ExitCode> {
-    match command {
-        GoalCommand::Create(args) => create(args),
-        GoalCommand::Get(args) => get(args),
-        GoalCommand::List(args) => list(args),
-        GoalCommand::Next(args) => next(args),
-        GoalCommand::Start(args) => start(args),
-        GoalCommand::Claim(args) => claim(args),
-        GoalCommand::ClaimNext(args) => claim_next(args),
-        GoalCommand::Renew(args) => renew(args),
-        GoalCommand::Reclaim(args) => reclaim(args),
-        GoalCommand::Satisfy(args) => satisfy(args),
-        GoalCommand::Verify(args) => verify(args),
-        GoalCommand::Progress(args) => progress(args),
-        GoalCommand::Pause(args) => pause(args),
-        GoalCommand::Resume(args) => resume(args),
-        GoalCommand::Done(args) => done(args),
-        GoalCommand::Fail(args) => fail(args),
-        GoalCommand::Cancel(args) => cancel(args),
+struct DispatchGoalRuntime {
+    service: VyaneService,
+    target: String,
+    sandbox: Sandbox,
+}
+
+#[async_trait]
+impl GoalSegmentRuntime for DispatchGoalRuntime {
+    async fn run_segment(
+        &self,
+        request: PursuitSegmentRequest,
+        cancel: CancellationToken,
+    ) -> PursuitSegmentResult {
+        let outcome = self
+            .service
+            .dispatch(
+                DispatchParams {
+                    task: request.prompt,
+                    target: self.target.clone(),
+                    workdir: Some(request.workdir),
+                    sandbox: self.sandbox,
+                    session: None,
+                    system: None,
+                    timeout_secs: Some(request.timeout.as_secs().max(1)),
+                    labels: Vec::new(),
+                },
+                cancel,
+            )
+            .await;
+        match outcome {
+            Ok(outcome) => PursuitSegmentResult {
+                status: pursuit_segment_status(outcome.record.status),
+                run_id: Some(outcome.record.run_id),
+            },
+            Err(_) => PursuitSegmentResult {
+                status: PursuitSegmentStatus::Error,
+                run_id: None,
+            },
+        }
     }
+}
+
+const fn pursuit_segment_status(status: RunStatus) -> PursuitSegmentStatus {
+    match status {
+        RunStatus::Success => PursuitSegmentStatus::Success,
+        RunStatus::Timeout => PursuitSegmentStatus::Timeout,
+        RunStatus::Cancelled => PursuitSegmentStatus::Cancelled,
+        RunStatus::Error => PursuitSegmentStatus::Error,
+    }
+}
+
+async fn pursue(config_path: Option<PathBuf>, args: GoalPursueArgs) -> Result<ExitCode> {
+    if args.common.owner != "local" {
+        bail!("goal pursue currently requires the local single-user owner scope");
+    }
+    let (store, db) = open_store(&args.common)?;
+    let goal = require_goal(&store, &args.common.owner, &args.id)?;
+    if goal.status != GoalStatus::InProgress {
+        bail!(
+            "goal `{}` must be in_progress before pursuit; current status is {}",
+            args.id,
+            goal.status
+        );
+    }
+    if !goal.lease_active(Utc::now()) {
+        bail!(
+            "goal `{}` requires an active worker lease before pursuit",
+            args.id
+        );
+    }
+    if goal.claimed_by.as_deref() != Some(args.worker.as_str()) {
+        bail!(
+            "goal `{}` has an active lease held by `{}`; pass the matching --worker",
+            args.id,
+            goal.claimed_by.as_deref().unwrap_or("unknown")
+        );
+    }
+    let workdir = match args.workdir {
+        Some(workdir) => workdir,
+        None => std::env::current_dir().context("resolve pursuit workdir")?,
+    };
+    let workdir = std::fs::canonicalize(&workdir).context("canonicalize pursuit workdir")?;
+    let verifier = AcceptanceVerifier::new(
+        &workdir,
+        std::time::Duration::from_secs(args.verifier_timeout_seconds),
+    )
+    .context("construct pursuit verifier")?;
+    let config = PursuitConfig {
+        workdir,
+        runtime: args.target.clone(),
+        worker_id: args.worker,
+        overall_timeout: std::time::Duration::from_secs(args.overall_timeout_seconds),
+        segment_timeout: std::time::Duration::from_secs(args.segment_timeout_seconds),
+        max_segments: args.max_segments,
+        max_failures: args.max_failures,
+    };
+    config.validate().context("validate goal pursuit")?;
+    let service = VyaneService::load(config_path.as_deref()).context("load pursuit runtime")?;
+    if !args.target.eq_ignore_ascii_case("auto") {
+        service
+            .resolve(&args.target)
+            .context("resolve pursuit target")?;
+    }
+    let (cancel, signal_task) = cancellation_token();
+    let runtime = DispatchGoalRuntime {
+        service,
+        target: args.target.clone(),
+        sandbox: args.sandbox.into(),
+    };
+    let pursuer =
+        GoalPursuer::new(&store, &runtime, &verifier, config).context("construct goal pursuer")?;
+    let outcome = pursuer
+        .pursue_with_cancel(&args.common.owner, &args.id, cancel)
+        .await;
+    signal_task.abort();
+    let _ = signal_task.await;
+    let outcome = outcome.context("pursue goal")?;
+    let goal = require_goal(&store, &args.common.owner, &args.id)?;
+    let (response_status, code) = match outcome.status {
+        PursuitStatus::Achieved => ("success", ExitCode::SUCCESS),
+        PursuitStatus::Paused => ("paused", ExitCode::from(3)),
+        PursuitStatus::Stopped => ("stopped", ExitCode::from(4)),
+    };
+    if args.common.json {
+        print_json(&PursueOutput {
+            status: response_status,
+            pursuit: outcome,
+            goal,
+            db: path_text(&db),
+        })?;
+    } else {
+        println!("{}", terminal_safe(&outcome.summary));
+    }
+    Ok(code)
+}
+
+fn cancellation_token() -> (CancellationToken, tokio::task::JoinHandle<()>) {
+    let token = CancellationToken::new();
+    let child = token.clone();
+    let task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            child.cancel();
+        }
+    });
+    (token, task)
 }
 
 fn create(args: GoalCreateArgs) -> Result<ExitCode> {
@@ -551,6 +708,7 @@ fn common(command: &GoalCommand) -> &GoalCommonArgs {
         GoalCommand::ClaimNext(args) => &args.common,
         GoalCommand::Satisfy(args) => &args.common,
         GoalCommand::Verify(args) => &args.common,
+        GoalCommand::Pursue(args) => &args.common,
         GoalCommand::Progress(args) => &args.common,
         GoalCommand::Pause(args) => &args.common,
         GoalCommand::Resume(args) => &args.common,
@@ -603,6 +761,23 @@ impl From<GoalStatusArg> for GoalStatus {
             GoalStatusArg::Completed => Self::Completed,
             GoalStatusArg::Failed => Self::Failed,
             GoalStatusArg::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_run_status_has_an_exact_pursuit_status() {
+        for (run, pursuit) in [
+            (RunStatus::Success, PursuitSegmentStatus::Success),
+            (RunStatus::Timeout, PursuitSegmentStatus::Timeout),
+            (RunStatus::Cancelled, PursuitSegmentStatus::Cancelled),
+            (RunStatus::Error, PursuitSegmentStatus::Error),
+        ] {
+            assert_eq!(pursuit_segment_status(run), pursuit);
         }
     }
 }
