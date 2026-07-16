@@ -96,6 +96,8 @@ pub enum GoalCommand {
     Reclaim(GoalClaimArgs),
     /// Record that an acceptance criterion was actually verified.
     Satisfy(GoalSatisfyArgs),
+    /// Run bounded local acceptance checks and persist successful criteria.
+    Verify(GoalVerifyArgs),
     /// Append a progress event without changing lifecycle state.
     Progress(GoalProgressArgs),
     /// Pause an in-progress goal; releases any lease (holder-only while leased).
@@ -289,6 +291,23 @@ pub struct GoalSatisfyArgs {
     /// Zero-based acceptance criterion index.
     #[arg(long)]
     pub index: usize,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalVerifyArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact goal id.
+    pub id: String,
+    /// Workdir for `cmd:` acceptance criteria; defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub workdir: Option<PathBuf>,
+    /// Maximum runtime per command, in seconds (1 through 300).
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=300))]
+    pub timeout_seconds: u64,
     /// Caller-supplied worker identity; required while a lease is active.
     #[arg(long)]
     pub worker: Option<String>,

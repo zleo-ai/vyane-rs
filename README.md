@@ -102,7 +102,7 @@ reference implementation.
 | durable, secret-free task metadata | `vyane-task` | [x] schema v2 keys snapshots, events and CAS by `(owner,id)` with transactional v1 migration; built-in frontends still select explicit `local` |
 | durable owner-scoped AgentRun queue, worker topology and recovery truth | `vyane-agent` | [~] exact leases/deadlines, active permits, bounded tree cancel, body-free completion receipts/outbox, and resident execution/recovery/publication are production-assembled for a narrow Linux `Process` path with an authenticated loopback submit/status/output/cancel API. `Remote`, native production execution, sessions/resume, distinct principals, live pause/resume, and automatic replay remain absent |
 | owner-scoped transactional message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO, delayed/idempotent delivery, fenced leases, TTL, ack/nack, body-free outbox, external-receipt reconciliation, hidden staged completion publication, bounded mailbox pages, and exact mailbox claim exist |
-| owner-scoped goal lifecycle and progress truth | `vyane-goal` | [x] one SQLite transaction updates the current snapshot and appends an immutable event; acceptance descriptors persist, while verification, pursuit, and quota handoff remain future layers |
+| owner-scoped goal lifecycle and progress truth | `vyane-goal` | [~] one SQLite transaction updates the current snapshot and appends an immutable event; WP-68 adds bounded local acceptance verification and fenced persistence of passing criteria, while pursuit, approval, quota handoff and authenticated goal service remain future layers |
 | bounded replay-safe delivery broker + body-free EventLog projectors | `vyane-broker` | [~] fake-adapter contracts, message/AgentRun lifecycle projection with stable source event IDs, and the explicit non-`Clone` `ResidentBrokerSupervisor` are assembled into the resident daemon with an intentionally empty delivery lane set; worker/message glue and remote A2A/Channels adapters remain absent |
 | declarative workflow engine (DAG + journal/resume/replay) | `vyane-workflow` | [x] exact-plan replay creates a new run and reuses a journal-recorded all-success prefix |
 | resident workflow and Process AgentRun daemon (authenticated local control) | `vyane-cli` | [x] workflow control plus fresh sessionless CLI-harness AgentRun submit/status/output/cancel on Linux; no automatic replay or live pause/resume |
@@ -409,13 +409,14 @@ The CLI exposes an owner-scoped goal lifecycle over one SQLite source of truth:
 
 ```sh
 vyane goal create --title "Ship a release" \
-  --acceptance test-passes:workspace --json
+  --acceptance 'test-passes:cmd:cargo test --workspace' --json
 vyane goal next --auto-start --json
 vyane goal progress <goal-id> --stage implementation --detail "tests added" --json
+vyane goal verify <goal-id> --workdir . --json
 vyane goal done <goal-id> --summary "all checks passed" --json
 ```
 
-`create/get/list/next/start/progress/pause/resume/done/fail/cancel` share stable
+`create/get/list/next/start/progress/verify/pause/resume/done/fail/cancel` share stable
 JSON success/error envelopes. Every mutation updates the current query snapshot
 and appends an immutable revision event in the same transaction. Queue selection
 orders priority ascending, then creation time ascending. The default database is
@@ -424,9 +425,13 @@ file. `--owner` (alias `--owner-user-id`) is a caller-selected storage scope,
 not authenticated authority. Foreign and absent ids are intentionally
 indistinguishable at the store boundary.
 
-Acceptance `KIND:TARGET` values are persisted descriptors only. This phase does
-not execute acceptance checks, pursue goals automatically, coordinate quota
-handoff, or expose a goal REST/MCP service. See [WP-60](docs/plan/WP-60.md).
+Acceptance `KIND:TARGET` values remain persisted descriptors. `goal verify`
+executes only explicit local `cmd:` checks under a canonical workdir, scrubbed
+environment, bounded output/time and Unix process-group cleanup, then persists
+passing criteria through the existing lease-fenced mutation. It does not
+auto-complete or pursue goals, invoke network/board adapters, coordinate quota
+handoff, or expose a goal REST/MCP service. See [WP-60](docs/plan/WP-60.md) and
+[WP-68](docs/plan/WP-68.md).
 
 ### REST API
 

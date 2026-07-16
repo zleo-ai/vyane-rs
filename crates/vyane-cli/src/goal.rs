@@ -6,15 +6,15 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::Utc;
 use serde::Serialize;
 use vyane_goal::{
-    AcceptanceCriterion, GoalEvent, GoalQuery, GoalRecord, GoalStatus, GoalStore, NewGoal,
-    SqliteGoalStore,
+    AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus, GoalEvent,
+    GoalQuery, GoalRecord, GoalStatus, GoalStore, NewGoal, SqliteGoalStore,
 };
 
 use crate::app::StoragePaths;
 use crate::cli::{
     GoalClaimArgs, GoalClaimNextArgs, GoalCommand, GoalCommonArgs, GoalCreateArgs, GoalDoneArgs,
     GoalFailArgs, GoalGetArgs, GoalIdArgs, GoalListArgs, GoalNextArgs, GoalProgressArgs,
-    GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs, GoalStatusArg,
+    GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs, GoalStatusArg, GoalVerifyArgs,
 };
 
 #[derive(Debug, Serialize)]
@@ -52,6 +52,14 @@ struct ProgressOutput {
     status: &'static str,
     goal: GoalRecord,
     event: GoalEvent,
+    db: String,
+}
+
+#[derive(Debug, Serialize)]
+struct VerifyOutput {
+    status: &'static str,
+    verification: AcceptanceVerification,
+    goal: GoalRecord,
     db: String,
 }
 
@@ -94,6 +102,7 @@ fn run_inner(command: GoalCommand) -> Result<ExitCode> {
         GoalCommand::Renew(args) => renew(args),
         GoalCommand::Reclaim(args) => reclaim(args),
         GoalCommand::Satisfy(args) => satisfy(args),
+        GoalCommand::Verify(args) => verify(args),
         GoalCommand::Progress(args) => progress(args),
         GoalCommand::Pause(args) => pause(args),
         GoalCommand::Resume(args) => resume(args),
@@ -283,6 +292,62 @@ fn satisfy(args: GoalSatisfyArgs) -> Result<ExitCode> {
     print_goal_result(&args.common, &db, goal)
 }
 
+fn verify(args: GoalVerifyArgs) -> Result<ExitCode> {
+    let (store, db) = open_store(&args.common)?;
+    let goal = require_goal(&store, &args.common.owner, &args.id)?;
+    let workdir = args
+        .workdir
+        .unwrap_or(std::env::current_dir().context("resolve acceptance workdir")?);
+    let verifier = AcceptanceVerifier::new(
+        workdir,
+        std::time::Duration::from_secs(args.timeout_seconds),
+    )
+    .context("construct acceptance verifier")?;
+    let verification = verifier.verify(&goal);
+    for result in &verification.results {
+        if result.status == CriterionStatus::Satisfied
+            && goal
+                .acceptance_criteria
+                .get(result.criterion_index)
+                .is_some_and(|criterion| criterion.satisfied_at.is_none())
+        {
+            store
+                .satisfy_criterion(
+                    &args.common.owner,
+                    &args.id,
+                    args.worker.as_deref(),
+                    result.criterion_index,
+                    chrono::Utc::now(),
+                )
+                .with_context(|| {
+                    format!("persist satisfied criterion {}", result.criterion_index)
+                })?;
+        }
+    }
+    let goal = require_goal(&store, &args.common.owner, &args.id)?;
+    let status = if verification.all_satisfied {
+        "success"
+    } else {
+        "inconclusive"
+    };
+    let all_satisfied = verification.all_satisfied;
+    if args.common.json {
+        print_json(&VerifyOutput {
+            status,
+            verification,
+            goal,
+            db: path_text(&db),
+        })?;
+    } else {
+        println!("{}", terminal_safe(&verification.summary));
+    }
+    Ok(if all_satisfied {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(3)
+    })
+}
+
 fn progress(args: GoalProgressArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
     let event = store
@@ -452,6 +517,7 @@ fn common(command: &GoalCommand) -> &GoalCommonArgs {
         }
         GoalCommand::ClaimNext(args) => &args.common,
         GoalCommand::Satisfy(args) => &args.common,
+        GoalCommand::Verify(args) => &args.common,
         GoalCommand::Progress(args) => &args.common,
         GoalCommand::Pause(args) => &args.common,
         GoalCommand::Resume(args) => &args.common,

@@ -436,6 +436,137 @@ fn malformed_input_and_illegal_transition_have_json_error_and_exit_two() {
 }
 
 #[test]
+fn verify_runs_bounded_commands_and_persists_only_satisfied_criteria() {
+    let directory = TempDir::new().unwrap();
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let created = json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--id",
+            "verified-goal",
+            "--title",
+            "Verify acceptance",
+            "--acceptance",
+            "custom:cmd:sh -c exit 0",
+            "--acceptance",
+            "manual-confirm:operator approval",
+        ],
+        0,
+    );
+    assert_eq!(
+        created["goal"]["acceptance_criteria"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    json_output(
+        &[
+            "goal",
+            "start",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "verified-goal",
+        ],
+        0,
+    );
+
+    let verified = json_output(
+        &[
+            "goal",
+            "verify",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--workdir",
+            directory.path().to_str().unwrap(),
+            "--timeout-seconds",
+            "2",
+            "verified-goal",
+        ],
+        3,
+    );
+    assert_eq!(verified["status"], "inconclusive");
+    assert_eq!(verified["verification"]["all_satisfied"], false);
+    assert_eq!(
+        verified["verification"]["results"][0]["status"],
+        "satisfied"
+    );
+    assert_eq!(
+        verified["verification"]["results"][1]["status"],
+        "manual_required"
+    );
+    assert!(verified["goal"]["acceptance_criteria"][0]["satisfied_at"].is_string());
+    assert!(verified["goal"]["acceptance_criteria"][1]["satisfied_at"].is_null());
+}
+
+#[test]
+fn verify_all_satisfied_returns_success_exit_code() {
+    let directory = TempDir::new().unwrap();
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let output = vyane()
+        .args([
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--id",
+            "verified-success-2",
+            "--title",
+            "Verify success",
+            "--acceptance",
+            "custom:cmd:sh -c exit 0",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    json_output(
+        &[
+            "goal",
+            "start",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "verified-success-2",
+        ],
+        0,
+    );
+    let verified = json_output(
+        &[
+            "goal",
+            "verify",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--workdir",
+            directory.path().to_str().unwrap(),
+            "verified-success-2",
+        ],
+        0,
+    );
+    assert_eq!(verified["status"], "success");
+    assert_eq!(verified["verification"]["all_satisfied"], true);
+}
+
+#[test]
 fn default_database_uses_vyane_data_dir_and_help_marks_scope_as_unauthenticated() {
     let directory = TempDir::new().unwrap();
     let created = vyane()

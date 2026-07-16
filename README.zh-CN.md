@@ -71,7 +71,7 @@ difference。运行 `python3 .github/scripts/parity-report.py --format markdown`
 | 不含敏感正文的持久化 task metadata | `vyane-task` | [x] schema v2 以 `(owner,id)` 隔离 snapshot/event/CAS，并事务迁移 v1；内置前端仍显式选择 `local` |
 | owner-scoped 持久 AgentRun queue、worker topology 与 recovery 真相 | `vyane-agent` | [~] exact lease/deadline、active permit、有界 tree cancel、无正文 completion receipt/outbox 及 resident execution/recovery/publication 已为一条窄 Linux `Process` 路径完成生产 assembly，并提供 authenticated loopback submit/status/output/cancel API。仍无 `Remote`、native production execution、session/resume、distinct principal、live pause/resume 或自动 replay |
 | owner-scoped 事务型 message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO、延迟/幂等投递、fenced lease、TTL、ack/nack、无正文 outbox、外部 receipt 对账、隐藏 staged completion publication、有界 mailbox page 与 exact mailbox claim 已具备 |
-| owner-scoped goal 生命周期与进度真相源 | `vyane-goal` | [x] 同一 SQLite 事务更新当前快照并追加不可变事件；acceptance descriptor 已持久化，验证、自动 pursuit 与 quota handoff 留待后续层 |
+| owner-scoped goal 生命周期与进度真相源 | `vyane-goal` | [~] 同一 SQLite 事务更新当前快照并追加不可变事件；WP-68 增加有界本地 acceptance verifier，并通过 fenced mutation 持久化通过项；自动 pursuit、approval、quota handoff 与 authenticated goal service 仍待后续层 |
 | 有界 replay-safe delivery broker + 无正文 EventLog projectors | `vyane-broker` | [~] fake-adapter 契约、复用 stable source event id 的 message/AgentRun lifecycle 投影，以及 daemon 内显式 non-`Clone` `ResidentBrokerSupervisor` 已具备；当前 delivery lane 刻意为空，worker/message glue 与远程 A2A/Channels adapter 仍缺 |
 | 声明式 workflow 引擎（DAG + journal/resume/replay） | `vyane-workflow` | [x] exact-plan replay 新建 run 并复用 journal 记录的全成功前缀 |
 | 常驻 workflow 与 Process AgentRun daemon（带认证的本地控制面） | `vyane-cli` | [x] workflow 控制，以及 Linux fresh sessionless CLI-harness AgentRun submit/status/output/cancel；无自动 replay 或 live pause/resume |
@@ -279,21 +279,25 @@ CLI 以单一 SQLite 真相源提供 owner-scoped goal 生命周期：
 
 ```sh
 vyane goal create --title "Ship a release" \
-  --acceptance test-passes:workspace --json
+  --acceptance 'test-passes:cmd:cargo test --workspace' --json
 vyane goal next --auto-start --json
 vyane goal progress <goal-id> --stage implementation --detail "tests added" --json
+vyane goal verify <goal-id> --workdir . --json
 vyane goal done <goal-id> --summary "all checks passed" --json
 ```
 
-`create/get/list/next/start/progress/pause/resume/done/fail/cancel` 共用稳定 JSON
+`create/get/list/next/start/progress/verify/pause/resume/done/fail/cancel` 共用稳定 JSON
 成功/错误 envelope。每次 mutation 都在同一事务里更新查询快照并追加不可变 revision event；
 队列按 priority 升序、再按创建时间升序。默认数据库位于 Vyane 标准数据目录下的
 `goals.sqlite3`，也可用 `--db` 指定本地文件。`--owner`（兼容别名
 `--owner-user-id`）只是调用方选择的存储 scope，不是认证 authority；foreign id 与 absent id
 在 store 边界保持同形。
 
-acceptance 的 `KIND:TARGET` 本轮只持久化 descriptor，不执行验证，也不做自动 pursuit、quota
-handoff 或 goal REST/MCP service。精确边界见 [WP-60](docs/plan/WP-60.md)。
+acceptance 的 `KIND:TARGET` 仍是持久化 descriptor。`goal verify` 只执行显式本地 `cmd:`
+检查：固定 canonical workdir、清理继承环境、限制时间与输出，并在 Unix 上用独立 process group
+清理超时子树；通过项再走现有 lease-fenced mutation。它不会自动完成或 pursuit goal，也不会
+暗中调用网络/看板 adapter、quota handoff 或 goal REST/MCP service。精确边界见
+[WP-60](docs/plan/WP-60.md) 与 [WP-68](docs/plan/WP-68.md)。
 
 `vyane serve` 会拒绝非 loopback bind；每次启动都会生成 256-bit bearer capability，并把它原子写入
 启动日志所示的私有 `serve.token`（Unix 上为 mode-0600，数据目录为 mode-0700），所有 endpoint
