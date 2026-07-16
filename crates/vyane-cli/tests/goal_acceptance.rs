@@ -927,6 +927,13 @@ fn pursue_auto_dispatches_fresh_segment_reverifies_and_completes() {
         detail["verifications"].as_array().expect("artifacts").len(),
         2
     );
+    let checkpoint = detail["pursuit_checkpoint"]
+        .as_object()
+        .expect("checkpoint view");
+    assert_eq!(checkpoint["status"], "achieved");
+    assert!(!checkpoint.contains_key("workdir"));
+    assert!(!checkpoint.contains_key("worker_id"));
+    assert!(!checkpoint.contains_key("runtime"));
 }
 
 #[cfg(unix)]

@@ -260,7 +260,7 @@ fn heartbeat_renewal_extends_the_lease_and_guards_identity_and_expiry() {
 }
 
 #[test]
-fn double_start_and_claim_over_manual_start_are_rejected() {
+fn double_start_is_rejected_but_unleased_manual_work_can_be_claimed() {
     let (_directory, store) = fixture();
     let at = timestamp(1_700_000_000);
     queued_goal(&store, "manual", at);
@@ -274,11 +274,12 @@ fn double_start_and_claim_over_manual_start_are_rejected() {
             ..
         })
     ));
-    // An unleased manual start is not silently claimable either.
-    assert!(matches!(
-        store.claim(OWNER, "manual", "worker-1", TTL, at),
-        Err(GoalStoreError::InvalidStatus { .. })
-    ));
+    // A worker may establish the first lease over genuinely unleased work.
+    let claimed = store
+        .claim(OWNER, "manual", "worker-1", TTL, at)
+        .expect("claim unleased work");
+    assert_eq!(claimed.claimed_by.as_deref(), Some("worker-1"));
+    assert_eq!(claimed.claim_generation, 1);
 }
 
 #[test]
@@ -724,4 +725,16 @@ fn pause_releases_the_lease_and_resumed_goals_are_unleased() {
     assert_eq!(resumed.status, GoalStatus::InProgress);
     assert_eq!(resumed.claimed_by, None);
     assert_eq!(resumed.claim_expires_at, None);
+
+    let reclaimed = store
+        .claim(
+            OWNER,
+            "pausable",
+            "worker-2",
+            TTL,
+            base + TimeDelta::seconds(2),
+        )
+        .expect("claim resumed goal");
+    assert_eq!(reclaimed.claimed_by.as_deref(), Some("worker-2"));
+    assert_eq!(reclaimed.claim_generation, 2);
 }

@@ -28,6 +28,9 @@ pub enum GoalStoreError {
     #[error("goal `{id}` still has {remaining} unsatisfied acceptance criteria")]
     CriteriaUnsatisfied { id: String, remaining: usize },
 
+    #[error("pursuit checkpoint for goal `{id}` changed concurrently")]
+    CheckpointConflict { id: String },
+
     #[error("invalid goal metadata: {0}")]
     InvalidInput(String),
 

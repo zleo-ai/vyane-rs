@@ -9,9 +9,10 @@ use serde::Serialize;
 use vyane_core::{CancellationToken, RunStatus, Sandbox};
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus, GoalEvent,
-    GoalPursuer, GoalQuery, GoalRecord, GoalSegmentRuntime, GoalStatus, GoalStore,
-    GoalVerificationArtifact, NewGoal, PursuitConfig, PursuitOutcome, PursuitSegmentRequest,
-    PursuitSegmentResult, PursuitSegmentStatus, PursuitStatus, SqliteGoalStore,
+    GoalPursuer, GoalPursuitCheckpoint, GoalQuery, GoalRecord, GoalSegmentRuntime, GoalStatus,
+    GoalStore, GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, PursuitConfig,
+    PursuitOutcome, PursuitSegmentRequest, PursuitSegmentResult, PursuitSegmentStatus,
+    PursuitStatus, SqliteGoalStore,
 };
 use vyane_service::{DispatchParams, VyaneService};
 
@@ -35,7 +36,41 @@ struct GoalDetailOutput {
     goal: GoalRecord,
     events: Vec<GoalEvent>,
     verifications: Vec<GoalVerificationArtifact>,
+    pursuit_checkpoint: Option<PursuitCheckpointView>,
     db: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PursuitCheckpointView {
+    checkpoint_revision: u64,
+    goal_revision: u64,
+    claim_generation: u64,
+    started_at: chrono::DateTime<Utc>,
+    updated_at: chrono::DateTime<Utc>,
+    segments_started: u16,
+    segments_completed: u16,
+    consecutive_failures: u16,
+    status: PursuitCheckpointStatus,
+    last_run_id: Option<String>,
+    last_verification_id: Option<String>,
+}
+
+impl From<GoalPursuitCheckpoint> for PursuitCheckpointView {
+    fn from(checkpoint: GoalPursuitCheckpoint) -> Self {
+        Self {
+            checkpoint_revision: checkpoint.checkpoint_revision,
+            goal_revision: checkpoint.goal_revision,
+            claim_generation: checkpoint.claim_generation,
+            started_at: checkpoint.started_at,
+            updated_at: checkpoint.updated_at,
+            segments_started: checkpoint.segments_started,
+            segments_completed: checkpoint.segments_completed,
+            consecutive_failures: checkpoint.consecutive_failures,
+            status: checkpoint.status,
+            last_run_id: checkpoint.last_run_id,
+            last_verification_id: checkpoint.last_verification_id,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -296,11 +331,16 @@ fn get(args: GoalGetArgs) -> Result<ExitCode> {
         .verifications(&args.common.owner, &args.id)
         .context("read goal verification artifacts")?;
     if args.common.json {
+        let pursuit_checkpoint = store
+            .pursuit_checkpoint(&args.common.owner, &args.id)
+            .context("read goal pursuit checkpoint")?
+            .map(PursuitCheckpointView::from);
         print_json(&GoalDetailOutput {
             status: "success",
             goal,
             events,
             verifications,
+            pursuit_checkpoint,
             db: path_text(&db),
         })?;
     } else {

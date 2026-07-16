@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    AcceptanceVerification, GoalEvent, GoalQuery, GoalRecord, GoalVerificationArtifact, NewGoal,
-    Result,
+    AcceptanceVerification, GoalEvent, GoalPursuitCheckpoint, GoalQuery, GoalRecord,
+    GoalVerificationArtifact, NewGoal, Result,
 };
 
 pub trait GoalStore: Send + Sync {
@@ -82,9 +82,41 @@ pub trait GoalStore: Send + Sync {
         at: DateTime<Utc>,
     ) -> Result<GoalVerificationArtifact>;
 
+    /// Atomically append pursuit verification evidence and its lease-fenced
+    /// checkpoint. The returned checkpoint carries the new verification id.
+    #[allow(clippy::too_many_arguments)]
+    fn record_pursuit_verification(
+        &self,
+        owner: &str,
+        id: &str,
+        worker_id: &str,
+        verification: &AcceptanceVerification,
+        checkpoint: &GoalPursuitCheckpoint,
+        detail: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(GoalVerificationArtifact, GoalPursuitCheckpoint, GoalEvent)>;
+
     fn verifications(&self, owner: &str, id: &str) -> Result<Vec<GoalVerificationArtifact>>;
 
     fn events(&self, owner: &str, id: &str) -> Result<Vec<GoalEvent>>;
+
+    fn pursuit_checkpoint(&self, owner: &str, id: &str) -> Result<Option<GoalPursuitCheckpoint>>;
+
+    /// CAS-write one lease-fenced checkpoint and append its event in the same
+    /// transaction. `Paused` and `Achieved` also perform the matching goal
+    /// lifecycle transition atomically. A checkpoint from an older lease may
+    /// be adopted only with the current goal revision and claim generation.
+    #[allow(clippy::too_many_arguments)]
+    fn record_pursuit_checkpoint(
+        &self,
+        owner: &str,
+        id: &str,
+        worker_id: &str,
+        checkpoint: &GoalPursuitCheckpoint,
+        stage: &str,
+        detail: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(GoalPursuitCheckpoint, GoalEvent)>;
 
     fn start(&self, owner: &str, id: &str, at: DateTime<Utc>) -> Result<GoalRecord>;
 

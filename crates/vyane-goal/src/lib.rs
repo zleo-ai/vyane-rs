@@ -21,9 +21,10 @@ pub use model::{
     NewGoal,
 };
 pub use pursuit::{
-    GoalPursuer, GoalSegmentRuntime, MAX_PURSUIT_FAILURES, MAX_PURSUIT_SEGMENTS,
-    MAX_PURSUIT_TIMEOUT, MAX_SEGMENT_TIMEOUT, PursuitConfig, PursuitOutcome, PursuitSegmentRequest,
-    PursuitSegmentResult, PursuitSegmentStatus, PursuitStatus,
+    GoalPursuer, GoalPursuitCheckpoint, GoalSegmentRuntime, MAX_PURSUIT_FAILURES,
+    MAX_PURSUIT_SEGMENTS, MAX_PURSUIT_TIMEOUT, MAX_SEGMENT_TIMEOUT, PursuitCheckpointStatus,
+    PursuitConfig, PursuitOutcome, PursuitSegmentRequest, PursuitSegmentResult,
+    PursuitSegmentStatus, PursuitStatus,
 };
 pub use sqlite::{SCHEMA_VERSION, SqliteGoalStore};
 pub use store::GoalStore;

@@ -102,7 +102,7 @@ reference implementation.
 | durable, secret-free task metadata | `vyane-task` | [x] schema v2 keys snapshots, events and CAS by `(owner,id)` with transactional v1 migration; built-in frontends still select explicit `local` |
 | durable owner-scoped AgentRun queue, worker topology and recovery truth | `vyane-agent` | [~] exact leases/deadlines, active permits, bounded tree cancel, body-free completion receipts/outbox, and resident execution/recovery/publication are production-assembled for a narrow Linux `Process` path with an authenticated loopback submit/status/output/cancel API. `Remote`, native production execution, sessions/resume, distinct principals, live pause/resume, and automatic replay remain absent |
 | owner-scoped transactional message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO, delayed/idempotent delivery, fenced leases, TTL, ack/nack, body-free outbox, external-receipt reconciliation, hidden staged completion publication, bounded mailbox pages, and exact mailbox claim exist |
-| owner-scoped goal lifecycle and progress truth | `vyane-goal` | [~] one SQLite transaction updates the current snapshot and appends an immutable event; WP-68 adds bounded local acceptance verification, WP-69 preserves immutable evidence, and WP-70 adds explicit bounded manual pursuit through fresh production dispatch segments; automatic/resumable pursuit, approval, quota handoff and authenticated goal service remain future layers |
+| owner-scoped goal lifecycle and progress truth | `vyane-goal` | [~] one SQLite transaction updates the current snapshot and appends an immutable event; WP-68 adds bounded local acceptance verification, WP-69 preserves immutable evidence, WP-70 adds explicit bounded manual pursuit through fresh production dispatch segments, and WP-71 adds durable lease-fenced restart checkpoints for that manual loop; daemon automatic pursuit, approval, quota handoff and authenticated goal service remain future layers |
 | bounded replay-safe delivery broker + body-free EventLog projectors | `vyane-broker` | [~] fake-adapter contracts, message/AgentRun lifecycle projection with stable source event IDs, and the explicit non-`Clone` `ResidentBrokerSupervisor` are assembled into the resident daemon with an intentionally empty delivery lane set; worker/message glue and remote A2A/Channels adapters remain absent |
 | declarative workflow engine (DAG + journal/resume/replay) | `vyane-workflow` | [x] exact-plan replay creates a new run and reuses a journal-recorded all-success prefix |
 | resident workflow and Process AgentRun daemon (authenticated local control) | `vyane-cli` | [x] workflow control plus fresh sessionless CLI-harness AgentRun submit/status/output/cancel on Linux; no automatic replay or live pause/resume |
@@ -418,7 +418,7 @@ vyane goal pursue <goal-id> --worker pursuer --target builder --workdir . --sand
 vyane goal done <goal-id> --summary "all checks passed" --json
 ```
 
-`create/get/list/next/start/progress/verify/pursue/pause/resume/done/fail/cancel` share stable
+`create/get/list/next/start/claim/progress/verify/pursue/pause/resume/done/fail/cancel` share stable
 JSON success/error envelopes. Every mutation updates the current query snapshot
 and appends an immutable revision event in the same transaction. Queue selection
 orders priority ascending, then creation time ascending. The default database is
@@ -440,13 +440,19 @@ returned by `goal get --json`; it is evidence, not completion authority.
 
 `goal pursue` is the explicit bounded outer loop: verify, dispatch one fresh
 sessionless segment through the ordinary target/failover kernel, then reverify.
-It requires and renews the exact active worker lease. Only the pursuer may
+It requires and renews the exact active worker lease. A schema-v4 checkpoint
+atomically preserves lifetime segment/failure counters, runtime/workdir identity,
+and the last run and verification ids with each progress event. After pause and
+database restart, an explicitly resumed goal can be claimed by a new worker and
+continues from that checkpoint; stale revisions, workers and lease generations
+fail closed. Only the pursuer may
 complete after all criteria pass. Missing/manual criteria,
 budgets, cancellation and repeated failures pause; external lifecycle changes stop. It does
-not auto-start goals, replay after restart, or perform quota/approval handoff.
+not auto-start or automatically pursue goals after restart, resume a runtime-native
+session, or perform quota/approval handoff.
 The production CLI currently accepts only the `local` single-user owner so goal
 and dispatch ledger authority cannot silently diverge.
-See [WP-70](docs/plan/WP-70.md).
+See [WP-70](docs/plan/WP-70.md) and [WP-71](docs/plan/WP-71.md).
 
 ### REST API
 
