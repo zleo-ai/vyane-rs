@@ -184,7 +184,7 @@ impl DaemonGoalSupervisor {
                 Ok(pursuer) => pursuer,
                 Err(error) => {
                     let retry = schedule_retry(&mut self.retry_after, &goal, Instant::now());
-                    self.pause_quarantined(&goal, retry);
+                    self.pause_quarantined(&goal, retry)?;
                     tracing::warn!(
                         goal_id = %goal.id,
                         error = %error,
@@ -216,7 +216,7 @@ impl DaemonGoalSupervisor {
                 }
                 Err(error) => {
                     let retry = schedule_retry(&mut self.retry_after, &goal, Instant::now());
-                    self.pause_quarantined(&goal, retry);
+                    self.pause_quarantined(&goal, retry)?;
                     tracing::warn!(
                         goal_id = %goal.id,
                         error = %error,
@@ -249,9 +249,9 @@ impl DaemonGoalSupervisor {
         )
     }
 
-    fn pause_quarantined(&mut self, goal: &GoalRecord, retry: PursuitRetry) {
+    fn pause_quarantined(&mut self, goal: &GoalRecord, retry: PursuitRetry) -> Result<()> {
         if retry.eligible_at.is_some() {
-            return;
+            return Ok(());
         }
         match self.store.pause(
             LOCAL_TASK_OWNER,
@@ -262,10 +262,14 @@ impl DaemonGoalSupervisor {
         ) {
             Ok(_) => {
                 self.retry_after.remove(&goal.id);
+                Ok(())
             }
-            Err(error) => {
+            Err(error) if self.retry_after.contains_key(&goal.id) => {
                 tracing::error!(goal_id = %goal.id, error = %error, "failed to persist resident goal quarantine");
+                Ok(())
             }
+            Err(error) => Err(error)
+                .context("persist resident goal quarantine before retry capacity overflow"),
         }
     }
 }
@@ -1043,12 +1047,68 @@ mod tests {
             recovery_scan: RecoveryScan::default(),
         };
 
-        supervisor.pause_quarantined(&goal, retry);
+        supervisor.pause_quarantined(&goal, retry).unwrap();
 
         assert!(supervisor.retry_after.is_empty());
         let paused = store.get(LOCAL_TASK_OWNER, "quarantine").unwrap().unwrap();
         assert_eq!(paused.status, GoalStatus::Paused);
         assert!(paused.claimed_by.is_none());
+    }
+
+    #[test]
+    fn retry_capacity_overflow_fails_closed_when_quarantine_cannot_persist() {
+        let fixture = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let workdir = TempDir::new().unwrap();
+        let config = config(&workdir);
+        let store = SqliteGoalStore::open(data.path().join("goals.sqlite3")).unwrap();
+        create(&store, "overflow", 0);
+        let goal = store
+            .claim(
+                LOCAL_TASK_OWNER,
+                "overflow",
+                DAEMON_GOAL_WORKER,
+                60,
+                Utc::now(),
+            )
+            .unwrap();
+        let sample = PursuitRetry {
+            errors: 1,
+            eligible_at: Some(Instant::now() + Duration::from_secs(60)),
+            claim_generation: 1,
+        };
+        let mut retries = (0..MAX_TRACKED_PURSUIT_RETRIES)
+            .map(|index| (format!("tracked-{index}"), sample))
+            .collect::<HashMap<_, _>>();
+        let overflow = schedule_retry(&mut retries, &goal, Instant::now());
+        assert!(overflow.eligible_at.is_none());
+        assert!(!retries.contains_key(&goal.id));
+        let connection = rusqlite::Connection::open(store.path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_overflow_quarantine
+                 BEFORE INSERT ON goal_events WHEN NEW.kind = 'paused'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected quarantine failure');
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+        let verifier = AcceptanceVerifier::new(workdir.path(), Duration::from_secs(1)).unwrap();
+        let mut supervisor = DaemonGoalSupervisor {
+            service: Arc::new(service(&fixture)),
+            store: store.clone(),
+            verifier,
+            config,
+            retry_after: retries,
+            recovery_scan: RecoveryScan::default(),
+        };
+
+        assert!(supervisor.pause_quarantined(&goal, overflow).is_err());
+        assert_eq!(supervisor.retry_after.len(), MAX_TRACKED_PURSUIT_RETRIES);
+        let unchanged = store.get(LOCAL_TASK_OWNER, &goal.id).unwrap().unwrap();
+        assert_eq!(unchanged.status, GoalStatus::InProgress);
+        assert_eq!(unchanged.claimed_by.as_deref(), Some(DAEMON_GOAL_WORKER));
     }
 
     #[test]
