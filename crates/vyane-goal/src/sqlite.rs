@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use crate::{
     AcceptanceCriterion, AcceptanceVerification, GoalEvent, GoalEventKind, GoalPursuitCheckpoint,
-    GoalQuery, GoalRecord, GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact,
-    NewGoal, PursuitCheckpointStatus, Result,
+    GoalQuery, GoalRecord, GoalRecoveryCursor, GoalRecoveryFilter, GoalStatus, GoalStore,
+    GoalStoreError, GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, Result,
     model::{
         validate_detail, validate_goal_id, validate_lease_seconds, validate_optional_reason,
         validate_owner, validate_stage, validate_worker,
@@ -52,6 +52,66 @@ impl SqliteGoalStore {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// List one bounded page of resident-recovery candidates using immutable
+    /// `(priority, created_at, id)` ordering.
+    pub fn list_recovery_page(
+        &self,
+        owner: &str,
+        filter: &GoalRecoveryFilter,
+        after: Option<&GoalRecoveryCursor>,
+        limit: usize,
+    ) -> Result<Vec<GoalRecord>> {
+        validate_owner(owner)?;
+        if !(1..=1_000).contains(&limit) {
+            return Err(GoalStoreError::InvalidInput(
+                "goal recovery page limit must be between 1 and 1000".into(),
+            ));
+        }
+        if let Some(after) = after {
+            after.validate()?;
+        }
+        let connection = self.connection()?;
+        let mut sql =
+            format!("SELECT {GOAL_COLUMNS} FROM goals WHERE owner = ? AND status = 'in_progress'");
+        let mut values = vec![Value::Text(owner.to_string())];
+        match filter {
+            GoalRecoveryFilter::ActiveWorker { worker_id, at } => {
+                validate_worker(worker_id)?;
+                sql.push_str(" AND claimed_by = ? AND claim_expires_at_ms > ?");
+                values.push(Value::Text(worker_id.clone()));
+                values.push(Value::Integer(at.timestamp_millis()));
+            }
+            GoalRecoveryFilter::Available { at } => {
+                sql.push_str(" AND (claimed_by IS NULL OR claim_expires_at_ms <= ?)");
+                values.push(Value::Integer(at.timestamp_millis()));
+            }
+        }
+        if let Some(after) = after {
+            sql.push_str(
+                " AND (priority > ? OR (priority = ? AND created_at_ms > ?) OR \
+                 (priority = ? AND created_at_ms = ? AND id > ?))",
+            );
+            let priority = Value::Integer(i64::from(after.priority));
+            let created_at = Value::Integer(after.created_at.timestamp_millis());
+            values.extend([
+                priority.clone(),
+                priority.clone(),
+                created_at.clone(),
+                priority,
+                created_at,
+                Value::Text(after.id.clone()),
+            ]);
+        }
+        sql.push_str(" ORDER BY priority ASC, created_at_ms ASC, id ASC LIMIT ?");
+        values.push(Value::Integer(i64::try_from(limit).map_err(|_| {
+            GoalStoreError::InvalidInput("goal recovery page limit is outside range".into())
+        })?));
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(values), row_to_record)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(GoalStoreError::from)
     }
 
     fn initialize(&self) -> Result<()> {
@@ -390,22 +450,6 @@ impl GoalStore for SqliteGoalStore {
         if let Some(parent) = &query.parent_goal_id {
             sql.push_str(" AND parent_goal_id = ?");
             values.push(Value::Text(parent.clone()));
-        }
-        if let Some(after) = &query.after {
-            sql.push_str(
-                " AND (priority > ? OR (priority = ? AND updated_at_ms < ?) OR \
-                 (priority = ? AND updated_at_ms = ? AND id > ?))",
-            );
-            let priority = Value::Integer(i64::from(after.priority));
-            let updated_at = Value::Integer(after.updated_at.timestamp_millis());
-            values.extend([
-                priority.clone(),
-                priority.clone(),
-                updated_at.clone(),
-                priority,
-                updated_at,
-                Value::Text(after.id.clone()),
-            ]);
         }
         sql.push_str(" ORDER BY priority ASC, updated_at_ms DESC, id ASC");
         if query.limit > 0 {

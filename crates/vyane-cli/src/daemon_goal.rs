@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result};
 use chrono::Utc;
 use vyane_core::{CancellationToken, Sandbox};
 use vyane_goal::{
-    AcceptanceVerifier, GoalPursuer, GoalQuery, GoalQueryCursor, GoalRecord, GoalStatus, GoalStore,
+    AcceptanceVerifier, GoalPursuer, GoalRecord, GoalRecoveryCursor, GoalRecoveryFilter, GoalStore,
     GoalStoreError, MAX_LEASE_SECONDS, PursuitConfig, SqliteGoalStore,
 };
 use vyane_service::VyaneService;
@@ -21,11 +21,34 @@ const DAEMON_GOAL_WORKER: &str = "daemon-goal:auto-v1";
 const MAX_PURSUIT_ERRORS_PER_GENERATION: u8 = 5;
 const MAX_PURSUIT_ERROR_BACKOFF: Duration = Duration::from_secs(60);
 const RECOVERY_PAGE_SIZE: usize = 256;
+const RECOVERY_PAGES_PER_CYCLE: usize = 4;
 
 #[derive(Debug, Clone, Copy)]
 struct PursuitRetry {
     errors: u8,
     eligible_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum RecoveryPhase {
+    #[default]
+    StableLease,
+    Available,
+}
+
+#[derive(Debug, Default)]
+struct RecoveryScan {
+    phase: RecoveryPhase,
+    after: Option<GoalRecoveryCursor>,
+    at: Option<chrono::DateTime<Utc>>,
+}
+
+impl RecoveryScan {
+    fn reset(&mut self) {
+        self.phase = RecoveryPhase::StableLease;
+        self.after = None;
+        self.at = None;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +113,7 @@ pub(crate) struct DaemonGoalSupervisor {
     verifier: AcceptanceVerifier,
     config: DaemonGoalConfig,
     retry_after: HashMap<String, PursuitRetry>,
+    recovery_scan: RecoveryScan,
 }
 
 impl DaemonGoalSupervisor {
@@ -105,6 +129,7 @@ impl DaemonGoalSupervisor {
             verifier,
             config,
             retry_after: HashMap::new(),
+            recovery_scan: RecoveryScan::default(),
         })
     }
 
@@ -112,6 +137,11 @@ impl DaemonGoalSupervisor {
         loop {
             if cancel.is_cancelled() {
                 return Ok(());
+            }
+            if let Err(error) = self.config.pursuit.validate() {
+                tracing::error!(error = %error, "resident goal configuration is temporarily unavailable");
+                self.wait_or_cancel(&cancel).await;
+                continue;
             }
             let goal = match self.acquire_next() {
                 Ok(Some(goal)) => goal,
@@ -132,13 +162,26 @@ impl DaemonGoalSupervisor {
                 self.config.pursuit.runtime.clone(),
                 self.config.sandbox,
             );
-            let pursuer = GoalPursuer::new(
+            let pursuer = match GoalPursuer::new(
                 &self.store,
                 &runtime,
                 &self.verifier,
                 self.config.pursuit.clone(),
-            )
-            .context("construct resident goal pursuer")?;
+            ) {
+                Ok(pursuer) => pursuer,
+                Err(error) => {
+                    let retry = schedule_retry(&mut self.retry_after, &goal.id, Instant::now());
+                    tracing::warn!(
+                        goal_id = %goal.id,
+                        error = %error,
+                        errors = retry.errors,
+                        quarantined = retry.eligible_at.is_none(),
+                        "resident goal pursuer construction failed"
+                    );
+                    self.wait_or_cancel(&cancel).await;
+                    continue;
+                }
+            };
             let result = pursuer
                 .pursue_with_cancel_preserving_checkpoint(
                     LOCAL_TASK_OWNER,
@@ -182,99 +225,101 @@ impl DaemonGoalSupervisor {
         }
     }
 
-    fn acquire_next(&self) -> Result<Option<GoalRecord>> {
-        acquire_from_store(&self.store, &self.config, &self.retry_after)
+    fn acquire_next(&mut self) -> Result<Option<GoalRecord>> {
+        acquire_from_store(
+            &self.store,
+            &self.config,
+            &self.retry_after,
+            &mut self.recovery_scan,
+        )
     }
 }
 
-fn acquire_from_store<S: GoalStore>(
-    store: &S,
+fn acquire_from_store(
+    store: &SqliteGoalStore,
     config: &DaemonGoalConfig,
     retry_after: &HashMap<String, PursuitRetry>,
+    scan: &mut RecoveryScan,
 ) -> Result<Option<GoalRecord>> {
     let retry_now = Instant::now();
-    let lease_now = Utc::now();
+    let lease_now = *scan.at.get_or_insert_with(Utc::now);
 
-    // A live lease owned by the stable daemon worker is restart continuity,
-    // not ordinary competing work. Adopt it before reclaiming any other row.
-    let mut after = None;
-    loop {
-        let page = recovery_page(store, after.clone())?;
-        if let Some(goal) = page.iter().find(|goal| {
-            retry_eligible(retry_after, &goal.id, retry_now)
-                && goal.lease_active(lease_now)
-                && goal.claimed_by.as_deref() == Some(DAEMON_GOAL_WORKER)
-        }) {
-            return Ok(Some(goal.clone()));
-        }
-        if page.len() < RECOVERY_PAGE_SIZE {
-            break;
-        }
-        after = page.last().map(GoalQueryCursor::from);
-    }
-
-    let mut after = None;
-    loop {
-        let page = recovery_page(store, after.clone())?;
+    for _ in 0..RECOVERY_PAGES_PER_CYCLE {
+        let filter = match scan.phase {
+            RecoveryPhase::StableLease => GoalRecoveryFilter::ActiveWorker {
+                worker_id: DAEMON_GOAL_WORKER.into(),
+                at: lease_now,
+            },
+            RecoveryPhase::Available => GoalRecoveryFilter::Available { at: lease_now },
+        };
+        let page = store.list_recovery_page(
+            LOCAL_TASK_OWNER,
+            &filter,
+            scan.after.as_ref(),
+            RECOVERY_PAGE_SIZE,
+        )?;
         for goal in &page {
-            if !retry_eligible(retry_after, &goal.id, retry_now) || goal.lease_active(lease_now) {
+            if !retry_eligible(retry_after, &goal.id, retry_now) {
                 continue;
             }
-            let acquired = if goal.claimed_by.is_some() {
-                store.reclaim(
-                    LOCAL_TASK_OWNER,
-                    &goal.id,
-                    DAEMON_GOAL_WORKER,
-                    config.lease_seconds(),
-                    lease_now,
-                )
-            } else {
-                store.claim(
-                    LOCAL_TASK_OWNER,
-                    &goal.id,
-                    DAEMON_GOAL_WORKER,
-                    config.lease_seconds(),
-                    lease_now,
-                )
-            };
-            match acquired {
-                Ok(goal) => return Ok(Some(goal)),
-                Err(error) if acquisition_raced(&error) => continue,
-                Err(error) => return Err(error.into()),
+            match scan.phase {
+                RecoveryPhase::StableLease => {
+                    scan.reset();
+                    return Ok(Some(goal.clone()));
+                }
+                RecoveryPhase::Available => {
+                    let acquired = if goal.claimed_by.is_some() {
+                        store.reclaim(
+                            LOCAL_TASK_OWNER,
+                            &goal.id,
+                            DAEMON_GOAL_WORKER,
+                            config.lease_seconds(),
+                            lease_now,
+                        )
+                    } else {
+                        store.claim(
+                            LOCAL_TASK_OWNER,
+                            &goal.id,
+                            DAEMON_GOAL_WORKER,
+                            config.lease_seconds(),
+                            lease_now,
+                        )
+                    };
+                    match acquired {
+                        Ok(goal) => {
+                            scan.reset();
+                            return Ok(Some(goal));
+                        }
+                        Err(error) if acquisition_raced(&error) => continue,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
             }
         }
-        if page.len() < RECOVERY_PAGE_SIZE {
-            break;
+        if page.len() == RECOVERY_PAGE_SIZE {
+            scan.after = page.last().map(GoalRecoveryCursor::from);
+            continue;
         }
-        after = page.last().map(GoalQueryCursor::from);
+        match scan.phase {
+            RecoveryPhase::StableLease => {
+                scan.phase = RecoveryPhase::Available;
+                scan.after = None;
+            }
+            RecoveryPhase::Available => {
+                scan.reset();
+                return store
+                    .claim_next(
+                        LOCAL_TASK_OWNER,
+                        DAEMON_GOAL_WORKER,
+                        config.lease_seconds(),
+                        Utc::now(),
+                    )
+                    .map_err(Into::into);
+            }
+        }
     }
 
-    store
-        .claim_next(
-            LOCAL_TASK_OWNER,
-            DAEMON_GOAL_WORKER,
-            config.lease_seconds(),
-            Utc::now(),
-        )
-        .map_err(Into::into)
-}
-
-fn recovery_page<S: GoalStore>(
-    store: &S,
-    after: Option<GoalQueryCursor>,
-) -> Result<Vec<GoalRecord>> {
-    store
-        .list(LOCAL_TASK_OWNER, &recovery_query(after))
-        .map_err(Into::into)
-}
-
-fn recovery_query(after: Option<GoalQueryCursor>) -> GoalQuery {
-    GoalQuery {
-        statuses: vec![GoalStatus::InProgress],
-        parent_goal_id: None,
-        after,
-        limit: RECOVERY_PAGE_SIZE,
-    }
+    Ok(None)
 }
 
 fn retry_eligible(
@@ -330,7 +375,7 @@ mod tests {
     use chrono::TimeDelta;
     use std::path::Path;
     use tempfile::TempDir;
-    use vyane_goal::{NewGoal, PursuitConfig};
+    use vyane_goal::{GoalStatus, NewGoal, PursuitConfig};
 
     use crate::cli::{DaemonGoalArgs, SandboxArg};
 
@@ -416,6 +461,38 @@ mod tests {
         assert!(DaemonGoalConfig::from_args(&runtime, &args).is_err());
     }
 
+    #[tokio::test]
+    async fn unavailable_workdir_does_not_claim_or_terminate_the_supervisor() {
+        let fixture = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let workdir = TempDir::new().unwrap();
+        let config = config(&workdir);
+        let store = SqliteGoalStore::open(data.path().join("goals.sqlite3")).unwrap();
+        create(&store, "waiting", 1);
+        let verifier = AcceptanceVerifier::new(workdir.path(), Duration::from_secs(1)).unwrap();
+        std::fs::remove_dir_all(workdir.path()).unwrap();
+        let supervisor = DaemonGoalSupervisor {
+            service: Arc::new(service(&fixture)),
+            store: store.clone(),
+            verifier,
+            config,
+            retry_after: HashMap::new(),
+            recovery_scan: RecoveryScan::default(),
+        };
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            stop.cancel();
+        });
+
+        supervisor.run(cancel).await.unwrap();
+        canceller.await.unwrap();
+        let waiting = store.get(LOCAL_TASK_OWNER, "waiting").unwrap().unwrap();
+        assert_eq!(waiting.status, GoalStatus::Queued);
+        assert_eq!(waiting.claim_generation, 0);
+    }
+
     fn create(store: &SqliteGoalStore, id: &str, priority: u8) -> GoalRecord {
         let mut goal = NewGoal::new(id, Utc::now());
         goal.id = Some(id.into());
@@ -424,7 +501,7 @@ mod tests {
     }
 
     fn acquire(store: &SqliteGoalStore, config: &DaemonGoalConfig) -> Option<GoalRecord> {
-        acquire_from_store(store, config, &HashMap::new()).unwrap()
+        acquire_from_store(store, config, &HashMap::new(), &mut RecoveryScan::default()).unwrap()
     }
 
     #[test]
@@ -441,20 +518,25 @@ mod tests {
     }
 
     #[test]
-    fn recovery_queries_are_keyset_paginated_and_bounded() {
-        let first = recovery_query(None);
-        assert_eq!(first.limit, RECOVERY_PAGE_SIZE);
-        assert!(first.limit > 0);
-        assert!(first.after.is_none());
-
-        let cursor = GoalQueryCursor {
+    fn recovery_scan_has_a_fixed_per_cycle_budget_and_immutable_cursor() {
+        assert!(RECOVERY_PAGE_SIZE > 0);
+        assert!(RECOVERY_PAGES_PER_CYCLE > 0);
+        assert_eq!(RECOVERY_PAGE_SIZE * RECOVERY_PAGES_PER_CYCLE, 1_024);
+        let cursor = GoalRecoveryCursor {
             priority: 2,
-            updated_at: Utc::now(),
+            created_at: Utc::now(),
             id: "cursor".into(),
         };
-        let next = recovery_query(Some(cursor.clone()));
-        assert_eq!(next.limit, RECOVERY_PAGE_SIZE);
-        assert_eq!(next.after, Some(cursor));
+        let mut scan = RecoveryScan {
+            phase: RecoveryPhase::Available,
+            after: Some(cursor.clone()),
+            at: Some(Utc::now()),
+        };
+        assert_eq!(scan.after, Some(cursor));
+        scan.reset();
+        assert_eq!(scan.phase, RecoveryPhase::StableLease);
+        assert!(scan.after.is_none());
+        assert!(scan.at.is_none());
     }
 
     #[test]
@@ -625,7 +707,7 @@ mod tests {
                 eligible_at: Some(Instant::now() + Duration::from_secs(60)),
             },
         );
-        let next = acquire_from_store(&store, &config, &retries)
+        let next = acquire_from_store(&store, &config, &retries, &mut RecoveryScan::default())
             .unwrap()
             .unwrap();
         assert_eq!(next.id, "next");
@@ -646,7 +728,7 @@ mod tests {
                 eligible_at: Some(Instant::now() - Duration::from_secs(1)),
             },
         );
-        let retried = acquire_from_store(&store, &config, &retries)
+        let retried = acquire_from_store(&store, &config, &retries, &mut RecoveryScan::default())
             .unwrap()
             .unwrap();
         assert_eq!(retried.id, "cooling");
@@ -693,7 +775,7 @@ mod tests {
                 eligible_at: None,
             },
         )]);
-        let next = acquire_from_store(&store, &config, &retries)
+        let next = acquire_from_store(&store, &config, &retries, &mut RecoveryScan::default())
             .unwrap()
             .unwrap();
         assert_eq!(next.id, "next");

@@ -4,8 +4,8 @@ use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
-    GoalQueryCursor, GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus,
-    SqliteGoalStore,
+    GoalRecoveryCursor, GoalRecoveryFilter, GoalStatus, GoalStore, GoalStoreError, NewGoal,
+    PursuitCheckpointStatus, SqliteGoalStore,
 };
 
 const OWNER_A: &str = "owner-a";
@@ -202,7 +202,6 @@ fn queue_and_list_order_are_stable_and_owner_scoped() {
             &GoalQuery {
                 statuses: vec![GoalStatus::Queued],
                 parent_goal_id: None,
-                after: None,
                 limit: 50,
             },
         )
@@ -214,44 +213,86 @@ fn queue_and_list_order_are_stable_and_owner_scoped() {
             .collect::<Vec<_>>(),
         ["later-urgent", "normal"]
     );
-    let first_page = store
-        .list(
-            OWNER_A,
-            &GoalQuery {
-                statuses: vec![GoalStatus::Queued],
-                parent_goal_id: None,
-                after: None,
-                limit: 1,
-            },
-        )
-        .expect("first queued page");
-    let second_page = store
-        .list(
-            OWNER_A,
-            &GoalQuery {
-                statuses: vec![GoalStatus::Queued],
-                parent_goal_id: None,
-                after: first_page.first().map(GoalQueryCursor::from),
-                limit: 1,
-            },
-        )
-        .expect("second queued page");
-    assert_eq!(first_page[0].id, "later-urgent");
-    assert_eq!(second_page[0].id, "normal");
-
     let parented = store
         .list(
             OWNER_A,
             &GoalQuery {
                 statuses: Vec::new(),
                 parent_goal_id: Some("umbrella".into()),
-                after: None,
                 limit: 50,
             },
         )
         .expect("parent list");
     assert_eq!(parented.len(), 1);
     assert_eq!(parented[0].id, "later-urgent");
+}
+
+#[test]
+fn recovery_pages_filter_leases_and_ignore_mutable_update_order() {
+    let (_directory, store) = fixture();
+    let base = timestamp(1_700_000_000);
+    for (id, priority, offset) in [("available-a", 0, 0), ("available-b", 0, 1)] {
+        store
+            .create(
+                OWNER_A,
+                new_goal(id, id, priority, base + TimeDelta::seconds(offset)),
+            )
+            .expect("create available goal");
+        store
+            .start(OWNER_A, id, base)
+            .expect("start available goal");
+    }
+    store
+        .create(OWNER_A, new_goal("stable", "stable", 1, base))
+        .expect("create stable goal");
+    store
+        .claim(OWNER_A, "stable", "daemon-worker", 60, base)
+        .expect("claim stable goal");
+    store
+        .create(OWNER_A, new_goal("foreign", "foreign", 0, base))
+        .expect("create foreign goal");
+    store
+        .claim(OWNER_A, "foreign", "foreign-worker", 60, base)
+        .expect("claim foreign goal");
+
+    let active = store
+        .list_recovery_page(
+            OWNER_A,
+            &GoalRecoveryFilter::ActiveWorker {
+                worker_id: "daemon-worker".into(),
+                at: base + TimeDelta::seconds(1),
+            },
+            None,
+            10,
+        )
+        .expect("stable-worker page");
+    assert_eq!(
+        active
+            .iter()
+            .map(|goal| goal.id.as_str())
+            .collect::<Vec<_>>(),
+        ["stable"]
+    );
+
+    let filter = GoalRecoveryFilter::Available { at: base };
+    let first = store
+        .list_recovery_page(OWNER_A, &filter, None, 1)
+        .expect("first recovery page");
+    assert_eq!(first[0].id, "available-a");
+    let cursor = GoalRecoveryCursor::from(&first[0]);
+    store
+        .progress(
+            OWNER_A,
+            "available-b",
+            "concurrent",
+            "move mutable updated_at",
+            base + TimeDelta::seconds(30),
+        )
+        .expect("update second recovery goal");
+    let second = store
+        .list_recovery_page(OWNER_A, &filter, Some(&cursor), 1)
+        .expect("second recovery page");
+    assert_eq!(second[0].id, "available-b");
 }
 
 #[test]
