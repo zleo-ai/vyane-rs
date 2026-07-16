@@ -834,8 +834,11 @@ pub(crate) fn with_ready_signal(
             let current = state
                 .ready_signals
                 .iter()
-                .rev()
-                .find(|ready| ready.review_check.is_some())
+                .find(|ready| {
+                    ready.review_check.as_ref().is_some_and(|candidate| {
+                        candidate.observation_sequence == state.review_observation_high_water
+                    })
+                })
                 .cloned()
                 .ok_or_else(|| {
                     GoalStoreError::CorruptData(
