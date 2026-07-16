@@ -259,11 +259,23 @@ pub fn project_continuity_next_action(
         .ready_signals
         .iter()
         .rev()
-        .find(|signal| signal.kind != GoalContinuitySignalKind::QuotaReset)
+        .find(|signal| {
+            matches!(
+                signal.kind,
+                GoalContinuitySignalKind::ReviewChecksPassed
+                    | GoalContinuitySignalKind::ReviewChecksFailed
+            )
+        })
         .map(|signal| signal.kind);
+    let review_failure_observed = state
+        .ready_signals
+        .iter()
+        .any(|signal| signal.kind == GoalContinuitySignalKind::ReviewChecksFailed);
     if state.handoff_plan.steps.iter().all(|step| {
         step.status == GoalContinuityStepStatus::Done
             || (step.kind == "repair_review_failure"
+                && step.status == GoalContinuityStepStatus::WaitingForReviewChecks
+                && !review_failure_observed
                 && latest_review_signal == Some(GoalContinuitySignalKind::ReviewChecksPassed))
     }) {
         return Ok(base_action(
@@ -300,22 +312,33 @@ fn latest_approval<'a>(
     step: &GoalContinuityStep,
     status: TakeoverApprovalStatus,
 ) -> Result<&'a TakeoverApproval> {
-    approvals
+    let latest = approvals
         .iter()
-        .rev()
-        .find(|approval| {
+        .filter(|approval| {
             approval.quota_event_id == state.quota_event_id
                 && approval.step_id == step.id
                 && approval.step_kind == step.kind
-                && approval.status == status
+        })
+        .max_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.approval_id.cmp(&right.approval_id))
         })
         .ok_or_else(|| {
             GoalStoreError::CorruptData(format!(
-                "{} continuity step has no matching {} approval",
-                step.id,
-                status.as_str()
+                "{} continuity step has no matching durable approval",
+                step.id
             ))
-        })
+        })?;
+    if latest.status != status {
+        return Err(GoalStoreError::CorruptData(format!(
+            "{} continuity step is {} but its latest durable approval is {}",
+            step.id,
+            status.as_str(),
+            latest.status.as_str()
+        )));
+    }
+    Ok(latest)
 }
 
 #[allow(clippy::too_many_arguments)]

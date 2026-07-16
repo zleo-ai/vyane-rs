@@ -252,7 +252,13 @@ fn projection_reports_in_flight_and_blocked_execution_from_durable_evidence() {
     let approvals = store
         .list_takeover_approvals("local", Some(&goal.id))
         .unwrap();
-    let blocked = project_continuity_next_action(&current, &approvals).unwrap();
+    let current_approval = approvals.last().unwrap().clone();
+    let mut stale = current_approval.clone();
+    stale.approval_id = "continuity-stale".into();
+    stale.created_at -= chrono::Duration::seconds(1);
+    stale.updated_at -= chrono::Duration::seconds(1);
+    stale.blocker_reason = Some("stale failure".into());
+    let blocked = project_continuity_next_action(&current, &[current_approval, stale]).unwrap();
     assert_eq!(
         blocked.action,
         GoalContinuityNextActionKind::ResolveBlockedExecution
@@ -374,6 +380,43 @@ fn projection_lists_only_signals_accepted_by_the_current_boundary() {
         GoalContinuityNextActionKind::ContinuityComplete
     );
     assert_eq!(goal.status, vyane_goal::GoalStatus::InProgress);
+
+    let mut forged = goal.clone();
+    let state = forged.continuity_state.as_mut().unwrap();
+    let pass_index = state
+        .ready_signals
+        .iter()
+        .position(|signal| signal.kind == GoalContinuitySignalKind::ReviewChecksPassed)
+        .unwrap();
+    let pass = &mut state.ready_signals[pass_index];
+    let review = pass.review_check.as_mut().unwrap();
+    review.observation_id = "checks-2".into();
+    review.observation_sequence = 2;
+    state.review_observation_high_water = 2;
+    state.ready_signals.insert(
+        pass_index,
+        GoalContinuitySignal {
+            kind: GoalContinuitySignalKind::ReviewChecksFailed,
+            quota_event_id: state.quota_event_id.clone(),
+            provider: state.primary.provider.clone(),
+            harness: state.primary.harness.clone(),
+            model: state.primary.model.clone(),
+            observed_at: Utc.timestamp_opt(1_030, 0).unwrap(),
+            source: "fixture".into(),
+            review_check: Some(GoalContinuityReviewCheck {
+                repository: "example/project".into(),
+                pull_request: 1,
+                observation_id: "checks-1".into(),
+                observation_sequence: 1,
+            }),
+        },
+    );
+    let fail_closed = project_continuity_next_action(&forged, &approvals).unwrap();
+    assert_eq!(
+        fail_closed.action,
+        GoalContinuityNextActionKind::WaitForDependency,
+        "a prior failure may not be erased by a later pass while repair is not done"
+    );
 }
 
 #[test]
