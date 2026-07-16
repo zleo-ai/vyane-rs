@@ -186,10 +186,11 @@ pub struct TakeoverApprovalRequest {
     pub timeout: Duration,
     pub goal_revision: u64,
     pub plan_snapshot: GoalContinuityState,
-    /// Exact successful takeover approval whose result is reviewed. Absent for
-    /// the takeover step itself.
+    /// Exact successful predecessor approval. Review binds takeover; primary
+    /// resume binds review when the policy requires it. Absent when the step
+    /// has no approval predecessor.
     pub upstream_approval_id: Option<String>,
-    /// Exact run produced by the bound upstream takeover approval.
+    /// Exact run produced by the bound predecessor approval.
     pub upstream_run_id: Option<String>,
     pub upstream_run_status: Option<TakeoverRunStatus>,
 }
@@ -205,13 +206,17 @@ impl TakeoverApprovalRequest {
         let is_takeover = self.step_id == "takeover" && self.step_kind == "start_takeover";
         let is_review =
             self.step_id == "review_takeover" && self.step_kind == "review_takeover_work";
-        if !is_takeover && !is_review {
+        let is_resume =
+            self.step_id == "resume_primary" && self.step_kind == "resume_primary_after_reset";
+        if !is_takeover && !is_review && !is_resume {
             return Err(GoalStoreError::InvalidInput(
-                "only takeover or review_takeover can be approved in this layer".into(),
+                "only takeover, review_takeover, or resume_primary can be approved in this layer"
+                    .into(),
             ));
         }
+        let resume_requires_review = is_resume && self.plan_snapshot.require_review_before_resume;
         match (
-            is_review,
+            is_review || resume_requires_review,
             self.upstream_approval_id.as_deref(),
             self.upstream_run_id.as_deref(),
             self.upstream_run_status,
@@ -223,12 +228,12 @@ impl TakeoverApprovalRequest {
             }
             (true, ..) => {
                 return Err(GoalStoreError::InvalidInput(
-                    "review approval requires exact successful takeover evidence".into(),
+                    "continuity approval requires exact successful predecessor evidence".into(),
                 ));
             }
             (false, ..) => {
                 return Err(GoalStoreError::InvalidInput(
-                    "takeover approval cannot carry upstream review evidence".into(),
+                    "continuity approval cannot carry unexpected predecessor evidence".into(),
                 ));
             }
         }

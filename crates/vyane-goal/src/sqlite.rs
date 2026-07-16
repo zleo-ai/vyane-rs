@@ -1278,7 +1278,7 @@ impl GoalStore for SqliteGoalStore {
             }
         })?;
         validate_takeover_request(request, &goal)?;
-        validate_upstream_review_evidence(&transaction, owner, request)?;
+        validate_upstream_continuity_evidence(&transaction, owner, request)?;
         transaction.execute(
             "INSERT INTO goal_takeover_approvals (approval_id, owner, goal_id, step_id, \
              step_kind, quota_event_id, snapshot_digest, target_profile, target_provider, \
@@ -2118,7 +2118,7 @@ fn validate_takeover_request(request: &TakeoverApprovalRequest, goal: &GoalRecor
     Ok(())
 }
 
-fn validate_upstream_review_evidence(
+fn validate_upstream_continuity_evidence(
     transaction: &Transaction<'_>,
     owner: &str,
     request: &TakeoverApprovalRequest,
@@ -2128,21 +2128,41 @@ fn validate_upstream_review_evidence(
     };
     let upstream =
         select_takeover_approval_by_id(transaction, owner, upstream_id)?.ok_or_else(|| {
-            GoalStoreError::InvalidInput("review upstream takeover approval was not found".into())
+            GoalStoreError::InvalidInput("continuity predecessor approval was not found".into())
         })?;
-    if request.step_id != "review_takeover"
-        || upstream.goal_id != request.goal_id
+    let expected_predecessor = match request.step_id.as_str() {
+        "review_takeover" => ("takeover", "start_takeover"),
+        "resume_primary" if request.plan_snapshot.require_review_before_resume => {
+            ("review_takeover", "review_takeover_work")
+        }
+        _ => {
+            return Err(GoalStoreError::InvalidInput(
+                "continuity approval carries unexpected predecessor evidence".into(),
+            ));
+        }
+    };
+    if upstream.goal_id != request.goal_id
         || upstream.quota_event_id != request.quota_event_id
-        || upstream.step_id != "takeover"
-        || upstream.step_kind != "start_takeover"
+        || upstream.step_id != expected_predecessor.0
+        || upstream.step_kind != expected_predecessor.1
         || upstream.status != TakeoverApprovalStatus::Done
         || upstream.run_status != Some(TakeoverRunStatus::Success)
         || upstream.run_id != request.upstream_run_id
         || request.upstream_run_status != Some(TakeoverRunStatus::Success)
     {
-        return Err(GoalStoreError::InvalidInput(
-            "review approval is not bound to the exact successful takeover run".into(),
-        ));
+        let message = if request.step_id == "review_takeover" {
+            "review approval is not bound to the exact successful takeover run"
+        } else {
+            "primary resume approval is not bound to the exact successful review run"
+        };
+        return Err(GoalStoreError::InvalidInput(message.into()));
+    }
+    if request.step_id == "resume_primary" {
+        validate_upstream_approval_record(transaction, owner, &upstream).map_err(|_| {
+            GoalStoreError::InvalidInput(
+                "primary resume is not bound to an intact reviewed takeover chain".into(),
+            )
+        })?;
     }
     Ok(())
 }
@@ -2167,7 +2187,7 @@ fn validate_upstream_approval_record(
         upstream_run_id: approval.upstream_run_id.clone(),
         upstream_run_status: approval.upstream_run_status,
     };
-    validate_upstream_review_evidence(transaction, owner, &request).map_err(|_| {
+    validate_upstream_continuity_evidence(transaction, owner, &request).map_err(|_| {
         GoalStoreError::TakeoverBoundaryChanged {
             id: approval.approval_id.clone(),
         }

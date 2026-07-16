@@ -87,6 +87,7 @@ fn pursuit_fixture(directory: &TempDir) -> (std::path::PathBuf, TempDir) {
         &claude,
         r#"#!/bin/sh
 : > "$PWD/done.txt"
+printf '%s\n' "$*" > "$PWD/last-prompt.txt"
 printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
 "#,
     )
@@ -942,6 +943,127 @@ fn continuity_execute_dispatches_once_and_settles_done() {
         GoalContinuityStepStatus::WaitingForQuotaReset
     );
     assert!(state.handoff_plan.next_ready_step.is_empty());
+
+    let signal = json_output(
+        &[
+            "goal",
+            "continuity-signal",
+            "--db",
+            &db,
+            "--json",
+            "execute-controlled",
+            "quota-reset",
+            "--quota-event-id",
+            "quota-execute",
+            "--provider",
+            "native",
+            "--harness",
+            "claude-code",
+            "--model",
+            "test-model",
+            "--source",
+            "acceptance-reader",
+        ],
+        0,
+    );
+    assert_eq!(
+        signal["result"]["state"]["handoff_plan"]["next_ready_step"],
+        "resume_primary"
+    );
+    let resume_queued = json_output(
+        &[
+            "goal",
+            "continuity-queue",
+            "--db",
+            &db,
+            "--json",
+            "execute-controlled",
+            "--workdir",
+            &workdir,
+            "--sandbox",
+            pursuit_test_sandbox(),
+            "--timeout-seconds",
+            "30",
+        ],
+        0,
+    );
+    assert_eq!(resume_queued["approval"]["step_id"], "resume_primary");
+    assert_eq!(
+        resume_queued["approval"]["upstream_approval_id"],
+        review_approval_id
+    );
+    let resume_approval_id = resume_queued["approval"]["approval_id"]
+        .as_str()
+        .expect("resume approval id");
+    json_output(
+        &[
+            "goal",
+            "continuity-decide",
+            "--db",
+            &db,
+            "--json",
+            resume_approval_id,
+            "--decision",
+            "approve",
+            "--decided-by",
+            "operator",
+        ],
+        0,
+    );
+    let resume_output = vyane()
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "continuity-execute",
+            "--db",
+            &db,
+            "--json",
+            resume_approval_id,
+        ])
+        .output()
+        .expect("execute primary resume");
+    assert_eq!(
+        resume_output.status.code(),
+        Some(0),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&resume_output.stdout),
+        String::from_utf8_lossy(&resume_output.stderr)
+    );
+    let resumed: Value =
+        serde_json::from_slice(&resume_output.stdout).expect("resume execution JSON");
+    assert_eq!(resumed["approval"]["status"], "done");
+    assert_eq!(resumed["approval"]["run_status"], "success");
+    let resume_prompt = fs::read_to_string(directory.path().join("last-prompt.txt"))
+        .expect("read primary resume prompt");
+    assert!(resume_prompt.contains("Primary resume evidence:"));
+    assert!(resume_prompt.contains("review.approval_id:"));
+    assert!(resume_prompt.contains("review.run_id:"));
+    assert!(resume_prompt.contains("takeover.approval_id:"));
+    assert!(resume_prompt.contains("takeover.run_id:"));
+    assert!(resume_prompt.contains("signal.quota_reset:"));
+    assert!(resume_prompt.contains("Approved target provider: native"));
+    assert!(resume_prompt.contains("Approved target harness: claude-code"));
+    let goal = store
+        .get("local", "execute-controlled")
+        .expect("read resumed goal")
+        .expect("resumed goal exists");
+    assert_eq!(goal.status, vyane_goal::GoalStatus::InProgress);
+    assert_eq!(
+        goal.continuity_state
+            .unwrap()
+            .handoff_plan
+            .steps
+            .iter()
+            .find(|step| step.id == "resume_primary")
+            .unwrap()
+            .status,
+        GoalContinuityStepStatus::Done
+    );
 }
 
 #[test]
