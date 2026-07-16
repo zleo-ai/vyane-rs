@@ -135,14 +135,17 @@ pub fn project_continuity_next_action(
                 &step.reason,
             ));
         }
-        let current = approvals.iter().rev().find(|approval| {
-            approval.quota_event_id == state.quota_event_id
-                && approval.step_id == step.id
-                && approval.step_kind == step.kind
-                && approval.goal_revision == goal.revision
-                && approval.plan_snapshot == *state
-        });
-        return Ok(match current.map(|approval| approval.status) {
+        let current = approvals
+            .iter()
+            .filter(|approval| {
+                approval.quota_event_id == state.quota_event_id
+                    && approval.step_id == step.id
+                    && approval.step_kind == step.kind
+                    && approval.goal_revision == goal.revision
+                    && approval.plan_snapshot == *state
+            })
+            .max_by(|left, right| approval_order(left, right));
+        return Ok(match current {
             None => action_for_step(
                 goal,
                 state,
@@ -154,8 +157,7 @@ pub fn project_continuity_next_action(
                 vec!["workdir".into(), "sandbox".into(), "timeout_seconds".into()],
                 "the ready continuity step has not been queued for approval",
             ),
-            Some(TakeoverApprovalStatus::Pending) => {
-                let approval = current.expect("matched approval exists");
+            Some(approval) if approval.status == TakeoverApprovalStatus::Pending => {
                 action_for_step(
                     goal,
                     state,
@@ -168,8 +170,7 @@ pub fn project_continuity_next_action(
                     "the queued continuity approval needs an explicit decision",
                 )
             }
-            Some(TakeoverApprovalStatus::Approved) => {
-                let approval = current.expect("matched approval exists");
+            Some(approval) if approval.status == TakeoverApprovalStatus::Approved => {
                 action_for_step(
                     goal,
                     state,
@@ -182,8 +183,7 @@ pub fn project_continuity_next_action(
                     "the approved continuity step is ready for one-shot execution",
                 )
             }
-            Some(TakeoverApprovalStatus::Rejected) => {
-                let approval = current.expect("matched approval exists");
+            Some(approval) if approval.status == TakeoverApprovalStatus::Rejected => {
                 action_for_step(
                     goal,
                     state,
@@ -199,11 +199,7 @@ pub fn project_continuity_next_action(
                         .unwrap_or("the continuity approval was rejected"),
                 )
             }
-            Some(
-                TakeoverApprovalStatus::InFlight
-                | TakeoverApprovalStatus::Done
-                | TakeoverApprovalStatus::Blocked,
-            ) => {
+            Some(_) => {
                 return Err(GoalStoreError::CorruptData(
                     "ready continuity step has a terminal or consumed current approval".into(),
                 ));
@@ -319,11 +315,7 @@ fn latest_approval<'a>(
                 && approval.step_id == step.id
                 && approval.step_kind == step.kind
         })
-        .max_by(|left, right| {
-            left.created_at
-                .cmp(&right.created_at)
-                .then_with(|| left.approval_id.cmp(&right.approval_id))
-        })
+        .max_by(|left, right| approval_order(left, right))
         .ok_or_else(|| {
             GoalStoreError::CorruptData(format!(
                 "{} continuity step has no matching durable approval",
@@ -339,6 +331,12 @@ fn latest_approval<'a>(
         )));
     }
     Ok(latest)
+}
+
+fn approval_order(left: &TakeoverApproval, right: &TakeoverApproval) -> std::cmp::Ordering {
+    left.created_at
+        .cmp(&right.created_at)
+        .then_with(|| left.approval_id.cmp(&right.approval_id))
 }
 
 #[allow(clippy::too_many_arguments)]

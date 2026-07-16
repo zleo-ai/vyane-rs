@@ -172,6 +172,23 @@ fn projection_moves_from_queue_to_decide_to_execute_without_mutation() {
         Some(queued.approval_id.as_str())
     );
 
+    let mut synthetic_approved = queued.clone();
+    synthetic_approved.approval_id = "continuity-newer".into();
+    synthetic_approved.status = vyane_goal::TakeoverApprovalStatus::Approved;
+    synthetic_approved.created_at += chrono::Duration::seconds(1);
+    synthetic_approved.updated_at += chrono::Duration::seconds(1);
+    let unsorted =
+        project_continuity_next_action(&goal, &[synthetic_approved.clone(), queued.clone()])
+            .unwrap();
+    assert_eq!(
+        unsorted.action,
+        GoalContinuityNextActionKind::ExecuteApproval
+    );
+    assert_eq!(
+        unsorted.approval_id.as_deref(),
+        Some(synthetic_approved.approval_id.as_str())
+    );
+
     store
         .decide_takeover_approval(
             "local",
