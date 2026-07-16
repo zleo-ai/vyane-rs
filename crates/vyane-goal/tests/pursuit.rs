@@ -686,6 +686,110 @@ async fn overall_timeout_and_cancellation_pause_without_another_segment() {
 }
 
 #[tokio::test]
+async fn resident_cancellation_preserves_running_checkpoint_and_lease() {
+    let (directory, store) = fixture();
+    running_goal(
+        &store,
+        "resident-cancelled",
+        vec![AcceptanceCriterion::new("custom", "cmd:false")],
+    );
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_worker = cancel.clone();
+    let runtime_started = Arc::new(tokio::sync::Notify::new());
+    let cancel_started = Arc::clone(&runtime_started);
+    let canceller = tokio::spawn(async move {
+        cancel_started.notified().await;
+        cancel_worker.cancel();
+    });
+    let runtime = NotifyingHangingRuntime {
+        started: runtime_started,
+    };
+    let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
+    let outcome = GoalPursuer::new(&store, &runtime, &verifier, config(&directory, 3, 3))
+        .unwrap()
+        .pursue_with_cancel_preserving_checkpoint(OWNER, "resident-cancelled", cancel)
+        .await
+        .unwrap();
+    canceller.await.unwrap();
+
+    assert_eq!(outcome.status, PursuitStatus::Stopped);
+    assert_eq!(outcome.reason, "pursuit cancelled");
+    let goal = store.get(OWNER, "resident-cancelled").unwrap().unwrap();
+    assert_eq!(goal.status, GoalStatus::InProgress);
+    assert_eq!(goal.claimed_by.as_deref(), Some("pursuer"));
+    let checkpoint = store
+        .pursuit_checkpoint(OWNER, "resident-cancelled")
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.status, PursuitCheckpointStatus::Running);
+    assert_eq!(checkpoint.segments_started, 1);
+    assert_eq!(checkpoint.segments_completed, 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resident_cancellation_waits_for_verifier_cleanup_without_pausing() {
+    let (directory, store) = fixture();
+    let script = directory.path().join("slow-verifier");
+    fs::write(
+        &script,
+        "#!/bin/sh\n: > \"$PWD/verifier-started\"\n/bin/sleep 5\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    running_goal(
+        &store,
+        "resident-verifier-cancelled",
+        vec![AcceptanceCriterion::new(
+            "custom",
+            format!("cmd:{}", script.display()),
+        )],
+    );
+    let marker = directory.path().join("verifier-started");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_worker = cancel.clone();
+    let canceller = std::thread::spawn(move || {
+        for _ in 0..1_000 {
+            if marker.exists() {
+                cancel_worker.cancel();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("verifier did not start");
+    });
+    let runtime = FakeRuntime::new(|_| panic!("runtime must not run"));
+    let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(10)).unwrap();
+    let started = std::time::Instant::now();
+    let outcome = GoalPursuer::new(&store, &runtime, &verifier, config(&directory, 3, 3))
+        .unwrap()
+        .pursue_with_cancel_preserving_checkpoint(OWNER, "resident-verifier-cancelled", cancel)
+        .await
+        .unwrap();
+    canceller.join().unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(outcome.status, PursuitStatus::Stopped);
+    assert_eq!(runtime.call_count(), 0);
+    let goal = store
+        .get(OWNER, "resident-verifier-cancelled")
+        .unwrap()
+        .unwrap();
+    assert_eq!(goal.status, GoalStatus::InProgress);
+    let checkpoint = store
+        .pursuit_checkpoint(OWNER, "resident-verifier-cancelled")
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.status, PursuitCheckpointStatus::Running);
+    assert!(
+        store
+            .verifications(OWNER, "resident-verifier-cancelled")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn active_lease_mismatch_rejects_before_verifier_or_runtime() {
     let (directory, store) = fixture();
     let mut goal = NewGoal::new("Leased", Utc::now());

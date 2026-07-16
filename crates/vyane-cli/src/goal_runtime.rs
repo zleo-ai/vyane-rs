@@ -15,11 +15,7 @@ pub(crate) struct DispatchGoalRuntime {
 }
 
 impl DispatchGoalRuntime {
-    pub(crate) fn new(
-        service: Arc<VyaneService>,
-        target: String,
-        sandbox: Sandbox,
-    ) -> Self {
+    pub(crate) fn new(service: Arc<VyaneService>, target: String, sandbox: Sandbox) -> Self {
         Self {
             service,
             target,

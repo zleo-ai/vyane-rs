@@ -126,8 +126,6 @@ impl DaemonGoalSupervisor {
             };
 
             tracing::info!(goal_id = %goal.id, "starting resident goal pursuit");
-            let runtime_cancel = cancel.child_token();
-            let shutdown_cancel = runtime_cancel.clone();
             let runtime = DispatchGoalRuntime::new(
                 Arc::clone(&self.service),
                 self.config.pursuit.runtime.clone(),
@@ -140,44 +138,34 @@ impl DaemonGoalSupervisor {
                 self.config.pursuit.clone(),
             )
             .context("construct resident goal pursuer")?;
-            let retry_after_error = tokio::select! {
-                biased;
-                () = cancel.cancelled() => {
-                    shutdown_cancel.cancel();
-                    return Ok(());
-                }
-                result = pursuer.pursue_with_cancel(
+            let result = pursuer
+                .pursue_with_cancel_preserving_checkpoint(
                     LOCAL_TASK_OWNER,
                     &goal.id,
-                    runtime_cancel,
-                ) => {
-                    match result {
-                        Ok(outcome) => {
-                            self.retry_after.remove(&goal.id);
-                            tracing::info!(
-                                goal_id = %goal.id,
-                                status = ?outcome.status,
-                                reason = %outcome.reason,
-                                "resident goal pursuit settled"
-                            );
-                            false
-                        }
-                        Err(error) => {
-                            let retry = schedule_retry(
-                                &mut self.retry_after,
-                                &goal.id,
-                                Instant::now(),
-                            );
-                            tracing::warn!(
-                                goal_id = %goal.id,
-                                error = %error,
-                                errors = retry.errors,
-                                quarantined = retry.eligible_at.is_none(),
-                                "resident goal pursuit stopped with an error"
-                            );
-                            true
-                        }
-                    }
+                    cancel.child_token(),
+                )
+                .await;
+            let retry_after_error = match result {
+                Ok(outcome) => {
+                    self.retry_after.remove(&goal.id);
+                    tracing::info!(
+                        goal_id = %goal.id,
+                        status = ?outcome.status,
+                        reason = %outcome.reason,
+                        "resident goal pursuit settled"
+                    );
+                    false
+                }
+                Err(error) => {
+                    let retry = schedule_retry(&mut self.retry_after, &goal.id, Instant::now());
+                    tracing::warn!(
+                        goal_id = %goal.id,
+                        error = %error,
+                        errors = retry.errors,
+                        quarantined = retry.eligible_at.is_none(),
+                        "resident goal pursuit stopped with an error"
+                    );
+                    true
                 }
             };
             if retry_after_error {
