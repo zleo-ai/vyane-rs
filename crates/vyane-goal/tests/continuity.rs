@@ -191,30 +191,44 @@ fn quota_target_aliases_provider_or_harness_and_broadcasts_to_all_matches() {
 }
 
 #[test]
-fn policy_validation_rejects_unsafe_or_ambiguous_declarations() {
+fn policy_validation_rejects_wrong_primary_role() {
     let directory = TempDir::new().expect("temporary directory");
     let store = store(&directory);
-
     let mut wrong_role = policy(true);
     wrong_role.primary.role = "takeover".into();
     let mut goal = NewGoal::new("wrong role", at(1_000));
     goal.id = Some("wrong-role".into());
     goal.continuity_policy = Some(wrong_role);
-    assert!(store.create(OWNER, goal).is_err());
+    let error = store.create(OWNER, goal).expect_err("wrong role must fail");
+    assert!(error.to_string().contains("primary target role"));
+}
 
+#[test]
+fn policy_validation_rejects_missing_reviewer() {
+    let directory = TempDir::new().expect("temporary directory");
+    let store = store(&directory);
     let mut missing_reviewer = policy(true);
     missing_reviewer.reviewer = None;
     let mut goal = NewGoal::new("missing reviewer", at(1_000));
     goal.id = Some("missing-reviewer".into());
     goal.continuity_policy = Some(missing_reviewer);
-    assert!(store.create(OWNER, goal).is_err());
+    let error = store
+        .create(OWNER, goal)
+        .expect_err("missing reviewer must fail");
+    assert!(error.to_string().contains("reviewer is required"));
+}
 
+#[test]
+fn policy_validation_rejects_too_many_takeover_targets() {
+    let directory = TempDir::new().expect("temporary directory");
+    let store = store(&directory);
     let mut too_many = policy(true);
     too_many.takeover = vec![target("takeover", "backup", "claude-code", "fallback"); 9];
     let mut goal = NewGoal::new("too many", at(1_000));
     goal.id = Some("too-many".into());
     goal.continuity_policy = Some(too_many);
-    assert!(store.create(OWNER, goal).is_err());
+    let error = store.create(OWNER, goal).expect_err("too many must fail");
+    assert!(error.to_string().contains("at most 8"));
 }
 
 #[test]
@@ -283,4 +297,23 @@ fn optional_review_and_primary_resume_steps_follow_policy_flags() {
     .expect("apply no-resume event");
     assert_eq!(action[0].state.handoff_plan.steps.len(), 2);
     assert_eq!(action[0].state.handoff_plan.steps[1].id, "review_takeover");
+}
+
+#[test]
+fn both_optional_continuity_steps_can_be_disabled() {
+    let directory = TempDir::new().expect("temporary directory");
+    let store = store(&directory);
+    let mut no_follow_up = policy(true);
+    no_follow_up.require_review_before_resume = false;
+    no_follow_up.resume_primary_after_reset = false;
+    create_started(&store, "no-follow-up", no_follow_up);
+    let action = apply_quota_handoff_events(
+        &store,
+        OWNER,
+        &[quota(Some("no-follow-up"), "quota-no-follow-up")],
+        at(1_101),
+    )
+    .expect("apply no-follow-up event");
+    assert_eq!(action[0].state.handoff_plan.steps.len(), 1);
+    assert_eq!(action[0].state.handoff_plan.steps[0].id, "takeover");
 }
