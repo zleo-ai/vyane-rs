@@ -200,6 +200,62 @@ struct FrozenExecutionLane {
 }
 
 impl ResidentAgentHost {
+    /// Assemble complete paired backends without exposing their internal
+    /// ports to a frontend crate. Shared owner/store and backend uniqueness
+    /// are validated by this service boundary.
+    pub fn from_backends(
+        backends: Vec<(ResidentAgentBackend, String, AgentExecutionOptions)>,
+        reconciler: impl Into<String>,
+        recovery: AgentRecoveryOptions,
+        schedule: AgentSupervisorOptions,
+    ) -> Result<Self, AgentSupervisorError> {
+        if backends.is_empty() || backends.len() > 3 {
+            return Err(AgentSupervisorError::InvalidLaneCount);
+        }
+        let mut backends = backends.into_iter();
+        let (first, first_lease, first_execution) = backends.next().expect("non-empty validated");
+        let ResidentAgentBackend {
+            owner,
+            store,
+            executor,
+            adapters,
+            completion_sinks,
+        } = first;
+        let mut shared_adapters = adapters;
+        let mut shared_sinks = completion_sinks;
+        let mut lanes = vec![ResidentAgentExecutionLane::new(
+            executor,
+            first_lease,
+            first_execution,
+        )];
+        for (backend, lease_owner, execution) in backends {
+            let ResidentAgentBackend {
+                owner: lane_owner,
+                store: lane_store,
+                executor,
+                adapters,
+                completion_sinks,
+            } = backend;
+            if lane_owner != owner || !Arc::ptr_eq(&lane_store, &store) {
+                return Err(AgentSupervisorError::InvalidExecution);
+            }
+            shared_adapters.extend(adapters);
+            shared_sinks.extend(completion_sinks);
+            lanes.push(ResidentAgentExecutionLane::new(
+                executor,
+                lease_owner,
+                execution,
+            ));
+        }
+        Self::new(
+            ResidentAgentHostBackend::new(owner, store, shared_adapters, shared_sinks),
+            lanes,
+            reconciler,
+            recovery,
+            schedule,
+        )
+    }
+
     pub fn new(
         shared: ResidentAgentHostBackend,
         lanes: Vec<ResidentAgentExecutionLane>,
@@ -435,6 +491,15 @@ impl ResidentAgentBackend {
             adapters,
             completion_sinks,
         }
+    }
+
+    /// Return one exact adapter for host-owned cancellation or confirmation.
+    #[must_use]
+    pub fn adapter(&self, kind: ControllerKind) -> Option<Arc<dyn AgentControllerAdapter>> {
+        self.adapters
+            .iter()
+            .find(|adapter| adapter.kind() == kind)
+            .cloned()
     }
 }
 

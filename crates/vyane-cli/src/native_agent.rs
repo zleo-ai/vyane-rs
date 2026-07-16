@@ -30,8 +30,8 @@ use vyane_service::{
 };
 
 use crate::native_agent_spool::{
-    NativeAgentInput, NativeAgentInputSpool, NativeAgentSpoolError, NativeAuthStyleSnapshot,
-    NativeGenParamsSnapshot, NativeProtocolSnapshot, NativeTargetSnapshot,
+    NativeAgentInput, NativeAgentInputSpool, NativeAgentPolicy, NativeAgentSpoolError,
+    NativeAuthStyleSnapshot, NativeGenParamsSnapshot, NativeProtocolSnapshot, NativeTargetSnapshot,
 };
 
 const OPERATION_NAME: &str = "fresh-native-chat-v1";
@@ -195,6 +195,73 @@ impl FreshNativeAgentOperation {
             AgentExecutorOutcome::Quiesced(AgentExecutionSettlement::Failed { code })
         }
     }
+}
+
+/// Freeze one public native submission into the private, fresh-only input
+/// shape. This deliberately accepts only a single direct OpenAI Chat target;
+/// callers must provide an already pinned workdir and its identity.
+pub(crate) fn native_input_for_submission(
+    owner: &str,
+    run_id: &str,
+    worker_id: &str,
+    details: NativeSubmissionDetails<'_>,
+) -> Result<NativeAgentInput, NativeAgentSpoolError> {
+    let NativeSubmissionDetails {
+        prompt,
+        selector,
+        bound,
+        workdir,
+        system,
+        timeout_seconds,
+    } = details;
+    if bound.target.protocol != Protocol::OpenaiChat
+        || bound.target.harness.is_some()
+        || bound.transport != AdapterTransport::DirectHttp
+        || bound.endpoint.is_none()
+    {
+        return Err(NativeAgentSpoolError::BindingMismatch);
+    }
+    let endpoint = bound
+        .endpoint
+        .as_ref()
+        .ok_or(NativeAgentSpoolError::BindingMismatch)?;
+    let auth_style = endpoint.auth.as_ref().map(|auth| match auth.style {
+        AuthStyle::Bearer => NativeAuthStyleSnapshot::Bearer,
+        AuthStyle::XApiKey => NativeAuthStyleSnapshot::XApiKey,
+    });
+    let routing_digest = endpoint_routing_digest(&endpoint.base_url)
+        .map_err(|_| NativeAgentSpoolError::BindingMismatch)?;
+    NativeAgentInput::fresh(
+        owner,
+        run_id,
+        worker_id,
+        prompt,
+        NativeAgentPolicy {
+            target_selector: selector.to_owned(),
+            target: NativeTargetSnapshot {
+                provider: bound.target.provider.as_str().to_owned(),
+                protocol: NativeProtocolSnapshot::OpenaiChat,
+                model: bound.target.model.as_str().to_owned(),
+                auth_style,
+                routing_digest,
+                params: params_snapshot(&bound.params),
+            },
+            canonical_workdir: workdir.canonical_path().to_path_buf(),
+            workdir_identity: workdir.identity().clone(),
+            system,
+            timeout_seconds,
+            max_model_turns: 2,
+        },
+    )
+}
+
+pub(crate) struct NativeSubmissionDetails<'a> {
+    pub(crate) prompt: String,
+    pub(crate) selector: &'a str,
+    pub(crate) bound: &'a vyane_core::BoundTarget,
+    pub(crate) workdir: &'a PinnedWorkdir,
+    pub(crate) system: Option<String>,
+    pub(crate) timeout_seconds: u64,
 }
 
 #[async_trait]

@@ -18,15 +18,16 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
 use uuid::Uuid;
 use vyane_agent::{
-    AgentRunRecord, AgentStore, CancelOutcome, CancelRequest, ControllerKind, ExecutionBackend,
-    NewAgentRun, NewWorker, RunCompletionStatus, RunFailureCode, RunMode, RunState,
-    SqliteAgentStore,
+    AgentRunRecord, AgentStore, AgentStoreError, CancelOutcome, CancelRequest, ControllerKind,
+    ExecutionBackend, NewAgentRun, NewWorker, RunCompletionStatus, RunFailureCode, RunMode,
+    RunState, SqliteAgentStore,
 };
-use vyane_core::{CancellationToken, Sandbox};
+use vyane_core::{CancellationToken, PinnedWorkdir, Sandbox};
 use vyane_service::{
     AgentControllerAdapter, AgentExecutionOptions, AgentRecoveryOptions, AgentRunExecutor,
-    AgentRunRecoveryDriver, AgentSupervisorOptions, MessageComponents, OwnerContext,
-    ResidentAgentBackend, ResidentAgentSupervisor, VyaneService,
+    AgentRunRecoveryDriver, AgentSupervisorOptions, ControllerRecoveryContext,
+    InProcessAgentComponents, MessageComponents, OwnerContext, ResidentAgentBackend,
+    ResidentAgentHost, VyaneService,
 };
 
 use crate::agent_host::ProcessAgentRunExecutor;
@@ -37,10 +38,15 @@ use crate::agent_spool::{
     AgentInputSpool, AgentSpoolCreate, AgentSpoolInput, AgentSpoolPolicy, AgentSpoolSandbox,
 };
 use crate::daemon::DaemonHttpState;
+use crate::native_agent::{
+    FreshNativeAgentOperation, NativeSubmissionDetails, native_input_for_submission,
+};
+use crate::native_agent_spool::{NativeAgentInput, NativeAgentInputSpool, NativeAgentSpoolCreate};
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
 
 const INPUT_DIR: &str = "agent-inputs";
+const NATIVE_INPUT_DIR: &str = "native-agent-inputs";
 const CONTROLLER_DIR: &str = "agent-controllers";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 10 * 60;
 const CANCEL_LEASE_SECONDS: u64 = 30;
@@ -64,6 +70,16 @@ pub(crate) struct AgentRunSubmitRequest {
     pub(crate) timeout_seconds: Option<u64>,
     #[serde(default)]
     pub(crate) labels: Vec<String>,
+    #[serde(default)]
+    pub(crate) execution_backend: AgentExecutionBackend,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentExecutionBackend {
+    #[default]
+    CliHarnessProcess,
+    NativeInProcess,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,8 +106,10 @@ pub(crate) struct DaemonAgentHost {
     service: Arc<VyaneService>,
     store: Arc<dyn AgentStore>,
     spool: AgentInputSpool,
+    native_spool: NativeAgentInputSpool,
     messages: MessageComponents,
     controller: Arc<ProcessAgentControllerAdapter>,
+    native_controller: Arc<dyn AgentControllerAdapter>,
     submissions: Arc<SubmissionGate>,
     cancel_gate: Arc<Mutex<()>>,
     cancel_owner: Arc<str>,
@@ -174,7 +192,7 @@ impl DaemonAgentHost {
     pub(crate) async fn open(
         service: Arc<VyaneService>,
         instance_id: &str,
-    ) -> Result<(Self, ResidentAgentSupervisor)> {
+    ) -> Result<(Self, ResidentAgentHost)> {
         let instance_key = opaque_digest(WORKER_DOMAIN, instance_id);
         let instance_key = &instance_key[..32];
         let paths = service.storage_paths().clone();
@@ -192,7 +210,7 @@ impl DaemonAgentHost {
         let messages = MessageComponents::open(&paths, LOCAL_TASK_OWNER)
             .context("open AgentRun completion messages")?;
         let scoped = service.scope(OwnerContext::single_user_local());
-        let executor: Arc<dyn AgentRunExecutor> = Arc::new(ProcessAgentRunExecutor::new(
+        let process_executor: Arc<dyn AgentRunExecutor> = Arc::new(ProcessAgentRunExecutor::new(
             Arc::<str>::from(LOCAL_TASK_OWNER),
             Arc::clone(&store),
             scoped,
@@ -201,15 +219,36 @@ impl DaemonAgentHost {
             messages.clone(),
         ));
         let controller = Arc::new(ProcessAgentControllerAdapter::new(sidecars.clone()));
-        let adapter: Arc<dyn AgentControllerAdapter> = controller.clone();
+        let process_adapter: Arc<dyn AgentControllerAdapter> = controller.clone();
+        let native_spool =
+            NativeAgentInputSpool::open(paths.data_dir.join(NATIVE_INPUT_DIR), LOCAL_TASK_OWNER)
+                .context("open native AgentRun input spool")?;
+        let native_components = InProcessAgentComponents::new_with_completion_sinks(
+            LOCAL_TASK_OWNER,
+            Arc::clone(&store),
+            Arc::new(FreshNativeAgentOperation::new(
+                LOCAL_TASK_OWNER,
+                service.scope(OwnerContext::single_user_local()),
+                native_spool.clone(),
+                messages.clone(),
+            )),
+            Vec::new(),
+        )
+        .context("construct native AgentRun lane")?;
+        let native_backend = native_components.into_resident_backend();
+        let native_controller = native_backend
+            .adapter(ControllerKind::InProcess)
+            .ok_or_else(|| anyhow::anyhow!("native AgentRun lane has no controller adapter"))?;
         let completion_sinks = vec![messages.completion_sink()];
+        let adapters = vec![process_adapter, native_controller.clone()];
+        let all_completion_sinks = completion_sinks.clone();
         AgentRunRecoveryDriver::new_with_completion_sinks(
             LOCAL_TASK_OWNER,
             Arc::clone(&store),
             format!("agent-startup-{instance_key}"),
             AgentRecoveryOptions::default(),
-            vec![Arc::clone(&adapter)],
-            completion_sinks.clone(),
+            adapters.clone(),
+            all_completion_sinks.clone(),
         )
         .context("construct startup AgentRun recovery")?
         .recover_once(CancellationToken::new())
@@ -218,18 +257,27 @@ impl DaemonAgentHost {
         cleanup_terminal_process_sidecars(&store, &sidecars, &controller)
             .await
             .context("clean terminal AgentRun process controllers")?;
-        let backend = ResidentAgentBackend::new(
+        let process_backend = ResidentAgentBackend::new(
             LOCAL_TASK_OWNER,
             Arc::clone(&store),
-            executor,
-            vec![adapter],
+            process_executor,
+            vec![adapters[0].clone()],
             completion_sinks,
         );
-        let supervisor = ResidentAgentSupervisor::new(
-            backend,
-            format!("agent-exec-{instance_key}"),
+        let supervisor = ResidentAgentHost::from_backends(
+            vec![
+                (
+                    process_backend,
+                    format!("agent-exec-process-{instance_key}"),
+                    AgentExecutionOptions::default(),
+                ),
+                (
+                    native_backend,
+                    format!("agent-exec-native-{instance_key}"),
+                    AgentExecutionOptions::default(),
+                ),
+            ],
             format!("agent-recovery-{instance_key}"),
-            AgentExecutionOptions::default(),
             AgentRecoveryOptions::default(),
             AgentSupervisorOptions::default(),
         )
@@ -239,8 +287,10 @@ impl DaemonAgentHost {
                 service,
                 store,
                 spool,
+                native_spool,
                 messages,
                 controller,
+                native_controller,
                 submissions: Arc::new(SubmissionGate::new()),
                 cancel_gate: Arc::new(Mutex::new(())),
                 cancel_owner: Arc::from(format!("agent-cancel-{instance_key}")),
@@ -280,6 +330,12 @@ impl DaemonAgentHost {
             return Err(AgentApiError::bad_request());
         }
         let timeout_seconds = request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
+        if matches!(
+            request.execution_backend,
+            AgentExecutionBackend::NativeInProcess
+        ) {
+            return self.submit_native_admitted(request, timeout_seconds).await;
+        }
         let sandbox = match request.sandbox {
             AgentSpoolSandbox::ReadOnly => Sandbox::ReadOnly,
             AgentSpoolSandbox::Write => Sandbox::Write,
@@ -386,6 +442,103 @@ impl DaemonAgentHost {
         }
     }
 
+    async fn submit_native_admitted(
+        &self,
+        request: AgentRunSubmitRequest,
+        timeout_seconds: u64,
+    ) -> Result<AgentRunView, AgentApiError> {
+        if request.sandbox != AgentSpoolSandbox::ReadOnly {
+            return Err(AgentApiError::bad_request());
+        }
+        let workdir = request
+            .workdir
+            .ok_or_else(AgentApiError::bad_request)
+            .and_then(|path| PinnedWorkdir::open(path).map_err(|_| AgentApiError::bad_request()))?;
+        let scoped = self.service.scope(OwnerContext::single_user_local());
+        let chain = scoped
+            .resolve(&request.target)
+            .map_err(|_| AgentApiError::bad_request())?;
+        if chain.chain.len() != 1 {
+            return Err(AgentApiError::bad_request());
+        }
+        let run_id = request.run_id.to_string();
+        let worker_id = worker_id(&run_id);
+        let input = native_input_for_submission(
+            LOCAL_TASK_OWNER,
+            &run_id,
+            &worker_id,
+            NativeSubmissionDetails {
+                prompt: request.task,
+                selector: &request.target,
+                bound: &chain.chain[0],
+                workdir: &workdir,
+                system: request.system,
+                timeout_seconds,
+            },
+        )
+        .map_err(|_| AgentApiError::bad_request())?;
+        if let Some(existing) = self.find_record(run_id.clone()).await? {
+            return if exact_native_retry(&existing, &input) {
+                self.view(existing).await
+            } else {
+                Err(AgentApiError::conflict())
+            };
+        }
+        let spool_create = self
+            .native_spool
+            .create(&input)
+            .map_err(|_| AgentApiError::unavailable())?;
+        let run = NewAgentRun {
+            id: run_id.clone(),
+            worker_id: worker_id.clone(),
+            task_id: None,
+            trace_id: None,
+            parent_run_id: None,
+            execution_backend: ExecutionBackend::NativeInProcess,
+            mode: RunMode::Autonomous,
+            target_key: input.policy.target_selector.clone(),
+            prompt_digest: input.prompt_sha256.clone(),
+            policy_digest: input.policy_sha256.clone(),
+            available_at: Utc::now(),
+            timeout_seconds,
+            max_resume_attempts: 0,
+        };
+        let worker = NewWorker {
+            id: worker_id,
+            logical_session_id: None,
+        };
+        let store = Arc::clone(&self.store);
+        let created =
+            tokio::task::spawn_blocking(move || store.create_root(LOCAL_TASK_OWNER, &worker, &run))
+                .await
+                .map_err(|_| AgentApiError::unavailable())?;
+        match created {
+            Ok((_, record)) => self.view(record).await,
+            Err(create_error) => {
+                let existing = self.find_record(run_id.clone()).await?;
+                if let Some(existing) =
+                    existing.filter(|existing| exact_native_retry(existing, &input))
+                {
+                    if existing.state.is_terminal() {
+                        self.native_spool
+                            .remove_exact(&input)
+                            .map_err(|_| AgentApiError::unavailable())?;
+                    }
+                    self.view(existing).await
+                } else {
+                    if spool_create == NativeAgentSpoolCreate::Created {
+                        let _ = self.native_spool.remove_exact(&input);
+                    }
+                    if matches!(create_error, AgentStoreError::AlreadyExists { .. }) {
+                        Err(AgentApiError::conflict())
+                    } else {
+                        Err(AgentApiError::unavailable())
+                    }
+                }
+            }
+        }
+    }
+
     async fn get(&self, run_id: String) -> Result<AgentRunView, AgentApiError> {
         let record = self.get_record(run_id).await?;
         self.view(record).await
@@ -453,24 +606,48 @@ impl DaemonAgentHost {
         .map_err(|_| AgentApiError::conflict())?;
         let mut root = None;
         for ticket in plan.tickets {
-            let (outcome, confirmed_gone) = match ticket.controller.clone() {
-                None => (CancelOutcome::Cancelled, None),
+            let (outcome, confirmed_gone, confirmed_adapter) = match ticket.controller.clone() {
+                None => (CancelOutcome::Cancelled, None, None),
                 Some(controller) if controller.kind == ControllerKind::Process => {
                     match self
                         .controller
                         .stop_exact(Instant::now() + CANCEL_CONTROL_TIMEOUT, controller.clone())
                         .await
                     {
-                        vyane_service::ControllerRecoveryObservation::Gone => {
-                            (CancelOutcome::Cancelled, Some(controller))
-                        }
+                        vyane_service::ControllerRecoveryObservation::Gone => (
+                            CancelOutcome::Cancelled,
+                            Some(controller),
+                            Some(self.controller.clone() as Arc<dyn AgentControllerAdapter>),
+                        ),
                         vyane_service::ControllerRecoveryObservation::StillPresent
                         | vyane_service::ControllerRecoveryObservation::Unavailable => {
-                            (CancelOutcome::ControllerUnavailable, None)
+                            (CancelOutcome::ControllerUnavailable, None, None)
                         }
                     }
                 }
-                Some(_) => (CancelOutcome::ControllerUnavailable, None),
+                Some(controller) if controller.kind == ControllerKind::InProcess => {
+                    match self
+                        .native_controller
+                        .observe_gone(
+                            ControllerRecoveryContext::with_deadline(
+                                Instant::now() + CANCEL_CONTROL_TIMEOUT,
+                            ),
+                            controller.clone(),
+                        )
+                        .await
+                    {
+                        vyane_service::ControllerRecoveryObservation::Gone => (
+                            CancelOutcome::Cancelled,
+                            Some(controller),
+                            Some(self.native_controller.clone()),
+                        ),
+                        vyane_service::ControllerRecoveryObservation::StillPresent
+                        | vyane_service::ControllerRecoveryObservation::Unavailable => {
+                            (CancelOutcome::ControllerUnavailable, None, None)
+                        }
+                    }
+                }
+                Some(_) => (CancelOutcome::ControllerUnavailable, None, None),
             };
             let store = Arc::clone(&self.store);
             let settled = tokio::task::spawn_blocking(move || {
@@ -479,8 +656,7 @@ impl DaemonAgentHost {
             .await
             .map_err(|_| AgentApiError::unavailable())?
             .map_err(|_| AgentApiError::unavailable())?;
-            if let Some(controller) = confirmed_gone {
-                let adapter = self.controller.clone();
+            if let (Some(controller), Some(adapter)) = (confirmed_gone, confirmed_adapter) {
                 // Durable cancellation now owns terminal truth, so the exact
                 // no-longer-live controller evidence can be retired.
                 let _ =
@@ -504,6 +680,14 @@ impl DaemonAgentHost {
             .map_err(|_| AgentApiError::unavailable())?
             .map_err(|_| AgentApiError::unavailable())?
             .ok_or_else(AgentApiError::not_found)
+    }
+
+    async fn find_record(&self, run_id: String) -> Result<Option<AgentRunRecord>, AgentApiError> {
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || store.get_run(LOCAL_TASK_OWNER, &run_id))
+            .await
+            .map_err(|_| AgentApiError::unavailable())?
+            .map_err(|_| AgentApiError::unavailable())
     }
 
     async fn view(&self, record: AgentRunRecord) -> Result<AgentRunView, AgentApiError> {
@@ -699,6 +883,19 @@ fn exact_retry(record: &AgentRunRecord, input: &AgentSpoolInput) -> bool {
         && record.max_resume_attempts == 0
 }
 
+fn exact_native_retry(record: &AgentRunRecord, input: &NativeAgentInput) -> bool {
+    record.execution_backend == ExecutionBackend::NativeInProcess
+        && record.owner == input.owner
+        && record.id == input.run_id
+        && record.worker_id == input.worker_id
+        && record.parent_run_id.is_none()
+        && record.target_key == input.policy.target_selector
+        && record.prompt_digest == input.prompt_sha256
+        && record.policy_digest == input.policy_sha256
+        && record.timeout_seconds == input.policy.timeout_seconds
+        && record.max_resume_attempts == 0
+}
+
 const fn exact_retry_backend(backend: ExecutionBackend) -> bool {
     matches!(backend, ExecutionBackend::CliHarnessProcess)
 }
@@ -743,7 +940,7 @@ fn freeze_requested_workdir(
     }
 }
 
-pub(crate) async fn run_supervisor(supervisor: ResidentAgentSupervisor, cancel: CancellationToken) {
+pub(crate) async fn run_supervisor(supervisor: ResidentAgentHost, cancel: CancellationToken) {
     let _ = supervisor.run(cancel).await;
 }
 

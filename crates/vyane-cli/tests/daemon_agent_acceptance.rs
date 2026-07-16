@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const VYANE_BIN: &str = env!("CARGO_BIN_EXE_vyane");
 const SUCCESS_RUN: &str = "0197f524-7a00-7000-8000-000000000101";
@@ -42,6 +44,64 @@ fn write_config(directory: &TempDir) -> PathBuf {
         harness = "claude-code"
         model = "test-model"
         "#,
+    )
+    .unwrap();
+    path
+}
+
+fn write_native_config(directory: &TempDir, endpoint: &str) -> PathBuf {
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            r#"
+            [providers.native_http]
+            base_url = "{endpoint}"
+            auth_style = "bearer"
+            protocol = "openai_chat"
+            default_model = "native-test-model"
+
+            [profiles.native]
+            provider = "native_http"
+            protocol = "openai_chat"
+            model = "native-test-model"
+            "#
+        ),
+    )
+    .unwrap();
+    path
+}
+
+fn write_mixed_config(directory: &TempDir, endpoint: &str) -> PathBuf {
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            r#"
+            [providers.native]
+            base_url = "https://unused.invalid"
+            auth_style = "x_api_key"
+            protocol = "anthropic_messages"
+            default_model = "test-model"
+
+            [providers.native_http]
+            base_url = "{endpoint}"
+            auth_style = "bearer"
+            protocol = "openai_chat"
+            default_model = "native-test-model"
+
+            [profiles.builder]
+            provider = "native"
+            protocol = "anthropic_messages"
+            harness = "claude-code"
+            model = "test-model"
+
+            [profiles.native]
+            provider = "native_http"
+            protocol = "openai_chat"
+            model = "native-test-model"
+            "#
+        ),
     )
     .unwrap();
     path
@@ -140,6 +200,34 @@ async fn submit(data_dir: &Path, run_id: &str, timeout: u64) -> reqwest::Respons
             "task": "return a bounded answer",
             "target": "builder",
             "timeout_seconds": timeout
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn submit_native(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
+    submit_native_with_timeout(data_dir, run_id, workdir, 2).await
+}
+
+async fn submit_native_with_timeout(
+    data_dir: &Path,
+    run_id: &str,
+    workdir: &Path,
+    timeout_seconds: u64,
+) -> reqwest::Response {
+    let (base, token) = control(data_dir);
+    reqwest::Client::new()
+        .post(format!("{base}/v1/agent-runs"))
+        .bearer_auth(token)
+        .json(&json!({
+            "run_id": run_id,
+            "task": "return native answer",
+            "target": "native",
+            "sandbox": "read_only",
+            "workdir": workdir,
+            "execution_backend": "native_in_process",
+            "timeout_seconds": timeout_seconds
         }))
         .send()
         .await
@@ -258,6 +346,160 @@ async fn process_agent_success_is_idempotent_and_publishes_exact_output() {
         regular_files_below(&data_dir.path().join("agent-inputs")).is_empty(),
         "an exact terminal retry must not recreate a durable prompt spool"
     );
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn native_agent_submit_uses_the_shared_resident_lane() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "native-test-model",
+            "choices": [{
+                "message": {"role": "assistant", "content": "native answer"},
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+
+    let response = submit_native(
+        data_dir.path(),
+        "0197f524-7a00-7000-8000-000000000110",
+        &workdir,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let run_id = "0197f524-7a00-7000-8000-000000000110";
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(15)).await;
+    assert_eq!(done["state"], "succeeded");
+    assert_eq!(done["completion_status"], "committed");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let output = loop {
+        let (status, body) =
+            get_json(data_dir.path(), &format!("/v1/agent-runs/{run_id}/output")).await;
+        if status == reqwest::StatusCode::OK {
+            break body;
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(output["output"], "native answer");
+    let native_spool_root = data_dir.path().join("native-agent-inputs");
+    assert!(regular_files_below(&native_spool_root).is_empty());
+    let owner_spool = fs::read_dir(&native_spool_root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .find(|entry| entry.file_type().unwrap().is_dir())
+        .unwrap()
+        .path();
+    let spool_modified_before_retry = fs::metadata(&owner_spool).unwrap().modified().unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let retry = submit_native(data_dir.path(), run_id, &workdir).await;
+    assert_eq!(retry.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(retry.json::<Value>().await.unwrap()["state"], "succeeded");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(regular_files_below(&native_spool_root).is_empty());
+    assert_eq!(
+        fs::metadata(owner_spool).unwrap().modified().unwrap(),
+        spool_modified_before_retry,
+        "an exact terminal retry must not rematerialize private native input"
+    );
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn mixed_process_and_native_lanes_run_concurrently_in_one_daemon() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "native-test-model",
+            "choices": [{
+                "message": {"role": "assistant", "content": "native mixed answer"},
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    write_claude(
+        &bin_dir,
+        "printf '%s\\n' '{\"result\":\"process mixed answer\"}'",
+    );
+    let config = write_mixed_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("mixed-native-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+
+    let process_run = "0197f524-7a00-7000-8000-000000000113";
+    let native_run = "0197f524-7a00-7000-8000-000000000114";
+    let (process_submit, native_submit) = tokio::join!(
+        submit(data_dir.path(), process_run, 30),
+        submit_native(data_dir.path(), native_run, &workdir),
+    );
+    assert_eq!(process_submit.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(native_submit.status(), reqwest::StatusCode::ACCEPTED);
+    let (process_done, native_done) = tokio::join!(
+        terminal(data_dir.path(), process_run, Duration::from_secs(15)),
+        terminal(data_dir.path(), native_run, Duration::from_secs(15)),
+    );
+    assert_eq!(process_done["state"], "succeeded");
+    assert_eq!(native_done["state"], "succeeded");
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn native_agent_cancel_uses_the_exact_in_process_controller() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(5))
+                .set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "late answer"},
+                        "finish_reason": "stop"
+                    }]
+                })),
+        )
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-cancel-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+
+    let run_id = "0197f524-7a00-7000-8000-000000000111";
+    assert_eq!(
+        submit_native_with_timeout(data_dir.path(), run_id, &workdir, 30)
+            .await
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (status, body) =
+        post_json(data_dir.path(), &format!("/v1/agent-runs/{run_id}/cancel")).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "cancel body: {body}");
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(10)).await;
+    assert_eq!(done["state"], "cancelled");
     assert!(daemon.stop().status.success());
 }
 
@@ -460,6 +702,54 @@ async fn restart_recovers_exact_controller_without_replay() {
     let done = terminal(data_dir.path(), RESTART_RUN, Duration::from_secs(15)).await;
     assert_ne!(done["state"], "succeeded");
     assert_eq!(fs::read(&invocation).unwrap(), b"x");
+    assert!(second.stop().status.success());
+}
+
+#[tokio::test]
+async fn restart_settles_expired_native_controller_without_replaying_private_input() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(30))
+                .set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "late answer"},
+                        "finish_reason": "stop"
+                    }]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-restart-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let run_id = "0197f524-7a00-7000-8000-000000000112";
+    let mut first = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    assert_eq!(
+        submit_native(data_dir.path(), run_id, &workdir)
+            .await
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.received_requests().await.unwrap().is_empty() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    first.kill();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let mut second = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(15)).await;
+    assert_eq!(done["state"], "timed_out");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
     assert!(second.stop().status.success());
 }
 

@@ -93,6 +93,14 @@ pub struct ControllerRecoveryContext {
 }
 
 impl ControllerRecoveryContext {
+    /// Construct a bounded context for a direct, owner-bound control request.
+    /// Resident hosts use this when cancellation is an explicit user action
+    /// rather than a recovery pass.
+    #[must_use]
+    pub fn with_deadline(deadline: Instant) -> Self {
+        Self { deadline }
+    }
+
     /// Monotonic deadline also enforced by the driver.
     #[must_use]
     pub fn deadline(&self) -> Instant {
