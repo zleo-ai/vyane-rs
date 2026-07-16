@@ -7,7 +7,7 @@ use crate::{
 
 const MAX_TARGETS: usize = 8;
 const MAX_APPLIED_EVENTS: usize = 50;
-const MAX_READY_SIGNALS: usize = 64;
+const MAX_READY_SIGNALS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -351,6 +351,8 @@ impl GoalContinuityState {
             ));
         }
         let mut quota_reset_seen = false;
+        let mut review_pass_seen = false;
+        let mut review_failure_seen = false;
         let mut review_observation_ids = std::collections::HashSet::new();
         let mut review_coordinate: Option<(&str, u64)> = None;
         for signal in &self.ready_signals {
@@ -377,6 +379,17 @@ impl GoalContinuityState {
                 }
                 GoalContinuitySignalKind::ReviewChecksPassed
                 | GoalContinuitySignalKind::ReviewChecksFailed => {
+                    let seen = match signal.kind {
+                        GoalContinuitySignalKind::ReviewChecksPassed => &mut review_pass_seen,
+                        GoalContinuitySignalKind::ReviewChecksFailed => &mut review_failure_seen,
+                        GoalContinuitySignalKind::QuotaReset => unreachable!(),
+                    };
+                    if *seen {
+                        return Err(GoalStoreError::InvalidInput(
+                            "continuity ready signal envelope is invalid".into(),
+                        ));
+                    }
+                    *seen = true;
                     let review = signal.review_check.as_ref().ok_or_else(|| {
                         GoalStoreError::InvalidInput(
                             "continuity ready signal envelope is invalid".into(),
@@ -879,6 +892,15 @@ pub(crate) fn with_ready_signal(
                 };
             }
         }
+    }
+    match signal.kind {
+        GoalContinuitySignalKind::QuotaReset => {}
+        GoalContinuitySignalKind::ReviewChecksFailed => next
+            .ready_signals
+            .retain(|ready| ready.kind == GoalContinuitySignalKind::QuotaReset),
+        GoalContinuitySignalKind::ReviewChecksPassed => next
+            .ready_signals
+            .retain(|ready| ready.kind != GoalContinuitySignalKind::ReviewChecksPassed),
     }
     next.ready_signals.push(signal.clone());
     if signal.kind == GoalContinuitySignalKind::QuotaReset {

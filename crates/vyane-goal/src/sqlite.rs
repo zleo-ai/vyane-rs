@@ -850,6 +850,24 @@ impl GoalStore for SqliteGoalStore {
             });
         }
         let persisted = next.clone();
+        let signal_detail = match &persisted_signal.review_check {
+            Some(review) => format!(
+                "{} recorded for {}#{} observation {}",
+                match persisted_signal.kind {
+                    crate::GoalContinuitySignalKind::ReviewChecksPassed => {
+                        "review checks passed"
+                    }
+                    crate::GoalContinuitySignalKind::ReviewChecksFailed => {
+                        "review checks failed"
+                    }
+                    crate::GoalContinuitySignalKind::QuotaReset => unreachable!(),
+                },
+                review.repository,
+                review.pull_request,
+                review.observation_id
+            ),
+            None => "quota reset signal recorded".into(),
+        };
         let (after, _) = mutate_in_transaction(
             &transaction,
             &before,
@@ -858,10 +876,7 @@ impl GoalStore for SqliteGoalStore {
             at,
             move |_before, after, _effective_at| {
                 after.continuity_state = Some(persisted);
-                Ok((
-                    Some("continuity_signal".into()),
-                    Some("quota reset signal recorded".into()),
-                ))
+                Ok((Some("continuity_signal".into()), Some(signal_detail)))
             },
         )?;
         transaction.commit()?;
@@ -1512,10 +1527,26 @@ impl GoalStore for SqliteGoalStore {
                         id: approval_id.to_string(),
                     });
                 }
+                let stale_repair = approval.step_id == "repair_failed_review"
+                    && next_step_status == GoalContinuityStepStatus::Done
+                    && state.ready_signals.iter().rev().find(|signal| {
+                        signal.kind == crate::GoalContinuitySignalKind::ReviewChecksFailed
+                    }) != approval
+                        .plan_snapshot
+                        .ready_signals
+                        .iter()
+                        .rev()
+                        .find(|signal| {
+                            signal.kind == crate::GoalContinuitySignalKind::ReviewChecksFailed
+                        });
                 after.continuity_state = Some(with_step_status(
                     state,
                     &approval.step_id,
-                    next_step_status,
+                    if stale_repair {
+                        GoalContinuityStepStatus::Ready
+                    } else {
+                        next_step_status
+                    },
                 )?);
                 Ok((Some("takeover.finish".into()), Some(finish.detail.clone())))
             },
