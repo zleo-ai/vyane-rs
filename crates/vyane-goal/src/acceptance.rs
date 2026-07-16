@@ -7,7 +7,7 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,8 @@ use crate::{
 
 pub const MAX_VERIFIER_TIMEOUT: Duration = Duration::from_secs(300);
 pub const MAX_OUTPUT_TAIL_BYTES: usize = 4_000;
+const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
+const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct AcceptanceVerifier {
@@ -193,6 +195,17 @@ impl AcceptanceVerifier {
             None,
             "command acceptance verification requires Unix process-group support",
         );
+        #[cfg(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))]
+        return self.result(
+            index,
+            key,
+            kind,
+            target,
+            CriterionStatus::Inconclusive,
+            Vec::new(),
+            None,
+            "command acceptance verification requires waitid WNOWAIT support",
+        );
         let Some(command) = parse_command(&target) else {
             return self.result(
                 index,
@@ -220,8 +233,21 @@ impl AcceptanceVerifier {
             use std::os::unix::process::CommandExt as _;
             process.process_group(0);
         }
-        let mut child = match process.spawn() {
+        let deadline = started + self.timeout;
+        let mut child = match spawn_with_busy_retry(&mut process, deadline) {
             Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                return self.result(
+                    index,
+                    key,
+                    kind,
+                    target,
+                    CriterionStatus::Error,
+                    command,
+                    None,
+                    "acceptance command timed out",
+                );
+            }
             Err(error) => {
                 return self.result(
                     index,
@@ -238,10 +264,31 @@ impl AcceptanceVerifier {
         let stdout = child.stdout.take().map(spawn_tail_reader);
         let stderr = child.stderr.take().map(spawn_tail_reader);
         loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    // The leader has already been reaped here. Do not signal its
-                    // cached PGID: that identifier may have been recycled.
+            match child_exited_without_reap(child.id()) {
+                Ok(true) => {
+                    // waitid(WNOWAIT) leaves the exited leader waitable, so its
+                    // PID remains the live process-group identity while every
+                    // descendant is stopped. Reap only after group cleanup;
+                    // signalling a cached PGID after try_wait would risk PID
+                    // reuse and an unrelated process group.
+                    kill_process_group(child.id());
+                    let status = match child.wait() {
+                        Ok(status) => status,
+                        Err(error) => {
+                            let _ = join_tail_bounded(stdout);
+                            let _ = join_tail_bounded(stderr);
+                            return self.result(
+                                index,
+                                key,
+                                kind,
+                                target,
+                                CriterionStatus::Error,
+                                command,
+                                None,
+                                &format!("failed to reap acceptance command: {error}"),
+                            );
+                        }
+                    };
                     let stdout = join_tail_bounded(stdout);
                     let stderr = join_tail_bounded(stderr);
                     let status_kind = if status.success() {
@@ -267,10 +314,10 @@ impl AcceptanceVerifier {
                         },
                     );
                 }
-                Ok(None) if started.elapsed() < self.timeout => {
+                Ok(false) if started.elapsed() < self.timeout => {
                     thread::sleep(Duration::from_millis(10));
                 }
-                Ok(None) => {
+                Ok(false) => {
                     kill_process_group(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
@@ -365,6 +412,61 @@ impl AcceptanceVerifier {
             detail: detail.to_owned(),
         }
     }
+}
+
+fn spawn_with_busy_retry(process: &mut Command, deadline: Instant) -> std::io::Result<Child> {
+    let mut retries = 0;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "acceptance command spawn deadline elapsed",
+            ));
+        }
+        match process.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if error.raw_os_error() == Some(26) && retries < EXECUTABLE_BUSY_MAX_RETRIES =>
+            {
+                retries += 1;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(EXECUTABLE_BUSY_RETRY_DELAY.min(remaining));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))
+))]
+fn child_exited_without_reap(pid: u32) -> std::io::Result<bool> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| std::io::Error::other("invalid acceptance command pid"))?;
+    waitid(
+        WaitId::Pid(pid),
+        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+    )
+    .map(|status| status.is_some())
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(any(
+    not(unix),
+    target_os = "cygwin",
+    target_os = "openbsd",
+    target_os = "redox"
+))]
+fn child_exited_without_reap(_pid: u32) -> std::io::Result<bool> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "waitid WNOWAIT is unavailable",
+    ))
 }
 
 #[must_use]
@@ -490,6 +592,10 @@ mod tests {
         }
     }
 
+    #[cfg(all(
+        unix,
+        not(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))
+    ))]
     #[test]
     fn command_verification_is_bounded_and_scrubs_environment() {
         let verifier = AcceptanceVerifier::new(".", Duration::from_secs(1)).expect("cwd");
@@ -516,7 +622,10 @@ mod tests {
         assert_eq!(result.results[1].status, CriterionStatus::Inconclusive);
     }
 
-    #[cfg(unix)]
+    #[cfg(all(
+        unix,
+        not(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))
+    ))]
     #[test]
     fn timeout_and_output_are_bounded() {
         let verifier = AcceptanceVerifier::new(".", Duration::from_millis(20)).expect("cwd");
@@ -536,6 +645,82 @@ mod tests {
         assert!(output.results[0].stdout_tail.len() <= MAX_OUTPUT_TAIL_BYTES);
     }
 
+    #[cfg(all(
+        unix,
+        not(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))
+    ))]
+    #[test]
+    fn successful_command_does_not_leave_background_descendants() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("command tempdir");
+        let script = directory.path().join("spawn-background");
+        let escaped_marker = directory.path().join("escaped");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n(sleep 1; echo escaped > \"$1\") &\nexit 0\n",
+        )
+        .expect("write background command");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .expect("make background command executable");
+
+        let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1))
+            .expect("construct verifier");
+        let result = verifier.verify(&record(vec![AcceptanceCriterion::new(
+            "custom",
+            format!("cmd:{} {}", script.display(), escaped_marker.display()),
+        )]));
+        assert_eq!(
+            result.results[0].status,
+            CriterionStatus::Satisfied,
+            "{}",
+            result.results[0].detail
+        );
+        thread::sleep(Duration::from_millis(1_200));
+        assert!(
+            !escaped_marker.exists(),
+            "a successful acceptance command must not escape its process group"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn command_spawn_retries_transient_executable_busy() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("command tempdir");
+        let script = directory.path().join("busy-script");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write command");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .expect("make command executable");
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&script)
+            .expect("hold command open for writing");
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            drop(writer);
+        });
+
+        let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1))
+            .expect("construct verifier");
+        let result = verifier.verify(&record(vec![AcceptanceCriterion::new(
+            "custom",
+            format!("cmd:{}", script.display()),
+        )]));
+        release.join().expect("release writer");
+        assert_eq!(
+            result.results[0].status,
+            CriterionStatus::Satisfied,
+            "{}",
+            result.results[0].detail
+        );
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))
+    ))]
     #[test]
     fn spawn_failure_is_reported_as_error() {
         let verifier = AcceptanceVerifier::new(".", Duration::from_secs(1)).expect("cwd");
@@ -546,6 +731,10 @@ mod tests {
         assert_eq!(result.results[0].status, CriterionStatus::Error);
     }
 
+    #[cfg(all(
+        unix,
+        not(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))
+    ))]
     #[test]
     fn non_zero_command_is_unsatisfied() {
         let verifier = AcceptanceVerifier::new(".", Duration::from_secs(1)).expect("cwd");
