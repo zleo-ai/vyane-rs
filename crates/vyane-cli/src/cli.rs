@@ -245,14 +245,17 @@ pub struct GoalContinuitySignalArgs {
     #[arg(long)]
     pub source: String,
     /// Public repository whose review checks were observed.
-    #[arg(long, requires_all = ["pull_request", "observation_id"])]
+    #[arg(long, requires_all = ["pull_request", "observation_id", "observation_sequence"])]
     pub repository: Option<String>,
     /// Pull request whose review checks were observed.
-    #[arg(long, requires_all = ["repository", "observation_id"], value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, requires_all = ["repository", "observation_id", "observation_sequence"], value_parser = clap::value_parser!(u64).range(1..))]
     pub pull_request: Option<u64>,
     /// Stable identifier for this distinct review-check observation.
-    #[arg(long, requires_all = ["repository", "pull_request"])]
+    #[arg(long, requires_all = ["repository", "pull_request", "observation_sequence"])]
     pub observation_id: Option<String>,
+    /// Strictly increasing sequence for review-check observations on this PR.
+    #[arg(long, requires_all = ["repository", "pull_request", "observation_id"], value_parser = clap::value_parser!(u64).range(1..))]
+    pub observation_sequence: Option<u64>,
 }
 
 #[derive(Debug, Args)]

@@ -115,6 +115,10 @@ const fn is_false(value: &bool) -> bool {
     !*value
 }
 
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalQuotaEvent {
     pub event_id: String,
@@ -202,6 +206,8 @@ pub struct GoalContinuityState {
     pub applied_quota_event_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ready_signals: Vec<GoalContinuitySignal>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub review_observation_high_water: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +224,7 @@ pub struct GoalContinuityReviewCheck {
     pub repository: String,
     pub pull_request: u64,
     pub observation_id: String,
+    pub observation_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +278,11 @@ impl GoalContinuitySignal {
                 if review.pull_request == 0 {
                     return Err(GoalStoreError::InvalidInput(
                         "continuity review-check pull request must be positive".into(),
+                    ));
+                }
+                if review.observation_sequence == 0 {
+                    return Err(GoalStoreError::InvalidInput(
+                        "continuity review-check observation sequence must be positive".into(),
                     ));
                 }
             }
@@ -412,6 +424,22 @@ impl GoalContinuityState {
                     }
                 }
             }
+        }
+        let max_review_sequence = self
+            .ready_signals
+            .iter()
+            .filter_map(|signal| {
+                signal
+                    .review_check
+                    .as_ref()
+                    .map(|review| review.observation_sequence)
+            })
+            .max()
+            .unwrap_or_default();
+        if max_review_sequence != self.review_observation_high_water {
+            return Err(GoalStoreError::InvalidInput(
+                "continuity review-check observation high water is invalid".into(),
+            ));
         }
         if self.handoff_plan.version != 1
             || self.handoff_plan.state != self.state
@@ -683,6 +711,7 @@ pub(crate) fn state_for_event(
         },
         applied_quota_event_ids: applied,
         ready_signals: Vec::new(),
+        review_observation_high_water: 0,
     };
     state.validate()?;
     Ok(Some(state))
@@ -800,6 +829,26 @@ pub(crate) fn with_ready_signal(
             }
         }
     }
+    if let Some(review) = &signal.review_check {
+        if review.observation_sequence < state.review_observation_high_water {
+            return Ok((state.clone(), signal.clone(), false));
+        }
+        if review.observation_sequence == state.review_observation_high_water {
+            if let Some(existing) = state.ready_signals.iter().find(|existing| {
+                existing.review_check.as_ref().is_some_and(|candidate| {
+                    candidate.observation_sequence == review.observation_sequence
+                })
+            }) {
+                if existing.same_evidence(signal) {
+                    return Ok((state.clone(), existing.clone(), false));
+                }
+            }
+            return Err(GoalStoreError::InvalidInput(
+                "continuity review-check observation sequence was already recorded with different evidence"
+                    .into(),
+            ));
+        }
+    }
     let existing = match signal.kind {
         GoalContinuitySignalKind::QuotaReset => state
             .ready_signals
@@ -903,6 +952,9 @@ pub(crate) fn with_ready_signal(
             .retain(|ready| ready.kind != GoalContinuitySignalKind::ReviewChecksPassed),
     }
     next.ready_signals.push(signal.clone());
+    if let Some(review) = &signal.review_check {
+        next.review_observation_high_water = review.observation_sequence;
+    }
     if signal.kind == GoalContinuitySignalKind::QuotaReset {
         if let Some(resume) = next
             .handoff_plan

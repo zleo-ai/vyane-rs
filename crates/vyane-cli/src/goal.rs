@@ -191,16 +191,27 @@ fn continuity_signal(args: GoalContinuitySignalArgs) -> Result<ExitCode> {
         GoalContinuitySignalArg::ReviewChecksPassed => GoalContinuitySignalKind::ReviewChecksPassed,
         GoalContinuitySignalArg::ReviewChecksFailed => GoalContinuitySignalKind::ReviewChecksFailed,
     };
-    let review_check = match (args.repository, args.pull_request, args.observation_id) {
-        (Some(repository), Some(pull_request), Some(observation_id)) => {
-            Some(GoalContinuityReviewCheck {
-                repository,
-                pull_request,
-                observation_id,
-            })
-        }
-        (None, None, None) => None,
-        _ => unreachable!("clap requires review-check coordinates together"),
+    let review_check = match (
+        args.repository,
+        args.pull_request,
+        args.observation_id,
+        args.observation_sequence,
+    ) {
+        (
+            Some(repository),
+            Some(pull_request),
+            Some(observation_id),
+            Some(observation_sequence),
+        ) => Some(GoalContinuityReviewCheck {
+            repository,
+            pull_request,
+            observation_id,
+            observation_sequence,
+        }),
+        (None, None, None, None) => None,
+        _ => bail!(
+            "--repository, --pull-request, --observation-id and --observation-sequence must be supplied together"
+        ),
     };
     let signal = GoalContinuitySignal {
         kind,

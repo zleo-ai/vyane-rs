@@ -997,6 +997,8 @@ fn continuity_execute_dispatches_once_and_settles_done() {
             "27",
             "--observation-id",
             "checks-failed-v1",
+            "--observation-sequence",
+            "1",
         ],
         0,
     );
@@ -1033,6 +1035,8 @@ fn continuity_execute_dispatches_once_and_settles_done() {
             "27",
             "--observation-id",
             "checks-passed-v1",
+            "--observation-sequence",
+            "2",
         ],
         0,
     );

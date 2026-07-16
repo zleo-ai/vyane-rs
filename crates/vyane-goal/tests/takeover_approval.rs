@@ -84,13 +84,19 @@ fn review_check_signal(kind: GoalContinuitySignalKind, pull_request: u64) -> Goa
         GoalContinuitySignalKind::ReviewChecksFailed => "checks-failed-v1",
         GoalContinuitySignalKind::QuotaReset => unreachable!(),
     };
-    review_check_signal_with_observation(kind, pull_request, observation_id)
+    let observation_sequence = match kind {
+        GoalContinuitySignalKind::ReviewChecksFailed => 1,
+        GoalContinuitySignalKind::ReviewChecksPassed => 2,
+        GoalContinuitySignalKind::QuotaReset => unreachable!(),
+    };
+    review_check_signal_with_observation(kind, pull_request, observation_id, observation_sequence)
 }
 
 fn review_check_signal_with_observation(
     kind: GoalContinuitySignalKind,
     pull_request: u64,
     observation_id: &str,
+    observation_sequence: u64,
 ) -> GoalContinuitySignal {
     GoalContinuitySignal {
         kind,
@@ -104,6 +110,7 @@ fn review_check_signal_with_observation(
             repository: "example/vyane-rs".into(),
             pull_request,
             observation_id: observation_id.into(),
+            observation_sequence,
         }),
     }
 }
@@ -1250,6 +1257,7 @@ fn empty_ready_signals_preserve_legacy_snapshot_serialization() {
         .unwrap();
     let value = serde_json::to_value(state).unwrap();
     assert!(value.get("ready_signals").is_none());
+    assert!(value.get("review_observation_high_water").is_none());
     assert!(value.get("wait_for_review_checks_before_resume").is_none());
     for step in value["handoff_plan"]["steps"].as_array().unwrap() {
         assert!(step.get("failure_wait_for").is_none());
@@ -1560,7 +1568,12 @@ fn late_review_failure_reblocks_ready_resume_and_invalidates_approval() {
         .record_continuity_signal(
             OWNER,
             "goal-a",
-            &review_check_signal(GoalContinuitySignalKind::ReviewChecksFailed, 27),
+            &review_check_signal_with_observation(
+                GoalContinuitySignalKind::ReviewChecksFailed,
+                27,
+                "checks-failed-after-pass",
+                3,
+            ),
             at(2_104),
         )
         .unwrap();
@@ -1668,7 +1681,12 @@ fn late_review_failure_is_rejected_after_primary_resume_starts() {
             store.record_continuity_signal(
                 OWNER,
                 "goal-a",
-                &review_check_signal(GoalContinuitySignalKind::ReviewChecksFailed, 27),
+                &review_check_signal_with_observation(
+                    GoalContinuitySignalKind::ReviewChecksFailed,
+                    27,
+                    "checks-failed-after-resume",
+                    3,
+                ),
                 at(2_106),
             ),
             Err(GoalStoreError::InvalidInput(ref message))
@@ -1725,6 +1743,7 @@ fn a_new_failure_after_repair_requires_another_repair_and_newer_pass() {
         GoalContinuitySignalKind::ReviewChecksFailed,
         27,
         "checks-failed-v2",
+        3,
     );
     let failed = store
         .record_continuity_signal(OWNER, "goal-a", &second_failure, at(2_107))
@@ -1797,6 +1816,7 @@ fn a_new_failure_after_repair_requires_another_repair_and_newer_pass() {
         GoalContinuitySignalKind::ReviewChecksPassed,
         27,
         "checks-passed-v2",
+        4,
     );
     let passed = store
         .record_continuity_signal(OWNER, "goal-a", &second_pass, at(2_113))
@@ -1870,6 +1890,7 @@ fn failure_during_inflight_repair_rearms_after_the_stale_repair_finishes() {
                 GoalContinuitySignalKind::ReviewChecksFailed,
                 27,
                 "checks-failed-v2",
+                2,
             ),
             at(2_105),
         )
@@ -1912,6 +1933,7 @@ fn failure_during_inflight_repair_rearms_after_the_stale_repair_finishes() {
                 GoalContinuitySignalKind::ReviewChecksPassed,
                 27,
                 "checks-passed-v2",
+                3,
             ),
             at(2_107),
         )
@@ -1965,8 +1987,12 @@ fn superseded_review_observations_do_not_exhaust_continuity_state() {
         } else {
             GoalContinuitySignalKind::ReviewChecksFailed
         };
-        let signal =
-            review_check_signal_with_observation(kind, 27, &format!("checks-observation-{index}"));
+        let signal = review_check_signal_with_observation(
+            kind,
+            27,
+            &format!("checks-observation-{index}"),
+            index as u64,
+        );
         store
             .record_continuity_signal(OWNER, "goal-a", &signal, at(2_100 + index))
             .unwrap();
@@ -1978,6 +2004,7 @@ fn superseded_review_observations_do_not_exhaust_continuity_state() {
         .continuity_state
         .unwrap();
     assert!(state.ready_signals.len() <= 2);
+    assert_eq!(state.review_observation_high_water, 100);
     assert_eq!(
         state.ready_signals.last().unwrap().kind,
         GoalContinuitySignalKind::ReviewChecksPassed
@@ -1998,6 +2025,47 @@ fn superseded_review_observations_do_not_exhaust_continuity_state() {
     let detail = events.last().unwrap().detail.as_deref().unwrap();
     assert!(detail.contains("review checks passed"));
     assert!(detail.contains("checks-observation-100"));
+}
+
+#[test]
+fn replayed_pass_below_observation_high_water_cannot_reopen_the_gate() {
+    let mut gated = policy();
+    gated.wait_for_review_checks_before_resume = true;
+    let (dir, store) = setup_with_policy(gated);
+    complete_review(&store, &dir);
+    store
+        .record_continuity_signal(OWNER, "goal-a", &quota_reset_signal(), at(2_002))
+        .unwrap();
+    let old_pass = review_check_signal(GoalContinuitySignalKind::ReviewChecksPassed, 27);
+    store
+        .record_continuity_signal(OWNER, "goal-a", &old_pass, at(2_101))
+        .unwrap();
+    store
+        .record_continuity_signal(
+            OWNER,
+            "goal-a",
+            &review_check_signal_with_observation(
+                GoalContinuitySignalKind::ReviewChecksFailed,
+                27,
+                "checks-failed-v2",
+                3,
+            ),
+            at(2_102),
+        )
+        .unwrap();
+    let before = store.get(OWNER, "goal-a").unwrap().unwrap();
+
+    let replay = store
+        .record_continuity_signal(OWNER, "goal-a", &old_pass, at(2_103))
+        .unwrap();
+    assert!(!replay.changed);
+    assert_eq!(
+        replay.state.handoff_plan.next_ready_step,
+        "repair_failed_review"
+    );
+    let after = store.get(OWNER, "goal-a").unwrap().unwrap();
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.continuity_state, before.continuity_state);
 }
 
 #[test]
