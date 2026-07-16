@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use vyane_agent::{ActiveExecutionPermit, AgentStore, RunCompletionStatus};
-use vyane_broker::{BrokerScope, MessageBroker, MessageEventProjector};
+use vyane_broker::{
+    BrokerScope, DeliveryLane, MessageBroker, MessageEventProjector, ResidentBrokerSupervisor,
+    SupervisorOptions,
+};
 use vyane_ledger::EventLog;
 use vyane_message::{
     IdempotencyKey, MessagePublicationStatus, MessageRequestDigest, MessageStore, NewMessage,
@@ -10,8 +13,9 @@ use vyane_message::{
 };
 
 use crate::{
-    AgentCompletionSink, InProcessCompletionStageError, InProcessPreparedCompletion,
-    MessageAgentCompletionSink, StagedRunCompletion, StoragePaths, message_run_completion,
+    AgentCompletionSink, AgentProjectionComponents, InProcessCompletionStageError,
+    InProcessPreparedCompletion, MessageAgentCompletionSink, StagedRunCompletion, StoragePaths,
+    message_run_completion,
 };
 
 /// Explicit message/broker construction for front-ends that need it.
@@ -61,6 +65,37 @@ impl MessageComponents {
     #[must_use]
     pub fn projector(&self) -> &MessageEventProjector {
         &self.projector
+    }
+
+    /// Assemble the owner-bound resident broker/projector loops for a daemon.
+    ///
+    /// Delivery lanes are deliberately supplied by the caller. An empty lane
+    /// set still runs maintenance and both body-free projectors, while a
+    /// concrete adapter must opt in explicitly rather than becoming an
+    /// accidental second runtime.
+    pub fn resident_broker(
+        &self,
+        agent: &AgentProjectionComponents,
+        lanes: Vec<DeliveryLane>,
+        options: SupervisorOptions,
+    ) -> Result<ResidentBrokerSupervisor> {
+        ResidentBrokerSupervisor::new(
+            self.broker.clone(),
+            self.projector.clone(),
+            agent.projector().clone(),
+            lanes,
+            options,
+        )
+        .map_err(anyhow::Error::new)
+    }
+
+    /// Assemble the daemon's current projector-only resident broker. Concrete
+    /// delivery adapters remain an explicit future integration.
+    pub fn resident_broker_default(
+        &self,
+        agent: &AgentProjectionComponents,
+    ) -> Result<ResidentBrokerSupervisor> {
+        self.resident_broker(agent, Vec::new(), SupervisorOptions::default())
     }
 
     /// Clone the owner-bound sink used by AgentRun recovery and completion
@@ -309,6 +344,7 @@ mod tests {
         AgentStore, ControllerKind, ControllerRef, NewAgentRun, NewWorker, RunCompletionStatus,
         RunMode, SqliteAgentStore,
     };
+    use vyane_core::CancellationToken;
     use vyane_message::{
         EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, MessagePublicationStatus,
         NewDelivery,
@@ -534,6 +570,50 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("published body")
+        );
+    }
+
+    #[tokio::test]
+    async fn resident_broker_assembly_owns_scope_and_drains_without_delivery_lanes() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = StoragePaths::from_data_dir(directory.path().join("data"));
+        let messages = MessageComponents::open(&paths, "alice").unwrap();
+        let agents = AgentProjectionComponents::open(&paths, "alice").unwrap();
+        let supervisor = messages
+            .resident_broker(
+                &agents,
+                Vec::new(),
+                SupervisorOptions {
+                    idle_poll_interval: std::time::Duration::from_millis(1),
+                    maintenance_interval: std::time::Duration::from_millis(1),
+                    initial_error_backoff: std::time::Duration::from_millis(1),
+                    max_error_backoff: std::time::Duration::from_millis(5),
+                    maintenance_limit: 1,
+                    projection_limit: 1,
+                    max_total_in_flight: 1,
+                },
+            )
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            stop.cancel();
+        });
+        let exit = supervisor.run(cancel).await;
+        assert!(exit.deliveries.is_empty());
+        assert!(exit.maintenance.cycles > 0);
+        assert!(exit.message_projection.cycles > 0);
+        assert!(exit.agent_projection.cycles > 0);
+
+        let foreign_agents = AgentProjectionComponents::open(&paths, "bob").unwrap();
+        let error = match messages.resident_broker_default(&foreign_agents) {
+            Ok(_) => panic!("foreign owner must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "invalid broker configuration: broker and projector owner scopes must match"
         );
     }
 }

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use vyane_broker::ResidentBrokerSupervisor;
 use vyane_config::ResolvedConfig;
 use vyane_core::{
     AdapterTransport, AttemptOutcome, BoundTarget, CancellationToken, ErrorKind,
@@ -22,10 +23,12 @@ use vyane_core::{
 };
 use vyane_kernel::{DispatchOutcome, PreparedDispatch, StreamDispatchEvent};
 
+use crate::agent::AgentProjectionComponents;
 use crate::config::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::diagnostics::{
     ConfigCheckReport, RoutePreview, RoutePreviewParams, check_config, route_preview,
 };
+use crate::message::MessageComponents;
 use crate::owner::OwnerContext;
 use crate::routing::{DispatchPlan, plan_dispatch};
 use crate::selector::{resolve_target_chain, split_targets};
@@ -381,6 +384,18 @@ impl VyaneService {
     #[must_use]
     pub fn storage_paths(&self) -> &StoragePaths {
         &self.storage_paths
+    }
+
+    /// Assemble the owner-bound resident broker/projector loops for a daemon.
+    /// Component construction stays behind the service boundary so a
+    /// frontend cannot accidentally derive a second owner or storage scope.
+    pub fn resident_broker(&self, owner: impl Into<String>) -> Result<ResidentBrokerSupervisor> {
+        let messages = MessageComponents::open(&self.storage_paths, owner)?;
+        let agents = AgentProjectionComponents::open(
+            &self.storage_paths,
+            messages.broker().scope().owner(),
+        )?;
+        messages.resident_broker_default(&agents)
     }
 
     /// Freeze a previously authenticated owner authority into a service

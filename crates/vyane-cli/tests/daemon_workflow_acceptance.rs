@@ -264,6 +264,16 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
 }
 
 #[tokio::test]
+async fn resident_daemon_projectors_start_and_gracefully_stop() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().expect("config tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let config = write_config(&config_dir, &server);
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config);
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
 async fn mcp_workflow_tools_use_the_authenticated_resident_daemon() -> anyhow::Result<()> {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
