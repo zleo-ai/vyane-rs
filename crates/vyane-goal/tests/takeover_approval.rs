@@ -648,8 +648,12 @@ fn review_queue_rejects_mismatched_existing_upstream_run() {
     let takeover = complete_takeover(&store, &dir);
     let mut request = review_request(&store, &dir, &takeover);
     request.upstream_run_id = Some("different-run".into());
+    let error = store
+        .queue_takeover_approval(OWNER, &request, at(1_204))
+        .unwrap_err();
     assert!(matches!(
-        store.queue_takeover_approval(OWNER, &request, at(1_204)),
-        Err(GoalStoreError::InvalidInput(_))
+        error,
+        GoalStoreError::InvalidInput(ref message)
+            if message == "review approval is not bound to the exact successful takeover run"
     ));
 }
