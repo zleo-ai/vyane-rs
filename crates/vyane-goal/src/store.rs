@@ -14,19 +14,18 @@ pub trait GoalStore: Send + Sync {
 
     /// Read one goal and all of its continuity approvals for projection.
     ///
-    /// The source-compatible default composes two ordinary reads and therefore
-    /// does not promise a concurrent snapshot. Stores used by a live projection
-    /// surface should override it with one storage-native read transaction.
+    /// The source-compatible default fails closed because composing `get` and
+    /// `list_takeover_approvals` would permit a torn concurrent read. Stores
+    /// that expose projection must override this with one storage-native read
+    /// transaction.
     fn continuity_projection_snapshot(
         &self,
-        owner: &str,
-        id: &str,
+        _owner: &str,
+        _id: &str,
     ) -> Result<Option<GoalContinuityProjectionSnapshot>> {
-        let Some(goal) = self.get(owner, id)? else {
-            return Ok(None);
-        };
-        let approvals = self.list_takeover_approvals(owner, Some(id))?;
-        Ok(Some(GoalContinuityProjectionSnapshot { goal, approvals }))
+        Err(crate::GoalStoreError::InvalidInput(
+            "goal store does not provide an atomic continuity projection snapshot".into(),
+        ))
     }
 
     fn list(&self, owner: &str, query: &GoalQuery) -> Result<Vec<GoalRecord>>;

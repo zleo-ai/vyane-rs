@@ -455,6 +455,19 @@ fn projection_rejects_approvals_from_another_goal() {
 }
 
 #[test]
+fn projection_rejects_approval_evidence_newer_than_the_goal_snapshot() {
+    let directory = TempDir::new().unwrap();
+    let workdir = TempDir::new().unwrap();
+    let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
+    let goal = create_goal(&store, "stale-goal-snapshot", true);
+    let mut approval = queue_current(&store, &goal, &workdir);
+    approval.goal_revision = goal.revision + 1;
+
+    let error = project_continuity_next_action(&goal, &[approval]).unwrap_err();
+    assert!(error.to_string().contains("newer than the projected goal"));
+}
+
+#[test]
 fn signal_kinds_are_closed_and_serializable() {
     assert_eq!(
         serde_json::to_string(&GoalContinuitySignalKind::ReviewChecksPassed).unwrap(),

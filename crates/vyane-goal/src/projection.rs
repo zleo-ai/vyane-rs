@@ -77,6 +77,11 @@ pub fn project_continuity_next_action(
                 "continuity projection approvals must belong to the exact goal owner and id".into(),
             ));
         }
+        if approval.goal_revision > goal.revision {
+            return Err(GoalStoreError::CorruptData(
+                "continuity projection approval is newer than the projected goal revision".into(),
+            ));
+        }
     }
 
     if let Some(step) = state
