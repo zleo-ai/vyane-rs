@@ -8,8 +8,8 @@ use anyhow::{Context as _, Result};
 use chrono::Utc;
 use vyane_core::{CancellationToken, Sandbox};
 use vyane_goal::{
-    AcceptanceVerifier, GoalPursuer, GoalQuery, GoalRecord, GoalStatus, GoalStore, GoalStoreError,
-    MAX_LEASE_SECONDS, PursuitConfig, SqliteGoalStore,
+    AcceptanceVerifier, GoalPursuer, GoalQuery, GoalQueryCursor, GoalRecord, GoalStatus, GoalStore,
+    GoalStoreError, MAX_LEASE_SECONDS, PursuitConfig, SqliteGoalStore,
 };
 use vyane_service::VyaneService;
 
@@ -20,6 +20,7 @@ use crate::task::LOCAL_TASK_OWNER;
 const DAEMON_GOAL_WORKER: &str = "daemon-goal:auto-v1";
 const MAX_PURSUIT_ERRORS_PER_GENERATION: u8 = 5;
 const MAX_PURSUIT_ERROR_BACKOFF: Duration = Duration::from_secs(60);
+const RECOVERY_PAGE_SIZE: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
 struct PursuitRetry {
@@ -191,53 +192,61 @@ fn acquire_from_store<S: GoalStore>(
     config: &DaemonGoalConfig,
     retry_after: &HashMap<String, PursuitRetry>,
 ) -> Result<Option<GoalRecord>> {
-    let query = GoalQuery {
-        statuses: vec![GoalStatus::InProgress],
-        parent_goal_id: None,
-        // Resident recovery must inspect every in-progress goal before it is
-        // allowed to claim queued work. GoalStore defines zero as unbounded.
-        limit: 0,
-    };
-    let goals = store.list(LOCAL_TASK_OWNER, &query)?;
     let retry_now = Instant::now();
     let lease_now = Utc::now();
 
     // A live lease owned by the stable daemon worker is restart continuity,
     // not ordinary competing work. Adopt it before reclaiming any other row.
-    if let Some(goal) = goals.iter().find(|goal| {
-        retry_eligible(retry_after, &goal.id, retry_now)
-            && goal.lease_active(lease_now)
-            && goal.claimed_by.as_deref() == Some(DAEMON_GOAL_WORKER)
-    }) {
-        return Ok(Some(goal.clone()));
+    let mut after = None;
+    loop {
+        let page = recovery_page(store, after.clone())?;
+        if let Some(goal) = page.iter().find(|goal| {
+            retry_eligible(retry_after, &goal.id, retry_now)
+                && goal.lease_active(lease_now)
+                && goal.claimed_by.as_deref() == Some(DAEMON_GOAL_WORKER)
+        }) {
+            return Ok(Some(goal.clone()));
+        }
+        if page.len() < RECOVERY_PAGE_SIZE {
+            break;
+        }
+        after = page.last().map(GoalQueryCursor::from);
     }
 
-    for goal in goals {
-        if !retry_eligible(retry_after, &goal.id, retry_now) || goal.lease_active(lease_now) {
-            continue;
+    let mut after = None;
+    loop {
+        let page = recovery_page(store, after.clone())?;
+        for goal in &page {
+            if !retry_eligible(retry_after, &goal.id, retry_now) || goal.lease_active(lease_now) {
+                continue;
+            }
+            let acquired = if goal.claimed_by.is_some() {
+                store.reclaim(
+                    LOCAL_TASK_OWNER,
+                    &goal.id,
+                    DAEMON_GOAL_WORKER,
+                    config.lease_seconds(),
+                    lease_now,
+                )
+            } else {
+                store.claim(
+                    LOCAL_TASK_OWNER,
+                    &goal.id,
+                    DAEMON_GOAL_WORKER,
+                    config.lease_seconds(),
+                    lease_now,
+                )
+            };
+            match acquired {
+                Ok(goal) => return Ok(Some(goal)),
+                Err(error) if acquisition_raced(&error) => continue,
+                Err(error) => return Err(error.into()),
+            }
         }
-        let acquired = if goal.claimed_by.is_some() {
-            store.reclaim(
-                LOCAL_TASK_OWNER,
-                &goal.id,
-                DAEMON_GOAL_WORKER,
-                config.lease_seconds(),
-                lease_now,
-            )
-        } else {
-            store.claim(
-                LOCAL_TASK_OWNER,
-                &goal.id,
-                DAEMON_GOAL_WORKER,
-                config.lease_seconds(),
-                lease_now,
-            )
-        };
-        match acquired {
-            Ok(goal) => return Ok(Some(goal)),
-            Err(error) if acquisition_raced(&error) => continue,
-            Err(error) => return Err(error.into()),
+        if page.len() < RECOVERY_PAGE_SIZE {
+            break;
         }
+        after = page.last().map(GoalQueryCursor::from);
     }
 
     store
@@ -248,6 +257,24 @@ fn acquire_from_store<S: GoalStore>(
             Utc::now(),
         )
         .map_err(Into::into)
+}
+
+fn recovery_page<S: GoalStore>(
+    store: &S,
+    after: Option<GoalQueryCursor>,
+) -> Result<Vec<GoalRecord>> {
+    store
+        .list(LOCAL_TASK_OWNER, &recovery_query(after))
+        .map_err(Into::into)
+}
+
+fn recovery_query(after: Option<GoalQueryCursor>) -> GoalQuery {
+    GoalQuery {
+        statuses: vec![GoalStatus::InProgress],
+        parent_goal_id: None,
+        after,
+        limit: RECOVERY_PAGE_SIZE,
+    }
 }
 
 fn retry_eligible(
@@ -411,6 +438,23 @@ mod tests {
         assert_eq!(goal.status, GoalStatus::InProgress);
         assert_eq!(goal.claimed_by.as_deref(), Some(DAEMON_GOAL_WORKER));
         assert_eq!(goal.claim_generation, 1);
+    }
+
+    #[test]
+    fn recovery_queries_are_keyset_paginated_and_bounded() {
+        let first = recovery_query(None);
+        assert_eq!(first.limit, RECOVERY_PAGE_SIZE);
+        assert!(first.limit > 0);
+        assert!(first.after.is_none());
+
+        let cursor = GoalQueryCursor {
+            priority: 2,
+            updated_at: Utc::now(),
+            id: "cursor".into(),
+        };
+        let next = recovery_query(Some(cursor.clone()));
+        assert_eq!(next.limit, RECOVERY_PAGE_SIZE);
+        assert_eq!(next.after, Some(cursor));
     }
 
     #[test]

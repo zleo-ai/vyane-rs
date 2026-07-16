@@ -4,7 +4,8 @@ use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
-    GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus, SqliteGoalStore,
+    GoalQueryCursor, GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus,
+    SqliteGoalStore,
 };
 
 const OWNER_A: &str = "owner-a";
@@ -201,6 +202,7 @@ fn queue_and_list_order_are_stable_and_owner_scoped() {
             &GoalQuery {
                 statuses: vec![GoalStatus::Queued],
                 parent_goal_id: None,
+                after: None,
                 limit: 50,
             },
         )
@@ -212,6 +214,30 @@ fn queue_and_list_order_are_stable_and_owner_scoped() {
             .collect::<Vec<_>>(),
         ["later-urgent", "normal"]
     );
+    let first_page = store
+        .list(
+            OWNER_A,
+            &GoalQuery {
+                statuses: vec![GoalStatus::Queued],
+                parent_goal_id: None,
+                after: None,
+                limit: 1,
+            },
+        )
+        .expect("first queued page");
+    let second_page = store
+        .list(
+            OWNER_A,
+            &GoalQuery {
+                statuses: vec![GoalStatus::Queued],
+                parent_goal_id: None,
+                after: first_page.first().map(GoalQueryCursor::from),
+                limit: 1,
+            },
+        )
+        .expect("second queued page");
+    assert_eq!(first_page[0].id, "later-urgent");
+    assert_eq!(second_page[0].id, "normal");
 
     let parented = store
         .list(
@@ -219,6 +245,7 @@ fn queue_and_list_order_are_stable_and_owner_scoped() {
             &GoalQuery {
                 statuses: Vec::new(),
                 parent_goal_id: Some("umbrella".into()),
+                after: None,
                 limit: 50,
             },
         )

@@ -299,7 +299,26 @@ pub struct GoalVerificationArtifact {
 pub struct GoalQuery {
     pub statuses: Vec<GoalStatus>,
     pub parent_goal_id: Option<String>,
+    pub after: Option<GoalQueryCursor>,
     pub limit: usize,
+}
+
+/// Exclusive keyset cursor for the stable goal-list order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalQueryCursor {
+    pub priority: u8,
+    pub updated_at: DateTime<Utc>,
+    pub id: String,
+}
+
+impl From<&GoalRecord> for GoalQueryCursor {
+    fn from(goal: &GoalRecord) -> Self {
+        Self {
+            priority: goal.priority,
+            updated_at: goal.updated_at,
+            id: goal.id.clone(),
+        }
+    }
 }
 
 impl GoalQuery {
@@ -319,6 +338,14 @@ impl GoalQuery {
         }
         if let Some(parent) = &self.parent_goal_id {
             validate_text("parent goal id", parent, 256)?;
+        }
+        if let Some(after) = &self.after {
+            if after.priority > 4 {
+                return Err(GoalStoreError::InvalidInput(
+                    "goal query cursor priority must be between 0 and 4".into(),
+                ));
+            }
+            validate_goal_id(&after.id)?;
         }
         Ok(())
     }

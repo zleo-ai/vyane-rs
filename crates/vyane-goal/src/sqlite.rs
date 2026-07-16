@@ -391,6 +391,22 @@ impl GoalStore for SqliteGoalStore {
             sql.push_str(" AND parent_goal_id = ?");
             values.push(Value::Text(parent.clone()));
         }
+        if let Some(after) = &query.after {
+            sql.push_str(
+                " AND (priority > ? OR (priority = ? AND updated_at_ms < ?) OR \
+                 (priority = ? AND updated_at_ms = ? AND id > ?))",
+            );
+            let priority = Value::Integer(i64::from(after.priority));
+            let updated_at = Value::Integer(after.updated_at.timestamp_millis());
+            values.extend([
+                priority.clone(),
+                priority.clone(),
+                updated_at.clone(),
+                priority,
+                updated_at,
+                Value::Text(after.id.clone()),
+            ]);
+        }
         sql.push_str(" ORDER BY priority ASC, updated_at_ms DESC, id ASC");
         if query.limit > 0 {
             sql.push_str(" LIMIT ?");

@@ -308,6 +308,7 @@ fn list(args: GoalListArgs) -> Result<ExitCode> {
     let query = GoalQuery {
         statuses: args.states.into_iter().map(GoalStatus::from).collect(),
         parent_goal_id: args.parent,
+        after: None,
         limit: args.limit,
     };
     let goals = store
