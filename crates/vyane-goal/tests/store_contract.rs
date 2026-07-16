@@ -969,7 +969,7 @@ fn store_reopens_and_rejects_newer_schema() {
         SqliteGoalStore::open(&path),
         Err(GoalStoreError::UnsupportedSchema {
             found: 99,
-            supported: 6
+            supported: 7
         })
     ));
 }

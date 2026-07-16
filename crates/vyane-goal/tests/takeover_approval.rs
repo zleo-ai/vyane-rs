@@ -87,13 +87,16 @@ fn request(store: &SqliteGoalStore, dir: &TempDir) -> TakeoverApprovalRequest {
         timeout: Duration::from_secs(300),
         goal_revision: goal.revision,
         plan_snapshot: state,
+        upstream_approval_id: None,
+        upstream_run_id: None,
+        upstream_run_status: None,
     }
 }
 
 #[test]
-fn schema_v6_contains_durable_takeover_approval_table() {
+fn schema_v7_contains_durable_continuity_approval_table() {
     let (dir, _store) = setup();
-    assert_eq!(SCHEMA_VERSION, 6);
+    assert_eq!(SCHEMA_VERSION, 7);
     let connection = Connection::open(dir.path().join("goals.sqlite3")).unwrap();
     let exists: bool = connection
         .query_row(
@@ -103,6 +106,36 @@ fn schema_v6_contains_durable_takeover_approval_table() {
         )
         .unwrap();
     assert!(exists);
+}
+
+#[test]
+fn schema_v6_takeover_rows_upgrade_without_digest_drift() {
+    let (dir, store) = setup();
+    let approval = store
+        .queue_takeover_approval(OWNER, &request(&store, &dir), at(1_200))
+        .unwrap();
+    drop(store);
+    let connection = Connection::open(dir.path().join("goals.sqlite3")).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX goal_takeover_approvals_upstream_idx;
+             ALTER TABLE goal_takeover_approvals DROP COLUMN upstream_run_status;
+             ALTER TABLE goal_takeover_approvals DROP COLUMN upstream_run_id;
+             ALTER TABLE goal_takeover_approvals DROP COLUMN upstream_approval_id;
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let upgraded = SqliteGoalStore::open(dir.path().join("goals.sqlite3")).unwrap();
+    let approval = upgraded
+        .get_takeover_approval(OWNER, &approval.approval_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(approval.status, TakeoverApprovalStatus::Pending);
+    assert!(approval.upstream_approval_id.is_none());
+    assert!(approval.upstream_run_id.is_none());
+    assert!(approval.upstream_run_status.is_none());
 }
 
 #[test]
@@ -398,4 +431,140 @@ fn removed_workdir_does_not_make_approval_unreadable() {
             .status,
         TakeoverApprovalStatus::Pending
     );
+}
+
+#[test]
+fn successful_takeover_releases_bound_review_and_review_hands_back_safely() {
+    let (dir, store) = setup();
+    let takeover_request = request(&store, &dir);
+    let takeover = store
+        .queue_takeover_approval(OWNER, &takeover_request, at(1_200))
+        .unwrap();
+    store
+        .decide_takeover_approval(
+            OWNER,
+            &takeover.approval_id,
+            TakeoverDecision::Approve,
+            "operator",
+            None,
+            at(1_201),
+        )
+        .unwrap();
+    store
+        .consume_takeover_approval(OWNER, &takeover.approval_id, at(1_202))
+        .unwrap();
+    let takeover = store
+        .finish_takeover_approval(
+            OWNER,
+            &takeover.approval_id,
+            &TakeoverFinish {
+                run_id: Some("takeover-run".into()),
+                run_status: TakeoverRunStatus::Success,
+                detail: "takeover completed".into(),
+            },
+            at(1_203),
+        )
+        .unwrap();
+
+    let goal = store.get(OWNER, "goal-a").unwrap().unwrap();
+    let state = goal.continuity_state.clone().unwrap();
+    let review = state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.id == "review_takeover")
+        .unwrap();
+    assert_eq!(review.status, GoalContinuityStepStatus::Ready);
+    assert_eq!(state.handoff_plan.next_ready_step, "review_takeover");
+    let review_request = TakeoverApprovalRequest {
+        goal_id: goal.id,
+        step_id: review.id.clone(),
+        step_kind: review.kind.clone(),
+        quota_event_id: state.quota_event_id.clone(),
+        target: TakeoverBoundTarget::from_execution(review.target.as_ref().unwrap()),
+        workdir: std::fs::canonicalize(dir.path()).unwrap(),
+        sandbox: TakeoverSandbox::ReadOnly,
+        timeout: Duration::from_secs(300),
+        goal_revision: goal.revision,
+        plan_snapshot: state,
+        upstream_approval_id: Some(takeover.approval_id.clone()),
+        upstream_run_id: takeover.run_id.clone(),
+        upstream_run_status: takeover.run_status,
+    };
+    let review_approval = store
+        .queue_takeover_approval(OWNER, &review_request, at(1_204))
+        .unwrap();
+    assert_eq!(
+        review_approval.upstream_approval_id.as_deref(),
+        Some(takeover.approval_id.as_str())
+    );
+    assert_eq!(
+        review_approval.upstream_run_id.as_deref(),
+        Some("takeover-run")
+    );
+    store
+        .decide_takeover_approval(
+            OWNER,
+            &review_approval.approval_id,
+            TakeoverDecision::Approve,
+            "operator",
+            None,
+            at(1_205),
+        )
+        .unwrap();
+    store
+        .consume_takeover_approval(OWNER, &review_approval.approval_id, at(1_206))
+        .unwrap();
+    store
+        .finish_takeover_approval(
+            OWNER,
+            &review_approval.approval_id,
+            &TakeoverFinish {
+                run_id: Some("review-run".into()),
+                run_status: TakeoverRunStatus::Success,
+                detail: "review completed".into(),
+            },
+            at(1_207),
+        )
+        .unwrap();
+
+    let state = store
+        .get(OWNER, "goal-a")
+        .unwrap()
+        .unwrap()
+        .continuity_state
+        .unwrap();
+    let review = state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.id == "review_takeover")
+        .unwrap();
+    let resume = state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.id == "resume_primary")
+        .unwrap();
+    assert_eq!(review.status, GoalContinuityStepStatus::Done);
+    assert_eq!(
+        resume.status,
+        GoalContinuityStepStatus::WaitingForQuotaReset
+    );
+    assert!(state.handoff_plan.next_ready_step.is_empty());
+}
+
+#[test]
+fn review_queue_rejects_forged_upstream_run_evidence() {
+    let (dir, store) = setup();
+    let mut forged = request(&store, &dir);
+    forged.step_id = "review_takeover".into();
+    forged.step_kind = "review_takeover_work".into();
+    forged.upstream_approval_id = Some("continuity-forged".into());
+    forged.upstream_run_id = Some("run-forged".into());
+    forged.upstream_run_status = Some(TakeoverRunStatus::Success);
+    assert!(matches!(
+        store.queue_takeover_approval(OWNER, &forged, at(1_200)),
+        Err(GoalStoreError::InvalidInput(_))
+    ));
 }

@@ -186,6 +186,12 @@ pub struct TakeoverApprovalRequest {
     pub timeout: Duration,
     pub goal_revision: u64,
     pub plan_snapshot: GoalContinuityState,
+    /// Exact successful takeover approval whose result is reviewed. Absent for
+    /// the takeover step itself.
+    pub upstream_approval_id: Option<String>,
+    /// Exact run produced by the bound upstream takeover approval.
+    pub upstream_run_id: Option<String>,
+    pub upstream_run_status: Option<TakeoverRunStatus>,
 }
 
 impl TakeoverApprovalRequest {
@@ -196,10 +202,35 @@ impl TakeoverApprovalRequest {
         validate_text("takeover quota event id", &self.quota_event_id, 256)?;
         self.target.validate()?;
         self.plan_snapshot.validate()?;
-        if self.step_id != "takeover" || self.step_kind != "start_takeover" {
+        let is_takeover = self.step_id == "takeover" && self.step_kind == "start_takeover";
+        let is_review =
+            self.step_id == "review_takeover" && self.step_kind == "review_takeover_work";
+        if !is_takeover && !is_review {
             return Err(GoalStoreError::InvalidInput(
-                "only takeover/start_takeover can be approved in this layer".into(),
+                "only takeover or review_takeover can be approved in this layer".into(),
             ));
+        }
+        match (
+            is_review,
+            self.upstream_approval_id.as_deref(),
+            self.upstream_run_id.as_deref(),
+            self.upstream_run_status,
+        ) {
+            (false, None, None, None) => {}
+            (true, Some(approval_id), Some(run_id), Some(TakeoverRunStatus::Success)) => {
+                validate_text("review upstream approval id", approval_id, 256)?;
+                validate_text("review upstream run id", run_id, 256)?;
+            }
+            (true, ..) => {
+                return Err(GoalStoreError::InvalidInput(
+                    "review approval requires exact successful takeover evidence".into(),
+                ));
+            }
+            (false, ..) => {
+                return Err(GoalStoreError::InvalidInput(
+                    "takeover approval cannot carry upstream review evidence".into(),
+                ));
+            }
         }
         let workdir_text = self.workdir.to_str().ok_or_else(|| {
             GoalStoreError::InvalidInput("takeover workdir must be valid UTF-8".into())
@@ -255,6 +286,12 @@ impl TakeoverApprovalRequest {
             timeout_seconds: u64,
             goal_revision: u64,
             plan_snapshot: &'a GoalContinuityState,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            upstream_approval_id: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            upstream_run_id: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            upstream_run_status: Option<TakeoverRunStatus>,
         }
         Ok(serde_json::to_string(&Snapshot {
             goal_id: &self.goal_id,
@@ -267,6 +304,9 @@ impl TakeoverApprovalRequest {
             timeout_seconds: self.timeout.as_secs(),
             goal_revision: self.goal_revision,
             plan_snapshot: &self.plan_snapshot,
+            upstream_approval_id: &self.upstream_approval_id,
+            upstream_run_id: &self.upstream_run_id,
+            upstream_run_status: self.upstream_run_status,
         })?)
     }
 }
@@ -286,6 +326,9 @@ pub struct TakeoverApproval {
     pub timeout_secs: u64,
     pub goal_revision: u64,
     pub plan_snapshot: GoalContinuityState,
+    pub upstream_approval_id: Option<String>,
+    pub upstream_run_id: Option<String>,
+    pub upstream_run_status: Option<TakeoverRunStatus>,
     pub status: TakeoverApprovalStatus,
     pub decided_by: Option<String>,
     pub decision_reason: Option<String>,

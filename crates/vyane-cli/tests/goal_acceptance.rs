@@ -573,6 +573,89 @@ fn continuity_execute_dispatches_once_and_settles_done() {
             .status,
         GoalContinuityStepStatus::Done
     );
+
+    let review_queued = json_output(
+        &[
+            "goal",
+            "continuity-queue",
+            "--db",
+            &db,
+            "--json",
+            "execute-controlled",
+            "--workdir",
+            &workdir,
+            "--sandbox",
+            pursuit_test_sandbox(),
+            "--timeout-seconds",
+            "30",
+        ],
+        0,
+    );
+    assert_eq!(review_queued["approval"]["step_id"], "review_takeover");
+    assert_eq!(
+        review_queued["approval"]["upstream_approval_id"],
+        approval_id
+    );
+    assert!(review_queued["approval"]["upstream_run_id"].is_string());
+    let review_approval_id = review_queued["approval"]["approval_id"]
+        .as_str()
+        .expect("review approval id");
+    json_output(
+        &[
+            "goal",
+            "continuity-decide",
+            "--db",
+            &db,
+            "--json",
+            review_approval_id,
+            "--decision",
+            "approve",
+            "--decided-by",
+            "operator",
+        ],
+        0,
+    );
+    let review_output = vyane()
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "continuity-execute",
+            "--db",
+            &db,
+            "--json",
+            review_approval_id,
+        ])
+        .output()
+        .expect("execute review");
+    assert_eq!(
+        review_output.status.code(),
+        Some(0),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&review_output.stdout),
+        String::from_utf8_lossy(&review_output.stderr)
+    );
+    let reviewed: Value =
+        serde_json::from_slice(&review_output.stdout).expect("review execution JSON");
+    assert_eq!(reviewed["approval"]["status"], "done");
+    let goal = store
+        .get("local", "execute-controlled")
+        .expect("read reviewed goal")
+        .expect("reviewed goal exists");
+    let state = goal.continuity_state.expect("reviewed continuity state");
+    assert_eq!(
+        state.handoff_plan.steps[1].status,
+        GoalContinuityStepStatus::Done
+    );
+    assert_eq!(
+        state.handoff_plan.steps[2].status,
+        GoalContinuityStepStatus::WaitingForQuotaReset
+    );
+    assert!(state.handoff_plan.next_ready_step.is_empty());
 }
 
 #[test]

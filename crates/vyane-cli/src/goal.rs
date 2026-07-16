@@ -186,17 +186,44 @@ fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
         .steps
         .iter()
         .find(|step| {
-            step.id == "takeover"
-                && step.kind == "start_takeover"
-                && step.status == vyane_goal::GoalContinuityStepStatus::Ready
+            matches!(
+                (step.id.as_str(), step.kind.as_str()),
+                ("takeover", "start_takeover") | ("review_takeover", "review_takeover_work")
+            ) && step.status == vyane_goal::GoalContinuityStepStatus::Ready
                 && step.requires_approval
         })
-        .context("goal has no approval-required ready takeover step")?;
+        .context("goal has no supported approval-required ready continuity step")?;
     let target = step
         .target
         .as_ref()
         .context("ready takeover step has no target")?;
-    let workdir = std::fs::canonicalize(&args.workdir).context("canonicalize takeover workdir")?;
+    let workdir =
+        std::fs::canonicalize(&args.workdir).context("canonicalize continuity workdir")?;
+    let upstream = if step.id == "review_takeover" {
+        store
+            .list_takeover_approvals(&args.common.owner, Some(&goal.id))
+            .context("list takeover evidence for review")?
+            .into_iter()
+            .find(|approval| {
+                approval.quota_event_id == state.quota_event_id
+                    && approval.step_id == "takeover"
+                    && approval.status == TakeoverApprovalStatus::Done
+                    && approval.run_status == Some(TakeoverRunStatus::Success)
+                    && approval.run_id.is_some()
+            })
+            .context("review step has no exact successful takeover run evidence")?
+            .into()
+    } else {
+        None
+    };
+    let (upstream_approval_id, upstream_run_id, upstream_run_status) =
+        upstream.map_or((None, None, None), |approval: TakeoverApproval| {
+            (
+                Some(approval.approval_id),
+                approval.run_id,
+                approval.run_status,
+            )
+        });
     let request = TakeoverApprovalRequest {
         goal_id: goal.id.clone(),
         step_id: step.id.clone(),
@@ -208,6 +235,9 @@ fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
         timeout: std::time::Duration::from_secs(args.timeout_seconds),
         goal_revision: goal.revision,
         plan_snapshot: state.clone(),
+        upstream_approval_id,
+        upstream_run_id,
+        upstream_run_status,
     };
     let approval = store
         .queue_takeover_approval(&args.common.owner, &request, Utc::now())
@@ -260,21 +290,21 @@ async fn continuity_execute(
         );
     }
     let goal = require_goal(&store, &args.common.owner, &approval.goal_id)?;
-    let prompt = takeover_prompt(&goal, &approval);
+    let prompt = continuity_prompt(&goal, &approval);
     let selector = approval.target.selector();
     let service =
-        Arc::new(VyaneService::load(config_path.as_deref()).context("load takeover runtime")?);
+        Arc::new(VyaneService::load(config_path.as_deref()).context("load continuity runtime")?);
     let resolved = service
         .resolve(&selector)
-        .context("resolve approved takeover target")?;
+        .context("resolve approved continuity target")?;
     let [bound] = resolved.chain.as_slice() else {
-        bail!("approved takeover target must resolve to exactly one target");
+        bail!("approved continuity target must resolve to exactly one target");
     };
-    validate_resolved_takeover(bound, &approval.target)?;
-    let current_workdir =
-        std::fs::canonicalize(&approval.workdir).context("revalidate approved takeover workdir")?;
+    validate_resolved_continuity(bound, &approval.target)?;
+    let current_workdir = std::fs::canonicalize(&approval.workdir)
+        .context("revalidate approved continuity workdir")?;
     if current_workdir != approval.workdir {
-        bail!("approved takeover workdir changed before execution");
+        bail!("approved continuity workdir changed before execution");
     }
 
     let approval = store
@@ -293,7 +323,7 @@ async fn continuity_execute(
                 timeout_secs: Some(approval.timeout_secs),
                 labels: vec![
                     "source=goal-continuity".into(),
-                    "continuity_step=takeover".into(),
+                    format!("continuity_step={}", approval.step_id),
                 ],
             },
             cancel,
@@ -313,7 +343,11 @@ async fn continuity_execute(
                 TakeoverFinish {
                     run_id: Some(outcome.record.run_id),
                     run_status,
-                    detail: format!("takeover dispatch finished with {}", run_status.as_str()),
+                    detail: format!(
+                        "continuity {} dispatch finished with {}",
+                        approval.step_id,
+                        run_status.as_str()
+                    ),
                 },
                 exit,
             )
@@ -322,7 +356,7 @@ async fn continuity_execute(
             TakeoverFinish {
                 run_id: None,
                 run_status: TakeoverRunStatus::Error,
-                detail: format!("takeover dispatch failed: {error:#}"),
+                detail: format!("continuity {} dispatch failed: {error:#}", approval.step_id),
             },
             ExitCode::from(4),
         ),
@@ -903,7 +937,7 @@ const fn takeover_run_status(value: RunStatus) -> TakeoverRunStatus {
     }
 }
 
-fn validate_resolved_takeover(
+fn validate_resolved_continuity(
     resolved: &vyane_core::BoundTarget,
     approved: &TakeoverBoundTarget,
 ) -> Result<()> {
@@ -918,15 +952,15 @@ fn validate_resolved_takeover(
         || resolved.target.model.as_str() != approved.model
     {
         bail!(
-            "resolved takeover target does not match the approved provider/protocol/harness/model boundary"
+            "resolved continuity target does not match the approved provider/protocol/harness/model boundary"
         );
     }
     Ok(())
 }
 
-fn takeover_prompt(goal: &GoalRecord, approval: &TakeoverApproval) -> String {
+fn continuity_prompt(goal: &GoalRecord, approval: &TakeoverApproval) -> String {
     let mut prompt = format!(
-        "Continue goal {}: {}\n\nTakeover step: {} ({})\nReason: primary quota blocked.\n",
+        "Continue goal {}: {}\n\nContinuity step: {} ({})\nReason: primary quota blocked.\n",
         goal.id, goal.title, approval.step_id, approval.step_kind
     );
     if !goal.description.trim().is_empty() {
@@ -934,8 +968,23 @@ fn takeover_prompt(goal: &GoalRecord, approval: &TakeoverApproval) -> String {
         prompt.push_str(goal.description.trim());
         prompt.push('\n');
     }
+    if approval.step_id == "review_takeover" {
+        prompt.push_str("\nTakeover evidence to review:\n");
+        if let Some(id) = &approval.upstream_approval_id {
+            prompt.push_str(&format!("- approval_id: {id}\n"));
+        }
+        if let Some(id) = &approval.upstream_run_id {
+            prompt.push_str(&format!("- run_id: {id}\n"));
+        }
+        if let Some(status) = approval.upstream_run_status {
+            prompt.push_str(&format!("- run_status: {}\n", status.as_str()));
+        }
+        prompt.push_str(
+            "Review the completed takeover before primary handback. Report required fixes as blockers.\n",
+        );
+    }
     prompt.push_str(
-        "\nWork only on this approved takeover step. Report changes, verification, and blockers before returning control.",
+        "\nWork only on this approved continuity step. Report changes, verification, and blockers before returning control.",
     );
     prompt
 }
