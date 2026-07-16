@@ -2060,6 +2060,14 @@ fn replayed_pass_below_observation_high_water_cannot_reopen_the_gate() {
         .unwrap();
     assert!(!replay.changed);
     assert_eq!(
+        replay.signal.kind,
+        GoalContinuitySignalKind::ReviewChecksFailed
+    );
+    assert_eq!(
+        replay.signal.review_check.as_ref().unwrap().observation_id,
+        "checks-failed-v2"
+    );
+    assert_eq!(
         replay.state.handoff_plan.next_ready_step,
         "repair_failed_review"
     );

@@ -831,7 +831,18 @@ pub(crate) fn with_ready_signal(
     }
     if let Some(review) = &signal.review_check {
         if review.observation_sequence < state.review_observation_high_water {
-            return Ok((state.clone(), signal.clone(), false));
+            let current = state
+                .ready_signals
+                .iter()
+                .rev()
+                .find(|ready| ready.review_check.is_some())
+                .cloned()
+                .ok_or_else(|| {
+                    GoalStoreError::CorruptData(
+                        "continuity review-check high water has no current evidence".into(),
+                    )
+                })?;
+            return Ok((state.clone(), current, false));
         }
         if review.observation_sequence == state.review_observation_high_water {
             if let Some(existing) = state.ready_signals.iter().find(|existing| {
