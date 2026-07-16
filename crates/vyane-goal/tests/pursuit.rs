@@ -947,6 +947,51 @@ async fn authority_change_after_verification_persistence_stops_before_runtime() 
 }
 
 #[tokio::test]
+async fn verifier_failure_budget_is_durable_at_verification_checkpoint() {
+    let (directory, store) = fixture();
+    running_goal(
+        &store,
+        "post-verify-failure",
+        vec![AcceptanceCriterion::new(
+            "custom",
+            "cmd:definitely-not-a-real-command",
+        )],
+    );
+    let connection = rusqlite::Connection::open(directory.path().join("goals.sqlite3"))
+        .expect("open trigger connection");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER pause_after_failed_verification
+             AFTER INSERT ON goal_events
+             WHEN NEW.goal_id = 'post-verify-failure'
+                  AND NEW.stage = 'acceptance.verify'
+             BEGIN
+                 UPDATE goals
+                 SET status = 'paused', claimed_by = NULL,
+                     claim_expires_at_ms = NULL, pause_reason = 'external pause'
+                 WHERE owner = 'owner-a' AND id = 'post-verify-failure';
+             END;",
+        )
+        .expect("install verification-interruption trigger");
+    let runtime = FakeRuntime::new(|_| panic!("runtime must not run"));
+    let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
+
+    let outcome = GoalPursuer::new(&store, &runtime, &verifier, config(&directory, 3, 2))
+        .unwrap()
+        .pursue(OWNER, "post-verify-failure")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, PursuitStatus::Stopped);
+    assert_eq!(runtime.call_count(), 0);
+    let checkpoint = store
+        .pursuit_checkpoint(OWNER, "post-verify-failure")
+        .unwrap()
+        .expect("durable verification checkpoint");
+    assert_eq!(checkpoint.consecutive_failures, 1);
+}
+
+#[tokio::test]
 async fn same_worker_reclaim_after_verification_stops_before_runtime() {
     let (directory, store) = fixture();
     running_goal(

@@ -433,6 +433,21 @@ where
                 return Ok(stopped);
             }
             self.persist_satisfied(owner, &goal, &verification, verified_at)?;
+            let manual_pause = manual_pause_required(&verification);
+            let verifier_failed = !verification.results.is_empty()
+                && !manual_pause
+                && verification
+                    .results
+                    .iter()
+                    .any(|result| result.status == CriterionStatus::Error);
+            if verifier_failed {
+                // Verifier and runtime failures are separate failure events. A
+                // round where both fail deliberately consumes two slots, which
+                // preserves the established pursuit contract.
+                // Persist verifier failures with the verification checkpoint so
+                // a restart cannot lose a consumed lifetime failure slot.
+                checkpoint.consecutive_failures = checkpoint.consecutive_failures.saturating_add(1);
+            }
             checkpoint.last_verification_id = Some(artifact.verification_id);
             self.record_checkpoint(
                 owner,
@@ -500,7 +515,7 @@ where
                     last_verification,
                 );
             }
-            if manual_pause_required(&verification) {
+            if manual_pause {
                 return self.pause(
                     owner,
                     goal_id,
@@ -519,25 +534,6 @@ where
                 );
             }
 
-            let verifier_failed = verification
-                .results
-                .iter()
-                .any(|result| result.status == CriterionStatus::Error);
-            if verifier_failed {
-                // Verifier and runtime failures are separate failure events. A
-                // round where both fail deliberately consumes two slots, which
-                // preserves the established pursuit contract.
-                checkpoint.consecutive_failures = checkpoint.consecutive_failures.saturating_add(1);
-                if checkpoint.consecutive_failures >= self.config.max_failures {
-                    return self.pause(
-                        owner,
-                        goal_id,
-                        &mut checkpoint,
-                        "pursuit max failures reached",
-                        last_verification,
-                    );
-                }
-            }
             if checkpoint.segments_started >= self.config.max_segments {
                 return self.pause(
                     owner,
