@@ -7,7 +7,7 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,8 @@ use crate::{
 
 pub const MAX_VERIFIER_TIMEOUT: Duration = Duration::from_secs(300);
 pub const MAX_OUTPUT_TAIL_BYTES: usize = 4_000;
+const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
+const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct AcceptanceVerifier {
@@ -186,8 +188,21 @@ impl AcceptanceVerifier {
             use std::os::unix::process::CommandExt as _;
             process.process_group(0);
         }
-        let mut child = match process.spawn() {
+        let deadline = started + self.timeout;
+        let mut child = match spawn_with_busy_retry(&mut process, deadline) {
             Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                return self.result(
+                    index,
+                    key,
+                    kind,
+                    target,
+                    CriterionStatus::Error,
+                    command,
+                    None,
+                    "acceptance command timed out",
+                );
+            }
             Err(error) => {
                 return self.result(
                     index,
@@ -350,6 +365,29 @@ impl AcceptanceVerifier {
             stdout_tail,
             stderr_tail,
             detail: detail.to_owned(),
+        }
+    }
+}
+
+fn spawn_with_busy_retry(process: &mut Command, deadline: Instant) -> std::io::Result<Child> {
+    let mut retries = 0;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "acceptance command spawn deadline elapsed",
+            ));
+        }
+        match process.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if error.raw_os_error() == Some(26) && retries < EXECUTABLE_BUSY_MAX_RETRIES =>
+            {
+                retries += 1;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(EXECUTABLE_BUSY_RETRY_DELAY.min(remaining));
+            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -587,11 +625,50 @@ mod tests {
             "custom",
             format!("cmd:{} {}", script.display(), escaped_marker.display()),
         )]));
-        assert_eq!(result.results[0].status, CriterionStatus::Satisfied);
+        assert_eq!(
+            result.results[0].status,
+            CriterionStatus::Satisfied,
+            "{}",
+            result.results[0].detail
+        );
         thread::sleep(Duration::from_millis(1_200));
         assert!(
             !escaped_marker.exists(),
             "a successful acceptance command must not escape its process group"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn command_spawn_retries_transient_executable_busy() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("command tempdir");
+        let script = directory.path().join("busy-script");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write command");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .expect("make command executable");
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&script)
+            .expect("hold command open for writing");
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            drop(writer);
+        });
+
+        let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1))
+            .expect("construct verifier");
+        let result = verifier.verify(&record(vec![AcceptanceCriterion::new(
+            "custom",
+            format!("cmd:{}", script.display()),
+        )]));
+        release.join().expect("release writer");
+        assert_eq!(
+            result.results[0].status,
+            CriterionStatus::Satisfied,
+            "{}",
+            result.results[0].detail
         );
     }
 
