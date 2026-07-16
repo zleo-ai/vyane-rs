@@ -132,7 +132,6 @@ impl DaemonGoalSupervisor {
                 Arc::clone(&self.service),
                 self.config.pursuit.runtime.clone(),
                 self.config.sandbox,
-                runtime_cancel,
             );
             let pursuer = GoalPursuer::new(
                 &self.store,
@@ -147,7 +146,11 @@ impl DaemonGoalSupervisor {
                     shutdown_cancel.cancel();
                     return Ok(());
                 }
-                result = pursuer.pursue(LOCAL_TASK_OWNER, &goal.id) => {
+                result = pursuer.pursue_with_cancel(
+                    LOCAL_TASK_OWNER,
+                    &goal.id,
+                    runtime_cancel,
+                ) => {
                     match result {
                         Ok(outcome) => {
                             self.retry_after.remove(&goal.id);
