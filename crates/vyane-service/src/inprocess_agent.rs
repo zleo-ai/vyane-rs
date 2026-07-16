@@ -360,6 +360,14 @@ pub trait InProcessAgentOperation: Send + Sync {
     /// Pure admission for a prospective controller identity.
     fn admit(&self, identity: &AgentExecutionIdentity, controller: &ControllerRef) -> bool;
 
+    /// Bounded cleanup after durable recovery proved this exact controller is
+    /// gone and consumed its recovery ticket.
+    ///
+    /// Implementations may release private input retained for reconciliation,
+    /// but must not recreate or replay work. This hook runs on a blocking
+    /// thread and must keep errors and panic payloads body-free.
+    fn confirmed_gone(&self, _controller: &ControllerRef) {}
+
     /// Resolve and run one structured operation.
     async fn execute(
         &self,
@@ -720,6 +728,9 @@ impl AgentControllerAdapter for InProcessAgentBackend {
     }
 
     fn confirmed_gone(&self, controller: &ControllerRef) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            self.state.operation.confirmed_gone(controller);
+        }));
         let Some(fingerprint) = controller.fingerprint.as_ref() else {
             return;
         };
@@ -949,11 +960,14 @@ mod tests {
         AgentClock, NewAgentRun, NewRunCompletion, NewWorker, ResumeSessionProof,
         RunCompletionRecord, RunMode, RunState, SqliteAgentStore,
     };
+    use vyane_message::{
+        EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
+    };
 
     use super::*;
     use crate::{
         AgentCompletionSinkObservation, AgentExecutionItemStatus, AgentExecutionSettlement,
-        AgentRecoveryItemStatus,
+        AgentRecoveryItemStatus, MessageComponents, StoragePaths, message_run_completion,
     };
 
     const OWNER: &str = "owner-test";
@@ -1076,6 +1090,7 @@ mod tests {
 
     struct StageBlockingOperation {
         owner: &'static str,
+        messages: MessageComponents,
         entered: Arc<Barrier>,
         release: Arc<Barrier>,
     }
@@ -1121,23 +1136,51 @@ mod tests {
             identity: AgentExecutionIdentity,
             authority: InProcessEffectAuthority<'_>,
         ) -> AgentExecutorOutcome {
-            let prepared = match authority
-                .prepare_completion(NewRunCompletion {
-                    id: format!("completion-{}", identity.run_id()),
-                    sink_kind: "test-sink".into(),
-                    publication_key: format!("result.{}", identity.run_id()),
-                    content_digest: "c".repeat(64),
-                    content_bytes: 1,
-                })
-                .await
-            {
+            let key = format!("result.{}", identity.run_id());
+            let message = NewMessage {
+                conversation_id: "stage-barrier-conversation".into(),
+                session_id: None,
+                direction: MessageDirection::Internal,
+                kind: "completion".into(),
+                sender: EndpointRef {
+                    kind: EndpointKind::Agent,
+                    id: "stage-barrier-agent".into(),
+                },
+                body: "stage-barrier-body".into(),
+                payload: serde_json::json!({"status": "completed"}),
+                reply_to: None,
+                trace_id: None,
+                correlation_id: Some(identity.run_id().into()),
+                idempotency: IdempotencyKey {
+                    producer: crate::MESSAGE_COMPLETION_PRODUCER.into(),
+                    key: key.clone(),
+                },
+                deliveries: vec![NewDelivery {
+                    route: "local".into(),
+                    target: EndpointRef {
+                        kind: EndpointKind::User,
+                        id: "stage-barrier-requester".into(),
+                    },
+                    available_at: None,
+                    expires_at: None,
+                    max_attempts: 1,
+                }],
+            };
+            let completion =
+                match message_run_completion(format!("completion-{}", identity.run_id()), &message)
+                {
+                    Ok(completion) => completion,
+                    Err(_) => return AgentExecutorOutcome::Unknown,
+                };
+            let prepared = match authority.prepare_completion(completion).await {
                 Ok(prepared) => prepared,
                 Err(_) => return AgentExecutorOutcome::Unknown,
             };
             let entered = Arc::clone(&self.entered);
             let release = Arc::clone(&self.release);
-            match prepared
-                .stage_blocking(move |_| {
+            match self
+                .messages
+                .stage_completion_with_cleanup(prepared, message, move || {
                     entered.wait();
                     release.wait();
                     true
@@ -2057,6 +2100,13 @@ mod tests {
                 fixture.store.clone() as Arc<dyn AgentStore>,
                 Arc::new(StageBlockingOperation {
                     owner: TEST_OWNER,
+                    messages: MessageComponents::open(
+                        &StoragePaths::from_data_dir(
+                            fixture._directory.path().join("stage-barrier-data"),
+                        ),
+                        TEST_OWNER,
+                    )
+                    .unwrap(),
                     entered: Arc::clone(&entered),
                     release: Arc::clone(&release),
                 }),

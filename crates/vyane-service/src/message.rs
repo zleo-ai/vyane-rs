@@ -81,6 +81,26 @@ impl MessageComponents {
         prepared: InProcessPreparedCompletion<'_>,
         message: NewMessage,
     ) -> Result<StagedRunCompletion, InProcessCompletionStageError> {
+        self.stage_completion_with_cleanup(prepared, message, || true)
+            .await
+    }
+
+    /// Stage an exact message and finish synchronous private-input cleanup in
+    /// the same recovery-visible controller lifetime.
+    ///
+    /// The cleanup callback runs only after an exact staged or already
+    /// published message is observed. Returning `false` rejects settlement.
+    /// Both operations stay inside the non-cancellable blocking closure that
+    /// owns the in-process lifetime guard.
+    pub async fn stage_completion_with_cleanup<F>(
+        &self,
+        prepared: InProcessPreparedCompletion<'_>,
+        message: NewMessage,
+        cleanup: F,
+    ) -> Result<StagedRunCompletion, InProcessCompletionStageError>
+    where
+        F: FnOnce() -> bool + Send + 'static,
+    {
         let store = Arc::clone(&self.store);
         let owner = self.broker.scope().owner().to_owned();
         prepared
@@ -99,7 +119,7 @@ impl MessageComponents {
                 {
                     return false;
                 }
-                store.stage(&owner, &message).is_ok_and(|outcome| {
+                let staged = store.stage(&owner, &message).is_ok_and(|outcome| {
                     outcome.resolution.owner == owner
                         && outcome.resolution.request_digest.as_str()
                             == snapshot.record.content_digest
@@ -107,7 +127,8 @@ impl MessageComponents {
                             outcome.resolution.status,
                             MessagePublicationStatus::Staged | MessagePublicationStatus::Published
                         )
-                })
+                });
+                staged && cleanup()
             })
             .await
     }
