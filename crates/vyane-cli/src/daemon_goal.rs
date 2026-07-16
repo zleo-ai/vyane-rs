@@ -194,21 +194,26 @@ fn acquire_from_store<S: GoalStore>(
     let query = GoalQuery {
         statuses: vec![GoalStatus::InProgress],
         parent_goal_id: None,
-        limit: 1_000,
+        // Resident recovery must inspect every in-progress goal before it is
+        // allowed to claim queued work. GoalStore defines zero as unbounded.
+        limit: 0,
     };
-    for goal in store.list(LOCAL_TASK_OWNER, &query)? {
-        if retry_after.get(&goal.id).is_some_and(|retry| {
-            retry
-                .eligible_at
-                .is_none_or(|eligible_at| eligible_at > Instant::now())
-        }) {
-            continue;
-        }
-        let now = Utc::now();
-        if goal.lease_active(now) {
-            if goal.claimed_by.as_deref() == Some(DAEMON_GOAL_WORKER) {
-                return Ok(Some(goal));
-            }
+    let goals = store.list(LOCAL_TASK_OWNER, &query)?;
+    let retry_now = Instant::now();
+    let lease_now = Utc::now();
+
+    // A live lease owned by the stable daemon worker is restart continuity,
+    // not ordinary competing work. Adopt it before reclaiming any other row.
+    if let Some(goal) = goals.iter().find(|goal| {
+        retry_eligible(retry_after, &goal.id, retry_now)
+            && goal.lease_active(lease_now)
+            && goal.claimed_by.as_deref() == Some(DAEMON_GOAL_WORKER)
+    }) {
+        return Ok(Some(goal.clone()));
+    }
+
+    for goal in goals {
+        if !retry_eligible(retry_after, &goal.id, retry_now) || goal.lease_active(lease_now) {
             continue;
         }
         let acquired = if goal.claimed_by.is_some() {
@@ -217,7 +222,7 @@ fn acquire_from_store<S: GoalStore>(
                 &goal.id,
                 DAEMON_GOAL_WORKER,
                 config.lease_seconds(),
-                now,
+                lease_now,
             )
         } else {
             store.claim(
@@ -225,7 +230,7 @@ fn acquire_from_store<S: GoalStore>(
                 &goal.id,
                 DAEMON_GOAL_WORKER,
                 config.lease_seconds(),
-                now,
+                lease_now,
             )
         };
         match acquired {
@@ -243,6 +248,18 @@ fn acquire_from_store<S: GoalStore>(
             Utc::now(),
         )
         .map_err(Into::into)
+}
+
+fn retry_eligible(
+    retry_after: &HashMap<String, PursuitRetry>,
+    goal_id: &str,
+    now: Instant,
+) -> bool {
+    !retry_after.get(goal_id).is_some_and(|retry| {
+        retry
+            .eligible_at
+            .is_none_or(|eligible_at| eligible_at > now)
+    })
 }
 
 fn schedule_retry(
@@ -451,6 +468,59 @@ mod tests {
         assert_eq!(adopted.id, "restart");
         assert_eq!(adopted.claim_generation, claimed.claim_generation);
         assert_eq!(adopted.revision, claimed.revision);
+    }
+
+    #[test]
+    fn live_stable_lease_precedes_earlier_reclaimable_work() {
+        let directory = TempDir::new().unwrap();
+        let (store, config) = supervisor_store(&directory);
+        let past = Utc::now() - TimeDelta::seconds(10);
+        create(&store, "reclaimable", 0);
+        store
+            .claim(LOCAL_TASK_OWNER, "reclaimable", "old-worker", 1, past)
+            .unwrap();
+        create(&store, "restart", 1);
+        let restart = store
+            .claim(
+                LOCAL_TASK_OWNER,
+                "restart",
+                DAEMON_GOAL_WORKER,
+                60,
+                Utc::now(),
+            )
+            .unwrap();
+
+        let adopted = acquire(&store, &config).unwrap();
+        assert_eq!(adopted.id, "restart");
+        assert_eq!(adopted.claim_generation, restart.claim_generation);
+        let untouched = store.get(LOCAL_TASK_OWNER, "reclaimable").unwrap().unwrap();
+        assert_eq!(untouched.claimed_by.as_deref(), Some("old-worker"));
+        assert_eq!(untouched.claim_generation, 1);
+    }
+
+    #[test]
+    fn recovery_scans_beyond_one_thousand_in_progress_goals() {
+        let directory = TempDir::new().unwrap();
+        let (store, config) = supervisor_store(&directory);
+        let now = Utc::now();
+        for index in 0..1_000 {
+            let id = format!("foreign-{index:04}");
+            create(&store, &id, 0);
+            store
+                .claim(LOCAL_TASK_OWNER, &id, "foreign-worker", 60, now)
+                .unwrap();
+        }
+        create(&store, "eligible-after-page", 1);
+        store
+            .start(LOCAL_TASK_OWNER, "eligible-after-page", now)
+            .unwrap();
+        create(&store, "queued", 2);
+
+        let recovered = acquire(&store, &config).unwrap();
+        assert_eq!(recovered.id, "eligible-after-page");
+        let queued = store.get(LOCAL_TASK_OWNER, "queued").unwrap().unwrap();
+        assert_eq!(queued.status, GoalStatus::Queued);
+        assert_eq!(queued.claim_generation, 0);
     }
 
     #[test]
