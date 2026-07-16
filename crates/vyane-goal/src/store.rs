@@ -12,14 +12,22 @@ pub trait GoalStore: Send + Sync {
 
     fn get(&self, owner: &str, id: &str) -> Result<Option<GoalRecord>>;
 
-    /// Read one goal and all of its continuity approvals from the same storage
-    /// snapshot so projection cannot mistake ordinary concurrent progress for
-    /// durable corruption.
+    /// Read one goal and all of its continuity approvals for projection.
+    ///
+    /// The source-compatible default composes two ordinary reads and therefore
+    /// does not promise a concurrent snapshot. Stores used by a live projection
+    /// surface should override it with one storage-native read transaction.
     fn continuity_projection_snapshot(
         &self,
         owner: &str,
         id: &str,
-    ) -> Result<Option<GoalContinuityProjectionSnapshot>>;
+    ) -> Result<Option<GoalContinuityProjectionSnapshot>> {
+        let Some(goal) = self.get(owner, id)? else {
+            return Ok(None);
+        };
+        let approvals = self.list_takeover_approvals(owner, Some(id))?;
+        Ok(Some(GoalContinuityProjectionSnapshot { goal, approvals }))
+    }
 
     fn list(&self, owner: &str, query: &GoalQuery) -> Result<Vec<GoalRecord>>;
 
