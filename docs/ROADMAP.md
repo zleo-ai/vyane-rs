@@ -15,8 +15,8 @@ Unqualified “full parity” means whole-system capability parity, not merely p
 Private credentials, deployment details, endpoints, paths, and identity data
 must not enter this public repository; the corresponding generic contracts and
 optional/private adapter boundaries must nevertheless be verifiable. In the
-current public integration baseline the 53 matrix items are 7 implemented, 21 partial,
-14 missing, 9 different, and 2 planned.
+current public integration baseline the 53 matrix items are 7 implemented, 22 partial,
+13 missing, 9 different, and 2 planned.
 
 | wave | active scope |
 |------|--------------|

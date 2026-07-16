@@ -106,6 +106,8 @@ pub enum GoalCommand {
     ContinuityDecide(GoalContinuityDecisionArgs),
     /// Consume one approved continuity approval and execute exactly once.
     ContinuityExecute(GoalContinuityExecuteArgs),
+    /// Record one exact external continuity readiness signal; never dispatches.
+    ContinuitySignal(GoalContinuitySignalArgs),
     /// Append a progress event without changing lifecycle state.
     Progress(GoalProgressArgs),
     /// Pause an in-progress goal; releases any lease (holder-only while leased).
@@ -206,6 +208,38 @@ pub struct GoalContinuityExecuteArgs {
     pub common: GoalCommonArgs,
     /// Exact approved, unconsumed approval id. No execution option may be overridden here.
     pub approval_id: String,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum GoalContinuitySignalArg {
+    #[value(name = "quota-reset", alias = "quota_reset")]
+    QuotaReset,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalContinuitySignalArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Goal whose current continuity plan receives the signal.
+    pub id: String,
+    /// Closed signal kind.
+    #[arg(value_enum)]
+    pub signal: GoalContinuitySignalArg,
+    /// Exact quota event currently visible on the goal.
+    #[arg(long)]
+    pub quota_event_id: String,
+    /// Exact primary provider observed available again.
+    #[arg(long)]
+    pub provider: String,
+    /// Exact primary harness observed available again.
+    #[arg(long)]
+    pub harness: String,
+    /// Exact primary model observed available again.
+    #[arg(long)]
+    pub model: String,
+    /// Bounded non-secret observer identifier.
+    #[arg(long)]
+    pub source: String,
 }
 
 #[derive(Debug, Args)]

@@ -8,7 +8,8 @@ use chrono::Utc;
 use serde::Serialize;
 use vyane_core::{CancellationToken, RunStatus, Sandbox};
 use vyane_goal::{
-    AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus, GoalEvent,
+    AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus,
+    GoalContinuitySignal, GoalContinuitySignalKind, GoalContinuitySignalResult, GoalEvent,
     GoalPursuer, GoalPursuitCheckpoint, GoalQuery, GoalRecord, GoalStatus, GoalStore,
     GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, PursuitConfig, PursuitOutcome,
     PursuitStatus, SqliteGoalStore, TakeoverApproval, TakeoverApprovalRequest,
@@ -20,10 +21,10 @@ use vyane_service::{DispatchParams, VyaneService};
 use crate::app::StoragePaths;
 use crate::cli::{
     GoalClaimArgs, GoalClaimNextArgs, GoalCommand, GoalCommonArgs, GoalContinuityDecisionArgs,
-    GoalContinuityExecuteArgs, GoalContinuityQueueArgs, GoalCreateArgs, GoalDoneArgs, GoalFailArgs,
-    GoalGetArgs, GoalIdArgs, GoalListArgs, GoalNextArgs, GoalProgressArgs, GoalPursueArgs,
-    GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs, GoalStatusArg, GoalTakeoverDecisionArg,
-    GoalVerifyArgs, SandboxArg,
+    GoalContinuityExecuteArgs, GoalContinuityQueueArgs, GoalContinuitySignalArg,
+    GoalContinuitySignalArgs, GoalCreateArgs, GoalDoneArgs, GoalFailArgs, GoalGetArgs, GoalIdArgs,
+    GoalListArgs, GoalNextArgs, GoalProgressArgs, GoalPursueArgs, GoalReasonArgs, GoalResumeArgs,
+    GoalSatisfyArgs, GoalStatusArg, GoalTakeoverDecisionArg, GoalVerifyArgs, SandboxArg,
 };
 use crate::goal_runtime::DispatchGoalRuntime;
 
@@ -125,6 +126,14 @@ struct TakeoverApprovalOutput {
 }
 
 #[derive(Debug, Serialize)]
+struct ContinuitySignalOutput {
+    status: &'static str,
+    changed: bool,
+    result: GoalContinuitySignalResult,
+    db: String,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorOutput<'a> {
     status: &'static str,
     error: &'a str,
@@ -148,6 +157,7 @@ pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<E
         GoalCommand::ContinuityQueue(args) => continuity_queue(args),
         GoalCommand::ContinuityDecide(args) => continuity_decide(args),
         GoalCommand::ContinuityExecute(args) => continuity_execute(config_path, args).await,
+        GoalCommand::ContinuitySignal(args) => continuity_signal(args),
         GoalCommand::Progress(args) => progress(args),
         GoalCommand::Pause(args) => pause(args),
         GoalCommand::Resume(args) => resume(args),
@@ -172,6 +182,45 @@ pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<E
             Ok(ExitCode::from(2))
         }
     }
+}
+
+fn continuity_signal(args: GoalContinuitySignalArgs) -> Result<ExitCode> {
+    let (store, db) = open_store(&args.common)?;
+    let kind = match args.signal {
+        GoalContinuitySignalArg::QuotaReset => GoalContinuitySignalKind::QuotaReset,
+    };
+    let signal = GoalContinuitySignal {
+        kind,
+        quota_event_id: args.quota_event_id,
+        provider: args.provider,
+        harness: args.harness,
+        model: args.model,
+        observed_at: Utc::now(),
+        source: args.source,
+    };
+    let result = store
+        .record_continuity_signal(&args.common.owner, &args.id, &signal, Utc::now())
+        .context("record continuity signal")?;
+    if args.common.json {
+        print_json(&ContinuitySignalOutput {
+            status: "success",
+            changed: result.changed,
+            result,
+            db: path_text(&db),
+        })?;
+    } else {
+        println!(
+            "{}\t{}\t{}",
+            args.id,
+            if result.changed {
+                "recorded"
+            } else {
+                "unchanged"
+            },
+            result.state.handoff_plan.next_ready_step
+        );
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
@@ -1016,6 +1065,7 @@ fn common(command: &GoalCommand) -> &GoalCommonArgs {
         GoalCommand::ContinuityQueue(args) => &args.common,
         GoalCommand::ContinuityDecide(args) => &args.common,
         GoalCommand::ContinuityExecute(args) => &args.common,
+        GoalCommand::ContinuitySignal(args) => &args.common,
         GoalCommand::Progress(args) => &args.common,
         GoalCommand::Pause(args) => &args.common,
         GoalCommand::Resume(args) => &args.common,

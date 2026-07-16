@@ -22,6 +22,7 @@ pub use approval::{
 };
 pub use continuity::{
     GoalContinuityAction, GoalContinuityMode, GoalContinuityPlan, GoalContinuityPolicy,
+    GoalContinuitySignal, GoalContinuitySignalKind, GoalContinuitySignalResult,
     GoalContinuityState, GoalContinuityStatus, GoalContinuityStep, GoalContinuityStepStatus,
     GoalExecutionTarget, GoalQuotaEvent, apply_quota_handoff_events,
 };
