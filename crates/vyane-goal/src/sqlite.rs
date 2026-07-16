@@ -840,16 +840,8 @@ impl GoalStore for SqliteGoalStore {
         let state = before.continuity_state.as_ref().ok_or_else(|| {
             GoalStoreError::InvalidInput("goal has no visible continuity state".into())
         })?;
-        let (next, changed) = with_ready_signal(state, signal)?;
+        let (next, persisted_signal, changed) = with_ready_signal(state, signal)?;
         if !changed {
-            let persisted_signal = next
-                .ready_signals
-                .iter()
-                .find(|existing| existing.kind == signal.kind)
-                .cloned()
-                .ok_or_else(|| {
-                    GoalStoreError::CorruptData("idempotent continuity signal disappeared".into())
-                })?;
             return Ok(GoalContinuitySignalResult {
                 goal_id: id.to_string(),
                 changed: false,
@@ -876,7 +868,7 @@ impl GoalStore for SqliteGoalStore {
         Ok(GoalContinuitySignalResult {
             goal_id: id.to_string(),
             changed: true,
-            signal: signal.clone(),
+            signal: persisted_signal,
             state: after.continuity_state.ok_or_else(|| {
                 GoalStoreError::CorruptData("continuity signal state disappeared".into())
             })?,

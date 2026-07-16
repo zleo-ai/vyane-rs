@@ -215,12 +215,30 @@ impl GoalContinuitySignal {
     }
 
     fn same_evidence(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.quota_event_id == other.quota_event_id
-            && self.provider == other.provider
-            && self.harness == other.harness
-            && self.model == other.model
-            && self.source == other.source
+        let Self {
+            kind,
+            quota_event_id,
+            provider,
+            harness,
+            model,
+            observed_at: _,
+            source,
+        } = self;
+        let Self {
+            kind: other_kind,
+            quota_event_id: other_quota_event_id,
+            provider: other_provider,
+            harness: other_harness,
+            model: other_model,
+            observed_at: _,
+            source: other_source,
+        } = other;
+        kind == other_kind
+            && quota_event_id == other_quota_event_id
+            && provider == other_provider
+            && harness == other_harness
+            && model == other_model
+            && source == other_source
     }
 }
 
@@ -555,7 +573,7 @@ pub(crate) fn with_step_status(
 pub(crate) fn with_ready_signal(
     state: &GoalContinuityState,
     signal: &GoalContinuitySignal,
-) -> Result<(GoalContinuityState, bool)> {
+) -> Result<(GoalContinuityState, GoalContinuitySignal, bool)> {
     signal.validate()?;
     if signal.quota_event_id != state.quota_event_id
         || signal.provider != state.primary.provider
@@ -572,7 +590,7 @@ pub(crate) fn with_ready_signal(
         .find(|existing| existing.kind == signal.kind)
     {
         if existing.same_evidence(signal) {
-            return Ok((state.clone(), false));
+            return Ok((state.clone(), existing.clone(), false));
         }
         return Err(GoalStoreError::InvalidInput(
             "continuity signal kind was already recorded with different evidence".into(),
@@ -603,7 +621,7 @@ pub(crate) fn with_ready_signal(
         .find(|step| step.status == GoalContinuityStepStatus::Ready)
         .map_or_else(String::new, |step| step.id.clone());
     next.validate()?;
-    Ok((next, true))
+    Ok((next, signal.clone(), true))
 }
 
 /// The exact approval-gated continuity target currently ready for execution.

@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::header::HeaderMap;
 use vyane_quota::{
-    QuotaBalance, QuotaCard, QuotaConnector, QuotaConnectorError, QuotaConnectorErrorCode,
-    QuotaHttpReader, QuotaReadPolicy, QuotaRunnerError, QuotaSnapshotRunner, QuotaSnapshotStatus,
-    QuotaStatus, QuotaTransportError, QuotaUnit, QuotaValidationError, QuotaWindow,
+    MAX_CONNECTOR_ID_BYTES, MAX_CONNECTORS, MAX_QUOTA_CONCURRENCY, QuotaBalance, QuotaCard,
+    QuotaConnector, QuotaConnectorError, QuotaConnectorErrorCode, QuotaHttpReader, QuotaReadPolicy,
+    QuotaRunnerError, QuotaSnapshotRunner, QuotaSnapshotStatus, QuotaStatus, QuotaTransportError,
+    QuotaUnit, QuotaValidationError, QuotaWindow,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -235,43 +236,70 @@ async fn runner_rejects_duplicate_ids_and_invalid_card_identity() {
 }
 
 #[test]
-fn runner_rejects_invalid_policy_counts_and_connector_identity() {
-    for policy in [
-        QuotaReadPolicy {
-            timeout: Duration::ZERO,
-            ..QuotaReadPolicy::default()
-        },
-        QuotaReadPolicy {
-            timeout: Duration::from_secs(31),
-            ..QuotaReadPolicy::default()
-        },
-        QuotaReadPolicy {
-            max_body_bytes: 0,
-            ..QuotaReadPolicy::default()
-        },
-        QuotaReadPolicy {
-            max_body_bytes: 4 * 1024 * 1024 + 1,
-            ..QuotaReadPolicy::default()
-        },
+fn policy_rejects_invalid_bounds_and_accepts_maximums() {
+    for (case, policy) in [
+        (
+            "zero timeout",
+            QuotaReadPolicy {
+                timeout: Duration::ZERO,
+                ..QuotaReadPolicy::default()
+            },
+        ),
+        (
+            "timeout above maximum",
+            QuotaReadPolicy {
+                timeout: Duration::from_secs(31),
+                ..QuotaReadPolicy::default()
+            },
+        ),
+        (
+            "zero body cap",
+            QuotaReadPolicy {
+                max_body_bytes: 0,
+                ..QuotaReadPolicy::default()
+            },
+        ),
+        (
+            "body cap above maximum",
+            QuotaReadPolicy {
+                max_body_bytes: 4 * 1024 * 1024 + 1,
+                ..QuotaReadPolicy::default()
+            },
+        ),
     ] {
-        assert!(matches!(
-            QuotaSnapshotRunner::new(vec![], 1, policy),
-            Err(QuotaRunnerError::InvalidPolicy)
-        ));
+        assert!(
+            matches!(policy.validate(), Err(QuotaRunnerError::InvalidPolicy)),
+            "case: {case}"
+        );
     }
+    assert!(
+        QuotaReadPolicy {
+            timeout: Duration::from_secs(30),
+            max_body_bytes: 4 * 1024 * 1024,
+        }
+        .validate()
+        .is_ok()
+    );
+}
 
+#[test]
+fn runner_rejects_invalid_counts_and_accepts_maximums() {
     assert!(matches!(
         QuotaSnapshotRunner::new(vec![], 0, QuotaReadPolicy::default()),
         Err(QuotaRunnerError::InvalidConfiguration)
     ));
     assert!(matches!(
-        QuotaSnapshotRunner::new(vec![], 17, QuotaReadPolicy::default()),
+        QuotaSnapshotRunner::new(
+            vec![],
+            MAX_QUOTA_CONCURRENCY + 1,
+            QuotaReadPolicy::default()
+        ),
         Err(QuotaRunnerError::InvalidConfiguration)
     ));
 
     let active = Arc::new(AtomicUsize::new(0));
     let maximum = Arc::new(AtomicUsize::new(0));
-    let too_many = (0..33)
+    let too_many = (0..=MAX_CONNECTORS)
         .map(|index| {
             let id = format!("connector-{index}");
             connector(
@@ -288,11 +316,37 @@ fn runner_rejects_invalid_policy_counts_and_connector_identity() {
         Err(QuotaRunnerError::InvalidConfiguration)
     ));
 
-    for (id, provider) in [
-        ("", "provider-a"),
-        (" connector", "provider-a"),
-        ("connector", ""),
-        ("connector", "provider-a "),
+    let maximum_connectors = (0..MAX_CONNECTORS)
+        .map(|index| {
+            let id = format!("maximum-{index}");
+            connector(
+                &id,
+                Duration::ZERO,
+                FakeResult::Card(card(&id, "provider-a")),
+                &active,
+                &maximum,
+            )
+        })
+        .collect();
+    assert!(
+        QuotaSnapshotRunner::new(
+            maximum_connectors,
+            MAX_QUOTA_CONCURRENCY,
+            QuotaReadPolicy::default()
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn runner_rejects_invalid_connector_identity() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let maximum = Arc::new(AtomicUsize::new(0));
+    for (case, id, provider) in [
+        ("empty id", "", "provider-a"),
+        ("padded id", " connector", "provider-a"),
+        ("empty provider", "connector", ""),
+        ("padded provider", "connector", "provider-a "),
     ] {
         let invalid: Vec<Arc<dyn QuotaConnector>> = vec![Arc::new(FakeConnector {
             id: id.into(),
@@ -302,13 +356,16 @@ fn runner_rejects_invalid_policy_counts_and_connector_identity() {
             active: Arc::clone(&active),
             maximum: Arc::clone(&maximum),
         })];
-        assert!(matches!(
-            QuotaSnapshotRunner::new(invalid, 1, QuotaReadPolicy::default()),
-            Err(QuotaRunnerError::InvalidConfiguration)
-        ));
+        assert!(
+            matches!(
+                QuotaSnapshotRunner::new(invalid, 1, QuotaReadPolicy::default()),
+                Err(QuotaRunnerError::InvalidConfiguration)
+            ),
+            "case: {case}"
+        );
     }
 
-    let oversized = "x".repeat(129);
+    let oversized = "x".repeat(MAX_CONNECTOR_ID_BYTES + 1);
     let invalid: Vec<Arc<dyn QuotaConnector>> = vec![Arc::new(FakeConnector {
         id: oversized,
         provider: "provider-a".into(),
@@ -321,6 +378,17 @@ fn runner_rejects_invalid_policy_counts_and_connector_identity() {
         QuotaSnapshotRunner::new(invalid, 1, QuotaReadPolicy::default()),
         Err(QuotaRunnerError::InvalidConfiguration)
     ));
+
+    let maximum_id = "x".repeat(MAX_CONNECTOR_ID_BYTES);
+    let valid: Vec<Arc<dyn QuotaConnector>> = vec![Arc::new(FakeConnector {
+        id: maximum_id.clone(),
+        provider: "provider-a".into(),
+        delay: Duration::ZERO,
+        result: FakeResult::Card(card(&maximum_id, "provider-a")),
+        active: Arc::new(AtomicUsize::new(0)),
+        maximum: Arc::new(AtomicUsize::new(0)),
+    })];
+    assert!(QuotaSnapshotRunner::new(valid, 1, QuotaReadPolicy::default()).is_ok());
 }
 
 #[test]
@@ -398,7 +466,7 @@ async fn http_reader_rejects_redirects_and_oversized_bodies() {
 }
 
 #[tokio::test]
-async fn http_reader_returns_bounded_success_and_rejects_invalid_urls() {
+async fn http_reader_returns_bounded_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/quota"))
@@ -417,7 +485,11 @@ async fn http_reader_returns_bounded_success_and_rejects_invalid_urls() {
         .unwrap();
     assert_eq!(response.status, 206);
     assert_eq!(response.body, b"quota");
+}
 
+#[tokio::test]
+async fn http_reader_rejects_invalid_urls() {
+    let reader = QuotaHttpReader::new().unwrap();
     for url in ["not a url", "file:///tmp/quota", "https://"] {
         assert_eq!(
             reader
