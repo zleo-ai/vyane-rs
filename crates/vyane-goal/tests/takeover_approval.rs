@@ -8,8 +8,9 @@ use tempfile::TempDir;
 use vyane_goal::{
     GoalContinuityMode, GoalContinuityPolicy, GoalContinuityStepStatus, GoalExecutionTarget,
     GoalQuotaEvent, GoalStore, GoalStoreError, NewGoal, SCHEMA_VERSION, SqliteGoalStore,
-    TakeoverApprovalRequest, TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision,
-    TakeoverFinish, TakeoverRunStatus, TakeoverSandbox, apply_quota_handoff_events,
+    TakeoverApproval, TakeoverApprovalRequest, TakeoverApprovalStatus, TakeoverBoundTarget,
+    TakeoverDecision, TakeoverFinish, TakeoverRunStatus, TakeoverSandbox,
+    apply_quota_handoff_events,
 };
 
 const OWNER: &str = "local";
@@ -93,6 +94,67 @@ fn request(store: &SqliteGoalStore, dir: &TempDir) -> TakeoverApprovalRequest {
     }
 }
 
+fn complete_takeover(store: &SqliteGoalStore, dir: &TempDir) -> TakeoverApproval {
+    let approval = store
+        .queue_takeover_approval(OWNER, &request(store, dir), at(1_200))
+        .unwrap();
+    store
+        .decide_takeover_approval(
+            OWNER,
+            &approval.approval_id,
+            TakeoverDecision::Approve,
+            "operator",
+            None,
+            at(1_201),
+        )
+        .unwrap();
+    store
+        .consume_takeover_approval(OWNER, &approval.approval_id, at(1_202))
+        .unwrap();
+    store
+        .finish_takeover_approval(
+            OWNER,
+            &approval.approval_id,
+            &TakeoverFinish {
+                run_id: Some("takeover-run".into()),
+                run_status: TakeoverRunStatus::Success,
+                detail: "takeover completed".into(),
+            },
+            at(1_203),
+        )
+        .unwrap()
+}
+
+fn review_request(
+    store: &SqliteGoalStore,
+    dir: &TempDir,
+    takeover: &TakeoverApproval,
+) -> TakeoverApprovalRequest {
+    let goal = store.get(OWNER, "goal-a").unwrap().unwrap();
+    let state = goal.continuity_state.clone().unwrap();
+    let review = state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.id == "review_takeover")
+        .unwrap();
+    TakeoverApprovalRequest {
+        goal_id: goal.id,
+        step_id: review.id.clone(),
+        step_kind: review.kind.clone(),
+        quota_event_id: state.quota_event_id.clone(),
+        target: TakeoverBoundTarget::from_execution(review.target.as_ref().unwrap()),
+        workdir: std::fs::canonicalize(dir.path()).unwrap(),
+        sandbox: TakeoverSandbox::ReadOnly,
+        timeout: Duration::from_secs(300),
+        goal_revision: goal.revision,
+        plan_snapshot: state,
+        upstream_approval_id: Some(takeover.approval_id.clone()),
+        upstream_run_id: takeover.run_id.clone(),
+        upstream_run_status: takeover.run_status,
+    }
+}
+
 #[test]
 fn schema_v7_contains_durable_continuity_approval_table() {
     let (dir, _store) = setup();
@@ -114,6 +176,7 @@ fn schema_v6_takeover_rows_upgrade_without_digest_drift() {
     let approval = store
         .queue_takeover_approval(OWNER, &request(&store, &dir), at(1_200))
         .unwrap();
+    let original_digest = approval.snapshot_digest.clone();
     drop(store);
     let connection = Connection::open(dir.path().join("goals.sqlite3")).unwrap();
     connection
@@ -133,6 +196,7 @@ fn schema_v6_takeover_rows_upgrade_without_digest_drift() {
         .unwrap()
         .unwrap();
     assert_eq!(approval.status, TakeoverApprovalStatus::Pending);
+    assert_eq!(approval.snapshot_digest, original_digest);
     assert!(approval.upstream_approval_id.is_none());
     assert!(approval.upstream_run_id.is_none());
     assert!(approval.upstream_run_status.is_none());
@@ -366,18 +430,27 @@ fn blocked_finish_and_owner_scope_are_persisted() {
         .unwrap();
     assert_eq!(blocked.status, TakeoverApprovalStatus::Blocked);
     assert_eq!(blocked.blocker_reason.as_deref(), Some("dispatch failed"));
+    let state = store
+        .get(OWNER, "goal-a")
+        .unwrap()
+        .unwrap()
+        .continuity_state
+        .unwrap();
     assert_eq!(
-        store
-            .get(OWNER, "goal-a")
-            .unwrap()
-            .unwrap()
-            .continuity_state
-            .unwrap()
-            .handoff_plan
-            .steps[0]
-            .status,
+        state.handoff_plan.steps[0].status,
         GoalContinuityStepStatus::Blocked
     );
+    assert_eq!(
+        state
+            .handoff_plan
+            .steps
+            .iter()
+            .find(|step| step.id == "review_takeover")
+            .unwrap()
+            .status,
+        GoalContinuityStepStatus::WaitingForTakeover
+    );
+    assert!(state.handoff_plan.next_ready_step.is_empty());
 }
 
 #[test]
@@ -565,6 +638,18 @@ fn review_queue_rejects_forged_upstream_run_evidence() {
     forged.upstream_run_status = Some(TakeoverRunStatus::Success);
     assert!(matches!(
         store.queue_takeover_approval(OWNER, &forged, at(1_200)),
+        Err(GoalStoreError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn review_queue_rejects_mismatched_existing_upstream_run() {
+    let (dir, store) = setup();
+    let takeover = complete_takeover(&store, &dir);
+    let mut request = review_request(&store, &dir, &takeover);
+    request.upstream_run_id = Some("different-run".into());
+    assert!(matches!(
+        store.queue_takeover_approval(OWNER, &request, at(1_204)),
         Err(GoalStoreError::InvalidInput(_))
     ));
 }
