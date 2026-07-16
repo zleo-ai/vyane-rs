@@ -2,7 +2,8 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     AcceptanceVerification, GoalContinuityState, GoalEvent, GoalPursuitCheckpoint, GoalQuery,
-    GoalQuotaEvent, GoalRecord, GoalVerificationArtifact, NewGoal, Result,
+    GoalQuotaEvent, GoalRecord, GoalVerificationArtifact, NewGoal, Result, TakeoverApproval,
+    TakeoverApprovalRequest, TakeoverDecision, TakeoverFinish,
 };
 
 pub trait GoalStore: Send + Sync {
@@ -182,4 +183,60 @@ pub trait GoalStore: Send + Sync {
         reason: Option<&str>,
         at: DateTime<Utc>,
     ) -> Result<GoalRecord>;
+
+    /// Idempotently queue one takeover approval for the current ready
+    /// `start_takeover` step. The same bound snapshot returns the existing
+    /// approval. The queue never dispatches.
+    fn queue_takeover_approval(
+        &self,
+        owner: &str,
+        request: &TakeoverApprovalRequest,
+        at: DateTime<Utc>,
+    ) -> Result<TakeoverApproval>;
+
+    /// Record an explicit approve/reject decision on a pending approval. The
+    /// decision is immutable once recorded.
+    fn decide_takeover_approval(
+        &self,
+        owner: &str,
+        approval_id: &str,
+        decision: TakeoverDecision,
+        decided_by: &str,
+        reason: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> Result<TakeoverApproval>;
+
+    /// Atomically consume an approved, unconsumed approval and mark its
+    /// takeover step `in_flight` in the same transaction. Re-validates owner,
+    /// status, goal readiness and the bound boundary; a changed boundary or a
+    /// non-ready/terminal goal fails closed. A crash after this point leaves
+    /// the approval visibly `in_flight` and unrecoverable by a second consume.
+    fn consume_takeover_approval(
+        &self,
+        owner: &str,
+        approval_id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<TakeoverApproval>;
+
+    /// Settle an in-flight approval done or blocked with run evidence, and mark
+    /// its takeover step correspondingly, in one transaction.
+    fn finish_takeover_approval(
+        &self,
+        owner: &str,
+        approval_id: &str,
+        finish: &TakeoverFinish,
+        at: DateTime<Utc>,
+    ) -> Result<TakeoverApproval>;
+
+    fn get_takeover_approval(
+        &self,
+        owner: &str,
+        approval_id: &str,
+    ) -> Result<Option<TakeoverApproval>>;
+
+    fn list_takeover_approvals(
+        &self,
+        owner: &str,
+        goal_id: Option<&str>,
+    ) -> Result<Vec<TakeoverApproval>>;
 }

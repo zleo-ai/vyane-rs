@@ -909,6 +909,9 @@ fn v2_database_migrates_current_goal_features_without_losing_goals() {
              DROP TRIGGER goal_verifications_immutable_delete;
              DROP INDEX goal_verifications_owner_goal_idx;
              DROP TABLE goal_verifications;
+             DROP INDEX goal_takeover_approvals_owner_goal_idx;
+             DROP INDEX goal_takeover_approvals_owner_status_idx;
+             DROP TABLE goal_takeover_approvals;
              ALTER TABLE goals DROP COLUMN continuity_state_json;
              ALTER TABLE goals DROP COLUMN continuity_policy_json;
              PRAGMA user_version = 2;",
@@ -966,7 +969,7 @@ fn store_reopens_and_rejects_newer_schema() {
         SqliteGoalStore::open(&path),
         Err(GoalStoreError::UnsupportedSchema {
             found: 99,
-            supported: 5
+            supported: 6
         })
     ));
 }

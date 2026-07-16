@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::GoalStatus;
+use crate::{GoalStatus, TakeoverApprovalStatus};
 
 pub type Result<T> = std::result::Result<T, GoalStoreError>;
 
@@ -30,6 +30,21 @@ pub enum GoalStoreError {
 
     #[error("pursuit checkpoint for goal `{id}` changed concurrently")]
     CheckpointConflict { id: String },
+
+    #[error("takeover approval `{id}` was not found")]
+    TakeoverApprovalNotFound { id: String },
+
+    #[error("takeover approval `{id}` is {status} and cannot be executed")]
+    TakeoverApprovalNotExecutable {
+        id: String,
+        status: TakeoverApprovalStatus,
+    },
+
+    #[error("takeover approval `{id}` has already been decided and is immutable")]
+    TakeoverApprovalAlreadyDecided { id: String },
+
+    #[error("takeover approval `{id}` boundary no longer matches the current ready step")]
+    TakeoverBoundaryChanged { id: String },
 
     #[error("invalid goal metadata: {0}")]
     InvalidInput(String),

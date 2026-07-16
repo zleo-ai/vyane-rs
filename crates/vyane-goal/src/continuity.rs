@@ -145,6 +145,12 @@ pub enum GoalContinuityStepStatus {
     WaitingForTakeover,
     WaitingForQuotaReset,
     WaitingForQuotaResetAndReview,
+    /// A takeover approval has been consumed and dispatch is (or was) in flight.
+    InFlight,
+    /// The takeover step finished successfully.
+    Done,
+    /// The takeover step was blocked by a failed one-shot execution.
+    Blocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,11 +217,10 @@ impl GoalContinuityState {
             ));
         }
         if !self.handoff_plan.next_ready_step.is_empty()
-            && !self
-                .handoff_plan
-                .steps
-                .iter()
-                .any(|step| step.id == self.handoff_plan.next_ready_step)
+            && !self.handoff_plan.steps.iter().any(|step| {
+                step.id == self.handoff_plan.next_ready_step
+                    && step.status == GoalContinuityStepStatus::Ready
+            })
         {
             return Err(GoalStoreError::InvalidInput(
                 "continuity next ready step is not in the plan".into(),
@@ -407,6 +412,54 @@ pub(crate) fn state_for_event(
     };
     state.validate()?;
     Ok(Some(state))
+}
+
+/// Produce a cloned continuity state with the named step's status replaced,
+/// re-validating the result. Used by the takeover approval consume/finish
+/// transitions to keep the visible handoff plan in lockstep with approval state.
+pub(crate) fn with_step_status(
+    state: &GoalContinuityState,
+    step_id: &str,
+    status: GoalContinuityStepStatus,
+) -> Result<GoalContinuityState> {
+    let mut next = state.clone();
+    let step = next
+        .handoff_plan
+        .steps
+        .iter_mut()
+        .find(|candidate| candidate.id == step_id)
+        .ok_or_else(|| {
+            GoalStoreError::CorruptData(format!(
+                "continuity step `{step_id}` is not in the handoff plan"
+            ))
+        })?;
+    step.status = status;
+    next.handoff_plan.next_ready_step = next
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|candidate| candidate.status == GoalContinuityStepStatus::Ready)
+        .map_or_else(String::new, |candidate| candidate.id.clone());
+    next.validate()?;
+    Ok(next)
+}
+
+/// The takeover target currently bound to a ready `start_takeover` step, if any.
+pub(crate) fn ready_takeover_target(
+    state: &GoalContinuityState,
+) -> Option<(String, String, &GoalExecutionTarget)> {
+    state.handoff_plan.steps.iter().find_map(|step| {
+        if step.status == GoalContinuityStepStatus::Ready
+            && step.kind == "start_takeover"
+            && step.id == "takeover"
+        {
+            step.target
+                .as_ref()
+                .map(|target| (step.id.clone(), step.kind.clone(), target))
+        } else {
+            None
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

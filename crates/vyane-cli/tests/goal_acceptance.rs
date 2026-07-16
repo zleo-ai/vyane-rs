@@ -11,8 +11,12 @@ use std::time::Duration;
 use std::{fs, os::unix::fs::PermissionsExt as _};
 
 use assert_cmd::Command;
+use chrono::{TimeZone as _, Utc};
 use serde_json::Value;
 use tempfile::TempDir;
+use vyane_goal::{
+    GoalQuotaEvent, GoalStore, SqliteGoalStore, TakeoverApprovalStatus, apply_quota_handoff_events,
+};
 
 fn vyane() -> Command {
     Command::cargo_bin("vyane").expect("vyane binary")
@@ -311,6 +315,113 @@ fn malformed_continuity_policy_fails_before_goal_creation() {
 
     let missing = json_output(&["goal", "get", "--db", &db, "--json", "bad-continuity"], 2);
     assert_eq!(missing["status"], "error");
+}
+
+#[test]
+fn continuity_queue_and_decide_are_explicit_json_roundtrip() {
+    let directory = TempDir::new().unwrap();
+    let db_path = directory.path().join("goals.sqlite3");
+    let db = db_text(&db_path);
+    let policy = r#"{"mode":"quota_handoff","primary":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"primary"},"takeover":[{"provider":"backup","protocol":"anthropic_messages","harness":"claude-code","model":"fallback","role":"takeover"}],"reviewer":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"reviewer"},"resume_primary_after_reset":true,"require_review_before_resume":true}"#;
+    json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--json",
+            "--id",
+            "controlled",
+            "--title",
+            "Controlled takeover",
+            "--continuity-policy-json",
+            policy,
+        ],
+        0,
+    );
+    json_output(&["goal", "start", "--db", &db, "--json", "controlled"], 0);
+    let store = SqliteGoalStore::open(&db_path).unwrap();
+    apply_quota_handoff_events(
+        &store,
+        "local",
+        &[GoalQuotaEvent {
+            event_id: "quota-cli".into(),
+            goal_id: Some("controlled".into()),
+            provider: "primary".into(),
+            harness: "codex-cli".into(),
+            model: "main".into(),
+            session_id: None,
+            observed_at: Utc.timestamp_opt(1_000, 0).unwrap(),
+            estimated_reset_at: None,
+        }],
+        Utc.timestamp_opt(1_001, 0).unwrap(),
+    )
+    .unwrap();
+
+    let workdir = db_text(directory.path());
+    let queued = json_output(
+        &[
+            "goal",
+            "continuity-queue",
+            "--db",
+            &db,
+            "--json",
+            "controlled",
+            "--workdir",
+            &workdir,
+            "--sandbox",
+            "write",
+            "--timeout-seconds",
+            "30",
+        ],
+        0,
+    );
+    assert_eq!(queued["status"], "pending");
+    assert_eq!(queued["approval"]["target"]["provider"], "backup");
+    assert_eq!(queued["approval"]["timeout_secs"], 30);
+    let approval_id = queued["approval"]["approval_id"].as_str().unwrap();
+
+    let not_approved = json_output(
+        &[
+            "goal",
+            "continuity-execute",
+            "--db",
+            &db,
+            "--json",
+            approval_id,
+        ],
+        2,
+    );
+    assert!(not_approved["error"].as_str().unwrap().contains("pending"));
+    assert_eq!(
+        store
+            .get_takeover_approval("local", approval_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TakeoverApprovalStatus::Pending
+    );
+
+    let approved = json_output(
+        &[
+            "goal",
+            "continuity-decide",
+            "--db",
+            &db,
+            "--json",
+            approval_id,
+            "--decision",
+            "approve",
+            "--decided-by",
+            "operator",
+            "--reason",
+            "explicit",
+        ],
+        0,
+    );
+    assert_eq!(approved["status"], "approved");
+    assert_eq!(approved["approval"]["decided_by"], "operator");
+    assert_eq!(approved["approval"]["status"], "approved");
 }
 
 #[test]

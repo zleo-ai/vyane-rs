@@ -100,6 +100,12 @@ pub enum GoalCommand {
     Verify(GoalVerifyArgs),
     /// Repeatedly verify and dispatch fresh bounded work segments until achieved or paused.
     Pursue(GoalPursueArgs),
+    /// Queue one approval bound to the current ready takeover step; never dispatches.
+    ContinuityQueue(GoalContinuityQueueArgs),
+    /// Explicitly approve or reject one pending takeover approval.
+    ContinuityDecide(GoalContinuityDecisionArgs),
+    /// Consume one approved takeover approval and execute exactly once.
+    ContinuityExecute(GoalContinuityExecuteArgs),
     /// Append a progress event without changing lifecycle state.
     Progress(GoalProgressArgs),
     /// Pause an in-progress goal; releases any lease (holder-only while leased).
@@ -152,6 +158,54 @@ pub struct GoalCreateArgs {
     /// Explicit goal id; generated when omitted.
     #[arg(long)]
     pub id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalContinuityQueueArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Goal whose current ready takeover step should be queued.
+    pub id: String,
+    /// Existing worktree or workspace bound into the approval.
+    #[arg(long, value_name = "PATH")]
+    pub workdir: PathBuf,
+    /// Workspace permission bound into the approval.
+    #[arg(long, value_enum, default_value_t = SandboxArg::Write)]
+    pub sandbox: SandboxArg,
+    /// Hard one-shot execution timeout, in seconds.
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum GoalTakeoverDecisionArg {
+    Approve,
+    Reject,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalContinuityDecisionArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact durable approval id.
+    pub approval_id: String,
+    /// Explicit operator decision.
+    #[arg(long, value_enum)]
+    pub decision: GoalTakeoverDecisionArg,
+    /// Auditable local operator identity.
+    #[arg(long)]
+    pub decided_by: String,
+    /// Optional decision rationale.
+    #[arg(long)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalContinuityExecuteArgs {
+    #[command(flatten)]
+    pub common: GoalCommonArgs,
+    /// Exact approved, unconsumed approval id. No execution option may be overridden here.
+    pub approval_id: String,
 }
 
 #[derive(Debug, Args)]
