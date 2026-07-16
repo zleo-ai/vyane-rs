@@ -35,7 +35,7 @@ pub use model::{
 };
 pub use projection::{
     GoalContinuityNextAction, GoalContinuityNextActionKind, GoalContinuityOperatorCommand,
-    project_continuity_next_action,
+    GoalContinuityProjectionSnapshot, project_continuity_next_action,
 };
 pub use pursuit::{
     GoalPursuer, GoalPursuitCheckpoint, GoalSegmentRuntime, MAX_PURSUIT_FAILURES,

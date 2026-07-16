@@ -195,11 +195,11 @@ pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<E
 
 fn continuity_next(args: GoalIdArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
-    let goal = require_goal(&store, &args.common.owner, &args.id)?;
-    let approvals = store
-        .list_takeover_approvals(&args.common.owner, Some(&args.id))
-        .context("list continuity approvals")?;
-    let next_action = project_continuity_next_action(&goal, &approvals)
+    let snapshot = store
+        .continuity_projection_snapshot(&args.common.owner, &args.id)
+        .context("read continuity projection snapshot")?
+        .ok_or_else(|| anyhow!("goal `{}` was not found", args.id))?;
+    let next_action = project_continuity_next_action(&snapshot.goal, &snapshot.approvals)
         .context("project continuity next action")?;
     if args.common.json {
         print_json(&ContinuityNextOutput {

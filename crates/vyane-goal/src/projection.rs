@@ -49,6 +49,12 @@ pub struct GoalContinuityNextAction {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalContinuityProjectionSnapshot {
+    pub goal: GoalRecord,
+    pub approvals: Vec<TakeoverApproval>,
+}
+
 /// Project the single operator-visible next action for the current continuity
 /// boundary. This is a pure read: it never queues, decides, consumes or
 /// dispatches anything.
@@ -135,28 +141,51 @@ pub fn project_continuity_next_action(
                 &step.reason,
             ));
         }
-        let current = approvals
-            .iter()
-            .filter(|approval| {
-                approval.quota_event_id == state.quota_event_id
-                    && approval.step_id == step.id
-                    && approval.step_kind == step.kind
-                    && approval.goal_revision == goal.revision
-                    && approval.plan_snapshot == *state
-            })
-            .max_by(|left, right| approval_order(left, right));
+        let mut current = approvals.iter().filter(|approval| {
+            approval.quota_event_id == state.quota_event_id
+                && approval.step_id == step.id
+                && approval.step_kind == step.kind
+                && approval.goal_revision == goal.revision
+                && approval.plan_snapshot == *state
+        });
+        let first = current.next();
+        if current.next().is_some() {
+            return Err(GoalStoreError::CorruptData(
+                "ready continuity step has multiple approvals for the exact current snapshot"
+                    .into(),
+            ));
+        }
+        let current = first;
         return Ok(match current {
-            None => action_for_step(
-                goal,
-                state,
-                step,
-                GoalContinuityNextActionKind::QueueApproval,
-                Some(GoalContinuityOperatorCommand::ContinuityQueue),
-                None,
-                Vec::new(),
-                vec!["workdir".into(), "sandbox".into(), "timeout_seconds".into()],
-                "the ready continuity step has not been queued for approval",
-            ),
+            None => {
+                let superseded = approvals
+                    .iter()
+                    .filter(|approval| {
+                        approval.quota_event_id == state.quota_event_id
+                            && approval.step_id == step.id
+                            && approval.step_kind == step.kind
+                            && matches!(
+                                approval.status,
+                                TakeoverApprovalStatus::Pending | TakeoverApprovalStatus::Approved
+                            )
+                    })
+                    .max_by(|left, right| approval_evidence_order(left, right));
+                action_for_step(
+                    goal,
+                    state,
+                    step,
+                    GoalContinuityNextActionKind::QueueApproval,
+                    Some(GoalContinuityOperatorCommand::ContinuityQueue),
+                    superseded.map(|approval| approval.approval_id.clone()),
+                    Vec::new(),
+                    vec!["workdir".into(), "sandbox".into(), "timeout_seconds".into()],
+                    if superseded.is_some() {
+                        "the prior pending or approved continuity approval is superseded by the current goal revision or plan snapshot"
+                    } else {
+                        "the ready continuity step has not been queued for approval"
+                    },
+                )
+            }
             Some(approval) if approval.status == TakeoverApprovalStatus::Pending => {
                 action_for_step(
                     goal,
@@ -315,7 +344,7 @@ fn latest_approval<'a>(
                 && approval.step_id == step.id
                 && approval.step_kind == step.kind
         })
-        .max_by(|left, right| approval_order(left, right))
+        .max_by(|left, right| approval_evidence_order(left, right))
         .ok_or_else(|| {
             GoalStoreError::CorruptData(format!(
                 "{} continuity step has no matching durable approval",
@@ -333,9 +362,14 @@ fn latest_approval<'a>(
     Ok(latest)
 }
 
-fn approval_order(left: &TakeoverApproval, right: &TakeoverApproval) -> std::cmp::Ordering {
-    left.created_at
-        .cmp(&right.created_at)
+fn approval_evidence_order(
+    left: &TakeoverApproval,
+    right: &TakeoverApproval,
+) -> std::cmp::Ordering {
+    left.plan_snapshot
+        .review_observation_high_water
+        .cmp(&right.plan_snapshot.review_observation_high_water)
+        .then_with(|| left.goal_revision.cmp(&right.goal_revision))
         .then_with(|| left.approval_id.cmp(&right.approval_id))
 }
 

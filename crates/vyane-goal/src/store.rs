@@ -1,16 +1,25 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    AcceptanceVerification, GoalContinuitySignal, GoalContinuitySignalResult, GoalContinuityState,
-    GoalEvent, GoalPursuitCheckpoint, GoalQuery, GoalQuotaEvent, GoalRecord,
-    GoalVerificationArtifact, NewGoal, Result, TakeoverApproval, TakeoverApprovalRequest,
-    TakeoverDecision, TakeoverFinish,
+    AcceptanceVerification, GoalContinuityProjectionSnapshot, GoalContinuitySignal,
+    GoalContinuitySignalResult, GoalContinuityState, GoalEvent, GoalPursuitCheckpoint, GoalQuery,
+    GoalQuotaEvent, GoalRecord, GoalVerificationArtifact, NewGoal, Result, TakeoverApproval,
+    TakeoverApprovalRequest, TakeoverDecision, TakeoverFinish,
 };
 
 pub trait GoalStore: Send + Sync {
     fn create(&self, owner: &str, goal: NewGoal) -> Result<GoalRecord>;
 
     fn get(&self, owner: &str, id: &str) -> Result<Option<GoalRecord>>;
+
+    /// Read one goal and all of its continuity approvals from the same storage
+    /// snapshot so projection cannot mistake ordinary concurrent progress for
+    /// durable corruption.
+    fn continuity_projection_snapshot(
+        &self,
+        owner: &str,
+        id: &str,
+    ) -> Result<Option<GoalContinuityProjectionSnapshot>>;
 
     fn list(&self, owner: &str, query: &GoalQuery) -> Result<Vec<GoalRecord>>;
 

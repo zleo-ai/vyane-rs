@@ -172,23 +172,6 @@ fn projection_moves_from_queue_to_decide_to_execute_without_mutation() {
         Some(queued.approval_id.as_str())
     );
 
-    let mut synthetic_approved = queued.clone();
-    synthetic_approved.approval_id = "continuity-newer".into();
-    synthetic_approved.status = vyane_goal::TakeoverApprovalStatus::Approved;
-    synthetic_approved.created_at += chrono::Duration::seconds(1);
-    synthetic_approved.updated_at += chrono::Duration::seconds(1);
-    let unsorted =
-        project_continuity_next_action(&goal, &[synthetic_approved.clone(), queued.clone()])
-            .unwrap();
-    assert_eq!(
-        unsorted.action,
-        GoalContinuityNextActionKind::ExecuteApproval
-    );
-    assert_eq!(
-        unsorted.approval_id.as_deref(),
-        Some(synthetic_approved.approval_id.as_str())
-    );
-
     store
         .decide_takeover_approval(
             "local",
@@ -212,6 +195,27 @@ fn projection_moves_from_queue_to_decide_to_execute_without_mutation() {
         goal,
         "projection must not mutate the goal"
     );
+
+    store
+        .progress(
+            "local",
+            &goal.id,
+            "fixture",
+            "advance an unrelated durable revision",
+            Utc.timestamp_opt(1_006, 0).unwrap(),
+        )
+        .unwrap();
+    let advanced = store.get("local", &goal.id).unwrap().unwrap();
+    let superseded = project_continuity_next_action(&advanced, &approvals).unwrap();
+    assert_eq!(
+        superseded.action,
+        GoalContinuityNextActionKind::QueueApproval
+    );
+    assert_eq!(
+        superseded.approval_id.as_deref(),
+        Some(queued.approval_id.as_str())
+    );
+    assert!(superseded.reason.contains("superseded"));
 }
 
 #[test]
@@ -272,8 +276,9 @@ fn projection_reports_in_flight_and_blocked_execution_from_durable_evidence() {
     let current_approval = approvals.last().unwrap().clone();
     let mut stale = current_approval.clone();
     stale.approval_id = "continuity-stale".into();
-    stale.created_at -= chrono::Duration::seconds(1);
-    stale.updated_at -= chrono::Duration::seconds(1);
+    stale.created_at += chrono::Duration::seconds(10);
+    stale.updated_at += chrono::Duration::seconds(10);
+    stale.goal_revision = stale.goal_revision.saturating_sub(1);
     stale.blocker_reason = Some("stale failure".into());
     let blocked = project_continuity_next_action(&current, &[current_approval, stale]).unwrap();
     assert_eq!(
