@@ -7,7 +7,8 @@ use chrono::Utc;
 use serde::Serialize;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus, GoalEvent,
-    GoalQuery, GoalRecord, GoalStatus, GoalStore, NewGoal, SqliteGoalStore,
+    GoalQuery, GoalRecord, GoalStatus, GoalStore, GoalVerificationArtifact, NewGoal,
+    SqliteGoalStore,
 };
 
 use crate::app::StoragePaths;
@@ -29,6 +30,7 @@ struct GoalDetailOutput {
     status: &'static str,
     goal: GoalRecord,
     events: Vec<GoalEvent>,
+    verifications: Vec<GoalVerificationArtifact>,
     db: String,
 }
 
@@ -59,6 +61,7 @@ struct ProgressOutput {
 struct VerifyOutput {
     status: &'static str,
     verification: AcceptanceVerification,
+    artifact: GoalVerificationArtifact,
     goal: GoalRecord,
     db: String,
 }
@@ -132,11 +135,15 @@ fn get(args: GoalGetArgs) -> Result<ExitCode> {
     let events = store
         .events(&args.common.owner, &args.id)
         .context("read goal events")?;
+    let verifications = store
+        .verifications(&args.common.owner, &args.id)
+        .context("read goal verification artifacts")?;
     if args.common.json {
         print_json(&GoalDetailOutput {
             status: "success",
             goal,
             events,
+            verifications,
             db: path_text(&db),
         })?;
     } else {
@@ -295,6 +302,21 @@ fn satisfy(args: GoalSatisfyArgs) -> Result<ExitCode> {
 fn verify(args: GoalVerifyArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
     let goal = require_goal(&store, &args.common.owner, &args.id)?;
+    let preflight_at = chrono::Utc::now();
+    if goal.status != GoalStatus::InProgress {
+        bail!(
+            "goal `{}` must be in_progress before verification; current status is {}",
+            args.id,
+            goal.status
+        );
+    }
+    if goal.lease_active(preflight_at) && args.worker.as_deref() != goal.claimed_by.as_deref() {
+        bail!(
+            "goal `{}` has an active lease held by `{}`; pass the matching --worker",
+            args.id,
+            goal.claimed_by.as_deref().unwrap_or("unknown")
+        );
+    }
     let workdir = args
         .workdir
         .unwrap_or(std::env::current_dir().context("resolve acceptance workdir")?);
@@ -304,6 +326,16 @@ fn verify(args: GoalVerifyArgs) -> Result<ExitCode> {
     )
     .context("construct acceptance verifier")?;
     let verification = verifier.verify(&goal);
+    let verified_at = chrono::Utc::now();
+    let artifact = store
+        .record_verification(
+            &args.common.owner,
+            &args.id,
+            args.worker.as_deref(),
+            &verification,
+            verified_at,
+        )
+        .context("persist verification artifact")?;
     for result in &verification.results {
         if result.status == CriterionStatus::Satisfied
             && goal
@@ -317,7 +349,7 @@ fn verify(args: GoalVerifyArgs) -> Result<ExitCode> {
                     &args.id,
                     args.worker.as_deref(),
                     result.criterion_index,
-                    chrono::Utc::now(),
+                    verified_at,
                 )
                 .with_context(|| {
                     format!("persist satisfied criterion {}", result.criterion_index)
@@ -335,6 +367,7 @@ fn verify(args: GoalVerifyArgs) -> Result<ExitCode> {
         print_json(&VerifyOutput {
             status,
             verification,
+            artifact,
             goal,
             db: path_text(&db),
         })?;

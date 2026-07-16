@@ -1,9 +1,10 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::Connection;
+use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use vyane_goal::{
-    AcceptanceCriterion, GoalEventKind, GoalQuery, GoalStatus, GoalStore, GoalStoreError, NewGoal,
-    SqliteGoalStore,
+    AcceptanceCriterion, AcceptanceVerification, GoalEventKind, GoalQuery, GoalStatus, GoalStore,
+    GoalStoreError, NewGoal, SqliteGoalStore,
 };
 
 const OWNER_A: &str = "owner-a";
@@ -340,6 +341,309 @@ fn events_are_immutable_at_the_database_boundary() {
 }
 
 #[test]
+fn verification_artifacts_are_owner_scoped_immutable_and_durable() {
+    let (directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("verified", "Verified", 2, at))
+        .expect("create");
+    store
+        .start(OWNER_A, "verified", at + TimeDelta::seconds(1))
+        .expect("start");
+    let verification = AcceptanceVerification {
+        goal_id: "verified".into(),
+        all_satisfied: false,
+        results: Vec::new(),
+        summary: "0 criteria: satisfied=0, unsatisfied=0, other=0".into(),
+    };
+    let artifact = store
+        .record_verification(
+            OWNER_A,
+            "verified",
+            None,
+            &verification,
+            at + TimeDelta::seconds(2),
+        )
+        .expect("record artifact");
+    assert_eq!(artifact.goal_id, "verified");
+    assert_eq!(artifact.payload_sha256.len(), 64);
+    assert_eq!(artifact.verification, verification);
+    assert_eq!(
+        store
+            .verifications(OWNER_A, "verified")
+            .expect("read artifacts"),
+        vec![artifact]
+    );
+    assert!(matches!(
+        store.verifications(OWNER_B, "verified"),
+        Err(GoalStoreError::NotFound { .. })
+    ));
+
+    let connection =
+        Connection::open(directory.path().join("goals.sqlite3")).expect("open raw database");
+    assert!(
+        connection
+            .execute("DELETE FROM goal_verifications", [])
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute("UPDATE goal_verifications SET payload_json = '{}'", [])
+            .is_err()
+    );
+}
+
+#[test]
+fn verification_artifacts_require_matching_goal_status_and_worker_lease() {
+    let (_directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("fenced-verification", "Fenced", 2, at))
+        .expect("create");
+    let verification = AcceptanceVerification {
+        goal_id: "fenced-verification".into(),
+        all_satisfied: false,
+        results: Vec::new(),
+        summary: "not complete".into(),
+    };
+    let missing = AcceptanceVerification {
+        goal_id: "missing".into(),
+        ..verification.clone()
+    };
+    assert!(matches!(
+        store.record_verification(OWNER_A, "missing", None, &missing, at),
+        Err(GoalStoreError::NotFound { .. })
+    ));
+    assert!(matches!(
+        store.record_verification(OWNER_A, "fenced-verification", None, &verification, at),
+        Err(GoalStoreError::InvalidStatus { .. })
+    ));
+    store
+        .claim(OWNER_A, "fenced-verification", "worker-a", 60, at)
+        .expect("claim");
+    assert!(matches!(
+        store.record_verification(
+            OWNER_A,
+            "fenced-verification",
+            Some("worker-b"),
+            &verification,
+            at
+        ),
+        Err(GoalStoreError::LeaseHeld { .. })
+    ));
+    let artifact = store
+        .record_verification(
+            OWNER_A,
+            "fenced-verification",
+            Some("worker-a"),
+            &verification,
+            at,
+        )
+        .expect("record with lease holder");
+    assert_eq!(artifact.worker_id.as_deref(), Some("worker-a"));
+
+    let wrong_goal = AcceptanceVerification {
+        goal_id: "different".into(),
+        ..verification
+    };
+    assert!(matches!(
+        store.record_verification(
+            OWNER_A,
+            "fenced-verification",
+            Some("worker-a"),
+            &wrong_goal,
+            at
+        ),
+        Err(GoalStoreError::InvalidInput(_))
+    ));
+
+    store
+        .reclaim(
+            OWNER_A,
+            "fenced-verification",
+            "worker-b",
+            60,
+            at + TimeDelta::seconds(61),
+        )
+        .expect("reclaim after expiry");
+    assert!(matches!(
+        store.satisfy_criterion(
+            OWNER_A,
+            "fenced-verification",
+            Some("worker-a"),
+            0,
+            at + TimeDelta::seconds(61)
+        ),
+        Err(GoalStoreError::LeaseHeld { .. }) | Err(GoalStoreError::InvalidInput(_))
+    ));
+    assert_eq!(
+        store
+            .verifications(OWNER_A, "fenced-verification")
+            .expect("artifact survives later fence failure")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn verification_artifact_size_and_digest_guards_fail_closed() {
+    let (directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("bounded-artifact", "Bounded", 2, at))
+        .expect("create");
+    store.start(OWNER_A, "bounded-artifact", at).expect("start");
+    let oversized = AcceptanceVerification {
+        goal_id: "bounded-artifact".into(),
+        all_satisfied: false,
+        results: Vec::new(),
+        summary: "x".repeat(1024 * 1024),
+    };
+    assert!(matches!(
+        store.record_verification(OWNER_A, "bounded-artifact", None, &oversized, at),
+        Err(GoalStoreError::InvalidInput(_))
+    ));
+
+    let payload = serde_json::to_string(&AcceptanceVerification {
+        goal_id: "bounded-artifact".into(),
+        all_satisfied: false,
+        results: Vec::new(),
+        summary: "tampered".into(),
+    })
+    .expect("serialize payload");
+    let connection =
+        Connection::open(directory.path().join("goals.sqlite3")).expect("open raw database");
+    connection
+        .execute(
+            "INSERT INTO goal_verifications (verification_id, owner, goal_id, recorded_at_ms, \
+             worker_id, payload_json, payload_sha256) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+            rusqlite::params![
+                "verification-corrupt",
+                OWNER_A,
+                "bounded-artifact",
+                at.timestamp_millis(),
+                payload,
+                "00".repeat(32),
+            ],
+        )
+        .expect("inject corrupt artifact");
+    assert!(matches!(
+        store.verifications(OWNER_A, "bounded-artifact"),
+        Err(GoalStoreError::Sqlite(_))
+    ));
+
+    store
+        .create(OWNER_A, new_goal("goal-mismatch", "Mismatch", 2, at))
+        .expect("create mismatch goal");
+    let mismatch_payload = serde_json::to_string(&AcceptanceVerification {
+        goal_id: "different".into(),
+        all_satisfied: false,
+        results: Vec::new(),
+        summary: "mismatch".into(),
+    })
+    .expect("serialize mismatch payload");
+    let mismatch_digest = Sha256::digest(mismatch_payload.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    connection
+        .execute(
+            "INSERT INTO goal_verifications (verification_id, owner, goal_id, recorded_at_ms, \
+             worker_id, payload_json, payload_sha256) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+            rusqlite::params![
+                "verification-mismatch",
+                OWNER_A,
+                "goal-mismatch",
+                at.timestamp_millis(),
+                mismatch_payload,
+                mismatch_digest,
+            ],
+        )
+        .expect("inject mismatched artifact");
+    assert!(matches!(
+        store.verifications(OWNER_A, "goal-mismatch"),
+        Err(GoalStoreError::Sqlite(_))
+    ));
+}
+
+#[test]
+fn verification_history_returns_latest_hundred_in_insert_order() {
+    let (_directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("paged-artifacts", "Paged", 2, at))
+        .expect("create");
+    store.start(OWNER_A, "paged-artifacts", at).expect("start");
+    let verification = AcceptanceVerification {
+        goal_id: "paged-artifacts".into(),
+        all_satisfied: false,
+        results: Vec::new(),
+        summary: "attempt".into(),
+    };
+    for _ in 0..101 {
+        store
+            .record_verification(OWNER_A, "paged-artifacts", None, &verification, at)
+            .expect("record artifact");
+    }
+    let artifacts = store
+        .verifications(OWNER_A, "paged-artifacts")
+        .expect("read bounded page");
+    assert_eq!(artifacts.len(), 100);
+    assert_eq!(artifacts.first().expect("first").sequence, 2);
+    assert_eq!(artifacts.last().expect("last").sequence, 101);
+}
+
+#[test]
+fn v2_database_migrates_verification_artifacts_without_losing_goals() {
+    let (directory, store) = fixture();
+    let path = directory.path().join("goals.sqlite3");
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("v2-existing", "Existing", 2, at))
+        .expect("create");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open raw database");
+    connection
+        .execute_batch(
+            "DROP TRIGGER goal_verifications_immutable_update;
+             DROP TRIGGER goal_verifications_immutable_delete;
+             DROP INDEX goal_verifications_owner_goal_idx;
+             DROP TABLE goal_verifications;
+             PRAGMA user_version = 2;",
+        )
+        .expect("restore v2 schema shape");
+    drop(connection);
+
+    let migrated = SqliteGoalStore::open(&path).expect("migrate v2 to v3");
+    assert!(
+        migrated
+            .get(OWNER_A, "v2-existing")
+            .expect("get existing goal")
+            .is_some()
+    );
+    migrated
+        .start(OWNER_A, "v2-existing", at)
+        .expect("start existing goal");
+    let verification = AcceptanceVerification {
+        goal_id: "v2-existing".into(),
+        all_satisfied: false,
+        results: Vec::new(),
+        summary: "migrated".into(),
+    };
+    migrated
+        .record_verification(OWNER_A, "v2-existing", None, &verification, at)
+        .expect("record after migration");
+    assert_eq!(
+        migrated
+            .verifications(OWNER_A, "v2-existing")
+            .expect("read after migration")
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn store_reopens_and_rejects_newer_schema() {
     let (directory, store) = fixture();
     let path = directory.path().join("goals.sqlite3");
@@ -361,7 +665,7 @@ fn store_reopens_and_rejects_newer_schema() {
         SqliteGoalStore::open(&path),
         Err(GoalStoreError::UnsupportedSchema {
             found: 99,
-            supported: 2
+            supported: 3
         })
     ));
 }

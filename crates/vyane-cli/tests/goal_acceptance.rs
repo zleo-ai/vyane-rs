@@ -183,6 +183,7 @@ fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
     );
     assert_eq!(detail["goal"]["status"], "completed");
     assert_eq!(detail["goal"]["revision"], 7);
+    assert_eq!(detail["verifications"], serde_json::json!([]));
     assert_eq!(detail["goal"]["completion_summary"], "verified");
     assert!(detail["goal"]["acceptance_criteria"][0]["satisfied_at"].is_string());
     assert!(detail["goal"]["acceptance_criteria"][1]["satisfied_at"].is_string());
@@ -499,6 +500,14 @@ fn verify_runs_bounded_commands_and_persists_only_satisfied_criteria() {
     );
     assert_eq!(verified["status"], "inconclusive");
     assert_eq!(verified["verification"]["all_satisfied"], false);
+    assert_eq!(verified["artifact"]["goal_id"], "verified-goal");
+    assert_eq!(
+        verified["artifact"]["payload_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
     assert_eq!(
         verified["verification"]["results"][0]["status"],
         "satisfied"
@@ -509,6 +518,49 @@ fn verify_runs_bounded_commands_and_persists_only_satisfied_criteria() {
     );
     assert!(verified["goal"]["acceptance_criteria"][0]["satisfied_at"].is_string());
     assert!(verified["goal"]["acceptance_criteria"][1]["satisfied_at"].is_null());
+
+    let verified_again = json_output(
+        &[
+            "goal",
+            "verify",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--workdir",
+            directory.path().to_str().unwrap(),
+            "verified-goal",
+        ],
+        3,
+    );
+    assert_ne!(
+        verified_again["artifact"]["verification_id"],
+        verified["artifact"]["verification_id"]
+    );
+
+    let detail = json_output(
+        &[
+            "goal",
+            "get",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "verified-goal",
+        ],
+        0,
+    );
+    assert_eq!(detail["verifications"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        detail["verifications"][0]["verification_id"],
+        verified["artifact"]["verification_id"]
+    );
+    assert_eq!(
+        detail["verifications"][1]["verification_id"],
+        verified_again["artifact"]["verification_id"]
+    );
 }
 
 #[test]
@@ -564,6 +616,128 @@ fn verify_all_satisfied_returns_success_exit_code() {
     );
     assert_eq!(verified["status"], "success");
     assert_eq!(verified["verification"]["all_satisfied"], true);
+}
+
+#[test]
+fn verify_requires_an_in_progress_goal_before_recording_evidence() {
+    let directory = TempDir::new().unwrap();
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--id",
+            "queued-verification",
+            "--title",
+            "Queued verification",
+            "--acceptance",
+            "manual-confirm:operator",
+        ],
+        0,
+    );
+    let output = json_output(
+        &[
+            "goal",
+            "verify",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--workdir",
+            directory.path().to_str().unwrap(),
+            "queued-verification",
+        ],
+        2,
+    );
+    assert_eq!(output["status"], "error");
+    assert_eq!(
+        output["error"],
+        "goal `queued-verification` must be in_progress before verification; current status is queued"
+    );
+}
+
+#[test]
+fn verify_requires_the_matching_cli_worker_for_an_active_lease() {
+    let directory = TempDir::new().unwrap();
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--id",
+            "leased-verification",
+            "--title",
+            "Leased verification",
+            "--acceptance",
+            "manual-confirm:operator",
+        ],
+        0,
+    );
+    json_output(
+        &[
+            "goal",
+            "claim",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "leased-verification",
+            "--worker",
+            "worker-1",
+        ],
+        0,
+    );
+    let refused = json_output(
+        &[
+            "goal",
+            "verify",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--workdir",
+            directory.path().to_str().unwrap(),
+            "--worker",
+            "worker-2",
+            "leased-verification",
+        ],
+        2,
+    );
+    assert_eq!(
+        refused["error"],
+        "goal `leased-verification` has an active lease held by `worker-1`; pass the matching --worker"
+    );
+    let verified = json_output(
+        &[
+            "goal",
+            "verify",
+            "--db",
+            &db,
+            "--owner",
+            "owner-a",
+            "--json",
+            "--workdir",
+            directory.path().to_str().unwrap(),
+            "--worker",
+            "worker-1",
+            "leased-verification",
+        ],
+        3,
+    );
+    assert_eq!(verified["artifact"]["worker_id"], "worker-1");
 }
 
 #[test]
