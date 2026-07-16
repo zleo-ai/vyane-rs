@@ -784,7 +784,7 @@ fn verify_requires_the_matching_cli_worker_for_an_active_lease() {
 
 #[cfg(unix)]
 #[test]
-fn pursue_dispatches_fresh_segment_reverifies_and_completes() {
+fn pursue_auto_dispatches_fresh_segment_reverifies_and_completes() {
     let directory = TempDir::new().expect("tempdir");
     let data_dir = TempDir::new().expect("data tempdir");
     let db = db_text(&directory.path().join("goals.sqlite3"));
@@ -839,7 +839,7 @@ fn pursue_dispatches_fresh_segment_reverifies_and_completes() {
             "local",
             "--json",
             "--target",
-            "builder",
+            "AUTO",
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--max-segments",
@@ -1322,6 +1322,162 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
     assert_eq!(value["status"], "paused");
     assert_eq!(value["pursuit"]["reason"], "pursuit cancelled");
     assert_eq!(value["pursuit"]["segments_started"], 1);
+    let history = vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["history", "--json"])
+        .output()
+        .expect("read cancellation ledger");
+    assert!(history.status.success());
+    let records: Value = serde_json::from_slice(&history.stdout).expect("history JSON");
+    assert_eq!(records.as_array().unwrap().len(), 1);
+    assert_eq!(records[0]["status"], "cancelled");
+}
+
+#[cfg(unix)]
+#[test]
+fn pursue_sigint_during_verification_kills_process_group_and_pauses() {
+    let directory = TempDir::new().expect("tempdir");
+    let data_dir = TempDir::new().expect("data tempdir");
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let (config, bin) = pursuit_fixture(&directory);
+    let verifier = directory.path().join("interruptible-verifier");
+    let descendant = directory.path().join("verifier-descendant");
+    let escaped = directory.path().join("escaped-verifier-child");
+    fs::write(
+        &verifier,
+        r#"#!/bin/sh
+"$2" "$1" &
+: > "$PWD/verifier-started"
+/bin/sleep 5
+"#,
+    )
+    .expect("write interruptible verifier");
+    fs::set_permissions(&verifier, fs::Permissions::from_mode(0o755))
+        .expect("chmod interruptible verifier");
+    fs::write(&descendant, "#!/bin/sh\n/bin/sleep 2\n: > \"$1\"\n")
+        .expect("write verifier descendant");
+    fs::set_permissions(&descendant, fs::Permissions::from_mode(0o755))
+        .expect("chmod verifier descendant");
+    json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--id",
+            "cancelled-verification",
+            "--title",
+            "Cancelled verification",
+            "--acceptance",
+            &format!(
+                "custom:cmd:{} {} {}",
+                verifier.display(),
+                escaped.display(),
+                descendant.display()
+            ),
+        ],
+        0,
+    );
+    json_output(
+        &[
+            "goal",
+            "claim",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "cancelled-verification",
+            "--worker",
+            "pursuer",
+        ],
+        0,
+    );
+
+    let program = vyane().get_program().to_owned();
+    let child = std::process::Command::new(program)
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "pursue",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "--target",
+            "builder",
+            "--workdir",
+            directory.path().to_str().expect("utf8 workdir"),
+            "--overall-timeout-seconds",
+            "10",
+            "--verifier-timeout-seconds",
+            "10",
+            "--worker",
+            "pursuer",
+            "cancelled-verification",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pursuit");
+    let marker = directory.path().join("verifier-started");
+    for _ in 0..500 {
+        if marker.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.exists(), "acceptance verifier did not start");
+    let interrupted_at = std::time::Instant::now();
+    let signal = std::process::Command::new("/bin/kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("send SIGINT");
+    assert!(signal.success());
+    let output = child.wait_with_output().expect("wait for pursuit");
+    assert!(
+        interrupted_at.elapsed() < Duration::from_secs(2),
+        "verification cancellation was not prompt"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("pursuit JSON");
+    assert_eq!(value["status"], "paused");
+    assert_eq!(value["pursuit"]["reason"], "pursuit cancelled");
+    assert_eq!(value["pursuit"]["segments_started"], 0);
+    assert_eq!(value["goal"]["status"], "paused");
+    let detail = json_output(
+        &[
+            "goal",
+            "get",
+            "--db",
+            &db,
+            "--owner",
+            "local",
+            "--json",
+            "cancelled-verification",
+        ],
+        0,
+    );
+    assert!(detail["verifications"].as_array().unwrap().is_empty());
+    thread::sleep(Duration::from_millis(2_200));
+    assert!(
+        !escaped.exists(),
+        "cancelled verifier descendants must not escape their process group"
+    );
 }
 
 #[test]
