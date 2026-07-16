@@ -41,6 +41,11 @@ impl PursuitConfig {
                 "pursuit workdir must be an existing absolute directory".into(),
             ));
         }
+        if self.workdir.to_str().is_none() {
+            return Err(GoalStoreError::InvalidInput(
+                "pursuit workdir must be valid UTF-8 for durable checkpoints".into(),
+            ));
+        }
         if self.runtime.trim().is_empty() || self.runtime.len() > 256 {
             return Err(GoalStoreError::InvalidInput(
                 "pursuit runtime must be between 1 and 256 bytes".into(),
@@ -504,6 +509,15 @@ where
                     last_verification,
                 );
             }
+            if checkpoint.consecutive_failures >= self.config.max_failures {
+                return self.pause(
+                    owner,
+                    goal_id,
+                    &mut checkpoint,
+                    "pursuit max failures reached",
+                    last_verification,
+                );
+            }
 
             let verifier_failed = verification
                 .results
@@ -684,7 +698,7 @@ where
             });
         }
         checkpoint.goal_revision = goal.revision;
-        checkpoint.updated_at = Utc::now();
+        checkpoint.updated_at = std::cmp::max(Utc::now(), checkpoint.updated_at);
         let (recorded, _) = self.store.record_pursuit_checkpoint(
             owner,
             goal_id,

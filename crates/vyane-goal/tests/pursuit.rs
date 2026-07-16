@@ -10,10 +10,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tempfile::TempDir;
 use vyane_goal::{
-    AcceptanceCriterion, AcceptanceVerifier, GoalEventKind, GoalPursuer, GoalSegmentRuntime,
-    GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus, PursuitConfig,
-    PursuitSegmentRequest, PursuitSegmentResult, PursuitSegmentStatus, PursuitStatus,
-    SqliteGoalStore,
+    AcceptanceCriterion, AcceptanceVerifier, GoalEventKind, GoalPursuer, GoalPursuitCheckpoint,
+    GoalSegmentRuntime, GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus,
+    PursuitConfig, PursuitSegmentRequest, PursuitSegmentResult, PursuitSegmentStatus,
+    PursuitStatus, SqliteGoalStore,
 };
 
 const OWNER: &str = "owner-a";
@@ -275,6 +275,110 @@ async fn paused_checkpoint_survives_reopen_and_new_lease_continues_lifetime_budg
     assert_eq!(checkpoint.segments_started, 2);
     assert_eq!(checkpoint.segments_completed, 2);
     assert_eq!(checkpoint.last_run_id.as_deref(), Some("run-2"));
+}
+
+#[tokio::test]
+async fn resumed_checkpoint_cannot_bypass_exhausted_failure_budget() {
+    let (directory, store) = fixture();
+    running_goal(
+        &store,
+        "failure-budget",
+        vec![AcceptanceCriterion::new("custom", "cmd:false")],
+    );
+    let failed = FakeRuntime::new(|_| PursuitSegmentResult {
+        status: PursuitSegmentStatus::Error,
+        run_id: None,
+    });
+    let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
+    let first = GoalPursuer::new(&store, &failed, &verifier, config(&directory, 3, 1))
+        .unwrap()
+        .pursue(OWNER, "failure-budget")
+        .await
+        .unwrap();
+    assert_eq!(first.reason, "pursuit max failures reached");
+    assert_eq!(first.consecutive_failures, 1);
+
+    store
+        .resume(OWNER, "failure-budget", None, Utc::now())
+        .expect("resume");
+    store
+        .claim(OWNER, "failure-budget", "replacement", 60, Utc::now())
+        .expect("replacement claim");
+    let must_not_run = FakeRuntime::new(|_| panic!("exhausted failure budget must not dispatch"));
+    let mut resumed_config = config(&directory, 3, 1);
+    resumed_config.worker_id = "replacement".into();
+
+    let resumed = GoalPursuer::new(&store, &must_not_run, &verifier, resumed_config)
+        .unwrap()
+        .pursue(OWNER, "failure-budget")
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.reason, "pursuit max failures reached");
+    assert_eq!(resumed.consecutive_failures, 1);
+    assert_eq!(must_not_run.call_count(), 0);
+}
+
+#[tokio::test]
+async fn future_checkpoint_timestamp_survives_clock_rollback() {
+    let (directory, store) = fixture();
+    running_goal(
+        &store,
+        "future-checkpoint",
+        vec![AcceptanceCriterion::new("custom", "cmd:false")],
+    );
+    let goal = store.get(OWNER, "future-checkpoint").unwrap().unwrap();
+    let future = chrono::DateTime::from_timestamp_millis(
+        (Utc::now() + chrono::Duration::seconds(10)).timestamp_millis(),
+    )
+    .expect("future timestamp is representable");
+    let seeded = GoalPursuitCheckpoint {
+        owner: OWNER.into(),
+        goal_id: "future-checkpoint".into(),
+        checkpoint_revision: 0,
+        goal_revision: goal.revision,
+        claim_generation: goal.claim_generation,
+        worker_id: "pursuer".into(),
+        runtime: "fake".into(),
+        workdir: directory.path().canonicalize().unwrap(),
+        started_at: future,
+        updated_at: future,
+        segments_started: 0,
+        segments_completed: 0,
+        consecutive_failures: 0,
+        status: PursuitCheckpointStatus::Running,
+        last_run_id: None,
+        last_verification_id: None,
+    };
+    store
+        .record_pursuit_checkpoint(
+            OWNER,
+            "future-checkpoint",
+            "pursuer",
+            &seeded,
+            "pursuit.seeded",
+            "future timestamp fixture",
+            future,
+        )
+        .expect("seed future checkpoint");
+    let runtime = FakeRuntime::new(|_| panic!("pre-cancelled pursuit must not dispatch"));
+    let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+
+    let outcome = GoalPursuer::new(&store, &runtime, &verifier, config(&directory, 3, 2))
+        .unwrap()
+        .pursue_with_cancel(OWNER, "future-checkpoint", cancel)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.reason, "pursuit cancelled");
+    let checkpoint = store
+        .pursuit_checkpoint(OWNER, "future-checkpoint")
+        .unwrap()
+        .unwrap();
+    assert!(checkpoint.updated_at >= future);
+    assert_eq!(runtime.call_count(), 0);
 }
 
 #[tokio::test]
@@ -682,6 +786,26 @@ fn pursuit_config_rejects_each_invalid_field() {
     }
     .validate()
     .expect("maximum inclusive boundaries are valid");
+}
+
+#[cfg(unix)]
+#[test]
+fn pursuit_config_rejects_non_utf8_workdir_before_checkpoint_io() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let (directory, _) = fixture();
+    let path = directory
+        .path()
+        .join(std::ffi::OsString::from_vec(b"invalid-\xff".to_vec()));
+    std::fs::create_dir(&path).expect("create non-UTF-8 workdir");
+    let mut pursuit_config = config(&directory, 3, 2);
+    pursuit_config.workdir = path;
+
+    assert!(matches!(
+        pursuit_config.validate(),
+        Err(GoalStoreError::InvalidInput(message))
+            if message.contains("valid UTF-8")
+    ));
 }
 
 #[tokio::test]
