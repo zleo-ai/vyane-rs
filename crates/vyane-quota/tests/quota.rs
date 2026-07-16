@@ -271,6 +271,13 @@ fn policy_rejects_invalid_bounds_and_accepts_maximums() {
             matches!(policy.validate(), Err(QuotaRunnerError::InvalidPolicy)),
             "case: {case}"
         );
+        assert!(
+            matches!(
+                QuotaSnapshotRunner::new(vec![], 1, policy),
+                Err(QuotaRunnerError::InvalidPolicy)
+            ),
+            "runner propagation case: {case}"
+        );
     }
     assert!(
         QuotaReadPolicy {
