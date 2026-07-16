@@ -94,6 +94,13 @@ fn pursuit_path(bin: &TempDir) -> std::ffi::OsString {
         .expect("join pursuit fixture PATH")
 }
 
+#[cfg(all(unix, target_os = "linux"))]
+const PURSUIT_SANDBOX: &str = "write";
+
+// Writable pinned workdirs are currently supported only on Linux.
+#[cfg(all(unix, not(target_os = "linux")))]
+const PURSUIT_SANDBOX: &str = "read-only";
+
 #[test]
 fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
     let directory = TempDir::new().unwrap();
@@ -846,6 +853,8 @@ fn pursue_auto_dispatches_fresh_segment_reverifies_and_completes() {
             "--json",
             "--target",
             "AUTO",
+            "--sandbox",
+            PURSUIT_SANDBOX,
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--max-segments",
@@ -955,6 +964,8 @@ fn pursue_reports_runtime_error_as_paused_exit_three() {
             "--json",
             "--target",
             "builder",
+            "--sandbox",
+            PURSUIT_SANDBOX,
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--max-failures",
@@ -1055,6 +1066,8 @@ fn pursue_missing_acceptance_returns_paused_exit_three() {
             "--json",
             "--target",
             "builder",
+            "--sandbox",
+            PURSUIT_SANDBOX,
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--worker",
@@ -1140,6 +1153,8 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
             "--json",
             "--target",
             "builder",
+            "--sandbox",
+            PURSUIT_SANDBOX,
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--worker",
@@ -1288,6 +1303,8 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
             "--json",
             "--target",
             "builder",
+            "--sandbox",
+            PURSUIT_SANDBOX,
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--overall-timeout-seconds",
@@ -1421,6 +1438,8 @@ fn pursue_sigint_during_verification_kills_process_group_and_pauses() {
             "--json",
             "--target",
             "builder",
+            "--sandbox",
+            PURSUIT_SANDBOX,
             "--workdir",
             directory.path().to_str().expect("utf8 workdir"),
             "--overall-timeout-seconds",
