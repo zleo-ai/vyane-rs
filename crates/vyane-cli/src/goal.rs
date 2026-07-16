@@ -212,7 +212,8 @@ fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
     let approval = store
         .queue_takeover_approval(&args.common.owner, &request, Utc::now())
         .context("queue takeover approval")?;
-    print_takeover_result(&args.common, &db, "pending", approval)
+    let status = approval.status.as_str();
+    print_takeover_result(&args.common, &db, status, approval)
 }
 
 fn continuity_decide(args: GoalContinuityDecisionArgs) -> Result<ExitCode> {
@@ -285,7 +286,10 @@ async fn continuity_execute(
                 session: None,
                 system: None,
                 timeout_secs: Some(approval.timeout_secs),
-                labels: vec!["goal-continuity".into(), "takeover".into()],
+                labels: vec![
+                    "source=goal-continuity".into(),
+                    "continuity_step=takeover".into(),
+                ],
             },
             cancel,
         )

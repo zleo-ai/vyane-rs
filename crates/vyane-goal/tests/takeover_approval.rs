@@ -117,6 +117,10 @@ fn queue_is_idempotent_and_decision_is_explicit_and_immutable() {
         .unwrap();
     assert_eq!(first.approval_id, repeated.approval_id);
     assert_eq!(first.status, TakeoverApprovalStatus::Pending);
+    assert!(matches!(
+        store.consume_takeover_approval(OWNER, &first.approval_id, at(1_201)),
+        Err(GoalStoreError::TakeoverApprovalNotExecutable { .. })
+    ));
 
     let approved = store
         .decide_takeover_approval(
@@ -140,6 +144,35 @@ fn queue_is_idempotent_and_decision_is_explicit_and_immutable() {
             at(1_203),
         ),
         Err(GoalStoreError::TakeoverApprovalAlreadyDecided { .. })
+    ));
+}
+
+#[test]
+fn reject_is_durable_and_never_executable() {
+    let (dir, store) = setup();
+    let request = request(&store, &dir);
+    let approval = store
+        .queue_takeover_approval(OWNER, &request, at(1_200))
+        .unwrap();
+    let rejected = store
+        .decide_takeover_approval(
+            OWNER,
+            &approval.approval_id,
+            TakeoverDecision::Reject,
+            "operator",
+            Some("boundary rejected"),
+            at(1_201),
+        )
+        .unwrap();
+    assert_eq!(rejected.status, TakeoverApprovalStatus::Rejected);
+    assert_eq!(rejected.decided_by.as_deref(), Some("operator"));
+    assert_eq!(
+        rejected.decision_reason.as_deref(),
+        Some("boundary rejected")
+    );
+    assert!(matches!(
+        store.consume_takeover_approval(OWNER, &approval.approval_id, at(1_202)),
+        Err(GoalStoreError::TakeoverApprovalNotExecutable { .. })
     ));
 }
 
@@ -232,5 +265,92 @@ fn stale_goal_revision_cannot_consume_approval() {
     assert!(matches!(
         store.consume_takeover_approval(OWNER, &approval.approval_id, at(1_203)),
         Err(GoalStoreError::TakeoverBoundaryChanged { .. })
+    ));
+}
+
+#[test]
+fn blocked_finish_and_owner_scope_are_persisted() {
+    let (dir, store) = setup();
+    let request = request(&store, &dir);
+    let approval = store
+        .queue_takeover_approval(OWNER, &request, at(1_200))
+        .unwrap();
+    assert!(
+        store
+            .get_takeover_approval("other", &approval.approval_id)
+            .unwrap()
+            .is_none()
+    );
+    store
+        .decide_takeover_approval(
+            OWNER,
+            &approval.approval_id,
+            TakeoverDecision::Approve,
+            "operator",
+            None,
+            at(1_201),
+        )
+        .unwrap();
+    store
+        .consume_takeover_approval(OWNER, &approval.approval_id, at(1_202))
+        .unwrap();
+    let blocked = store
+        .finish_takeover_approval(
+            OWNER,
+            &approval.approval_id,
+            &TakeoverFinish {
+                run_id: Some("run-failed".into()),
+                run_status: TakeoverRunStatus::Error,
+                detail: "dispatch failed".into(),
+            },
+            at(1_203),
+        )
+        .unwrap();
+    assert_eq!(blocked.status, TakeoverApprovalStatus::Blocked);
+    assert_eq!(blocked.blocker_reason.as_deref(), Some("dispatch failed"));
+    assert_eq!(
+        store
+            .get(OWNER, "goal-a")
+            .unwrap()
+            .unwrap()
+            .continuity_state
+            .unwrap()
+            .handoff_plan
+            .steps[0]
+            .status,
+        GoalContinuityStepStatus::Blocked
+    );
+}
+
+#[test]
+fn store_rejects_noncanonical_workdir_boundary() {
+    let (dir, store) = setup();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let mut request = request(&store, &dir);
+    request.workdir = nested.join("..");
+    assert!(matches!(
+        store.queue_takeover_approval(OWNER, &request, at(1_200)),
+        Err(GoalStoreError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn tampered_approval_boundary_fails_integrity_read() {
+    let (dir, store) = setup();
+    let request = request(&store, &dir);
+    let approval = store
+        .queue_takeover_approval(OWNER, &request, at(1_200))
+        .unwrap();
+    let connection = Connection::open(dir.path().join("goals.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE goal_takeover_approvals SET timeout_seconds = timeout_seconds + 1 WHERE approval_id = ?1",
+            [&approval.approval_id],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.get_takeover_approval(OWNER, &approval.approval_id),
+        Err(GoalStoreError::Sqlite(_))
     ));
 }

@@ -201,7 +201,21 @@ impl TakeoverApprovalRequest {
                 "only takeover/start_takeover can be approved in this layer".into(),
             ));
         }
+        let workdir_text = self.workdir.to_str().ok_or_else(|| {
+            GoalStoreError::InvalidInput("takeover workdir must be valid UTF-8".into())
+        })?;
+        validate_text("takeover workdir", workdir_text, 4_096)?;
         if !self.workdir.is_absolute() {
+            return Err(GoalStoreError::InvalidInput(
+                "takeover workdir must be canonical and absolute".into(),
+            ));
+        }
+        let canonical = std::fs::canonicalize(&self.workdir).map_err(|error| {
+            GoalStoreError::InvalidInput(format!(
+                "takeover workdir cannot be canonicalized: {error}"
+            ))
+        })?;
+        if canonical != self.workdir {
             return Err(GoalStoreError::InvalidInput(
                 "takeover workdir must be canonical and absolute".into(),
             ));

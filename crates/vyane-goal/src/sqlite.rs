@@ -1233,7 +1233,9 @@ impl GoalStore for SqliteGoalStore {
                 request.target.protocol,
                 request.target.harness,
                 request.target.model,
-                request.workdir.to_string_lossy(),
+                request.workdir.to_str().ok_or_else(|| {
+                    GoalStoreError::InvalidInput("takeover workdir must be valid UTF-8".into())
+                })?,
                 request.sandbox.as_str(),
                 timeout_secs,
                 counter_to_i64(request.goal_revision, "takeover goal revision")?,
@@ -1377,7 +1379,7 @@ impl GoalStore for SqliteGoalStore {
         if changed != 1 {
             return Err(GoalStoreError::TakeoverApprovalNotExecutable {
                 id: approval_id.to_string(),
-                status: TakeoverApprovalStatus::InFlight,
+                status: approval.status,
             });
         }
         let consumed = select_takeover_approval_by_id(&transaction, owner, approval_id)?
@@ -1468,7 +1470,7 @@ impl GoalStore for SqliteGoalStore {
         if changed != 1 {
             return Err(GoalStoreError::TakeoverApprovalNotExecutable {
                 id: approval_id.to_string(),
-                status: TakeoverApprovalStatus::Approved,
+                status: approval.status,
             });
         }
         let settled = select_takeover_approval_by_id(&transaction, owner, approval_id)?
@@ -1903,7 +1905,7 @@ fn row_to_takeover_approval(row: &Row<'_>) -> rusqlite::Result<TakeoverApproval>
     let timeout_secs = u64::try_from(timeout_secs).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(14, Type::Integer, Box::new(error))
     })?;
-    Ok(TakeoverApproval {
+    let approval = TakeoverApproval {
         approval_id: row.get(0)?,
         owner: row.get(1)?,
         goal_id: row.get(2)?,
@@ -1926,7 +1928,33 @@ fn row_to_takeover_approval(row: &Row<'_>) -> rusqlite::Result<TakeoverApproval>
         created_at: timestamp_column(row, 23)?,
         decided_at: optional_timestamp_column(row, 24)?,
         updated_at: timestamp_column(row, 25)?,
-    })
+    };
+    let request = TakeoverApprovalRequest {
+        goal_id: approval.goal_id.clone(),
+        step_id: approval.step_id.clone(),
+        step_kind: approval.step_kind.clone(),
+        quota_event_id: approval.quota_event_id.clone(),
+        target: approval.target.clone(),
+        workdir: approval.workdir.clone(),
+        sandbox: approval.sandbox,
+        timeout: Duration::from_secs(approval.timeout_secs),
+        goal_revision: approval.goal_revision,
+        plan_snapshot: approval.plan_snapshot.clone(),
+    };
+    request.validate().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(16, Type::Text, Box::new(error))
+    })?;
+    let digest = request.snapshot_payload().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(6, Type::Text, Box::new(error))
+    })?;
+    if hex_digest(digest.as_bytes()) != approval.snapshot_digest {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            6,
+            Type::Text,
+            "takeover approval snapshot digest mismatch".into(),
+        ));
+    }
+    Ok(approval)
 }
 
 fn optional_enum_string(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<String>> {
