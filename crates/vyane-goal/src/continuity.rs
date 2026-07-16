@@ -57,6 +57,8 @@ pub struct GoalContinuityPolicy {
     pub resume_primary_after_reset: bool,
     #[serde(default = "default_true")]
     pub require_review_before_resume: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wait_for_review_checks_before_resume: bool,
 }
 
 impl GoalContinuityPolicy {
@@ -93,12 +95,23 @@ impl GoalContinuityPolicy {
                 "continuity reviewer is required before primary resume".into(),
             ));
         }
+        if self.wait_for_review_checks_before_resume
+            && (!self.require_review_before_resume || self.reviewer.is_none())
+        {
+            return Err(GoalStoreError::InvalidInput(
+                "continuity review-check gating requires a reviewer before primary resume".into(),
+            ));
+        }
         Ok(())
     }
 }
 
 const fn default_true() -> bool {
     true
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +159,7 @@ pub enum GoalContinuityStepStatus {
     WaitingForQuotaReset,
     WaitingForQuotaResetAndReview,
     WaitingForReview,
+    WaitingForReviewChecks,
     /// A takeover approval has been consumed and dispatch is (or was) in flight.
     InFlight,
     /// The takeover step finished successfully.
@@ -162,6 +176,10 @@ pub struct GoalContinuityStep {
     pub target: Option<GoalExecutionTarget>,
     pub requires_approval: bool,
     pub wait_for: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failure_wait_for: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_step: Option<String>,
     pub reason: String,
     pub estimated_ready_at: Option<DateTime<Utc>>,
 }
@@ -177,6 +195,8 @@ pub struct GoalContinuityState {
     pub reviewer: Option<GoalExecutionTarget>,
     pub resume_primary_after_reset: bool,
     pub require_review_before_resume: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wait_for_review_checks_before_resume: bool,
     pub handoff_plan: GoalContinuityPlan,
     pub applied_quota_event_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -187,6 +207,15 @@ pub struct GoalContinuityState {
 #[serde(rename_all = "snake_case")]
 pub enum GoalContinuitySignalKind {
     QuotaReset,
+    ReviewChecksPassed,
+    ReviewChecksFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalContinuityReviewCheck {
+    pub repository: String,
+    pub pull_request: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +228,8 @@ pub struct GoalContinuitySignal {
     pub model: String,
     pub observed_at: DateTime<Utc>,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_check: Option<GoalContinuityReviewCheck>,
 }
 
 impl GoalContinuitySignal {
@@ -211,7 +242,34 @@ impl GoalContinuitySignal {
         validate_text("continuity signal provider", &self.provider, 128)?;
         validate_text("continuity signal harness", &self.harness, 128)?;
         validate_text("continuity signal model", &self.model, 256)?;
-        validate_text("continuity signal source", &self.source, 128)
+        validate_text("continuity signal source", &self.source, 128)?;
+        match self.kind {
+            GoalContinuitySignalKind::QuotaReset if self.review_check.is_some() => {
+                return Err(GoalStoreError::InvalidInput(
+                    "quota-reset signal cannot carry review-check evidence".into(),
+                ));
+            }
+            GoalContinuitySignalKind::ReviewChecksPassed
+            | GoalContinuitySignalKind::ReviewChecksFailed => {
+                let review = self.review_check.as_ref().ok_or_else(|| {
+                    GoalStoreError::InvalidInput(
+                        "review-check signal requires repository and pull request evidence".into(),
+                    )
+                })?;
+                validate_text(
+                    "continuity review-check repository",
+                    &review.repository,
+                    256,
+                )?;
+                if review.pull_request == 0 {
+                    return Err(GoalStoreError::InvalidInput(
+                        "continuity review-check pull request must be positive".into(),
+                    ));
+                }
+            }
+            GoalContinuitySignalKind::QuotaReset => {}
+        }
+        Ok(())
     }
 
     fn same_evidence(&self, other: &Self) -> bool {
@@ -223,6 +281,7 @@ impl GoalContinuitySignal {
             model,
             observed_at: _,
             source,
+            review_check,
         } = self;
         let Self {
             kind: other_kind,
@@ -232,6 +291,7 @@ impl GoalContinuitySignal {
             model: other_model,
             observed_at: _,
             source: other_source,
+            review_check: other_review_check,
         } = other;
         kind == other_kind
             && quota_event_id == other_quota_event_id
@@ -239,6 +299,7 @@ impl GoalContinuitySignal {
             && harness == other_harness
             && model == other_model
             && source == other_source
+            && review_check == other_review_check
     }
 }
 
@@ -288,6 +349,8 @@ impl GoalContinuityState {
                 || signal.provider != self.primary.provider
                 || signal.harness != self.primary.harness
                 || signal.model != self.primary.model
+                || (!self.wait_for_review_checks_before_resume
+                    && signal.kind != GoalContinuitySignalKind::QuotaReset)
                 || self.ready_signals[..index]
                     .iter()
                     .any(|candidate| candidate.kind == signal.kind)
@@ -316,6 +379,17 @@ impl GoalContinuityState {
                 "continuity next ready step is not in the plan".into(),
             ));
         }
+        let step_ids = self
+            .handoff_plan
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        if step_ids.len() != self.handoff_plan.steps.len() {
+            return Err(GoalStoreError::InvalidInput(
+                "continuity handoff plan contains duplicate step ids".into(),
+            ));
+        }
         for step in &self.handoff_plan.steps {
             validate_text("continuity step id", &step.id, 128)?;
             validate_text("continuity step kind", &step.kind, 128)?;
@@ -327,6 +401,32 @@ impl GoalContinuityState {
                 return Err(GoalStoreError::InvalidInput(
                     "continuity step dependencies are too large".into(),
                 ));
+            }
+            if step.failure_wait_for.len() > MAX_TARGETS {
+                return Err(GoalStoreError::InvalidInput(
+                    "continuity step failure dependencies are too large".into(),
+                ));
+            }
+            for dependency in step.wait_for.iter().chain(&step.failure_wait_for) {
+                validate_text("continuity step dependency", dependency, 128)?;
+                if !step_ids.contains(dependency.as_str())
+                    && !matches!(
+                        dependency.as_str(),
+                        "quota_reset" | "review_checks_passed" | "review_checks_failed"
+                    )
+                {
+                    return Err(GoalStoreError::InvalidInput(
+                        "continuity step dependency is not in the plan".into(),
+                    ));
+                }
+            }
+            if let Some(failure_step) = &step.failure_step {
+                validate_text("continuity failure step", failure_step, 128)?;
+                if !step_ids.contains(failure_step.as_str()) {
+                    return Err(GoalStoreError::InvalidInput(
+                        "continuity failure step is not in the plan".into(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -431,6 +531,31 @@ pub(crate) fn state_for_event(
                 "primary resume requires reviewer approval",
                 None,
             ));
+            if policy.wait_for_review_checks_before_resume {
+                let mut wait = step(
+                    "wait_review_checks",
+                    "wait_for_review_checks",
+                    GoalContinuityStepStatus::WaitingForReview,
+                    None,
+                    false,
+                    &["review_takeover", "review_checks_passed"],
+                    "review PR checks must pass before primary resumes",
+                    None,
+                );
+                wait.failure_wait_for = vec!["review_checks_failed".into()];
+                wait.failure_step = Some("repair_failed_review".into());
+                steps.push(wait);
+                steps.push(step(
+                    "repair_failed_review",
+                    "repair_review_failure",
+                    GoalContinuityStepStatus::WaitingForReviewChecks,
+                    policy.reviewer.clone(),
+                    true,
+                    &["review_takeover", "review_checks_failed"],
+                    "review PR checks failed",
+                    None,
+                ));
+            }
         }
         if policy.resume_primary_after_reset {
             steps.push(step(
@@ -451,6 +576,10 @@ pub(crate) fn state_for_event(
                 "primary quota reset is expected",
                 event.estimated_reset_at,
             ));
+            if review_wait && policy.wait_for_review_checks_before_resume {
+                let resume = steps.last_mut().expect("resume step was just inserted");
+                resume.wait_for = vec!["quota_reset".into(), "wait_review_checks".into()];
+            }
         }
         (
             GoalContinuityStatus::TakeoverReady,
@@ -491,6 +620,7 @@ pub(crate) fn state_for_event(
         reviewer: policy.reviewer.clone(),
         resume_primary_after_reset: policy.resume_primary_after_reset,
         require_review_before_resume: policy.require_review_before_resume,
+        wait_for_review_checks_before_resume: policy.wait_for_review_checks_before_resume,
         handoff_plan: GoalContinuityPlan {
             version: 1,
             state: status,
@@ -537,7 +667,7 @@ pub(crate) fn with_step_status(
                     review.status = GoalContinuityStepStatus::Ready;
                 }
             }
-        } else if step_id == "review_takeover" {
+        } else if step_id == "review_takeover" && !next.wait_for_review_checks_before_resume {
             let quota_reset = next
                 .ready_signals
                 .iter()
@@ -560,6 +690,7 @@ pub(crate) fn with_step_status(
             }
         }
     }
+    release_ready_dependents(&mut next);
     next.handoff_plan.next_ready_step = next
         .handoff_plan
         .steps
@@ -584,6 +715,24 @@ pub(crate) fn with_ready_signal(
             "continuity signal does not match the current primary quota boundary".into(),
         ));
     }
+    if signal.kind != GoalContinuitySignalKind::QuotaReset
+        && !state.wait_for_review_checks_before_resume
+    {
+        return Err(GoalStoreError::InvalidInput(
+            "review-check signal is not enabled for the current continuity plan".into(),
+        ));
+    }
+    if signal.kind != GoalContinuitySignalKind::QuotaReset {
+        if let Some(other) = state.ready_signals.iter().find(|candidate| {
+            candidate.kind != GoalContinuitySignalKind::QuotaReset && candidate.kind != signal.kind
+        }) {
+            if other.review_check != signal.review_check {
+                return Err(GoalStoreError::InvalidInput(
+                    "review-check signals do not describe the same pull request".into(),
+                ));
+            }
+        }
+    }
     if let Some(existing) = state
         .ready_signals
         .iter()
@@ -597,6 +746,50 @@ pub(crate) fn with_ready_signal(
         ));
     }
     let mut next = state.clone();
+    if signal.kind == GoalContinuitySignalKind::ReviewChecksFailed {
+        let resume_status = next
+            .handoff_plan
+            .steps
+            .iter()
+            .find(|step| step.id == "resume_primary")
+            .map(|step| step.status);
+        if matches!(
+            resume_status,
+            Some(GoalContinuityStepStatus::InFlight | GoalContinuityStepStatus::Done)
+        ) {
+            return Err(GoalStoreError::InvalidInput(
+                "review-check failure arrived after primary resume started".into(),
+            ));
+        }
+        if let Some(wait) = next
+            .handoff_plan
+            .steps
+            .iter_mut()
+            .find(|step| step.id == "wait_review_checks")
+        {
+            if wait.status == GoalContinuityStepStatus::Done {
+                wait.status = GoalContinuityStepStatus::WaitingForReview;
+            }
+        }
+        let quota_reset = next
+            .ready_signals
+            .iter()
+            .any(|ready| ready.kind == GoalContinuitySignalKind::QuotaReset);
+        if let Some(resume) = next
+            .handoff_plan
+            .steps
+            .iter_mut()
+            .find(|step| step.id == "resume_primary")
+        {
+            if resume.status == GoalContinuityStepStatus::Ready {
+                resume.status = if quota_reset {
+                    GoalContinuityStepStatus::WaitingForReview
+                } else {
+                    GoalContinuityStepStatus::WaitingForQuotaResetAndReview
+                };
+            }
+        }
+    }
     next.ready_signals.push(signal.clone());
     if signal.kind == GoalContinuitySignalKind::QuotaReset {
         if let Some(resume) = next
@@ -614,6 +807,7 @@ pub(crate) fn with_ready_signal(
             };
         }
     }
+    release_ready_dependents(&mut next);
     next.handoff_plan.next_ready_step = next
         .handoff_plan
         .steps
@@ -661,7 +855,72 @@ fn step(
         target,
         requires_approval,
         wait_for: wait_for.iter().map(|value| (*value).into()).collect(),
+        failure_wait_for: Vec::new(),
+        failure_step: None,
         reason: reason.into(),
         estimated_ready_at,
+    }
+}
+
+fn release_ready_dependents(state: &mut GoalContinuityState) {
+    loop {
+        let done = state
+            .handoff_plan
+            .steps
+            .iter()
+            .filter(|step| step.status == GoalContinuityStepStatus::Done)
+            .map(|step| step.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let signals = state
+            .ready_signals
+            .iter()
+            .map(|signal| match signal.kind {
+                GoalContinuitySignalKind::QuotaReset => "quota_reset",
+                GoalContinuitySignalKind::ReviewChecksPassed => "review_checks_passed",
+                GoalContinuitySignalKind::ReviewChecksFailed => "review_checks_failed",
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let mut changed = false;
+        for step in &mut state.handoff_plan.steps {
+            if !matches!(
+                step.status,
+                GoalContinuityStepStatus::WaitingForTakeover
+                    | GoalContinuityStepStatus::WaitingForQuotaReset
+                    | GoalContinuityStepStatus::WaitingForQuotaResetAndReview
+                    | GoalContinuityStepStatus::WaitingForReview
+                    | GoalContinuityStepStatus::WaitingForReviewChecks
+            ) {
+                continue;
+            }
+            let satisfied =
+                |dependency: &str| done.contains(dependency) || signals.contains(dependency);
+            if !step.wait_for.iter().all(|dependency| satisfied(dependency)) {
+                continue;
+            }
+            let failure_observed = step
+                .failure_wait_for
+                .iter()
+                .any(|dependency| satisfied(dependency));
+            if failure_observed
+                && !step
+                    .failure_step
+                    .as_deref()
+                    .is_some_and(|failure_step| done.contains(failure_step))
+            {
+                continue;
+            }
+            step.status = if step.kind == "wait_for_review_checks"
+                && !step.requires_approval
+                && step.target.is_none()
+            {
+                GoalContinuityStepStatus::Done
+            } else {
+                GoalContinuityStepStatus::Ready
+            };
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
     }
 }

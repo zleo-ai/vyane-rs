@@ -623,6 +623,7 @@ fn continuity_review_queue_requires_persisted_successful_takeover_evidence() {
         reviewer: Some(target("reviewer")),
         resume_primary_after_reset: true,
         require_review_before_resume: true,
+        wait_for_review_checks_before_resume: false,
     });
     store.create("local", goal).unwrap();
     store
@@ -749,6 +750,7 @@ fn continuity_execute_dispatches_once_and_settles_done() {
         reviewer: Some(target("reviewer")),
         resume_primary_after_reset: true,
         require_review_before_resume: true,
+        wait_for_review_checks_before_resume: true,
     });
     store.create("local", goal).expect("create goal");
     store
@@ -940,7 +942,7 @@ fn continuity_execute_dispatches_once_and_settles_done() {
     assert_eq!(review.status, GoalContinuityStepStatus::Done);
     assert_eq!(
         resume.status,
-        GoalContinuityStepStatus::WaitingForQuotaReset
+        GoalContinuityStepStatus::WaitingForQuotaResetAndReview
     );
     assert!(state.handoff_plan.next_ready_step.is_empty());
 
@@ -968,7 +970,131 @@ fn continuity_execute_dispatches_once_and_settles_done() {
     );
     assert_eq!(
         signal["result"]["state"]["handoff_plan"]["next_ready_step"],
-        "resume_primary"
+        ""
+    );
+    let failed = json_output(
+        &[
+            "goal",
+            "continuity-signal",
+            "--db",
+            &db,
+            "--json",
+            "execute-controlled",
+            "review-checks-failed",
+            "--quota-event-id",
+            "quota-execute",
+            "--provider",
+            "native",
+            "--harness",
+            "claude-code",
+            "--model",
+            "test-model",
+            "--source",
+            "github-check-reader",
+            "--repository",
+            "example/vyane-rs",
+            "--pull-request",
+            "27",
+        ],
+        0,
+    );
+    assert_eq!(
+        failed["result"]["state"]["handoff_plan"]["next_ready_step"],
+        "repair_failed_review"
+    );
+    let passed = json_output(
+        &[
+            "goal",
+            "continuity-signal",
+            "--db",
+            &db,
+            "--json",
+            "execute-controlled",
+            "review-checks-passed",
+            "--quota-event-id",
+            "quota-execute",
+            "--provider",
+            "native",
+            "--harness",
+            "claude-code",
+            "--model",
+            "test-model",
+            "--source",
+            "github-check-reader",
+            "--repository",
+            "example/vyane-rs",
+            "--pull-request",
+            "27",
+        ],
+        0,
+    );
+    assert_eq!(
+        passed["result"]["state"]["handoff_plan"]["next_ready_step"],
+        "repair_failed_review"
+    );
+    let repair_queued = json_output(
+        &[
+            "goal",
+            "continuity-queue",
+            "--db",
+            &db,
+            "--json",
+            "execute-controlled",
+            "--workdir",
+            &workdir,
+            "--sandbox",
+            pursuit_test_sandbox(),
+            "--timeout-seconds",
+            "30",
+        ],
+        0,
+    );
+    assert_eq!(repair_queued["approval"]["step_id"], "repair_failed_review");
+    assert_eq!(
+        repair_queued["approval"]["upstream_approval_id"],
+        review_approval_id
+    );
+    let repair_approval_id = repair_queued["approval"]["approval_id"]
+        .as_str()
+        .expect("repair approval id");
+    json_output(
+        &[
+            "goal",
+            "continuity-decide",
+            "--db",
+            &db,
+            "--json",
+            repair_approval_id,
+            "--decision",
+            "approve",
+            "--decided-by",
+            "operator",
+        ],
+        0,
+    );
+    let repair_output = vyane()
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "continuity-execute",
+            "--db",
+            &db,
+            "--json",
+            repair_approval_id,
+        ])
+        .output()
+        .expect("execute review repair");
+    assert_eq!(
+        repair_output.status.code(),
+        Some(0),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&repair_output.stdout),
+        String::from_utf8_lossy(&repair_output.stderr)
     );
     let resume_queued = json_output(
         &[
@@ -990,7 +1116,7 @@ fn continuity_execute_dispatches_once_and_settles_done() {
     assert_eq!(resume_queued["approval"]["step_id"], "resume_primary");
     assert_eq!(
         resume_queued["approval"]["upstream_approval_id"],
-        review_approval_id
+        repair_approval_id
     );
     let resume_approval_id = resume_queued["approval"]["approval_id"]
         .as_str()
@@ -1043,9 +1169,14 @@ fn continuity_execute_dispatches_once_and_settles_done() {
     assert!(resume_prompt.contains("Primary resume evidence:"));
     assert!(resume_prompt.contains("review.approval_id:"));
     assert!(resume_prompt.contains("review.run_id:"));
+    assert!(resume_prompt.contains("repair.approval_id:"));
+    assert!(resume_prompt.contains("repair.run_id:"));
     assert!(resume_prompt.contains("takeover.approval_id:"));
     assert!(resume_prompt.contains("takeover.run_id:"));
     assert!(resume_prompt.contains("signal.quota_reset:"));
+    assert!(resume_prompt.contains("signal.review_checks_failed:"));
+    assert!(resume_prompt.contains("signal.review_checks_passed:"));
+    assert!(resume_prompt.contains("review: example/vyane-rs#27"));
     assert!(resume_prompt.contains("Approved target provider: native"));
     assert!(resume_prompt.contains("Approved target harness: claude-code"));
     let goal = store

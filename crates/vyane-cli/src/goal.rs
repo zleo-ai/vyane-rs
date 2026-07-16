@@ -9,12 +9,12 @@ use serde::Serialize;
 use vyane_core::{CancellationToken, RunStatus, Sandbox};
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus,
-    GoalContinuitySignal, GoalContinuitySignalKind, GoalContinuitySignalResult, GoalEvent,
-    GoalPursuer, GoalPursuitCheckpoint, GoalQuery, GoalRecord, GoalStatus, GoalStore,
-    GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, PursuitConfig, PursuitOutcome,
-    PursuitStatus, SqliteGoalStore, TakeoverApproval, TakeoverApprovalRequest,
-    TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision, TakeoverFinish,
-    TakeoverRunStatus, TakeoverSandbox,
+    GoalContinuityReviewCheck, GoalContinuitySignal, GoalContinuitySignalKind,
+    GoalContinuitySignalResult, GoalEvent, GoalPursuer, GoalPursuitCheckpoint, GoalQuery,
+    GoalRecord, GoalStatus, GoalStore, GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus,
+    PursuitConfig, PursuitOutcome, PursuitStatus, SqliteGoalStore, TakeoverApproval,
+    TakeoverApprovalRequest, TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision,
+    TakeoverFinish, TakeoverRunStatus, TakeoverSandbox,
 };
 use vyane_service::{DispatchParams, VyaneService};
 
@@ -188,6 +188,16 @@ fn continuity_signal(args: GoalContinuitySignalArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
     let kind = match args.signal {
         GoalContinuitySignalArg::QuotaReset => GoalContinuitySignalKind::QuotaReset,
+        GoalContinuitySignalArg::ReviewChecksPassed => GoalContinuitySignalKind::ReviewChecksPassed,
+        GoalContinuitySignalArg::ReviewChecksFailed => GoalContinuitySignalKind::ReviewChecksFailed,
+    };
+    let review_check = match (args.repository, args.pull_request) {
+        (Some(repository), Some(pull_request)) => Some(GoalContinuityReviewCheck {
+            repository,
+            pull_request,
+        }),
+        (None, None) => None,
+        _ => unreachable!("clap requires review-check coordinates together"),
     };
     let signal = GoalContinuitySignal {
         kind,
@@ -197,6 +207,7 @@ fn continuity_signal(args: GoalContinuitySignalArgs) -> Result<ExitCode> {
         model: args.model,
         observed_at: Utc::now(),
         source: args.source,
+        review_check,
     };
     let result = store
         .record_continuity_signal(&args.common.owner, &args.id, &signal, Utc::now())
@@ -239,6 +250,7 @@ fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
                 (step.id.as_str(), step.kind.as_str()),
                 ("takeover", "start_takeover")
                     | ("review_takeover", "review_takeover_work")
+                    | ("repair_failed_review", "repair_review_failure")
                     | ("resume_primary", "resume_primary_after_reset")
             ) && step.status == vyane_goal::GoalContinuityStepStatus::Ready
                 && step.requires_approval
@@ -252,6 +264,16 @@ fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
         std::fs::canonicalize(&args.workdir).context("canonicalize continuity workdir")?;
     let upstream_step = match step.id.as_str() {
         "review_takeover" => Some(("takeover", "start_takeover")),
+        "repair_failed_review" => Some(("review_takeover", "review_takeover_work")),
+        "resume_primary"
+            if state.wait_for_review_checks_before_resume
+                && state
+                    .ready_signals
+                    .iter()
+                    .any(|signal| signal.kind == GoalContinuitySignalKind::ReviewChecksFailed) =>
+        {
+            Some(("repair_failed_review", "repair_review_failure"))
+        }
         "resume_primary" if state.require_review_before_resume => {
             Some(("review_takeover", "review_takeover_work"))
         }
@@ -1037,6 +1059,7 @@ fn continuity_prompt(
     let reason = match approval.step_id.as_str() {
         "takeover" => "primary quota blocked",
         "review_takeover" => "review the completed takeover before primary handback",
+        "repair_failed_review" => "repair the failed review checks before primary handback",
         "resume_primary" if approval.plan_snapshot.require_review_before_resume => {
             "review and quota-reset dependencies are satisfied"
         }
@@ -1079,64 +1102,8 @@ fn continuity_prompt(
     }
     if approval.step_id == "resume_primary" {
         prompt.push_str("\nPrimary resume evidence:\n");
-        let mut takeover_id = None;
-        if let Some(review_id) = &approval.upstream_approval_id {
-            prompt.push_str(&format!("- review.approval_id: {review_id}\n"));
-            if let Some(review) = approvals
-                .iter()
-                .find(|candidate| &candidate.approval_id == review_id)
-            {
-                if let Some(run_id) = &review.run_id {
-                    prompt.push_str(&format!("- review.run_id: {run_id}\n"));
-                }
-                if let Some(status) = review.run_status {
-                    prompt.push_str(&format!("- review.run_status: {}\n", status.as_str()));
-                }
-                if let Some(bound_takeover_id) = &review.upstream_approval_id {
-                    takeover_id = Some(bound_takeover_id.as_str());
-                    prompt.push_str(&format!("- takeover.approval_id: {bound_takeover_id}\n"));
-                }
-            }
-        }
-        let takeover = takeover_id
-            .and_then(|id| {
-                approvals
-                    .iter()
-                    .find(|candidate| candidate.approval_id == id)
-            })
-            .or_else(|| {
-                approvals.iter().find(|candidate| {
-                    candidate.quota_event_id == approval.quota_event_id
-                        && candidate.step_id == "takeover"
-                        && candidate.step_kind == "start_takeover"
-                        && candidate.status == TakeoverApprovalStatus::Done
-                        && candidate.run_status == Some(TakeoverRunStatus::Success)
-                })
-            });
-        if let Some(takeover) = takeover {
-            if takeover_id.is_none() {
-                prompt.push_str(&format!(
-                    "- takeover.approval_id: {}\n",
-                    takeover.approval_id
-                ));
-            }
-            if let Some(run_id) = &takeover.run_id {
-                prompt.push_str(&format!("- takeover.run_id: {run_id}\n"));
-            }
-            if let Some(status) = takeover.run_status {
-                prompt.push_str(&format!("- takeover.run_status: {}\n", status.as_str()));
-            }
-        }
-        for signal in &approval.plan_snapshot.ready_signals {
-            prompt.push_str(&format!(
-                "- signal.{}: observed at {} by {}\n",
-                match signal.kind {
-                    vyane_goal::GoalContinuitySignalKind::QuotaReset => "quota_reset",
-                },
-                signal.observed_at.to_rfc3339(),
-                signal.source
-            ));
-        }
+        append_approval_chain(&mut prompt, approval, approvals);
+        append_signal_evidence(&mut prompt, approval);
         if approval.plan_snapshot.require_review_before_resume {
             prompt.push_str(
                 "Resume the approved primary target only after verifying the reviewed takeover handback and quota-reset evidence.\n",
@@ -1147,10 +1114,94 @@ fn continuity_prompt(
             );
         }
     }
+    if approval.step_id == "repair_failed_review" {
+        prompt.push_str("\nReview repair evidence:\n");
+        append_approval_chain(&mut prompt, approval, approvals);
+        append_signal_evidence(&mut prompt, approval);
+        prompt.push_str(
+            "Repair the failed review checks and report the new verification evidence before returning control.\n",
+        );
+    }
     prompt.push_str(
         "\nWork only on this approved continuity step. Report changes, verification, and blockers before returning control.",
     );
     prompt
+}
+
+fn append_approval_chain(
+    prompt: &mut String,
+    approval: &TakeoverApproval,
+    approvals: &[TakeoverApproval],
+) {
+    let by_id = |id: &str| {
+        approvals
+            .iter()
+            .find(|candidate| candidate.approval_id == id)
+    };
+    let direct = approval.upstream_approval_id.as_deref().and_then(by_id);
+    let repair = direct.filter(|candidate| candidate.step_id == "repair_failed_review");
+    if let Some(repair) = repair {
+        append_approval_evidence(prompt, "repair", repair);
+    }
+    let review = if let Some(repair) = repair {
+        repair.upstream_approval_id.as_deref().and_then(by_id)
+    } else {
+        direct.filter(|candidate| candidate.step_id == "review_takeover")
+    };
+    if let Some(review) = review {
+        append_approval_evidence(prompt, "review", review);
+    }
+    let takeover = if let Some(review) = review {
+        review.upstream_approval_id.as_deref().and_then(by_id)
+    } else if direct.is_some_and(|candidate| candidate.step_id == "takeover") {
+        direct
+    } else {
+        approvals.iter().find(|candidate| {
+            candidate.quota_event_id == approval.quota_event_id
+                && candidate.step_id == "takeover"
+                && candidate.step_kind == "start_takeover"
+                && candidate.status == TakeoverApprovalStatus::Done
+                && candidate.run_status == Some(TakeoverRunStatus::Success)
+        })
+    };
+    if let Some(takeover) = takeover {
+        append_approval_evidence(prompt, "takeover", takeover);
+    }
+}
+
+fn append_approval_evidence(prompt: &mut String, label: &str, approval: &TakeoverApproval) {
+    prompt.push_str(&format!(
+        "- {label}.approval_id: {}\n",
+        approval.approval_id
+    ));
+    if let Some(run_id) = &approval.run_id {
+        prompt.push_str(&format!("- {label}.run_id: {run_id}\n"));
+    }
+    if let Some(status) = approval.run_status {
+        prompt.push_str(&format!("- {label}.run_status: {}\n", status.as_str()));
+    }
+}
+
+fn append_signal_evidence(prompt: &mut String, approval: &TakeoverApproval) {
+    for signal in &approval.plan_snapshot.ready_signals {
+        let signal_name = match signal.kind {
+            GoalContinuitySignalKind::QuotaReset => "quota_reset",
+            GoalContinuitySignalKind::ReviewChecksPassed => "review_checks_passed",
+            GoalContinuitySignalKind::ReviewChecksFailed => "review_checks_failed",
+        };
+        prompt.push_str(&format!(
+            "- signal.{}: observed at {} by {}\n",
+            signal_name,
+            signal.observed_at.to_rfc3339(),
+            signal.source
+        ));
+        if let Some(review_check) = &signal.review_check {
+            prompt.push_str(&format!(
+                "  review: {}#{}\n",
+                review_check.repository, review_check.pull_request
+            ));
+        }
+    }
 }
 
 fn open_store(common: &GoalCommonArgs) -> Result<(SqliteGoalStore, PathBuf)> {

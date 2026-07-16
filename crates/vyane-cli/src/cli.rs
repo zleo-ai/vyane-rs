@@ -214,6 +214,10 @@ pub struct GoalContinuityExecuteArgs {
 pub enum GoalContinuitySignalArg {
     #[value(name = "quota-reset", alias = "quota_reset")]
     QuotaReset,
+    #[value(name = "review-checks-passed", alias = "review_checks_passed")]
+    ReviewChecksPassed,
+    #[value(name = "review-checks-failed", alias = "review_checks_failed")]
+    ReviewChecksFailed,
 }
 
 #[derive(Debug, Args)]
@@ -240,6 +244,12 @@ pub struct GoalContinuitySignalArgs {
     /// Bounded non-secret observer identifier.
     #[arg(long)]
     pub source: String,
+    /// Public repository whose review checks were observed.
+    #[arg(long, requires = "pull_request")]
+    pub repository: Option<String>,
+    /// Pull request whose review checks were observed.
+    #[arg(long, requires = "repository", value_parser = clap::value_parser!(u64).range(1..))]
+    pub pull_request: Option<u64>,
 }
 
 #[derive(Debug, Args)]

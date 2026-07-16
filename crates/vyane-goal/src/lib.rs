@@ -22,9 +22,9 @@ pub use approval::{
 };
 pub use continuity::{
     GoalContinuityAction, GoalContinuityMode, GoalContinuityPlan, GoalContinuityPolicy,
-    GoalContinuitySignal, GoalContinuitySignalKind, GoalContinuitySignalResult,
-    GoalContinuityState, GoalContinuityStatus, GoalContinuityStep, GoalContinuityStepStatus,
-    GoalExecutionTarget, GoalQuotaEvent, apply_quota_handoff_events,
+    GoalContinuityReviewCheck, GoalContinuitySignal, GoalContinuitySignalKind,
+    GoalContinuitySignalResult, GoalContinuityState, GoalContinuityStatus, GoalContinuityStep,
+    GoalContinuityStepStatus, GoalExecutionTarget, GoalQuotaEvent, apply_quota_handoff_events,
 };
 pub use error::{GoalStoreError, Result};
 pub use model::{
