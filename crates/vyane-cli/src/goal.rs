@@ -271,6 +271,11 @@ async fn continuity_execute(
         bail!("approved takeover target must resolve to exactly one target");
     };
     validate_resolved_takeover(bound, &approval.target)?;
+    let current_workdir =
+        std::fs::canonicalize(&approval.workdir).context("revalidate approved takeover workdir")?;
+    if current_workdir != approval.workdir {
+        bail!("approved takeover workdir changed before execution");
+    }
 
     let approval = store
         .consume_takeover_approval(&args.common.owner, &args.approval_id, Utc::now())

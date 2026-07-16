@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -210,12 +210,11 @@ impl TakeoverApprovalRequest {
                 "takeover workdir must be canonical and absolute".into(),
             ));
         }
-        let canonical = std::fs::canonicalize(&self.workdir).map_err(|error| {
-            GoalStoreError::InvalidInput(format!(
-                "takeover workdir cannot be canonicalized: {error}"
-            ))
-        })?;
-        if canonical != self.workdir {
+        if self
+            .workdir
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        {
             return Err(GoalStoreError::InvalidInput(
                 "takeover workdir must be canonical and absolute".into(),
             ));
@@ -225,6 +224,20 @@ impl TakeoverApprovalRequest {
                 "takeover timeout must be between 1 and {} seconds",
                 MAX_TAKEOVER_TIMEOUT.as_secs()
             )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_live_workdir(&self) -> Result<()> {
+        let canonical = std::fs::canonicalize(&self.workdir).map_err(|error| {
+            GoalStoreError::InvalidInput(format!(
+                "takeover workdir cannot be canonicalized: {error}"
+            ))
+        })?;
+        if canonical != self.workdir {
+            return Err(GoalStoreError::InvalidInput(
+                "takeover workdir must be canonical and absolute".into(),
+            ));
         }
         Ok(())
     }

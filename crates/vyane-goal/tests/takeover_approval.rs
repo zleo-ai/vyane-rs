@@ -119,7 +119,10 @@ fn queue_is_idempotent_and_decision_is_explicit_and_immutable() {
     assert_eq!(first.status, TakeoverApprovalStatus::Pending);
     assert!(matches!(
         store.consume_takeover_approval(OWNER, &first.approval_id, at(1_201)),
-        Err(GoalStoreError::TakeoverApprovalNotExecutable { .. })
+        Err(GoalStoreError::TakeoverApprovalNotExecutable {
+            status: TakeoverApprovalStatus::Pending,
+            ..
+        })
     ));
 
     let approved = store
@@ -172,7 +175,10 @@ fn reject_is_durable_and_never_executable() {
     );
     assert!(matches!(
         store.consume_takeover_approval(OWNER, &approval.approval_id, at(1_202)),
-        Err(GoalStoreError::TakeoverApprovalNotExecutable { .. })
+        Err(GoalStoreError::TakeoverApprovalNotExecutable {
+            status: TakeoverApprovalStatus::Rejected,
+            ..
+        })
     ));
 }
 
@@ -211,7 +217,10 @@ fn consume_and_finish_are_one_shot_and_visible() {
     );
     assert!(matches!(
         store.consume_takeover_approval(OWNER, &approval.approval_id, at(1_203)),
-        Err(GoalStoreError::TakeoverApprovalNotExecutable { .. })
+        Err(GoalStoreError::TakeoverApprovalNotExecutable {
+            status: TakeoverApprovalStatus::InFlight,
+            ..
+        })
     ));
 
     let finished = store
@@ -291,8 +300,24 @@ fn blocked_finish_and_owner_scope_are_persisted() {
             at(1_201),
         )
         .unwrap();
+    assert!(matches!(
+        store.finish_takeover_approval(
+            OWNER,
+            &approval.approval_id,
+            &TakeoverFinish {
+                run_id: None,
+                run_status: TakeoverRunStatus::Error,
+                detail: "not started".into(),
+            },
+            at(1_202),
+        ),
+        Err(GoalStoreError::TakeoverApprovalNotExecutable {
+            status: TakeoverApprovalStatus::Approved,
+            ..
+        })
+    ));
     store
-        .consume_takeover_approval(OWNER, &approval.approval_id, at(1_202))
+        .consume_takeover_approval(OWNER, &approval.approval_id, at(1_203))
         .unwrap();
     let blocked = store
         .finish_takeover_approval(
@@ -303,7 +328,7 @@ fn blocked_finish_and_owner_scope_are_persisted() {
                 run_status: TakeoverRunStatus::Error,
                 detail: "dispatch failed".into(),
             },
-            at(1_203),
+            at(1_204),
         )
         .unwrap();
     assert_eq!(blocked.status, TakeoverApprovalStatus::Blocked);
@@ -353,4 +378,24 @@ fn tampered_approval_boundary_fails_integrity_read() {
         store.get_takeover_approval(OWNER, &approval.approval_id),
         Err(GoalStoreError::Sqlite(_))
     ));
+}
+
+#[test]
+fn removed_workdir_does_not_make_approval_unreadable() {
+    let (dir, store) = setup();
+    let workdir = TempDir::new().unwrap();
+    let mut request = request(&store, &dir);
+    request.workdir = std::fs::canonicalize(workdir.path()).unwrap();
+    let approval = store
+        .queue_takeover_approval(OWNER, &request, at(1_200))
+        .unwrap();
+    workdir.close().unwrap();
+    assert_eq!(
+        store
+            .get_takeover_approval(OWNER, &approval.approval_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TakeoverApprovalStatus::Pending
+    );
 }

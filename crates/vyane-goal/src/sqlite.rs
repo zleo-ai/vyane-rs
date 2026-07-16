@@ -1188,6 +1188,7 @@ impl GoalStore for SqliteGoalStore {
     ) -> Result<TakeoverApproval> {
         validate_owner(owner)?;
         request.validate()?;
+        request.validate_live_workdir()?;
         if request.goal_revision > i64::MAX as u64 {
             return Err(GoalStoreError::CorruptData(
                 "takeover goal revision is outside SQLite range".into(),
