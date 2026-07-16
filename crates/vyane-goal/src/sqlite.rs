@@ -784,7 +784,6 @@ impl GoalStore for SqliteGoalStore {
         let Some(state) = state_for_event(&before, event)? else {
             return Ok(None);
         };
-        state.validate()?;
         let persisted = state.clone();
         let (after, _) = mutate_in_transaction(
             &transaction,

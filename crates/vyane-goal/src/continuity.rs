@@ -405,6 +405,7 @@ pub(crate) fn state_for_event(
         },
         applied_quota_event_ids: applied,
     };
+    state.validate()?;
     Ok(Some(state))
 }
 
