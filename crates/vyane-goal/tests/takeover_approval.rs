@@ -79,6 +79,19 @@ fn setup_with_policy(policy: GoalContinuityPolicy) -> (TempDir, SqliteGoalStore)
 }
 
 fn review_check_signal(kind: GoalContinuitySignalKind, pull_request: u64) -> GoalContinuitySignal {
+    let observation_id = match kind {
+        GoalContinuitySignalKind::ReviewChecksPassed => "checks-passed-v1",
+        GoalContinuitySignalKind::ReviewChecksFailed => "checks-failed-v1",
+        GoalContinuitySignalKind::QuotaReset => unreachable!(),
+    };
+    review_check_signal_with_observation(kind, pull_request, observation_id)
+}
+
+fn review_check_signal_with_observation(
+    kind: GoalContinuitySignalKind,
+    pull_request: u64,
+    observation_id: &str,
+) -> GoalContinuitySignal {
     GoalContinuitySignal {
         kind,
         quota_event_id: "quota-a".into(),
@@ -90,6 +103,7 @@ fn review_check_signal(kind: GoalContinuitySignalKind, pull_request: u64) -> Goa
         review_check: Some(GoalContinuityReviewCheck {
             repository: "example/vyane-rs".into(),
             pull_request,
+            observation_id: observation_id.into(),
         }),
     }
 }
@@ -280,6 +294,48 @@ fn downstream_request(
         upstream_run_id: upstream.run_id.clone(),
         upstream_run_status: upstream.run_status,
     }
+}
+
+fn complete_downstream_step(
+    store: &SqliteGoalStore,
+    dir: &TempDir,
+    step_id: &str,
+    upstream: &TakeoverApproval,
+    run_id: &str,
+    seconds: i64,
+) -> TakeoverApproval {
+    let approval = store
+        .queue_takeover_approval(
+            OWNER,
+            &downstream_request(store, dir, step_id, upstream),
+            at(seconds),
+        )
+        .unwrap();
+    store
+        .decide_takeover_approval(
+            OWNER,
+            &approval.approval_id,
+            TakeoverDecision::Approve,
+            "operator",
+            None,
+            at(seconds + 1),
+        )
+        .unwrap();
+    store
+        .consume_takeover_approval(OWNER, &approval.approval_id, at(seconds + 2))
+        .unwrap();
+    store
+        .finish_takeover_approval(
+            OWNER,
+            &approval.approval_id,
+            &TakeoverFinish {
+                run_id: Some(run_id.into()),
+                run_status: TakeoverRunStatus::Success,
+                detail: format!("{step_id} completed"),
+            },
+            at(seconds + 3),
+        )
+        .unwrap()
 }
 
 #[test]
@@ -1622,6 +1678,150 @@ fn late_review_failure_is_rejected_after_primary_resume_starts() {
         assert_eq!(after.revision, before.revision);
         assert_eq!(after.continuity_state, before.continuity_state);
     }
+}
+
+#[test]
+fn a_new_failure_after_repair_requires_another_repair_and_newer_pass() {
+    let mut gated = policy();
+    gated.wait_for_review_checks_before_resume = true;
+    let (dir, store) = setup_with_policy(gated);
+    let review = complete_review(&store, &dir);
+    store
+        .record_continuity_signal(OWNER, "goal-a", &quota_reset_signal(), at(2_002))
+        .unwrap();
+    store
+        .record_continuity_signal(
+            OWNER,
+            "goal-a",
+            &review_check_signal(GoalContinuitySignalKind::ReviewChecksFailed, 27),
+            at(2_101),
+        )
+        .unwrap();
+    store
+        .record_continuity_signal(
+            OWNER,
+            "goal-a",
+            &review_check_signal(GoalContinuitySignalKind::ReviewChecksPassed, 27),
+            at(2_102),
+        )
+        .unwrap();
+    let first_repair = complete_downstream_step(
+        &store,
+        &dir,
+        "repair_failed_review",
+        &review,
+        "repair-run-v1",
+        2_103,
+    );
+    let state = store
+        .get(OWNER, "goal-a")
+        .unwrap()
+        .unwrap()
+        .continuity_state
+        .unwrap();
+    assert_eq!(state.handoff_plan.next_ready_step, "resume_primary");
+
+    let second_failure = review_check_signal_with_observation(
+        GoalContinuitySignalKind::ReviewChecksFailed,
+        27,
+        "checks-failed-v2",
+    );
+    let failed = store
+        .record_continuity_signal(OWNER, "goal-a", &second_failure, at(2_107))
+        .unwrap();
+    let status = |id: &str| {
+        failed
+            .state
+            .handoff_plan
+            .steps
+            .iter()
+            .find(|step| step.id == id)
+            .unwrap()
+            .status
+    };
+    assert_eq!(
+        status("repair_failed_review"),
+        GoalContinuityStepStatus::Ready
+    );
+    assert_eq!(
+        status("wait_review_checks"),
+        GoalContinuityStepStatus::WaitingForReview
+    );
+    assert_eq!(
+        status("resume_primary"),
+        GoalContinuityStepStatus::WaitingForReview
+    );
+    assert_eq!(
+        failed.state.handoff_plan.next_ready_step,
+        "repair_failed_review"
+    );
+
+    let before_repeat = store.get(OWNER, "goal-a").unwrap().unwrap();
+    let repeated = store
+        .record_continuity_signal(OWNER, "goal-a", &second_failure, at(2_108))
+        .unwrap();
+    assert!(!repeated.changed);
+    assert_eq!(
+        store.get(OWNER, "goal-a").unwrap().unwrap().revision,
+        before_repeat.revision
+    );
+
+    let second_repair = complete_downstream_step(
+        &store,
+        &dir,
+        "repair_failed_review",
+        &review,
+        "repair-run-v2",
+        2_109,
+    );
+    assert_ne!(second_repair.approval_id, first_repair.approval_id);
+    let after_repair = store
+        .get(OWNER, "goal-a")
+        .unwrap()
+        .unwrap()
+        .continuity_state
+        .unwrap();
+    assert!(after_repair.handoff_plan.next_ready_step.is_empty());
+    assert_eq!(
+        after_repair
+            .handoff_plan
+            .steps
+            .iter()
+            .find(|step| step.id == "wait_review_checks")
+            .unwrap()
+            .status,
+        GoalContinuityStepStatus::WaitingForReview
+    );
+
+    let second_pass = review_check_signal_with_observation(
+        GoalContinuitySignalKind::ReviewChecksPassed,
+        27,
+        "checks-passed-v2",
+    );
+    let passed = store
+        .record_continuity_signal(OWNER, "goal-a", &second_pass, at(2_113))
+        .unwrap();
+    assert_eq!(passed.state.handoff_plan.next_ready_step, "resume_primary");
+    assert!(matches!(
+        store.queue_takeover_approval(
+            OWNER,
+            &downstream_request(&store, &dir, "resume_primary", &first_repair),
+            at(2_114),
+        ),
+        Err(GoalStoreError::InvalidInput(ref message))
+            if message.contains("latest review-check failure")
+    ));
+    let resume = store
+        .queue_takeover_approval(
+            OWNER,
+            &downstream_request(&store, &dir, "resume_primary", &second_repair),
+            at(2_115),
+        )
+        .unwrap();
+    assert_eq!(
+        resume.upstream_approval_id.as_deref(),
+        Some(second_repair.approval_id.as_str())
+    );
 }
 
 #[test]

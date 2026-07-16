@@ -995,12 +995,18 @@ fn continuity_execute_dispatches_once_and_settles_done() {
             "example/vyane-rs",
             "--pull-request",
             "27",
+            "--observation-id",
+            "checks-failed-v1",
         ],
         0,
     );
     assert_eq!(
         failed["result"]["state"]["handoff_plan"]["next_ready_step"],
         "repair_failed_review"
+    );
+    assert_eq!(
+        failed["result"]["signal"]["review_check"]["observation_id"],
+        "checks-failed-v1"
     );
     let passed = json_output(
         &[
@@ -1025,12 +1031,18 @@ fn continuity_execute_dispatches_once_and_settles_done() {
             "example/vyane-rs",
             "--pull-request",
             "27",
+            "--observation-id",
+            "checks-passed-v1",
         ],
         0,
     );
     assert_eq!(
         passed["result"]["state"]["handoff_plan"]["next_ready_step"],
         "repair_failed_review"
+    );
+    assert_eq!(
+        passed["result"]["signal"]["review_check"]["observation_id"],
+        "checks-passed-v1"
     );
     let repair_queued = json_output(
         &[

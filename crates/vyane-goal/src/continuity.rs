@@ -7,6 +7,7 @@ use crate::{
 
 const MAX_TARGETS: usize = 8;
 const MAX_APPLIED_EVENTS: usize = 50;
+const MAX_READY_SIGNALS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -216,6 +217,7 @@ pub enum GoalContinuitySignalKind {
 pub struct GoalContinuityReviewCheck {
     pub repository: String,
     pub pull_request: u64,
+    pub observation_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,6 +261,11 @@ impl GoalContinuitySignal {
                 validate_text(
                     "continuity review-check repository",
                     &review.repository,
+                    256,
+                )?;
+                validate_text(
+                    "continuity review-check observation id",
+                    &review.observation_id,
                     256,
                 )?;
                 if review.pull_request == 0 {
@@ -338,12 +345,15 @@ impl GoalContinuityState {
         for event_id in &self.applied_quota_event_ids {
             validate_text("continuity applied quota event id", event_id, 256)?;
         }
-        if self.ready_signals.len() > 8 {
+        if self.ready_signals.len() > MAX_READY_SIGNALS {
             return Err(GoalStoreError::InvalidInput(
                 "continuity ready signal history is too large".into(),
             ));
         }
-        for (index, signal) in self.ready_signals.iter().enumerate() {
+        let mut quota_reset_seen = false;
+        let mut review_observation_ids = std::collections::HashSet::new();
+        let mut review_coordinate: Option<(&str, u64)> = None;
+        for signal in &self.ready_signals {
             signal.validate()?;
             if signal.quota_event_id != self.quota_event_id
                 || signal.provider != self.primary.provider
@@ -351,13 +361,43 @@ impl GoalContinuityState {
                 || signal.model != self.primary.model
                 || (!self.wait_for_review_checks_before_resume
                     && signal.kind != GoalContinuitySignalKind::QuotaReset)
-                || self.ready_signals[..index]
-                    .iter()
-                    .any(|candidate| candidate.kind == signal.kind)
             {
                 return Err(GoalStoreError::InvalidInput(
                     "continuity ready signal envelope is invalid".into(),
                 ));
+            }
+            match signal.kind {
+                GoalContinuitySignalKind::QuotaReset => {
+                    if quota_reset_seen {
+                        return Err(GoalStoreError::InvalidInput(
+                            "continuity ready signal envelope is invalid".into(),
+                        ));
+                    }
+                    quota_reset_seen = true;
+                }
+                GoalContinuitySignalKind::ReviewChecksPassed
+                | GoalContinuitySignalKind::ReviewChecksFailed => {
+                    let review = signal.review_check.as_ref().ok_or_else(|| {
+                        GoalStoreError::InvalidInput(
+                            "continuity ready signal envelope is invalid".into(),
+                        )
+                    })?;
+                    if !review_observation_ids.insert(review.observation_id.as_str()) {
+                        return Err(GoalStoreError::InvalidInput(
+                            "continuity review-check observation ids must be unique".into(),
+                        ));
+                    }
+                    if let Some((repository, pull_request)) = review_coordinate {
+                        if repository != review.repository || pull_request != review.pull_request {
+                            return Err(GoalStoreError::InvalidInput(
+                                "continuity review-check signals do not describe the same pull request"
+                                    .into(),
+                            ));
+                        }
+                    } else {
+                        review_coordinate = Some((&review.repository, review.pull_request));
+                    }
+                }
             }
         }
         if self.handoff_plan.version != 1
@@ -723,27 +763,60 @@ pub(crate) fn with_ready_signal(
         ));
     }
     if signal.kind != GoalContinuitySignalKind::QuotaReset {
-        if let Some(other) = state.ready_signals.iter().find(|candidate| {
-            candidate.kind != GoalContinuitySignalKind::QuotaReset && candidate.kind != signal.kind
-        }) {
+        if let Some(other) = state
+            .ready_signals
+            .iter()
+            .find(|candidate| candidate.kind != GoalContinuitySignalKind::QuotaReset)
+        {
             if other.review_check != signal.review_check {
-                return Err(GoalStoreError::InvalidInput(
-                    "review-check signals do not describe the same pull request".into(),
-                ));
+                let other = other
+                    .review_check
+                    .as_ref()
+                    .expect("validated review signal");
+                let current = signal
+                    .review_check
+                    .as_ref()
+                    .expect("validated review signal");
+                if other.repository != current.repository
+                    || other.pull_request != current.pull_request
+                {
+                    return Err(GoalStoreError::InvalidInput(
+                        "review-check signals do not describe the same pull request".into(),
+                    ));
+                }
             }
         }
     }
-    if let Some(existing) = state
-        .ready_signals
-        .iter()
-        .find(|existing| existing.kind == signal.kind)
-    {
+    let existing = match signal.kind {
+        GoalContinuitySignalKind::QuotaReset => state
+            .ready_signals
+            .iter()
+            .find(|existing| existing.kind == GoalContinuitySignalKind::QuotaReset),
+        GoalContinuitySignalKind::ReviewChecksPassed
+        | GoalContinuitySignalKind::ReviewChecksFailed => {
+            let observation_id = &signal
+                .review_check
+                .as_ref()
+                .expect("validated review signal")
+                .observation_id;
+            state.ready_signals.iter().find(|existing| {
+                existing
+                    .review_check
+                    .as_ref()
+                    .is_some_and(|review| &review.observation_id == observation_id)
+            })
+        }
+    };
+    if let Some(existing) = existing {
         if existing.same_evidence(signal) {
             return Ok((state.clone(), existing.clone(), false));
         }
-        return Err(GoalStoreError::InvalidInput(
-            "continuity signal kind was already recorded with different evidence".into(),
-        ));
+        let message = if signal.kind == GoalContinuitySignalKind::QuotaReset {
+            "continuity signal kind was already recorded with different evidence"
+        } else {
+            "continuity signal observation was already recorded with different evidence"
+        };
+        return Err(GoalStoreError::InvalidInput(message.into()));
     }
     let mut next = state.clone();
     if signal.kind == GoalContinuitySignalKind::ReviewChecksFailed {
@@ -769,6 +842,23 @@ pub(crate) fn with_ready_signal(
         {
             if wait.status == GoalContinuityStepStatus::Done {
                 wait.status = GoalContinuityStepStatus::WaitingForReview;
+            }
+        }
+        let review_done = next.handoff_plan.steps.iter().any(|step| {
+            step.id == "review_takeover" && step.status == GoalContinuityStepStatus::Done
+        });
+        if let Some(repair) = next
+            .handoff_plan
+            .steps
+            .iter_mut()
+            .find(|step| step.id == "repair_failed_review")
+        {
+            if repair.status == GoalContinuityStepStatus::Done {
+                repair.status = if review_done {
+                    GoalContinuityStepStatus::Ready
+                } else {
+                    GoalContinuityStepStatus::WaitingForReviewChecks
+                };
             }
         }
         let quota_reset = next
@@ -871,15 +961,20 @@ fn release_ready_dependents(state: &mut GoalContinuityState) {
             .filter(|step| step.status == GoalContinuityStepStatus::Done)
             .map(|step| step.id.clone())
             .collect::<std::collections::HashSet<_>>();
-        let signals = state
+        let quota_reset = state
             .ready_signals
             .iter()
-            .map(|signal| match signal.kind {
-                GoalContinuitySignalKind::QuotaReset => "quota_reset",
-                GoalContinuitySignalKind::ReviewChecksPassed => "review_checks_passed",
-                GoalContinuitySignalKind::ReviewChecksFailed => "review_checks_failed",
-            })
-            .collect::<std::collections::HashSet<_>>();
+            .any(|signal| signal.kind == GoalContinuitySignalKind::QuotaReset);
+        let latest_review_signal = state
+            .ready_signals
+            .iter()
+            .rev()
+            .find(|signal| signal.kind != GoalContinuitySignalKind::QuotaReset)
+            .map(|signal| signal.kind);
+        let review_failure_observed = state
+            .ready_signals
+            .iter()
+            .any(|signal| signal.kind == GoalContinuitySignalKind::ReviewChecksFailed);
         let mut changed = false;
         for step in &mut state.handoff_plan.steps {
             if !matches!(
@@ -892,8 +987,18 @@ fn release_ready_dependents(state: &mut GoalContinuityState) {
             ) {
                 continue;
             }
-            let satisfied =
-                |dependency: &str| done.contains(dependency) || signals.contains(dependency);
+            let satisfied = |dependency: &str| {
+                done.contains(dependency)
+                    || match dependency {
+                        "quota_reset" => quota_reset,
+                        "review_checks_passed" => {
+                            latest_review_signal
+                                == Some(GoalContinuitySignalKind::ReviewChecksPassed)
+                        }
+                        "review_checks_failed" => review_failure_observed,
+                        _ => false,
+                    }
+            };
             if !step.wait_for.iter().all(|dependency| satisfied(dependency)) {
                 continue;
             }

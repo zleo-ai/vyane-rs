@@ -2176,6 +2176,26 @@ fn validate_upstream_continuity_evidence(
         };
         return Err(GoalStoreError::InvalidInput(message.into()));
     }
+    if expected_predecessor.0 == "repair_failed_review" {
+        let request_failure = request
+            .plan_snapshot
+            .ready_signals
+            .iter()
+            .rev()
+            .find(|signal| signal.kind == crate::GoalContinuitySignalKind::ReviewChecksFailed);
+        let repaired_failure = upstream
+            .plan_snapshot
+            .ready_signals
+            .iter()
+            .rev()
+            .find(|signal| signal.kind == crate::GoalContinuitySignalKind::ReviewChecksFailed);
+        if request_failure != repaired_failure {
+            return Err(GoalStoreError::InvalidInput(
+                "primary resume is not bound to the repair for the latest review-check failure"
+                    .into(),
+            ));
+        }
+    }
     if matches!(
         request.step_id.as_str(),
         "resume_primary" | "repair_failed_review"
