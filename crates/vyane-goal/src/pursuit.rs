@@ -165,7 +165,7 @@ impl GoalPursuitCheckpoint {
                 "pursuit checkpoint runtime must be between 1 and 256 bytes".into(),
             ));
         }
-        if !self.workdir.is_absolute() {
+        if !checkpoint_workdir_is_absolute(&self.workdir) {
             return Err(GoalStoreError::InvalidInput(
                 "pursuit checkpoint workdir must be absolute".into(),
             ));
@@ -186,6 +186,22 @@ impl GoalPursuitCheckpoint {
             self.last_verification_id.as_deref(),
         )
     }
+}
+
+fn checkpoint_workdir_is_absolute(path: &std::path::Path) -> bool {
+    if path.is_absolute() {
+        return true;
+    }
+    let Some(path) = path.to_str() else {
+        return false;
+    };
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with("\\\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
 }
 
 fn validate_optional_run_id(value: Option<&str>) -> Result<()> {
@@ -414,13 +430,6 @@ where
                 );
             }
             let verified_at = Utc::now();
-            let artifact = self.store.record_verification(
-                owner,
-                goal_id,
-                Some(&self.config.worker_id),
-                &verification,
-                verified_at,
-            )?;
             if let Some(stopped) = self.stopped_if_drifted(
                 owner,
                 goal_id,
@@ -432,7 +441,13 @@ where
             )? {
                 return Ok(stopped);
             }
-            self.persist_satisfied(owner, &goal, &verification, verified_at)?;
+            checkpoint.goal_revision = self
+                .store
+                .get(owner, goal_id)?
+                .ok_or_else(|| GoalStoreError::NotFound {
+                    id: goal_id.to_string(),
+                })?
+                .revision;
             let manual_pause = manual_pause_required(&verification);
             let verifier_failed = !verification.results.is_empty()
                 && !manual_pause
@@ -448,14 +463,17 @@ where
                 // a restart cannot lose a consumed lifetime failure slot.
                 checkpoint.consecutive_failures = checkpoint.consecutive_failures.saturating_add(1);
             }
-            checkpoint.last_verification_id = Some(artifact.verification_id);
-            self.record_checkpoint(
+            checkpoint.updated_at = std::cmp::max(verified_at, checkpoint.updated_at);
+            let (_, recorded, _) = self.store.record_pursuit_verification(
                 owner,
                 goal_id,
-                &mut checkpoint,
-                "acceptance.verify",
+                &self.config.worker_id,
+                &verification,
+                &checkpoint,
                 &verification.summary,
+                checkpoint.updated_at,
             )?;
+            checkpoint = recorded;
             previous_verification = Some(verification.clone());
             let last_verification = previous_verification.clone();
 
@@ -589,6 +607,11 @@ where
                 return Ok(stopped);
             }
             checkpoint.segments_started = segment_index;
+            // Dispatch is an external side effect. Reserve its failure slot in
+            // the durable pre-dispatch checkpoint, then release it only after a
+            // successful result is durably observed.
+            let failures_before_segment = checkpoint.consecutive_failures;
+            checkpoint.consecutive_failures = checkpoint.consecutive_failures.saturating_add(1);
             self.record_checkpoint(
                 owner,
                 goal_id,
@@ -633,22 +656,20 @@ where
                 valid_run_id.map_or_else(String::new, |value| format!("; run {value}"));
             let (stage, detail) = match result.status {
                 PursuitSegmentStatus::Success => {
-                    if !verifier_failed {
-                        checkpoint.consecutive_failures = 0;
-                    }
+                    checkpoint.consecutive_failures = if verifier_failed {
+                        failures_before_segment
+                    } else {
+                        0
+                    };
                     (
                         "pursuit.segment.completed",
                         format!("segment {segment_index} completed{run_suffix}"),
                     )
                 }
-                other => {
-                    checkpoint.consecutive_failures =
-                        checkpoint.consecutive_failures.saturating_add(1);
-                    (
-                        "pursuit.segment.failed",
-                        format!("segment {segment_index} failed: {other:?}{run_suffix}"),
-                    )
-                }
+                other => (
+                    "pursuit.segment.failed",
+                    format!("segment {segment_index} failed: {other:?}{run_suffix}"),
+                ),
             };
             self.record_checkpoint(owner, goal_id, &mut checkpoint, stage, &detail)?;
             if result.status == PursuitSegmentStatus::Cancelled {
@@ -800,32 +821,6 @@ where
             ));
         }
         None
-    }
-
-    fn persist_satisfied(
-        &self,
-        owner: &str,
-        goal: &GoalRecord,
-        verification: &AcceptanceVerification,
-        at: chrono::DateTime<Utc>,
-    ) -> Result<()> {
-        for result in &verification.results {
-            if result.status == CriterionStatus::Satisfied
-                && goal
-                    .acceptance_criteria
-                    .get(result.criterion_index)
-                    .is_some_and(|criterion| criterion.satisfied_at.is_none())
-            {
-                self.store.satisfy_criterion(
-                    owner,
-                    &goal.id,
-                    Some(&self.config.worker_id),
-                    result.criterion_index,
-                    at,
-                )?;
-            }
-        }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -633,7 +633,7 @@ fn pursuit_checkpoint_is_revision_and_lease_generation_fenced() {
             at + TimeDelta::seconds(1),
         )
         .expect("record initial checkpoint");
-    assert_eq!(first.checkpoint_revision, 0);
+    assert_eq!(first.checkpoint_revision, 1);
     assert_eq!(first.goal_revision, event.revision);
     assert_eq!(event.kind, GoalEventKind::Progress);
     assert_eq!(
@@ -681,7 +681,7 @@ fn pursuit_checkpoint_is_revision_and_lease_generation_fenced() {
             at + TimeDelta::seconds(121),
         )
         .expect("adopt checkpoint under new generation");
-    assert_eq!(second.checkpoint_revision, 1);
+    assert_eq!(second.checkpoint_revision, 2);
     assert_eq!(second.claim_generation, reclaimed.claim_generation);
     assert_eq!(second.worker_id, "worker-b");
     let current = store
@@ -716,6 +716,61 @@ fn pursuit_checkpoint_is_revision_and_lease_generation_fenced() {
         ),
         Err(GoalStoreError::LeaseHeld { .. })
     ));
+}
+
+#[test]
+fn checkpoint_can_read_a_foreign_platform_absolute_workdir() {
+    let (_directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("foreign-path", "Foreign path", 2, at))
+        .expect("create");
+    let claimed = store
+        .claim(OWNER_A, "foreign-path", "worker-a", 60, at)
+        .expect("claim");
+    #[cfg(unix)]
+    let workdir = std::path::PathBuf::from(r"C:\workspace\vyane");
+    #[cfg(windows)]
+    let workdir = std::path::PathBuf::from("/workspace/vyane");
+    let checkpoint = GoalPursuitCheckpoint {
+        owner: OWNER_A.into(),
+        goal_id: "foreign-path".into(),
+        checkpoint_revision: 0,
+        goal_revision: claimed.revision,
+        claim_generation: claimed.claim_generation,
+        worker_id: "worker-a".into(),
+        runtime: "builder".into(),
+        workdir: workdir.clone(),
+        started_at: at,
+        updated_at: at,
+        segments_started: 0,
+        segments_completed: 0,
+        consecutive_failures: 0,
+        status: PursuitCheckpointStatus::Running,
+        last_run_id: None,
+        last_verification_id: None,
+    };
+
+    store
+        .record_pursuit_checkpoint(
+            OWNER_A,
+            "foreign-path",
+            "worker-a",
+            &checkpoint,
+            "pursuit.started",
+            "foreign path fixture",
+            at + TimeDelta::seconds(1),
+        )
+        .expect("record foreign path checkpoint");
+
+    assert_eq!(
+        store
+            .pursuit_checkpoint(OWNER_A, "foreign-path")
+            .expect("read foreign path checkpoint")
+            .expect("checkpoint")
+            .workdir,
+        workdir
+    );
 }
 
 #[test]

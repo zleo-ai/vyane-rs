@@ -676,6 +676,132 @@ impl GoalStore for SqliteGoalStore {
         })
     }
 
+    fn record_pursuit_verification(
+        &self,
+        owner: &str,
+        id: &str,
+        worker_id: &str,
+        verification: &AcceptanceVerification,
+        checkpoint: &GoalPursuitCheckpoint,
+        detail: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(GoalVerificationArtifact, GoalPursuitCheckpoint, GoalEvent)> {
+        validate_owner(owner)?;
+        validate_goal_id(id)?;
+        validate_worker(worker_id)?;
+        validate_detail(detail)?;
+        checkpoint.validate()?;
+        if checkpoint.owner != owner
+            || checkpoint.goal_id != id
+            || checkpoint.worker_id != worker_id
+        {
+            return Err(GoalStoreError::InvalidInput(
+                "pursuit checkpoint identity does not match the write scope".into(),
+            ));
+        }
+        if verification.goal_id != id {
+            return Err(GoalStoreError::InvalidInput(
+                "verification goal id does not match the persisted goal".into(),
+            ));
+        }
+        let payload_json = serde_json::to_string(verification)?;
+        if payload_json.len() > MAX_VERIFICATION_PAYLOAD_BYTES {
+            return Err(GoalStoreError::InvalidInput(format!(
+                "verification artifact exceeds {MAX_VERIFICATION_PAYLOAD_BYTES} bytes"
+            )));
+        }
+        let occurred_at = normalize_timestamp(at)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before = get_in_transaction(&transaction, owner, id)?
+            .ok_or_else(|| GoalStoreError::NotFound { id: id.to_string() })?;
+        if before.status != GoalStatus::InProgress {
+            return Err(GoalStoreError::InvalidStatus {
+                id: id.to_string(),
+                operation: "record pursuit verification for",
+                status: before.status,
+            });
+        }
+        ensure_lease_holder(&before, Some(worker_id), occurred_at)?;
+        if !before.lease_active(occurred_at) {
+            return Err(GoalStoreError::LeaseExpired { id: id.to_string() });
+        }
+        if checkpoint.goal_revision != before.revision
+            || checkpoint.claim_generation != before.claim_generation
+        {
+            return Err(GoalStoreError::CheckpointConflict { id: id.to_string() });
+        }
+        let payload_sha256 = hex_digest(payload_json.as_bytes());
+        let mut artifact = GoalVerificationArtifact {
+            sequence: 0,
+            verification_id: format!("verification-{}", Uuid::now_v7()),
+            owner: owner.to_string(),
+            goal_id: id.to_string(),
+            recorded_at: occurred_at,
+            worker_id: Some(worker_id.to_string()),
+            verification: verification.clone(),
+            payload_sha256,
+        };
+        transaction.execute(
+            "INSERT INTO goal_verifications (verification_id, owner, goal_id, recorded_at_ms, \
+             worker_id, payload_json, payload_sha256) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                artifact.verification_id,
+                artifact.owner,
+                artifact.goal_id,
+                artifact.recorded_at.timestamp_millis(),
+                artifact.worker_id,
+                payload_json,
+                artifact.payload_sha256,
+            ],
+        )?;
+        artifact.sequence = u64::try_from(transaction.last_insert_rowid()).map_err(|_| {
+            GoalStoreError::CorruptData("verification sequence is outside supported range".into())
+        })?;
+        let mut current = before;
+        for result in &verification.results {
+            if result.status == crate::CriterionStatus::Satisfied
+                && current
+                    .acceptance_criteria
+                    .get(result.criterion_index)
+                    .is_some_and(|criterion| criterion.satisfied_at.is_none())
+            {
+                let index = result.criterion_index;
+                let total = current.acceptance_criteria.len();
+                let (next, _) = mutate_in_transaction(
+                    &transaction,
+                    &current,
+                    GoalEventKind::CriterionSatisfied,
+                    "satisfy a criterion on",
+                    occurred_at,
+                    |_before, after, effective_at| {
+                        let Some(criterion) = after.acceptance_criteria.get_mut(index) else {
+                            return Err(GoalStoreError::InvalidInput(format!(
+                                "criterion index {index} is out of range for {total} criteria"
+                            )));
+                        };
+                        criterion.satisfied_at = Some(effective_at);
+                        Ok((Some(criterion.kind.clone()), Some(criterion.target.clone())))
+                    },
+                )?;
+                current = next;
+            }
+        }
+        let mut checkpoint = checkpoint.clone();
+        checkpoint.last_verification_id = Some(artifact.verification_id.clone());
+        checkpoint.goal_revision = current.revision;
+        let (checkpoint, event) = record_pursuit_checkpoint_in_transaction(
+            &transaction,
+            &current,
+            &checkpoint,
+            "acceptance.verify",
+            detail,
+            occurred_at,
+        )?;
+        transaction.commit()?;
+        Ok((artifact, checkpoint, event))
+    }
+
     fn verifications(&self, owner: &str, id: &str) -> Result<Vec<GoalVerificationArtifact>> {
         validate_owner(owner)?;
         validate_goal_id(id)?;
@@ -779,112 +905,16 @@ impl GoalStore for SqliteGoalStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let before = get_in_transaction(&transaction, owner, id)?
             .ok_or_else(|| GoalStoreError::NotFound { id: id.to_string() })?;
-        if before.status != GoalStatus::InProgress {
-            return Err(GoalStoreError::InvalidStatus {
-                id: id.to_string(),
-                operation: "record pursuit checkpoint for",
-                status: before.status,
-            });
-        }
-        ensure_lease_holder(&before, Some(worker_id), occurred_at)?;
-        if !before.lease_active(occurred_at) {
-            return Err(GoalStoreError::LeaseExpired { id: id.to_string() });
-        }
-        if checkpoint.goal_revision != before.revision
-            || checkpoint.claim_generation != before.claim_generation
-        {
-            return Err(GoalStoreError::CheckpointConflict { id: id.to_string() });
-        }
-        let existing = transaction
-            .query_row(
-                "SELECT owner, goal_id, checkpoint_revision, claim_generation, updated_at_ms, \
-                 payload_json, payload_sha256 FROM goal_pursuit_checkpoints \
-                 WHERE owner = ?1 AND goal_id = ?2",
-                params![owner, id],
-                row_to_pursuit_checkpoint,
-            )
-            .optional()?;
-        let next_revision = match existing {
-            None if checkpoint.checkpoint_revision == 0 => 0,
-            Some(existing) if existing.checkpoint_revision == checkpoint.checkpoint_revision => {
-                existing.checkpoint_revision.checked_add(1).ok_or_else(|| {
-                    GoalStoreError::CorruptData("pursuit checkpoint revision overflow".into())
-                })?
-            }
-            None | Some(_) => {
-                return Err(GoalStoreError::CheckpointConflict { id: id.to_string() });
-            }
-        };
-        let (event_kind, operation) = match checkpoint.status {
-            PursuitCheckpointStatus::Running => {
-                (GoalEventKind::Progress, "record pursuit checkpoint for")
-            }
-            PursuitCheckpointStatus::Paused => (GoalEventKind::Paused, "pause pursuit for"),
-            PursuitCheckpointStatus::Achieved => (GoalEventKind::Completed, "complete pursuit for"),
-        };
-        let (after, event) = mutate_in_transaction(
+        let result = record_pursuit_checkpoint_in_transaction(
             &transaction,
             &before,
-            event_kind,
-            operation,
+            checkpoint,
+            stage,
+            detail,
             occurred_at,
-            |before, after, effective_at| {
-                match checkpoint.status {
-                    PursuitCheckpointStatus::Running => {}
-                    PursuitCheckpointStatus::Paused => {
-                        ensure_transition(before, GoalStatus::Paused, "pause")?;
-                        after.status = GoalStatus::Paused;
-                        clear_lease(after);
-                        after.pause_reason = Some(detail.to_string());
-                    }
-                    PursuitCheckpointStatus::Achieved => {
-                        ensure_transition(before, GoalStatus::Completed, "complete")?;
-                        let remaining = before
-                            .acceptance_criteria
-                            .iter()
-                            .filter(|criterion| criterion.satisfied_at.is_none())
-                            .count();
-                        if remaining > 0 {
-                            return Err(GoalStoreError::CriteriaUnsatisfied {
-                                id: id.to_string(),
-                                remaining,
-                            });
-                        }
-                        after.status = GoalStatus::Completed;
-                        after.finished_at = Some(effective_at);
-                        clear_lease(after);
-                        after.completion_summary = Some(detail.to_string());
-                    }
-                }
-                Ok((Some(stage.to_string()), Some(detail.to_string())))
-            },
-        )?;
-        let mut next = checkpoint.clone();
-        next.checkpoint_revision = next_revision;
-        next.goal_revision = after.revision;
-        next.updated_at = event.occurred_at;
-        let payload_json = serde_json::to_string(&next)?;
-        let payload_sha256 = hex_digest(payload_json.as_bytes());
-        transaction.execute(
-            "INSERT INTO goal_pursuit_checkpoints (owner, goal_id, checkpoint_revision, \
-             claim_generation, updated_at_ms, payload_json, payload_sha256) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-             ON CONFLICT(owner, goal_id) DO UPDATE SET \
-             checkpoint_revision = excluded.checkpoint_revision, \
-             claim_generation = excluded.claim_generation, updated_at_ms = excluded.updated_at_ms, \
-             payload_json = excluded.payload_json, payload_sha256 = excluded.payload_sha256",
-            params![
-                owner,
-                id,
-                counter_to_i64(next.checkpoint_revision, "checkpoint revision")?,
-                counter_to_i64(next.claim_generation, "claim generation")?,
-                next.updated_at.timestamp_millis(),
-                payload_json,
-                payload_sha256,
-            ],
         )?;
         transaction.commit()?;
-        Ok((next, event))
+        Ok(result)
     }
 
     fn start(&self, owner: &str, id: &str, at: DateTime<Utc>) -> Result<GoalRecord> {
@@ -1167,6 +1197,127 @@ fn get_in_transaction(
         .query_row(&sql, params![owner, id], row_to_record)
         .optional()
         .map_err(GoalStoreError::from)
+}
+
+fn record_pursuit_checkpoint_in_transaction(
+    transaction: &Transaction<'_>,
+    before: &GoalRecord,
+    checkpoint: &GoalPursuitCheckpoint,
+    stage: &str,
+    detail: &str,
+    occurred_at: DateTime<Utc>,
+) -> Result<(GoalPursuitCheckpoint, GoalEvent)> {
+    if before.status != GoalStatus::InProgress {
+        return Err(GoalStoreError::InvalidStatus {
+            id: before.id.clone(),
+            operation: "record pursuit checkpoint for",
+            status: before.status,
+        });
+    }
+    ensure_lease_holder(before, Some(&checkpoint.worker_id), occurred_at)?;
+    if !before.lease_active(occurred_at) {
+        return Err(GoalStoreError::LeaseExpired {
+            id: before.id.clone(),
+        });
+    }
+    if checkpoint.goal_revision != before.revision
+        || checkpoint.claim_generation != before.claim_generation
+    {
+        return Err(GoalStoreError::CheckpointConflict {
+            id: before.id.clone(),
+        });
+    }
+    let existing = transaction
+        .query_row(
+            "SELECT owner, goal_id, checkpoint_revision, claim_generation, updated_at_ms, \
+             payload_json, payload_sha256 FROM goal_pursuit_checkpoints \
+             WHERE owner = ?1 AND goal_id = ?2",
+            params![before.owner, before.id],
+            row_to_pursuit_checkpoint,
+        )
+        .optional()?;
+    let next_revision = match existing {
+        None if checkpoint.checkpoint_revision == 0 => 1,
+        Some(existing) if existing.checkpoint_revision == checkpoint.checkpoint_revision => {
+            existing.checkpoint_revision.checked_add(1).ok_or_else(|| {
+                GoalStoreError::CorruptData("pursuit checkpoint revision overflow".into())
+            })?
+        }
+        None | Some(_) => {
+            return Err(GoalStoreError::CheckpointConflict {
+                id: before.id.clone(),
+            });
+        }
+    };
+    let (event_kind, operation) = match checkpoint.status {
+        PursuitCheckpointStatus::Running => {
+            (GoalEventKind::Progress, "record pursuit checkpoint for")
+        }
+        PursuitCheckpointStatus::Paused => (GoalEventKind::Paused, "pause pursuit for"),
+        PursuitCheckpointStatus::Achieved => (GoalEventKind::Completed, "complete pursuit for"),
+    };
+    let (after, event) = mutate_in_transaction(
+        transaction,
+        before,
+        event_kind,
+        operation,
+        occurred_at,
+        |before, after, effective_at| {
+            match checkpoint.status {
+                PursuitCheckpointStatus::Running => {}
+                PursuitCheckpointStatus::Paused => {
+                    ensure_transition(before, GoalStatus::Paused, "pause")?;
+                    after.status = GoalStatus::Paused;
+                    clear_lease(after);
+                    after.pause_reason = Some(detail.to_string());
+                }
+                PursuitCheckpointStatus::Achieved => {
+                    ensure_transition(before, GoalStatus::Completed, "complete")?;
+                    let remaining = before
+                        .acceptance_criteria
+                        .iter()
+                        .filter(|criterion| criterion.satisfied_at.is_none())
+                        .count();
+                    if remaining > 0 {
+                        return Err(GoalStoreError::CriteriaUnsatisfied {
+                            id: before.id.clone(),
+                            remaining,
+                        });
+                    }
+                    after.status = GoalStatus::Completed;
+                    after.finished_at = Some(effective_at);
+                    clear_lease(after);
+                    after.completion_summary = Some(detail.to_string());
+                }
+            }
+            Ok((Some(stage.to_string()), Some(detail.to_string())))
+        },
+    )?;
+    let mut next = checkpoint.clone();
+    next.checkpoint_revision = next_revision;
+    next.goal_revision = after.revision;
+    next.updated_at = event.occurred_at;
+    let payload_json = serde_json::to_string(&next)?;
+    let payload_sha256 = hex_digest(payload_json.as_bytes());
+    transaction.execute(
+        "INSERT INTO goal_pursuit_checkpoints (owner, goal_id, checkpoint_revision, \
+         claim_generation, updated_at_ms, payload_json, payload_sha256) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+         ON CONFLICT(owner, goal_id) DO UPDATE SET \
+         checkpoint_revision = excluded.checkpoint_revision, \
+         claim_generation = excluded.claim_generation, updated_at_ms = excluded.updated_at_ms, \
+         payload_json = excluded.payload_json, payload_sha256 = excluded.payload_sha256",
+        params![
+            before.owner,
+            before.id,
+            counter_to_i64(next.checkpoint_revision, "checkpoint revision")?,
+            counter_to_i64(next.claim_generation, "claim generation")?,
+            next.updated_at.timestamp_millis(),
+            payload_json,
+            payload_sha256,
+        ],
+    )?;
+    Ok((next, event))
 }
 
 fn update_snapshot(

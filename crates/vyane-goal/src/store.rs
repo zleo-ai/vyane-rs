@@ -82,6 +82,20 @@ pub trait GoalStore: Send + Sync {
         at: DateTime<Utc>,
     ) -> Result<GoalVerificationArtifact>;
 
+    /// Atomically append pursuit verification evidence and its lease-fenced
+    /// checkpoint. The returned checkpoint carries the new verification id.
+    #[allow(clippy::too_many_arguments)]
+    fn record_pursuit_verification(
+        &self,
+        owner: &str,
+        id: &str,
+        worker_id: &str,
+        verification: &AcceptanceVerification,
+        checkpoint: &GoalPursuitCheckpoint,
+        detail: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(GoalVerificationArtifact, GoalPursuitCheckpoint, GoalEvent)>;
+
     fn verifications(&self, owner: &str, id: &str) -> Result<Vec<GoalVerificationArtifact>>;
 
     fn events(&self, owner: &str, id: &str) -> Result<Vec<GoalEvent>>;
