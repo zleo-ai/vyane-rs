@@ -88,6 +88,12 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
     (config, bin)
 }
 
+#[cfg(unix)]
+fn pursuit_path(bin: &TempDir) -> std::ffi::OsString {
+    std::env::join_paths([bin.path(), Path::new("/usr/bin"), Path::new("/bin")])
+        .expect("join pursuit fixture PATH")
+}
+
 #[test]
 fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
     let directory = TempDir::new().unwrap();
@@ -825,7 +831,7 @@ fn pursue_auto_dispatches_fresh_segment_reverifies_and_completes() {
 
     let output = vyane()
         .env_clear()
-        .env("PATH", bin.path())
+        .env("PATH", pursuit_path(&bin))
         .env("HOME", directory.path())
         .env("VYANE_DATA_DIR", data_dir.path())
         .arg("--config")
@@ -934,7 +940,7 @@ fn pursue_reports_runtime_error_as_paused_exit_three() {
 
     let output = vyane()
         .env_clear()
-        .env("PATH", bin.path())
+        .env("PATH", pursuit_path(&bin))
         .env("HOME", directory.path())
         .env("VYANE_DATA_DIR", data_dir.path())
         .arg("--config")
@@ -1034,7 +1040,7 @@ fn pursue_missing_acceptance_returns_paused_exit_three() {
 
     let output = vyane()
         .env_clear()
-        .env("PATH", bin.path())
+        .env("PATH", pursuit_path(&bin))
         .env("HOME", directory.path())
         .env("VYANE_DATA_DIR", data_dir.path())
         .arg("--config")
@@ -1119,7 +1125,7 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
     let program = vyane().get_program().to_owned();
     let child = std::process::Command::new(program)
         .env_clear()
-        .env("PATH", bin.path())
+        .env("PATH", pursuit_path(&bin))
         .env("HOME", directory.path())
         .env("VYANE_DATA_DIR", data_dir.path())
         .arg("--config")
@@ -1267,7 +1273,7 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
     let program = vyane().get_program().to_owned();
     let child = std::process::Command::new(program)
         .env_clear()
-        .env("PATH", bin.path())
+        .env("PATH", pursuit_path(&bin))
         .env("HOME", directory.path())
         .env("VYANE_DATA_DIR", data_dir.path())
         .arg("--config")
@@ -1400,7 +1406,7 @@ fn pursue_sigint_during_verification_kills_process_group_and_pauses() {
     let program = vyane().get_program().to_owned();
     let child = std::process::Command::new(program)
         .env_clear()
-        .env("PATH", bin.path())
+        .env("PATH", pursuit_path(&bin))
         .env("HOME", directory.path())
         .env("VYANE_DATA_DIR", data_dir.path())
         .arg("--config")
