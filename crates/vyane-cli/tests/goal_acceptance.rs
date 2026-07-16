@@ -61,6 +61,98 @@ fn create(db: &str, owner: &str, id: &str, title: &str, priority: &str) -> Value
     )
 }
 
+#[test]
+fn continuity_next_is_stable_json_and_read_only() {
+    let directory = TempDir::new().unwrap();
+    let db_path = directory.path().join("goals.sqlite3");
+    let db = db_text(&db_path);
+    let store = SqliteGoalStore::open(&db_path).unwrap();
+    let target = |role: &str| GoalExecutionTarget {
+        provider: "provider".into(),
+        protocol: "openai_chat".into(),
+        harness: "harness".into(),
+        model: "model".into(),
+        profile: None,
+        role: role.into(),
+    };
+    let mut goal = NewGoal::new("Project next action", Utc.timestamp_opt(1_000, 0).unwrap());
+    goal.id = Some("project-next".into());
+    goal.continuity_policy = Some(GoalContinuityPolicy {
+        mode: GoalContinuityMode::QuotaHandoff,
+        primary: target("primary"),
+        takeover: vec![target("takeover")],
+        reviewer: Some(target("reviewer")),
+        resume_primary_after_reset: true,
+        require_review_before_resume: true,
+        wait_for_review_checks_before_resume: true,
+    });
+    store.create("local", goal).unwrap();
+    store
+        .start(
+            "local",
+            "project-next",
+            Utc.timestamp_opt(1_001, 0).unwrap(),
+        )
+        .unwrap();
+    apply_quota_handoff_events(
+        &store,
+        "local",
+        &[GoalQuotaEvent {
+            event_id: "quota-project-next".into(),
+            goal_id: Some("project-next".into()),
+            provider: "provider".into(),
+            harness: "harness".into(),
+            model: "model".into(),
+            session_id: None,
+            observed_at: Utc.timestamp_opt(1_002, 0).unwrap(),
+            estimated_reset_at: None,
+        }],
+        Utc.timestamp_opt(1_003, 0).unwrap(),
+    )
+    .unwrap();
+    let before = store.get("local", "project-next").unwrap().unwrap();
+    let events_before = store.events("local", "project-next").unwrap();
+
+    let first = json_output(
+        &[
+            "goal",
+            "continuity-next",
+            "--db",
+            &db,
+            "--json",
+            "project-next",
+        ],
+        0,
+    );
+    let second = json_output(
+        &[
+            "goal",
+            "continuity-next",
+            "--db",
+            &db,
+            "--json",
+            "project-next",
+        ],
+        0,
+    );
+    assert_eq!(first["status"], "success");
+    assert_eq!(first["next_action"]["action"], "queue_approval");
+    assert_eq!(first["next_action"]["command"], "continuity_queue");
+    assert_eq!(first["next_action"]["step_id"], "takeover");
+    assert_eq!(first["next_action"], second["next_action"]);
+    assert_eq!(store.get("local", "project-next").unwrap().unwrap(), before);
+    assert_eq!(
+        store.events("local", "project-next").unwrap(),
+        events_before
+    );
+    assert!(
+        store
+            .list_takeover_approvals("local", Some("project-next"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[cfg(unix)]
 fn pursuit_fixture(directory: &TempDir) -> (std::path::PathBuf, TempDir) {
     let config = directory.path().join("config.toml");

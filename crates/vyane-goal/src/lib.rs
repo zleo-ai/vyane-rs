@@ -9,6 +9,7 @@ mod approval;
 mod continuity;
 mod error;
 mod model;
+mod projection;
 mod pursuit;
 mod sqlite;
 mod store;
@@ -31,6 +32,10 @@ pub use model::{
     AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalEvent,
     GoalEventKind, GoalQuery, GoalRecord, GoalStatus, GoalVerificationArtifact, MAX_LEASE_SECONDS,
     NewGoal,
+};
+pub use projection::{
+    GoalContinuityNextAction, GoalContinuityNextActionKind, GoalContinuityOperatorCommand,
+    project_continuity_next_action,
 };
 pub use pursuit::{
     GoalPursuer, GoalPursuitCheckpoint, GoalSegmentRuntime, MAX_PURSUIT_FAILURES,
