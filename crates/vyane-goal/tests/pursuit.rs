@@ -320,6 +320,53 @@ async fn resumed_checkpoint_cannot_bypass_exhausted_failure_budget() {
 }
 
 #[tokio::test]
+async fn resumed_verifier_error_does_not_exceed_exhausted_failure_budget() {
+    let (directory, store) = fixture();
+    running_goal(
+        &store,
+        "verifier-budget",
+        vec![AcceptanceCriterion::new(
+            "custom",
+            "cmd:definitely-not-a-real-command",
+        )],
+    );
+    let must_not_run = FakeRuntime::new(|_| panic!("exhausted verifier budget must not dispatch"));
+    let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
+    let first = GoalPursuer::new(&store, &must_not_run, &verifier, config(&directory, 3, 1))
+        .unwrap()
+        .pursue(OWNER, "verifier-budget")
+        .await
+        .unwrap();
+    assert_eq!(first.consecutive_failures, 1);
+
+    store
+        .resume(OWNER, "verifier-budget", None, Utc::now())
+        .expect("resume");
+    store
+        .claim(OWNER, "verifier-budget", "replacement", 60, Utc::now())
+        .expect("replacement claim");
+    let mut resumed_config = config(&directory, 3, 1);
+    resumed_config.worker_id = "replacement".into();
+    let resumed = GoalPursuer::new(&store, &must_not_run, &verifier, resumed_config)
+        .unwrap()
+        .pursue(OWNER, "verifier-budget")
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.reason, "pursuit max failures reached");
+    assert_eq!(resumed.consecutive_failures, 1);
+    assert_eq!(must_not_run.call_count(), 0);
+    assert_eq!(
+        store
+            .pursuit_checkpoint(OWNER, "verifier-budget")
+            .unwrap()
+            .unwrap()
+            .consecutive_failures,
+        1
+    );
+}
+
+#[tokio::test]
 async fn future_checkpoint_timestamp_survives_clock_rollback() {
     let (directory, store) = fixture();
     running_goal(

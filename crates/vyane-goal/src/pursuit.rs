@@ -455,7 +455,7 @@ where
                     .results
                     .iter()
                     .any(|result| result.status == CriterionStatus::Error);
-            if verifier_failed {
+            if verifier_failed && checkpoint.consecutive_failures < self.config.max_failures {
                 // Verifier and runtime failures are separate failure events. A
                 // round where both fail deliberately consumes two slots, which
                 // preserves the established pursuit contract.
