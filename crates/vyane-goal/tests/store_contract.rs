@@ -4,8 +4,8 @@ use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
-    GoalRecoveryCursor, GoalRecoveryFilter, GoalStatus, GoalStore, GoalStoreError, NewGoal,
-    PursuitCheckpointStatus, SqliteGoalStore,
+    GoalRecoveryFilter, GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus,
+    SqliteGoalStore,
 };
 
 const OWNER_A: &str = "owner-a";
@@ -268,6 +268,7 @@ fn recovery_pages_filter_leases_and_ignore_mutable_update_order() {
         .expect("stable-worker page");
     assert_eq!(
         active
+            .candidates
             .iter()
             .map(|goal| goal.id.as_str())
             .collect::<Vec<_>>(),
@@ -276,10 +277,10 @@ fn recovery_pages_filter_leases_and_ignore_mutable_update_order() {
 
     let filter = GoalRecoveryFilter::Available { at: base };
     let first = store
-        .list_recovery_page(OWNER_A, &filter, None, 1)
+        .list_recovery_page(OWNER_A, &filter, None, 2)
         .expect("first recovery page");
-    assert_eq!(first[0].id, "available-a");
-    let cursor = GoalRecoveryCursor::from(&first[0]);
+    assert_eq!(first.candidates[0].id, "available-a");
+    let cursor = first.next.expect("raw page cursor");
     store
         .progress(
             OWNER_A,
@@ -290,9 +291,107 @@ fn recovery_pages_filter_leases_and_ignore_mutable_update_order() {
         )
         .expect("update second recovery goal");
     let second = store
-        .list_recovery_page(OWNER_A, &filter, Some(&cursor), 1)
+        .list_recovery_page(OWNER_A, &filter, Some(&cursor), 2)
         .expect("second recovery page");
-    assert_eq!(second[0].id, "available-b");
+    assert_eq!(second.candidates[0].id, "available-b");
+}
+
+#[test]
+fn recovery_page_bounds_rows_examined_before_lease_filtering() {
+    let (directory, store) = fixture();
+    let base = timestamp(1_700_000_000);
+    for index in 0..20 {
+        let id = format!("foreign-{index:02}");
+        store
+            .create(OWNER_A, new_goal(&id, &id, 0, base))
+            .expect("create foreign goal");
+        store
+            .claim(OWNER_A, &id, "foreign-worker", 60, base)
+            .expect("claim foreign goal");
+    }
+
+    let page = store
+        .list_recovery_page(
+            OWNER_A,
+            &GoalRecoveryFilter::Available {
+                at: base + TimeDelta::seconds(1),
+            },
+            None,
+            5,
+        )
+        .expect("bounded raw page");
+    assert!(page.candidates.is_empty());
+    assert!(page.next.is_some(), "five examined rows advance the cursor");
+
+    let connection = Connection::open(directory.path().join("goals.sqlite3"))
+        .expect("open query-plan connection");
+    let detail: String = connection
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT id FROM goals INDEXED BY goals_owner_queue_idx \
+             WHERE owner = ?1 AND status = 'in_progress' \
+             ORDER BY priority, created_at_ms, id LIMIT 5",
+            [OWNER_A],
+            |row| row.get(3),
+        )
+        .expect("recovery query plan");
+    assert!(detail.contains("goals_owner_queue_idx"), "{detail}");
+
+    for (index, predicate) in [
+        (
+            "goals_owner_worker_lease_idx",
+            "claimed_by = 'daemon-worker' AND claim_expires_at_ms > 0",
+        ),
+        ("goals_owner_lease_idx", "claim_expires_at_ms <= 0"),
+    ] {
+        let sql = format!(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM goals INDEXED BY {index} \
+             WHERE owner = 'owner-a' AND status = 'in_progress' AND {predicate} LIMIT 1"
+        );
+        let plan: String = connection
+            .query_row(&sql, [], |row| row.get(3))
+            .expect("recovery confirmation query plan");
+        assert!(plan.contains(index), "{plan}");
+    }
+}
+
+#[test]
+fn queued_claim_is_atomically_gated_by_recovery_candidates() {
+    let (_directory, store) = fixture();
+    let base = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("expired", "expired", 0, base))
+        .expect("create expired goal");
+    store
+        .claim(OWNER_A, "expired", "foreign-worker", 1, base)
+        .expect("claim expired goal");
+    store
+        .create(OWNER_A, new_goal("queued", "queued", 1, base))
+        .expect("create queued goal");
+    let after_expiry = base + TimeDelta::seconds(2);
+
+    assert!(
+        store
+            .claim_next_if_no_recovery(OWNER_A, "daemon-worker", 60, &[], after_expiry)
+            .expect("recovery-gated claim")
+            .is_none()
+    );
+    let queued = store
+        .get(OWNER_A, "queued")
+        .expect("get queued")
+        .expect("queued goal remains");
+    assert_eq!(queued.status, GoalStatus::Queued);
+
+    let claimed = store
+        .claim_next_if_no_recovery(
+            OWNER_A,
+            "daemon-worker",
+            60,
+            &["expired".into()],
+            after_expiry,
+        )
+        .expect("cooldown-excluded claim")
+        .expect("queued claim");
+    assert_eq!(claimed.id, "queued");
 }
 
 #[test]
@@ -1027,6 +1126,8 @@ fn v2_database_migrates_current_goal_features_without_losing_goals() {
     connection
         .execute_batch(
             "DROP INDEX goal_pursuit_checkpoints_owner_updated_idx;
+             DROP INDEX goals_owner_worker_lease_idx;
+             DROP INDEX goals_owner_lease_idx;
              DROP TABLE goal_pursuit_checkpoints;
              DROP TRIGGER goal_verifications_immutable_update;
              DROP TRIGGER goal_verifications_immutable_delete;
@@ -1087,7 +1188,7 @@ fn store_reopens_and_rejects_newer_schema() {
         SqliteGoalStore::open(&path),
         Err(GoalStoreError::UnsupportedSchema {
             found: 99,
-            supported: 4
+            supported: 5
         })
     ));
 }

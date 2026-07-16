@@ -310,6 +310,15 @@ pub struct GoalRecoveryCursor {
     pub id: String,
 }
 
+/// One bounded slice of the immutable recovery order. `next` is the cursor
+/// after the last row examined, even when none of those rows matched the
+/// requested recovery filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalRecoveryPage {
+    pub candidates: Vec<GoalRecord>,
+    pub next: Option<GoalRecoveryCursor>,
+}
+
 impl From<&GoalRecord> for GoalRecoveryCursor {
     fn from(goal: &GoalRecord) -> Self {
         Self {
