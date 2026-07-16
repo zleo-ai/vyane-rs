@@ -70,8 +70,10 @@ pub trait QuotaConnector: Send + Sync {
     fn id(&self) -> &str;
     fn provider(&self) -> &str;
 
-    /// Read one current snapshot. Implementations must treat `policy` as a
-    /// ceiling; [`crate::QuotaHttpReader`] is the provided redirect-closed,
+    /// Read one current snapshot. Implementations own and trust their fixed
+    /// endpoint; they must not pass caller-controlled URLs through to the
+    /// transport. They must also treat `policy` as a ceiling;
+    /// [`crate::QuotaHttpReader`] is the provided redirect-closed,
     /// body-bounded transport helper.
     async fn snapshot(&self, policy: QuotaReadPolicy) -> Result<QuotaCard, QuotaConnectorError>;
 }

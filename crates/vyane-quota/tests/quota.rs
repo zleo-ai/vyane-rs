@@ -235,6 +235,95 @@ async fn runner_rejects_duplicate_ids_and_invalid_card_identity() {
 }
 
 #[test]
+fn runner_rejects_invalid_policy_counts_and_connector_identity() {
+    for policy in [
+        QuotaReadPolicy {
+            timeout: Duration::ZERO,
+            ..QuotaReadPolicy::default()
+        },
+        QuotaReadPolicy {
+            timeout: Duration::from_secs(31),
+            ..QuotaReadPolicy::default()
+        },
+        QuotaReadPolicy {
+            max_body_bytes: 0,
+            ..QuotaReadPolicy::default()
+        },
+        QuotaReadPolicy {
+            max_body_bytes: 4 * 1024 * 1024 + 1,
+            ..QuotaReadPolicy::default()
+        },
+    ] {
+        assert!(matches!(
+            QuotaSnapshotRunner::new(vec![], 1, policy),
+            Err(QuotaRunnerError::InvalidPolicy)
+        ));
+    }
+
+    assert!(matches!(
+        QuotaSnapshotRunner::new(vec![], 0, QuotaReadPolicy::default()),
+        Err(QuotaRunnerError::InvalidConfiguration)
+    ));
+    assert!(matches!(
+        QuotaSnapshotRunner::new(vec![], 17, QuotaReadPolicy::default()),
+        Err(QuotaRunnerError::InvalidConfiguration)
+    ));
+
+    let active = Arc::new(AtomicUsize::new(0));
+    let maximum = Arc::new(AtomicUsize::new(0));
+    let too_many = (0..33)
+        .map(|index| {
+            let id = format!("connector-{index}");
+            connector(
+                &id,
+                Duration::ZERO,
+                FakeResult::Card(card(&id, "provider-a")),
+                &active,
+                &maximum,
+            )
+        })
+        .collect();
+    assert!(matches!(
+        QuotaSnapshotRunner::new(too_many, 1, QuotaReadPolicy::default()),
+        Err(QuotaRunnerError::InvalidConfiguration)
+    ));
+
+    for (id, provider) in [
+        ("", "provider-a"),
+        (" connector", "provider-a"),
+        ("connector", ""),
+        ("connector", "provider-a "),
+    ] {
+        let invalid: Vec<Arc<dyn QuotaConnector>> = vec![Arc::new(FakeConnector {
+            id: id.into(),
+            provider: provider.into(),
+            delay: Duration::ZERO,
+            result: FakeResult::Card(card("connector", "provider-a")),
+            active: Arc::clone(&active),
+            maximum: Arc::clone(&maximum),
+        })];
+        assert!(matches!(
+            QuotaSnapshotRunner::new(invalid, 1, QuotaReadPolicy::default()),
+            Err(QuotaRunnerError::InvalidConfiguration)
+        ));
+    }
+
+    let oversized = "x".repeat(129);
+    let invalid: Vec<Arc<dyn QuotaConnector>> = vec![Arc::new(FakeConnector {
+        id: oversized,
+        provider: "provider-a".into(),
+        delay: Duration::ZERO,
+        result: FakeResult::Card(card("connector", "provider-a")),
+        active,
+        maximum,
+    })];
+    assert!(matches!(
+        QuotaSnapshotRunner::new(invalid, 1, QuotaReadPolicy::default()),
+        Err(QuotaRunnerError::InvalidConfiguration)
+    ));
+}
+
+#[test]
 fn quota_card_validation_rejects_invalid_windows_and_balances() {
     let mut invalid_window = card("connector", "provider-a");
     invalid_window.windows.push(QuotaWindow {
@@ -306,6 +395,37 @@ async fn http_reader_rejects_redirects_and_oversized_bodies() {
         )
         .await;
     assert_eq!(oversized, Err(QuotaTransportError::BodyTooLarge));
+}
+
+#[tokio::test]
+async fn http_reader_returns_bounded_success_and_rejects_invalid_urls() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/quota"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(b"quota"))
+        .mount(&server)
+        .await;
+    let reader = QuotaHttpReader::new().unwrap();
+
+    let response = reader
+        .get(
+            &format!("{}/quota", server.uri()),
+            HeaderMap::new(),
+            QuotaReadPolicy::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status, 206);
+    assert_eq!(response.body, b"quota");
+
+    for url in ["not a url", "file:///tmp/quota", "https://"] {
+        assert_eq!(
+            reader
+                .get(url, HeaderMap::new(), QuotaReadPolicy::default())
+                .await,
+            Err(QuotaTransportError::InvalidUrl)
+        );
+    }
 }
 
 #[tokio::test]

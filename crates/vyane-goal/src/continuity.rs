@@ -213,6 +213,15 @@ impl GoalContinuitySignal {
         validate_text("continuity signal model", &self.model, 256)?;
         validate_text("continuity signal source", &self.source, 128)
     }
+
+    fn same_evidence(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.quota_event_id == other.quota_event_id
+            && self.provider == other.provider
+            && self.harness == other.harness
+            && self.model == other.model
+            && self.source == other.source
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -562,7 +571,7 @@ pub(crate) fn with_ready_signal(
         .iter()
         .find(|existing| existing.kind == signal.kind)
     {
-        if existing == signal {
+        if existing.same_evidence(signal) {
             return Ok((state.clone(), false));
         }
         return Err(GoalStoreError::InvalidInput(

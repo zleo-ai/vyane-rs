@@ -842,10 +842,18 @@ impl GoalStore for SqliteGoalStore {
         })?;
         let (next, changed) = with_ready_signal(state, signal)?;
         if !changed {
+            let persisted_signal = next
+                .ready_signals
+                .iter()
+                .find(|existing| existing.kind == signal.kind)
+                .cloned()
+                .ok_or_else(|| {
+                    GoalStoreError::CorruptData("idempotent continuity signal disappeared".into())
+                })?;
             return Ok(GoalContinuitySignalResult {
                 goal_id: id.to_string(),
                 changed: false,
-                signal: signal.clone(),
+                signal: persisted_signal,
                 state: next,
             });
         }

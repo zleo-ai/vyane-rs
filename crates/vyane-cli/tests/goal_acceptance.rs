@@ -429,6 +429,39 @@ fn continuity_signal_is_typed_json_and_never_dispatches() {
     assert_eq!(goal.revision, 3);
     assert_eq!(store.events("local", "signal-goal").unwrap().len(), 4);
 
+    let repeated = json_output(
+        &[
+            "goal",
+            "continuity-signal",
+            "--db",
+            &db,
+            "--json",
+            "signal-goal",
+            "quota-reset",
+            "--quota-event-id",
+            "quota-signal",
+            "--provider",
+            "primary",
+            "--harness",
+            "codex-cli",
+            "--model",
+            "main",
+            "--source",
+            "test-reader",
+        ],
+        0,
+    );
+    assert_eq!(repeated["changed"], false);
+    assert_eq!(
+        repeated["result"]["signal"]["observed_at"],
+        recorded["result"]["signal"]["observed_at"]
+    );
+    assert_eq!(
+        store.get("local", "signal-goal").unwrap().unwrap().revision,
+        3
+    );
+    assert_eq!(store.events("local", "signal-goal").unwrap().len(), 4);
+
     let help = vyane()
         .args(["goal", "continuity-signal", "--help"])
         .output()

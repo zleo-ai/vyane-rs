@@ -757,7 +757,7 @@ fn review_before_quota_reset_releases_resume_without_dispatching() {
 }
 
 #[test]
-fn exact_signal_is_idempotent_without_revision_or_event_drift() {
+fn repeated_signal_evidence_is_idempotent_without_revision_or_event_drift() {
     let (_dir, store) = setup();
     let signal = quota_reset_signal();
     let first = store
@@ -766,12 +766,15 @@ fn exact_signal_is_idempotent_without_revision_or_event_drift() {
     let revision = store.get(OWNER, "goal-a").unwrap().unwrap().revision;
     let event_count = store.events(OWNER, "goal-a").unwrap().len();
 
+    let mut retried = signal.clone();
+    retried.observed_at = at(2_100);
     let repeated = store
-        .record_continuity_signal(OWNER, "goal-a", &signal, at(2_003))
+        .record_continuity_signal(OWNER, "goal-a", &retried, at(2_003))
         .unwrap();
 
     assert!(first.changed);
     assert!(!repeated.changed);
+    assert_eq!(repeated.signal, signal);
     assert_eq!(
         store.get(OWNER, "goal-a").unwrap().unwrap().revision,
         revision
