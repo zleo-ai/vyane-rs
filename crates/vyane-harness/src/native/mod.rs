@@ -13,12 +13,16 @@
 //! or capability escapes before performing side effects.
 
 mod permissions;
+mod text_edit;
 mod tools;
 mod turn_driver;
 
 pub use permissions::{
     ApprovalPlan, PermissionDecision, PermissionEffect, PermissionPolicy, PermissionRule,
     PermissionRuleError, protected_paths_policy, risky_operations_policy,
+};
+pub use text_edit::{
+    EditError, EditOutcome, EditRequest, MatchPass, MatchSearch, ReplacedSpan, compute_edit, locate,
 };
 pub use tools::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, ToolCall, ToolCallLimits, ToolContext, ToolContextError,
