@@ -12,28 +12,25 @@ pub(crate) struct DispatchGoalRuntime {
     service: Arc<VyaneService>,
     target: String,
     sandbox: Sandbox,
-    cancel: CancellationToken,
 }
 
 impl DispatchGoalRuntime {
-    pub(crate) fn new(
-        service: Arc<VyaneService>,
-        target: String,
-        sandbox: Sandbox,
-        cancel: CancellationToken,
-    ) -> Self {
+    pub(crate) fn new(service: Arc<VyaneService>, target: String, sandbox: Sandbox) -> Self {
         Self {
             service,
             target,
             sandbox,
-            cancel,
         }
     }
 }
 
 #[async_trait]
 impl GoalSegmentRuntime for DispatchGoalRuntime {
-    async fn run_segment(&self, request: PursuitSegmentRequest) -> PursuitSegmentResult {
+    async fn run_segment(
+        &self,
+        request: PursuitSegmentRequest,
+        cancel: CancellationToken,
+    ) -> PursuitSegmentResult {
         let outcome = self
             .service
             .dispatch(
@@ -47,7 +44,7 @@ impl GoalSegmentRuntime for DispatchGoalRuntime {
                     timeout_secs: Some(request.timeout.as_secs().max(1)),
                     labels: Vec::new(),
                 },
-                self.cancel.child_token(),
+                cancel,
             )
             .await;
         match outcome {

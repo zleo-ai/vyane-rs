@@ -1,4 +1,4 @@
--- Schema v7: bind review execution to exact successful takeover evidence.
+-- Schema v8: bind review execution to exact successful takeover evidence.
 --
 -- The original approval table remains the single durable queue for continuity
 -- execution. Review rows bind the terminal takeover approval and run they are

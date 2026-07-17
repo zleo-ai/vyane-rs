@@ -156,9 +156,9 @@ fn review_request(
 }
 
 #[test]
-fn schema_v7_contains_durable_continuity_approval_table() {
+fn schema_v8_contains_durable_continuity_approval_table() {
     let (dir, _store) = setup();
-    assert_eq!(SCHEMA_VERSION, 7);
+    assert_eq!(SCHEMA_VERSION, 8);
     let connection = Connection::open(dir.path().join("goals.sqlite3")).unwrap();
     let exists: bool = connection
         .query_row(
@@ -171,7 +171,7 @@ fn schema_v7_contains_durable_continuity_approval_table() {
 }
 
 #[test]
-fn schema_v6_takeover_rows_upgrade_without_digest_drift() {
+fn schema_v7_takeover_rows_upgrade_without_digest_drift() {
     let (dir, store) = setup();
     let approval = store
         .queue_takeover_approval(OWNER, &request(&store, &dir), at(1_200))
@@ -185,7 +185,7 @@ fn schema_v6_takeover_rows_upgrade_without_digest_drift() {
              ALTER TABLE goal_takeover_approvals DROP COLUMN upstream_run_status;
              ALTER TABLE goal_takeover_approvals DROP COLUMN upstream_run_id;
              ALTER TABLE goal_takeover_approvals DROP COLUMN upstream_approval_id;
-             PRAGMA user_version = 6;",
+             PRAGMA user_version = 7;",
         )
         .unwrap();
     drop(connection);

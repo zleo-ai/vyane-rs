@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::model::validate_worker;
 use crate::{
@@ -35,7 +36,17 @@ pub struct PursuitConfig {
 
 impl PursuitConfig {
     pub fn validate(&self) -> Result<()> {
-        if !self.workdir.is_absolute() || !self.workdir.is_dir() {
+        if !self.workdir.is_absolute() {
+            return Err(GoalStoreError::InvalidInput(
+                "pursuit workdir must be an existing absolute directory".into(),
+            ));
+        }
+        if self.workdir.to_str().is_none() {
+            return Err(GoalStoreError::InvalidInput(
+                "pursuit workdir must be valid UTF-8 for durable checkpoints".into(),
+            ));
+        }
+        if !self.workdir.is_dir() {
             return Err(GoalStoreError::InvalidInput(
                 "pursuit workdir must be an existing absolute directory".into(),
             ));
@@ -100,10 +111,15 @@ pub struct PursuitSegmentResult {
 
 #[async_trait]
 pub trait GoalSegmentRuntime: Send + Sync {
-    /// The returned future must be cancellation-safe: the pursuer drops it at
-    /// the segment/overall deadline and no external effect may remain owned by
-    /// the dropped future.
-    async fn run_segment(&self, request: PursuitSegmentRequest) -> PursuitSegmentResult;
+    /// The runtime must observe `cancel`, finish its cancellation bookkeeping,
+    /// and return [`PursuitSegmentStatus::Cancelled`]. The returned future must
+    /// also be cancellation-safe when the pursuer drops it at the segment or
+    /// overall deadline.
+    async fn run_segment(
+        &self,
+        request: PursuitSegmentRequest,
+        cancel: CancellationToken,
+    ) -> PursuitSegmentResult;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,7 +170,7 @@ impl GoalPursuitCheckpoint {
                 "pursuit checkpoint runtime must be between 1 and 256 bytes".into(),
             ));
         }
-        if !self.workdir.is_absolute() {
+        if !checkpoint_workdir_is_absolute(&self.workdir) {
             return Err(GoalStoreError::InvalidInput(
                 "pursuit checkpoint workdir must be absolute".into(),
             ));
@@ -175,6 +191,22 @@ impl GoalPursuitCheckpoint {
             self.last_verification_id.as_deref(),
         )
     }
+}
+
+fn checkpoint_workdir_is_absolute(path: &std::path::Path) -> bool {
+    if path.is_absolute() {
+        return true;
+    }
+    let Some(path) = path.to_str() else {
+        return false;
+    };
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with("\\\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
 }
 
 fn validate_optional_run_id(value: Option<&str>) -> Result<()> {
@@ -222,6 +254,12 @@ pub struct GoalPursuer<'a, S, R> {
     config: PursuitConfig,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CancellationDisposition {
+    Pause,
+    PreserveRunning,
+}
+
 impl<'a, S, R> GoalPursuer<'a, S, R>
 where
     S: GoalStore,
@@ -243,6 +281,49 @@ where
     }
 
     pub async fn pursue(&self, owner: &str, goal_id: &str) -> Result<PursuitOutcome> {
+        self.pursue_with_cancel(owner, goal_id, CancellationToken::new())
+            .await
+    }
+
+    pub async fn pursue_with_cancel(
+        &self,
+        owner: &str,
+        goal_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<PursuitOutcome> {
+        self.pursue_with_cancellation_disposition(
+            owner,
+            goal_id,
+            cancel,
+            CancellationDisposition::Pause,
+        )
+        .await
+    }
+
+    /// Cancel in-flight verifier and runtime work, but keep the durable
+    /// checkpoint running so a resident supervisor replacement may resume it.
+    pub async fn pursue_with_cancel_preserving_checkpoint(
+        &self,
+        owner: &str,
+        goal_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<PursuitOutcome> {
+        self.pursue_with_cancellation_disposition(
+            owner,
+            goal_id,
+            cancel,
+            CancellationDisposition::PreserveRunning,
+        )
+        .await
+    }
+
+    async fn pursue_with_cancellation_disposition(
+        &self,
+        owner: &str,
+        goal_id: &str,
+        cancel: CancellationToken,
+        cancellation: CancellationDisposition,
+    ) -> Result<PursuitOutcome> {
         let goal = self.require_running(owner, goal_id)?;
         let now = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
             .expect("current UTC timestamp is representable");
@@ -268,6 +349,11 @@ where
                 last_verification_id: None,
             });
         checkpoint.status = PursuitCheckpointStatus::Running;
+        checkpoint.goal_revision = goal.revision;
+        checkpoint.claim_generation = goal.claim_generation;
+        checkpoint.worker_id.clone_from(&self.config.worker_id);
+        checkpoint.runtime.clone_from(&self.config.runtime);
+        checkpoint.workdir.clone_from(&self.config.workdir);
         self.record_checkpoint(
             owner,
             goal_id,
@@ -275,7 +361,7 @@ where
             "pursuit.started",
             "pursuit started or resumed",
         )?;
-
+        let claim_generation = checkpoint.claim_generation;
         let started = Instant::now();
         let mut previous_verification = None;
         loop {
@@ -309,10 +395,20 @@ where
                 checkpoint.segments_completed,
                 checkpoint.consecutive_failures,
                 previous_verification.clone(),
+                claim_generation,
             ) {
                 return Ok(stopped);
             };
             let goal = latest;
+            if cancel.is_cancelled() {
+                return self.finish_cancellation(
+                    owner,
+                    goal_id,
+                    &mut checkpoint,
+                    previous_verification,
+                    cancellation,
+                );
+            }
             self.store.renew_lease(
                 owner,
                 goal_id,
@@ -325,13 +421,38 @@ where
             )?;
             let verifier = self.verifier.clone();
             let verification_goal = goal.clone();
+            let verification_cancel = cancel.child_token();
             let verification = tokio::task::spawn_blocking(move || {
-                verifier.verify_with_budget(&verification_goal, remaining)
+                verifier.verify_with_budget_and_cancel(
+                    &verification_goal,
+                    remaining,
+                    &verification_cancel,
+                )
             })
             .await
             .map_err(|_| {
                 GoalStoreError::InvalidInput("acceptance verifier worker failed".into())
             })?;
+            let Some(verification) = verification else {
+                if let Some(stopped) = self.stopped_if_drifted(
+                    owner,
+                    goal_id,
+                    checkpoint.segments_started,
+                    checkpoint.segments_completed,
+                    checkpoint.consecutive_failures,
+                    previous_verification.clone(),
+                    claim_generation,
+                )? {
+                    return Ok(stopped);
+                }
+                return self.finish_cancellation(
+                    owner,
+                    goal_id,
+                    &mut checkpoint,
+                    previous_verification,
+                    cancellation,
+                );
+            };
             if let Some(stopped) = self.stopped_if_drifted(
                 owner,
                 goal_id,
@@ -339,29 +460,87 @@ where
                 checkpoint.segments_completed,
                 checkpoint.consecutive_failures,
                 previous_verification.clone(),
+                claim_generation,
             )? {
                 return Ok(stopped);
             }
+            if cancel.is_cancelled() {
+                return self.finish_cancellation(
+                    owner,
+                    goal_id,
+                    &mut checkpoint,
+                    previous_verification,
+                    cancellation,
+                );
+            }
             let verified_at = Utc::now();
-            let artifact = self.store.record_verification(
+            if let Some(stopped) = self.stopped_if_drifted(
                 owner,
                 goal_id,
-                Some(&self.config.worker_id),
+                checkpoint.segments_started,
+                checkpoint.segments_completed,
+                checkpoint.consecutive_failures,
+                previous_verification.clone(),
+                claim_generation,
+            )? {
+                return Ok(stopped);
+            }
+            checkpoint.goal_revision = self
+                .store
+                .get(owner, goal_id)?
+                .ok_or_else(|| GoalStoreError::NotFound {
+                    id: goal_id.to_string(),
+                })?
+                .revision;
+            let manual_pause = manual_pause_required(&verification);
+            let verifier_failed = !verification.results.is_empty()
+                && !manual_pause
+                && verification
+                    .results
+                    .iter()
+                    .any(|result| result.status == CriterionStatus::Error);
+            if verifier_failed && checkpoint.consecutive_failures < self.config.max_failures {
+                // Verifier and runtime failures are separate failure events. A
+                // round where both fail deliberately consumes two slots, which
+                // preserves the established pursuit contract.
+                // Persist verifier failures with the verification checkpoint so
+                // a restart cannot lose a consumed lifetime failure slot.
+                checkpoint.consecutive_failures = checkpoint.consecutive_failures.saturating_add(1);
+            }
+            checkpoint.updated_at = std::cmp::max(verified_at, checkpoint.updated_at);
+            let (_, recorded, _) = self.store.record_pursuit_verification(
+                owner,
+                goal_id,
+                &self.config.worker_id,
                 &verification,
-                verified_at,
-            )?;
-            self.persist_satisfied(owner, &goal, &verification, verified_at)?;
-            checkpoint.last_verification_id = Some(artifact.verification_id);
-            self.record_checkpoint(
-                owner,
-                goal_id,
-                &mut checkpoint,
-                "acceptance.verify",
+                &checkpoint,
                 &verification.summary,
+                checkpoint.updated_at,
             )?;
+            checkpoint = recorded;
             previous_verification = Some(verification.clone());
             let last_verification = previous_verification.clone();
 
+            if let Some(stopped) = self.stopped_if_drifted(
+                owner,
+                goal_id,
+                checkpoint.segments_started,
+                checkpoint.segments_completed,
+                checkpoint.consecutive_failures,
+                last_verification.clone(),
+                claim_generation,
+            )? {
+                return Ok(stopped);
+            }
+            if cancel.is_cancelled() {
+                return self.finish_cancellation(
+                    owner,
+                    goal_id,
+                    &mut checkpoint,
+                    last_verification,
+                    cancellation,
+                );
+            }
             if verification.all_satisfied {
                 checkpoint.consecutive_failures = 0;
                 checkpoint.status = PursuitCheckpointStatus::Achieved;
@@ -398,7 +577,7 @@ where
                     last_verification,
                 );
             }
-            if manual_pause_required(&verification) {
+            if manual_pause {
                 return self.pause(
                     owner,
                     goal_id,
@@ -407,26 +586,16 @@ where
                     last_verification,
                 );
             }
-
-            let verifier_failed = verification
-                .results
-                .iter()
-                .any(|result| result.status == CriterionStatus::Error);
-            if verifier_failed {
-                // Verifier and runtime failures are separate failure events. A
-                // round where both fail deliberately consumes two slots, which
-                // preserves the established pursuit contract.
-                checkpoint.consecutive_failures = checkpoint.consecutive_failures.saturating_add(1);
-                if checkpoint.consecutive_failures >= self.config.max_failures {
-                    return self.pause(
-                        owner,
-                        goal_id,
-                        &mut checkpoint,
-                        "pursuit max failures reached",
-                        last_verification,
-                    );
-                }
+            if checkpoint.consecutive_failures >= self.config.max_failures {
+                return self.pause(
+                    owner,
+                    goal_id,
+                    &mut checkpoint,
+                    "pursuit max failures reached",
+                    last_verification,
+                );
             }
+
             if checkpoint.segments_started >= self.config.max_segments {
                 return self.pause(
                     owner,
@@ -461,7 +630,32 @@ where
                 runtime: self.config.runtime.clone(),
                 verification,
             };
+            if cancel.is_cancelled() {
+                return self.finish_cancellation(
+                    owner,
+                    goal_id,
+                    &mut checkpoint,
+                    last_verification,
+                    cancellation,
+                );
+            }
+            if let Some(stopped) = self.stopped_if_drifted(
+                owner,
+                goal_id,
+                checkpoint.segments_started,
+                checkpoint.segments_completed,
+                checkpoint.consecutive_failures,
+                last_verification.clone(),
+                claim_generation,
+            )? {
+                return Ok(stopped);
+            }
             checkpoint.segments_started = segment_index;
+            // Dispatch is an external side effect. Reserve its failure slot in
+            // the durable pre-dispatch checkpoint, then release it only after a
+            // successful result is durably observed.
+            let failures_before_segment = checkpoint.consecutive_failures;
+            checkpoint.consecutive_failures = checkpoint.consecutive_failures.saturating_add(1);
             self.record_checkpoint(
                 owner,
                 goal_id,
@@ -469,14 +663,18 @@ where
                 "pursuit.segment.started",
                 &format!("segment {segment_index} started"),
             )?;
-            let result =
-                match tokio::time::timeout(timeout, self.runtime.run_segment(request)).await {
-                    Ok(result) => result,
-                    Err(_) => PursuitSegmentResult {
-                        status: PursuitSegmentStatus::Timeout,
-                        run_id: None,
-                    },
-                };
+            let result = match tokio::time::timeout(
+                timeout,
+                self.runtime.run_segment(request, cancel.child_token()),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => PursuitSegmentResult {
+                    status: PursuitSegmentStatus::Timeout,
+                    run_id: None,
+                },
+            };
 
             if let Some(stopped) = self.stopped_if_drifted(
                 owner,
@@ -485,8 +683,20 @@ where
                 checkpoint.segments_completed,
                 checkpoint.consecutive_failures,
                 last_verification.clone(),
+                claim_generation,
             )? {
                 return Ok(stopped);
+            }
+            if result.status == PursuitSegmentStatus::Cancelled
+                && matches!(cancellation, CancellationDisposition::PreserveRunning)
+            {
+                return self.finish_cancellation(
+                    owner,
+                    goal_id,
+                    &mut checkpoint,
+                    last_verification,
+                    cancellation,
+                );
             }
             checkpoint.segments_completed = checkpoint.segments_completed.saturating_add(1);
             let valid_run_id = result.run_id.as_deref().filter(|value| {
@@ -501,31 +711,29 @@ where
                 valid_run_id.map_or_else(String::new, |value| format!("; run {value}"));
             let (stage, detail) = match result.status {
                 PursuitSegmentStatus::Success => {
-                    if !verifier_failed {
-                        checkpoint.consecutive_failures = 0;
-                    }
+                    checkpoint.consecutive_failures = if verifier_failed {
+                        failures_before_segment
+                    } else {
+                        0
+                    };
                     (
                         "pursuit.segment.completed",
                         format!("segment {segment_index} completed{run_suffix}"),
                     )
                 }
-                other => {
-                    checkpoint.consecutive_failures =
-                        checkpoint.consecutive_failures.saturating_add(1);
-                    (
-                        "pursuit.segment.failed",
-                        format!("segment {segment_index} failed: {other:?}{run_suffix}"),
-                    )
-                }
+                other => (
+                    "pursuit.segment.failed",
+                    format!("segment {segment_index} failed: {other:?}{run_suffix}"),
+                ),
             };
             self.record_checkpoint(owner, goal_id, &mut checkpoint, stage, &detail)?;
             if result.status == PursuitSegmentStatus::Cancelled {
-                return self.pause(
+                return self.finish_cancellation(
                     owner,
                     goal_id,
                     &mut checkpoint,
-                    "pursuit cancelled",
                     last_verification,
+                    cancellation,
                 );
             }
             if result.status != PursuitSegmentStatus::Success
@@ -556,12 +764,13 @@ where
             .ok_or_else(|| GoalStoreError::NotFound {
                 id: goal_id.to_string(),
             })?;
+        if goal.claim_generation != checkpoint.claim_generation {
+            return Err(GoalStoreError::CheckpointConflict {
+                id: goal_id.to_string(),
+            });
+        }
         checkpoint.goal_revision = goal.revision;
-        checkpoint.claim_generation = goal.claim_generation;
-        checkpoint.worker_id.clone_from(&self.config.worker_id);
-        checkpoint.runtime.clone_from(&self.config.runtime);
-        checkpoint.workdir.clone_from(&self.config.workdir);
-        checkpoint.updated_at = Utc::now();
+        checkpoint.updated_at = std::cmp::max(Utc::now(), checkpoint.updated_at);
         let (recorded, _) = self.store.record_pursuit_checkpoint(
             owner,
             goal_id,
@@ -612,6 +821,7 @@ where
         segments_completed: u16,
         consecutive_failures: u16,
         verification: Option<AcceptanceVerification>,
+        claim_generation: u64,
     ) -> Result<Option<PursuitOutcome>> {
         let latest = self
             .store
@@ -625,6 +835,7 @@ where
             segments_completed,
             consecutive_failures,
             verification,
+            claim_generation,
         ))
     }
 
@@ -635,6 +846,7 @@ where
         segments_completed: u16,
         consecutive_failures: u16,
         verification: Option<AcceptanceVerification>,
+        claim_generation: u64,
     ) -> Option<PursuitOutcome> {
         if latest.status != GoalStatus::InProgress {
             return Some(outcome(
@@ -650,6 +862,7 @@ where
         }
         if !latest.lease_active(Utc::now())
             || latest.claimed_by.as_deref() != Some(self.config.worker_id.as_str())
+            || latest.claim_generation != claim_generation
         {
             return Some(outcome(
                 latest,
@@ -663,32 +876,6 @@ where
             ));
         }
         None
-    }
-
-    fn persist_satisfied(
-        &self,
-        owner: &str,
-        goal: &GoalRecord,
-        verification: &AcceptanceVerification,
-        at: chrono::DateTime<Utc>,
-    ) -> Result<()> {
-        for result in &verification.results {
-            if result.status == CriterionStatus::Satisfied
-                && goal
-                    .acceptance_criteria
-                    .get(result.criterion_index)
-                    .is_some_and(|criterion| criterion.satisfied_at.is_none())
-            {
-                self.store.satisfy_criterion(
-                    owner,
-                    &goal.id,
-                    Some(&self.config.worker_id),
-                    result.criterion_index,
-                    at,
-                )?;
-            }
-        }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -719,6 +906,45 @@ where
             checkpoint.consecutive_failures,
             &summary,
             reason,
+            verification,
+        ))
+    }
+
+    fn finish_cancellation(
+        &self,
+        owner: &str,
+        goal_id: &str,
+        checkpoint: &mut GoalPursuitCheckpoint,
+        verification: Option<AcceptanceVerification>,
+        disposition: CancellationDisposition,
+    ) -> Result<PursuitOutcome> {
+        if matches!(disposition, CancellationDisposition::Pause) {
+            return self.pause(
+                owner,
+                goal_id,
+                checkpoint,
+                "pursuit cancelled",
+                verification,
+            );
+        }
+        let running = self
+            .store
+            .get(owner, goal_id)?
+            .ok_or_else(|| GoalStoreError::NotFound {
+                id: goal_id.to_string(),
+            })?;
+        let summary = verification.as_ref().map_or_else(
+            || "pursuit cancelled".to_string(),
+            |value| value.summary.clone(),
+        );
+        Ok(outcome(
+            &running,
+            PursuitStatus::Stopped,
+            checkpoint.segments_started,
+            checkpoint.segments_completed,
+            checkpoint.consecutive_failures,
+            &summary,
+            "pursuit cancelled",
             verification,
         ))
     }

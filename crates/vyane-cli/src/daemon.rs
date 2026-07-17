@@ -234,14 +234,6 @@ pub(crate) async fn run_daemon(
         .map(|config| crate::daemon_goal::DaemonGoalSupervisor::open(Arc::clone(&service), config))
         .transpose()
         .context("open resident goal supervisor")?;
-    let goal_task = goal_supervisor.map(|supervisor| {
-        let cancel = goal_cancel.clone();
-        tokio::spawn(async move {
-            if let Err(error) = supervisor.run(cancel).await {
-                tracing::error!(error = %error, "resident goal supervisor failed");
-            }
-        })
-    });
     let app = daemon_router(
         &descriptor.instance_id,
         &token,
@@ -252,7 +244,16 @@ pub(crate) async fn run_daemon(
     let shutdown = PreparedShutdownSignal::install()
         .context("install daemon shutdown handlers before control publication")?;
 
-    publish_control(&paths, &token, &descriptor)?;
+    let goal_task = publish_control_then_start_goal(&paths, &token, &descriptor, || {
+        goal_supervisor.map(|supervisor| {
+            let cancel = goal_cancel.clone();
+            tokio::spawn(async move {
+                if let Err(error) = supervisor.run(cancel).await {
+                    tracing::error!(error = %error, "resident goal supervisor failed");
+                }
+            })
+        })
+    })?;
 
     eprintln!("vyane daemon listening on {addr}");
     let (signal_seen_tx, signal_seen_rx) = tokio::sync::oneshot::channel();
@@ -983,6 +984,16 @@ fn publish_control(paths: &DaemonPaths, token: &str, descriptor: &DaemonDescript
     Ok(())
 }
 
+fn publish_control_then_start_goal<T>(
+    paths: &DaemonPaths,
+    token: &str,
+    descriptor: &DaemonDescriptor,
+    start_goal: impl FnOnce() -> T,
+) -> Result<T> {
+    publish_control(paths, token, descriptor)?;
+    Ok(start_goal())
+}
+
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(anyhow::Error::new)
@@ -1379,6 +1390,53 @@ mod tests {
         assert!(read_live_control(&paths).unwrap().is_none());
         assert!(!paths.descriptor().exists());
         assert!(!paths.token().exists());
+    }
+
+    #[test]
+    fn failed_control_publication_does_not_start_goal_work() {
+        use vyane_goal::{GoalStatus, GoalStore as _, NewGoal, SqliteGoalStore};
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
+        let mut goal = NewGoal::new("publication-gate", Utc::now());
+        goal.id = Some("publication-gate".into());
+        store.create(LOCAL_TASK_OWNER, goal).unwrap();
+
+        let blocked_control_root = directory.path().join("not-a-directory");
+        std::fs::write(&blocked_control_root, b"blocked").unwrap();
+        let paths = DaemonPaths {
+            data_dir: blocked_control_root,
+        };
+        let descriptor = DaemonDescriptor {
+            schema: DAEMON_DESCRIPTOR_SCHEMA,
+            instance_id: INSTANCE_A.into(),
+            pid: 101,
+            pgid: 101,
+            started_at: Utc::now(),
+            birth_fingerprint: Some("birth-101".into()),
+            addr: "127.0.0.1:9722".parse().unwrap(),
+        };
+
+        let result = publish_control_then_start_goal(&paths, &"a".repeat(64), &descriptor, || {
+            store
+                .claim(
+                    LOCAL_TASK_OWNER,
+                    "publication-gate",
+                    "must-not-run",
+                    60,
+                    Utc::now(),
+                )
+                .unwrap()
+        });
+
+        assert!(result.is_err());
+        let untouched = store
+            .get(LOCAL_TASK_OWNER, "publication-gate")
+            .unwrap()
+            .unwrap();
+        assert_eq!(untouched.status, GoalStatus::Queued);
+        assert_eq!(untouched.claim_generation, 0);
+        assert!(untouched.claimed_by.is_none());
     }
 
     #[cfg(unix)]
