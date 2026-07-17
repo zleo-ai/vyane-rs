@@ -1,16 +1,32 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    AcceptanceVerification, GoalContinuitySignal, GoalContinuitySignalResult, GoalContinuityState,
-    GoalEvent, GoalPursuitCheckpoint, GoalQuery, GoalQuotaEvent, GoalRecord,
-    GoalVerificationArtifact, NewGoal, Result, TakeoverApproval, TakeoverApprovalRequest,
-    TakeoverDecision, TakeoverFinish,
+    AcceptanceVerification, GoalContinuityProjectionSnapshot, GoalContinuitySignal,
+    GoalContinuitySignalResult, GoalContinuityState, GoalEvent, GoalPursuitCheckpoint, GoalQuery,
+    GoalQuotaEvent, GoalRecord, GoalVerificationArtifact, NewGoal, Result, TakeoverApproval,
+    TakeoverApprovalRequest, TakeoverDecision, TakeoverFinish,
 };
 
 pub trait GoalStore: Send + Sync {
     fn create(&self, owner: &str, goal: NewGoal) -> Result<GoalRecord>;
 
     fn get(&self, owner: &str, id: &str) -> Result<Option<GoalRecord>>;
+
+    /// Read one goal and all of its continuity approvals for projection.
+    ///
+    /// The source-compatible default fails closed because composing `get` and
+    /// `list_takeover_approvals` would permit a torn concurrent read. Stores
+    /// that expose projection must override this with one storage-native read
+    /// transaction.
+    fn continuity_projection_snapshot(
+        &self,
+        _owner: &str,
+        _id: &str,
+    ) -> Result<Option<GoalContinuityProjectionSnapshot>> {
+        Err(crate::GoalStoreError::InvalidInput(
+            "goal store does not provide an atomic continuity projection snapshot".into(),
+        ))
+    }
 
     fn list(&self, owner: &str, query: &GoalQuery) -> Result<Vec<GoalRecord>>;
 

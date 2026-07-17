@@ -100,6 +100,8 @@ pub enum GoalCommand {
     Verify(GoalVerifyArgs),
     /// Repeatedly verify and dispatch fresh bounded work segments until achieved or paused.
     Pursue(GoalPursueArgs),
+    /// Project the current continuity next action without mutating or dispatching.
+    ContinuityNext(GoalIdArgs),
     /// Queue one approval bound to the current ready takeover or review step; never dispatches.
     ContinuityQueue(GoalContinuityQueueArgs),
     /// Explicitly approve or reject one pending continuity approval.

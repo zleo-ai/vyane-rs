@@ -9,12 +9,13 @@ use serde::Serialize;
 use vyane_core::{CancellationToken, RunStatus, Sandbox};
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus,
-    GoalContinuityReviewCheck, GoalContinuitySignal, GoalContinuitySignalKind,
-    GoalContinuitySignalResult, GoalEvent, GoalPursuer, GoalPursuitCheckpoint, GoalQuery,
-    GoalRecord, GoalStatus, GoalStore, GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus,
-    PursuitConfig, PursuitOutcome, PursuitStatus, SqliteGoalStore, TakeoverApproval,
-    TakeoverApprovalRequest, TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision,
-    TakeoverFinish, TakeoverRunStatus, TakeoverSandbox,
+    GoalContinuityNextAction, GoalContinuityReviewCheck, GoalContinuitySignal,
+    GoalContinuitySignalKind, GoalContinuitySignalResult, GoalEvent, GoalPursuer,
+    GoalPursuitCheckpoint, GoalQuery, GoalRecord, GoalStatus, GoalStore, GoalVerificationArtifact,
+    NewGoal, PursuitCheckpointStatus, PursuitConfig, PursuitOutcome, PursuitStatus,
+    SqliteGoalStore, TakeoverApproval, TakeoverApprovalRequest, TakeoverApprovalStatus,
+    TakeoverBoundTarget, TakeoverDecision, TakeoverFinish, TakeoverRunStatus, TakeoverSandbox,
+    project_continuity_next_action,
 };
 use vyane_service::{DispatchParams, VyaneService};
 
@@ -134,6 +135,13 @@ struct ContinuitySignalOutput {
 }
 
 #[derive(Debug, Serialize)]
+struct ContinuityNextOutput {
+    status: &'static str,
+    next_action: GoalContinuityNextAction,
+    db: String,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorOutput<'a> {
     status: &'static str,
     error: &'a str,
@@ -154,6 +162,7 @@ pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<E
         GoalCommand::Satisfy(args) => satisfy(args),
         GoalCommand::Verify(args) => verify(args),
         GoalCommand::Pursue(args) => pursue(config_path, args).await,
+        GoalCommand::ContinuityNext(args) => continuity_next(args),
         GoalCommand::ContinuityQueue(args) => continuity_queue(args),
         GoalCommand::ContinuityDecide(args) => continuity_decide(args),
         GoalCommand::ContinuityExecute(args) => continuity_execute(config_path, args).await,
@@ -182,6 +191,31 @@ pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<E
             Ok(ExitCode::from(2))
         }
     }
+}
+
+fn continuity_next(args: GoalIdArgs) -> Result<ExitCode> {
+    let (store, db) = open_store(&args.common)?;
+    let snapshot = store
+        .continuity_projection_snapshot(&args.common.owner, &args.id)
+        .context("read continuity projection snapshot")?
+        .ok_or_else(|| anyhow!("goal `{}` was not found", args.id))?;
+    let next_action = project_continuity_next_action(&snapshot.goal, &snapshot.approvals)
+        .context("project continuity next action")?;
+    if args.common.json {
+        print_json(&ContinuityNextOutput {
+            status: "success",
+            next_action,
+            db: path_text(&db),
+        })?;
+    } else {
+        println!(
+            "{}\t{:?}\t{}",
+            terminal_safe(&next_action.goal_id),
+            next_action.action,
+            terminal_safe(&next_action.reason)
+        );
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn continuity_signal(args: GoalContinuitySignalArgs) -> Result<ExitCode> {
@@ -1246,6 +1280,7 @@ fn common(command: &GoalCommand) -> &GoalCommonArgs {
         GoalCommand::Satisfy(args) => &args.common,
         GoalCommand::Verify(args) => &args.common,
         GoalCommand::Pursue(args) => &args.common,
+        GoalCommand::ContinuityNext(args) => &args.common,
         GoalCommand::ContinuityQueue(args) => &args.common,
         GoalCommand::ContinuityDecide(args) => &args.common,
         GoalCommand::ContinuityExecute(args) => &args.common,

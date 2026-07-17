@@ -575,6 +575,27 @@ impl GoalStore for SqliteGoalStore {
         get_in_connection(&self.connection()?, owner, id)
     }
 
+    fn continuity_projection_snapshot(
+        &self,
+        owner: &str,
+        id: &str,
+    ) -> Result<Option<crate::GoalContinuityProjectionSnapshot>> {
+        validate_owner(owner)?;
+        validate_goal_id(id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let Some(goal) = get_in_transaction(&transaction, owner, id)? else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let approvals = list_takeover_approvals_in_connection(&transaction, owner, Some(id))?;
+        transaction.commit()?;
+        Ok(Some(crate::GoalContinuityProjectionSnapshot {
+            goal,
+            approvals,
+        }))
+    }
+
     fn list(&self, owner: &str, query: &GoalQuery) -> Result<Vec<GoalRecord>> {
         validate_owner(owner)?;
         query.validate()?;
@@ -1810,25 +1831,32 @@ impl GoalStore for SqliteGoalStore {
         if let Some(goal_id) = goal_id {
             validate_goal_id(goal_id)?;
         }
-        let connection = self.connection()?;
-        let sql = format!("SELECT {TAKEOVER_COLUMNS} FROM goal_takeover_approvals");
-        let mut statement = if let Some(goal_id) = goal_id {
-            let mut s = connection.prepare(&format!(
-                "{sql} WHERE owner = ?1 AND goal_id = ?2 ORDER BY created_at_ms ASC, approval_id ASC"
-            ))?;
-            let rows = s.query_map(params![owner, goal_id], row_to_takeover_approval)?;
-            return rows
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(GoalStoreError::from);
-        } else {
-            connection.prepare(&format!(
-                "{sql} WHERE owner = ?1 ORDER BY created_at_ms ASC, approval_id ASC"
-            ))?
-        };
-        let rows = statement.query_map(params![owner], row_to_takeover_approval)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(GoalStoreError::from)
+        list_takeover_approvals_in_connection(&self.connection()?, owner, goal_id)
     }
+}
+
+fn list_takeover_approvals_in_connection(
+    connection: &Connection,
+    owner: &str,
+    goal_id: Option<&str>,
+) -> Result<Vec<TakeoverApproval>> {
+    let sql = format!("SELECT {TAKEOVER_COLUMNS} FROM goal_takeover_approvals");
+    let mut statement = if let Some(goal_id) = goal_id {
+        let mut statement = connection.prepare(&format!(
+            "{sql} WHERE owner = ?1 AND goal_id = ?2 ORDER BY created_at_ms ASC, approval_id ASC"
+        ))?;
+        let rows = statement.query_map(params![owner, goal_id], row_to_takeover_approval)?;
+        return rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(GoalStoreError::from);
+    } else {
+        connection.prepare(&format!(
+            "{sql} WHERE owner = ?1 ORDER BY created_at_ms ASC, approval_id ASC"
+        ))?
+    };
+    let rows = statement.query_map(params![owner], row_to_takeover_approval)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(GoalStoreError::from)
 }
 
 fn ensure_transition(

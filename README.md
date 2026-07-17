@@ -102,7 +102,7 @@ reference implementation.
 | durable, secret-free task metadata | `vyane-task` | [x] schema v2 keys snapshots, events and CAS by `(owner,id)` with transactional v1 migration; built-in frontends still select explicit `local` |
 | durable owner-scoped AgentRun queue, worker topology and recovery truth | `vyane-agent` | [~] exact leases/deadlines, active permits, bounded tree cancel, body-free completion receipts/outbox, and resident execution/recovery/publication are production-assembled for a narrow Linux `Process` path with an authenticated loopback submit/status/output/cancel API. `Remote`, native production execution, sessions/resume, distinct principals, live pause/resume, and automatic replay remain absent |
 | owner-scoped transactional message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO, delayed/idempotent delivery, fenced leases, TTL, ack/nack, body-free outbox, external-receipt reconciliation, hidden staged completion publication, bounded mailbox pages, and exact mailbox claim exist |
-| owner-scoped goal lifecycle and progress truth | `vyane-goal` | [~] one SQLite transaction updates the current snapshot and appends an immutable event; WP-68 through WP-75 add bounded verification/evidence, pursuit/checkpoint/daemon composition and explicit approval-gated continuity through reviewed takeover handback. WP-76 adds exact typed quota-reset ingestion whose dependency release is arrival-order independent. WP-77 extends the same durable decision and one-shot dispatch boundary to a ready primary continuation. WP-78 adds observation-identified and sequenced review-check pass/fail evidence plus an approval-gated repair handback; stale replay cannot reopen the gate, repeated failures reopen repair, and resume recursively binds the latest repair/review/takeover evidence. Automatic queueing, check polling, runtime-native resume and an authenticated goal service remain future layers |
+| owner-scoped goal lifecycle and progress truth | `vyane-goal` | [~] one SQLite transaction updates the current snapshot and appends an immutable event; WP-68 through WP-75 add bounded verification/evidence, pursuit/checkpoint/daemon composition and explicit approval-gated continuity through reviewed takeover handback. WP-76 adds exact typed quota-reset ingestion whose dependency release is arrival-order independent. WP-77 extends the same durable decision and one-shot dispatch boundary to a ready primary continuation. WP-78 adds observation-identified and sequenced review-check pass/fail evidence plus an approval-gated repair handback; stale replay cannot reopen the gate, repeated failures reopen repair, and resume recursively binds the latest repair/review/takeover evidence. WP-79 adds a read-only, revision-bound operator next-action projection over the current goal and approval evidence. Automatic queueing, check polling, runtime-native resume and an authenticated goal service remain future layers |
 | bounded platform-neutral upstream quota snapshots | `vyane-quota` | [~] closed card/window/balance and error schemas, validated connector identity, stable sorted snapshots, bounded concurrency, whole-operation timeout, failure isolation, redirect-closed HTTP and a body cap; no concrete provider connector, credential loader, durable history, polling daemon, CLI snapshot surface or automatic action |
 | bounded replay-safe delivery broker + body-free EventLog projectors | `vyane-broker` | [~] fake-adapter contracts, message/AgentRun lifecycle projection with stable source event IDs, and the explicit non-`Clone` `ResidentBrokerSupervisor` are assembled into the resident daemon with an intentionally empty delivery lane set; worker/message glue and remote A2A/Channels adapters remain absent |
 | declarative workflow engine (DAG + journal/resume/replay) | `vyane-workflow` | [x] exact-plan replay creates a new run and reuses a journal-recorded all-success prefix |
@@ -416,6 +416,7 @@ vyane goal progress <goal-id> --stage implementation --detail "tests added" --js
 vyane goal verify <goal-id> --workdir . --json
 vyane goal claim <goal-id> --worker pursuer --json
 vyane goal pursue <goal-id> --worker pursuer --target builder --workdir . --sandbox write --json
+vyane goal continuity-next <goal-id> --json
 vyane goal done <goal-id> --summary "all checks passed" --json
 ```
 
@@ -456,6 +457,13 @@ The production CLI currently accepts only the `local` single-user owner so goal
 and dispatch ledger authority cannot silently diverge.
 See [WP-70](docs/plan/WP-70.md), [WP-71](docs/plan/WP-71.md),
 [WP-72](docs/plan/WP-72.md), and [WP-73](docs/plan/WP-73.md).
+
+`goal continuity-next` is a read-only operator projection over the exact current
+goal revision, quota boundary, handoff steps, and durable approval evidence. It
+returns one closed action such as queue, decide, execute, record a signal, wait,
+resolve a blocked execution, or continuity complete. It never performs that
+action and never invents required workdir, decision, or signal evidence. See
+[WP-79](docs/plan/WP-79.md).
 
 ### REST API
 
