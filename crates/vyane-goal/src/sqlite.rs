@@ -1152,6 +1152,24 @@ impl GoalStore for SqliteGoalStore {
             });
         }
         let persisted = next.clone();
+        let signal_detail = match &persisted_signal.review_check {
+            Some(review) => format!(
+                "{} recorded for {}#{} observation {}",
+                match persisted_signal.kind {
+                    crate::GoalContinuitySignalKind::ReviewChecksPassed => {
+                        "review checks passed"
+                    }
+                    crate::GoalContinuitySignalKind::ReviewChecksFailed => {
+                        "review checks failed"
+                    }
+                    crate::GoalContinuitySignalKind::QuotaReset => unreachable!(),
+                },
+                review.repository,
+                review.pull_request,
+                review.observation_id
+            ),
+            None => "quota reset signal recorded".into(),
+        };
         let (after, _) = mutate_in_transaction(
             &transaction,
             &before,
@@ -1160,10 +1178,7 @@ impl GoalStore for SqliteGoalStore {
             at,
             move |_before, after, _effective_at| {
                 after.continuity_state = Some(persisted);
-                Ok((
-                    Some("continuity_signal".into()),
-                    Some("quota reset signal recorded".into()),
-                ))
+                Ok((Some("continuity_signal".into()), Some(signal_detail)))
             },
         )?;
         transaction.commit()?;
@@ -1718,10 +1733,26 @@ impl GoalStore for SqliteGoalStore {
                         id: approval_id.to_string(),
                     });
                 }
+                let stale_repair = approval.step_id == "repair_failed_review"
+                    && next_step_status == GoalContinuityStepStatus::Done
+                    && state.ready_signals.iter().rev().find(|signal| {
+                        signal.kind == crate::GoalContinuitySignalKind::ReviewChecksFailed
+                    }) != approval
+                        .plan_snapshot
+                        .ready_signals
+                        .iter()
+                        .rev()
+                        .find(|signal| {
+                            signal.kind == crate::GoalContinuitySignalKind::ReviewChecksFailed
+                        });
                 after.continuity_state = Some(with_step_status(
                     state,
                     &approval.step_id,
-                    next_step_status,
+                    if stale_repair {
+                        GoalContinuityStepStatus::Ready
+                    } else {
+                        next_step_status
+                    },
                 )?);
                 Ok((Some("takeover.finish".into()), Some(finish.detail.clone())))
             },
@@ -2459,6 +2490,15 @@ fn validate_upstream_continuity_evidence(
         })?;
     let expected_predecessor = match request.step_id.as_str() {
         "review_takeover" => ("takeover", "start_takeover"),
+        "repair_failed_review" => ("review_takeover", "review_takeover_work"),
+        "resume_primary"
+            if request.plan_snapshot.wait_for_review_checks_before_resume
+                && request.plan_snapshot.ready_signals.iter().any(|signal| {
+                    signal.kind == crate::GoalContinuitySignalKind::ReviewChecksFailed
+                }) =>
+        {
+            ("repair_failed_review", "repair_review_failure")
+        }
         "resume_primary" if request.plan_snapshot.require_review_before_resume => {
             ("review_takeover", "review_takeover_work")
         }
@@ -2477,17 +2517,50 @@ fn validate_upstream_continuity_evidence(
         || upstream.run_id != request.upstream_run_id
         || request.upstream_run_status != Some(TakeoverRunStatus::Success)
     {
-        let message = if request.step_id == "review_takeover" {
-            "review approval is not bound to the exact successful takeover run"
-        } else {
-            "primary resume approval is not bound to the exact successful review run"
+        let message = match request.step_id.as_str() {
+            "review_takeover" => {
+                "review approval is not bound to the exact successful takeover run"
+            }
+            "repair_failed_review" => {
+                "review repair approval is not bound to the exact successful review run"
+            }
+            "resume_primary" if expected_predecessor.0 == "repair_failed_review" => {
+                "primary resume approval is not bound to the exact successful repair run"
+            }
+            "resume_primary" => {
+                "primary resume approval is not bound to the exact successful review run"
+            }
+            _ => "continuity approval is not bound to its exact successful predecessor run",
         };
         return Err(GoalStoreError::InvalidInput(message.into()));
     }
-    if request.step_id == "resume_primary" {
+    if expected_predecessor.0 == "repair_failed_review" {
+        let request_failure = request
+            .plan_snapshot
+            .ready_signals
+            .iter()
+            .rev()
+            .find(|signal| signal.kind == crate::GoalContinuitySignalKind::ReviewChecksFailed);
+        let repaired_failure = upstream
+            .plan_snapshot
+            .ready_signals
+            .iter()
+            .rev()
+            .find(|signal| signal.kind == crate::GoalContinuitySignalKind::ReviewChecksFailed);
+        if request_failure != repaired_failure {
+            return Err(GoalStoreError::InvalidInput(
+                "primary resume is not bound to the repair for the latest review-check failure"
+                    .into(),
+            ));
+        }
+    }
+    if matches!(
+        request.step_id.as_str(),
+        "resume_primary" | "repair_failed_review"
+    ) {
         validate_upstream_approval_record(transaction, owner, &upstream).map_err(|_| {
             GoalStoreError::InvalidInput(
-                "primary resume is not bound to an intact reviewed takeover chain".into(),
+                "continuity approval is not bound to an intact reviewed takeover chain".into(),
             )
         })?;
     }

@@ -208,15 +208,16 @@ impl TakeoverApprovalRequest {
             self.step_id == "review_takeover" && self.step_kind == "review_takeover_work";
         let is_resume =
             self.step_id == "resume_primary" && self.step_kind == "resume_primary_after_reset";
-        if !is_takeover && !is_review && !is_resume {
+        let is_repair =
+            self.step_id == "repair_failed_review" && self.step_kind == "repair_review_failure";
+        if !is_takeover && !is_review && !is_resume && !is_repair {
             return Err(GoalStoreError::InvalidInput(
-                "only takeover, review_takeover, or resume_primary can be approved in this layer"
-                    .into(),
+                "unsupported approval-required continuity step".into(),
             ));
         }
         let resume_requires_review = is_resume && self.plan_snapshot.require_review_before_resume;
         match (
-            is_review || resume_requires_review,
+            is_review || is_repair || resume_requires_review,
             self.upstream_approval_id.as_deref(),
             self.upstream_run_id.as_deref(),
             self.upstream_run_status,

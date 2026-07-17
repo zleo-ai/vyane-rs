@@ -41,6 +41,7 @@ fn policy(with_takeover: bool) -> GoalContinuityPolicy {
         reviewer: Some(reviewer),
         resume_primary_after_reset: true,
         require_review_before_resume: true,
+        wait_for_review_checks_before_resume: false,
     }
 }
 
@@ -216,6 +217,64 @@ fn policy_validation_rejects_missing_reviewer() {
         .create(OWNER, goal)
         .expect_err("missing reviewer must fail");
     assert!(error.to_string().contains("reviewer is required"));
+}
+
+#[test]
+fn review_check_gate_requires_review_and_builds_failure_repair_plan() {
+    let directory = TempDir::new().expect("temporary directory");
+    let store = store(&directory);
+    let mut invalid = policy(true);
+    invalid.require_review_before_resume = false;
+    invalid.wait_for_review_checks_before_resume = true;
+    let mut goal = NewGoal::new("invalid review checks", at(1_000));
+    goal.id = Some("invalid-review-checks".into());
+    goal.continuity_policy = Some(invalid);
+    let error = store
+        .create(OWNER, goal)
+        .expect_err("review checks without review must fail");
+    assert!(error.to_string().contains("review-check gating"));
+
+    let mut gated = policy(true);
+    gated.wait_for_review_checks_before_resume = true;
+    create_started(&store, "gated", gated);
+    let action = apply_quota_handoff_events(
+        &store,
+        OWNER,
+        &[quota(Some("gated"), "quota-gated")],
+        at(1_101),
+    )
+    .expect("apply gated event");
+    let state = &action[0].state;
+    assert!(state.wait_for_review_checks_before_resume);
+    assert_eq!(
+        state
+            .handoff_plan
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "takeover",
+            "review_takeover",
+            "wait_review_checks",
+            "repair_failed_review",
+            "resume_primary"
+        ]
+    );
+    let wait = &state.handoff_plan.steps[2];
+    assert!(!wait.requires_approval);
+    assert!(wait.target.is_none());
+    assert_eq!(wait.wait_for, ["review_takeover", "review_checks_passed"]);
+    assert_eq!(wait.failure_wait_for, ["review_checks_failed"]);
+    assert_eq!(wait.failure_step.as_deref(), Some("repair_failed_review"));
+    assert_eq!(
+        state.handoff_plan.steps[3].status,
+        GoalContinuityStepStatus::WaitingForReviewChecks
+    );
+    assert_eq!(
+        state.handoff_plan.steps[4].wait_for,
+        ["quota_reset", "wait_review_checks"]
+    );
 }
 
 #[test]
