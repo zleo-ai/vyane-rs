@@ -237,7 +237,9 @@ fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
         .find(|step| {
             matches!(
                 (step.id.as_str(), step.kind.as_str()),
-                ("takeover", "start_takeover") | ("review_takeover", "review_takeover_work")
+                ("takeover", "start_takeover")
+                    | ("review_takeover", "review_takeover_work")
+                    | ("resume_primary", "resume_primary_after_reset")
             ) && step.status == vyane_goal::GoalContinuityStepStatus::Ready
                 && step.requires_approval
         })
@@ -245,22 +247,39 @@ fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
     let target = step
         .target
         .as_ref()
-        .context("ready takeover step has no target")?;
+        .context("ready continuity step has no target")?;
     let workdir =
         std::fs::canonicalize(&args.workdir).context("canonicalize continuity workdir")?;
-    let upstream = if step.id == "review_takeover" {
+    let upstream_step = match step.id.as_str() {
+        "review_takeover" => Some(("takeover", "start_takeover")),
+        "resume_primary" if state.require_review_before_resume => {
+            Some(("review_takeover", "review_takeover_work"))
+        }
+        _ => None,
+    };
+    let upstream = if let Some((upstream_step_id, upstream_step_kind)) = upstream_step {
         store
             .list_takeover_approvals(&args.common.owner, Some(&goal.id))
-            .context("list takeover evidence for review")?
+            .context("list continuity predecessor evidence")?
             .into_iter()
             .find(|approval| {
                 approval.quota_event_id == state.quota_event_id
-                    && approval.step_id == "takeover"
+                    && approval.step_id == upstream_step_id
+                    && approval.step_kind == upstream_step_kind
                     && approval.status == TakeoverApprovalStatus::Done
                     && approval.run_status == Some(TakeoverRunStatus::Success)
                     && approval.run_id.is_some()
             })
-            .context("review step has no exact successful takeover run evidence")?
+            .with_context(|| {
+                if step.id == "review_takeover" {
+                    "review step has no exact successful takeover run evidence".to_owned()
+                } else {
+                    format!(
+                        "{} step has no exact successful {} run evidence",
+                        step.id, upstream_step_id
+                    )
+                }
+            })?
             .into()
     } else {
         None
@@ -339,7 +358,10 @@ async fn continuity_execute(
         );
     }
     let goal = require_goal(&store, &args.common.owner, &approval.goal_id)?;
-    let prompt = continuity_prompt(&goal, &approval);
+    let evidence = store
+        .list_takeover_approvals(&args.common.owner, Some(&goal.id))
+        .context("list continuity evidence for execution")?;
+    let prompt = continuity_prompt(&goal, &approval, &evidence);
     let selector = approval.target.selector();
     let service =
         Arc::new(VyaneService::load(config_path.as_deref()).context("load continuity runtime")?);
@@ -1010,10 +1032,33 @@ fn validate_resolved_continuity(
     Ok(())
 }
 
-fn continuity_prompt(goal: &GoalRecord, approval: &TakeoverApproval) -> String {
+fn continuity_prompt(
+    goal: &GoalRecord,
+    approval: &TakeoverApproval,
+    approvals: &[TakeoverApproval],
+) -> String {
+    let reason = match approval.step_id.as_str() {
+        "takeover" => "primary quota blocked",
+        "review_takeover" => "review the completed takeover before primary handback",
+        "resume_primary" if approval.plan_snapshot.require_review_before_resume => {
+            "review and quota-reset dependencies are satisfied"
+        }
+        "resume_primary" => "quota-reset dependency is satisfied",
+        _ => "approved continuity step is ready",
+    };
     let mut prompt = format!(
-        "Continue goal {}: {}\n\nContinuity step: {} ({})\nReason: primary quota blocked.\n",
-        goal.id, goal.title, approval.step_id, approval.step_kind
+        "Continue goal {}: {}\n\nContinuity step: {} ({})\nReason: {}.\n\
+         Approved target provider: {}\nApproved target protocol: {}\n\
+         Approved target harness: {}\nApproved target model: {}\n",
+        goal.id,
+        goal.title,
+        approval.step_id,
+        approval.step_kind,
+        reason,
+        approval.target.provider,
+        approval.target.protocol,
+        approval.target.harness,
+        approval.target.model,
     );
     if !goal.description.trim().is_empty() {
         prompt.push_str("\nGoal description:\n");
@@ -1034,6 +1079,76 @@ fn continuity_prompt(goal: &GoalRecord, approval: &TakeoverApproval) -> String {
         prompt.push_str(
             "Review the completed takeover before primary handback. Report required fixes as blockers.\n",
         );
+    }
+    if approval.step_id == "resume_primary" {
+        prompt.push_str("\nPrimary resume evidence:\n");
+        let mut takeover_id = None;
+        if let Some(review_id) = &approval.upstream_approval_id {
+            prompt.push_str(&format!("- review.approval_id: {review_id}\n"));
+            if let Some(review) = approvals
+                .iter()
+                .find(|candidate| &candidate.approval_id == review_id)
+            {
+                if let Some(run_id) = &review.run_id {
+                    prompt.push_str(&format!("- review.run_id: {run_id}\n"));
+                }
+                if let Some(status) = review.run_status {
+                    prompt.push_str(&format!("- review.run_status: {}\n", status.as_str()));
+                }
+                if let Some(bound_takeover_id) = &review.upstream_approval_id {
+                    takeover_id = Some(bound_takeover_id.as_str());
+                    prompt.push_str(&format!("- takeover.approval_id: {bound_takeover_id}\n"));
+                }
+            }
+        }
+        let takeover = takeover_id
+            .and_then(|id| {
+                approvals
+                    .iter()
+                    .find(|candidate| candidate.approval_id == id)
+            })
+            .or_else(|| {
+                approvals.iter().find(|candidate| {
+                    candidate.quota_event_id == approval.quota_event_id
+                        && candidate.step_id == "takeover"
+                        && candidate.step_kind == "start_takeover"
+                        && candidate.status == TakeoverApprovalStatus::Done
+                        && candidate.run_status == Some(TakeoverRunStatus::Success)
+                })
+            });
+        if let Some(takeover) = takeover {
+            if takeover_id.is_none() {
+                prompt.push_str(&format!(
+                    "- takeover.approval_id: {}\n",
+                    takeover.approval_id
+                ));
+            }
+            if let Some(run_id) = &takeover.run_id {
+                prompt.push_str(&format!("- takeover.run_id: {run_id}\n"));
+            }
+            if let Some(status) = takeover.run_status {
+                prompt.push_str(&format!("- takeover.run_status: {}\n", status.as_str()));
+            }
+        }
+        for signal in &approval.plan_snapshot.ready_signals {
+            prompt.push_str(&format!(
+                "- signal.{}: observed at {} by {}\n",
+                match signal.kind {
+                    vyane_goal::GoalContinuitySignalKind::QuotaReset => "quota_reset",
+                },
+                signal.observed_at.to_rfc3339(),
+                signal.source
+            ));
+        }
+        if approval.plan_snapshot.require_review_before_resume {
+            prompt.push_str(
+                "Resume the approved primary target only after verifying the reviewed takeover handback and quota-reset evidence.\n",
+            );
+        } else {
+            prompt.push_str(
+                "Resume the approved primary target only after verifying the takeover handback and quota-reset evidence.\n",
+            );
+        }
     }
     prompt.push_str(
         "\nWork only on this approved continuity step. Report changes, verification, and blockers before returning control.",

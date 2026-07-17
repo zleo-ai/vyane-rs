@@ -209,9 +209,9 @@ pub trait GoalStore: Send + Sync {
         at: DateTime<Utc>,
     ) -> Result<GoalRecord>;
 
-    /// Idempotently queue one takeover approval for the current ready
-    /// `start_takeover` step. The same bound snapshot returns the existing
-    /// approval. The queue never dispatches.
+    /// Idempotently queue one approval for the current supported, ready
+    /// continuity step. The same bound snapshot returns the existing approval.
+    /// The queue never dispatches.
     fn queue_takeover_approval(
         &self,
         owner: &str,
