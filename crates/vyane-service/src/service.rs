@@ -399,6 +399,17 @@ impl VyaneService {
         crate::GoalReadService::open(self.storage_paths(), context.owner())
     }
 
+    /// Open the opt-in goal observation mutation port with one previously
+    /// authenticated durable owner frozen into it. Source identity is bound
+    /// separately before any typed fact can be recorded.
+    pub fn goal_observation_ingress(
+        &self,
+        context: OwnerContext,
+    ) -> std::result::Result<crate::GoalObservationIngress, crate::GoalObservationIngressError>
+    {
+        crate::GoalObservationIngress::open(self.storage_paths(), context.owner())
+    }
+
     /// Assemble the owner-bound resident broker/projector loops for a daemon.
     /// Component construction stays behind the service boundary so a
     /// frontend cannot accidentally derive a second owner or storage scope.
