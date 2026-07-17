@@ -1133,6 +1133,8 @@ fn v2_database_migrates_current_goal_features_without_losing_goals() {
              DROP TRIGGER goal_verifications_immutable_delete;
              DROP INDEX goal_verifications_owner_goal_idx;
              DROP TABLE goal_verifications;
+             ALTER TABLE goals DROP COLUMN continuity_state_json;
+             ALTER TABLE goals DROP COLUMN continuity_policy_json;
              PRAGMA user_version = 2;",
         )
         .expect("restore v2 schema shape");
@@ -1167,6 +1169,77 @@ fn v2_database_migrates_current_goal_features_without_losing_goals() {
 }
 
 #[test]
+fn v5_database_migrates_continuity_without_losing_recovery_indexes() {
+    let (directory, store) = fixture();
+    let path = directory.path().join("goals.sqlite3");
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("v5-existing", "Existing", 2, at))
+        .expect("create");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open raw database");
+    connection
+        .execute_batch(
+            "ALTER TABLE goals DROP COLUMN continuity_state_json;
+             ALTER TABLE goals DROP COLUMN continuity_policy_json;
+             PRAGMA user_version = 5;",
+        )
+        .expect("restore v5 schema shape");
+    drop(connection);
+
+    let migrated = SqliteGoalStore::open(&path).expect("migrate v5 to current");
+    assert!(
+        migrated
+            .get(OWNER_A, "v5-existing")
+            .expect("get existing goal")
+            .is_some()
+    );
+    drop(migrated);
+
+    let connection = Connection::open(&path).expect("inspect migrated database");
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read schema version");
+    assert_eq!(version, 6);
+    for name in [
+        "goals_owner_worker_lease_idx",
+        "goals_owner_lease_idx",
+        "continuity_policy_json",
+        "continuity_state_json",
+    ] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1 \
+                 UNION ALL SELECT 1 FROM pragma_table_info('goals') WHERE name = ?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .expect("inspect migrated schema object");
+        assert!(exists, "missing migrated schema object {name}");
+    }
+}
+
+#[test]
+fn current_schema_without_continuity_column_is_rejected_at_open() {
+    let (directory, store) = fixture();
+    let path = directory.path().join("goals.sqlite3");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open raw database");
+    connection
+        .execute_batch("ALTER TABLE goals DROP COLUMN continuity_state_json;")
+        .expect("damage current schema");
+    drop(connection);
+
+    assert!(matches!(
+        SqliteGoalStore::open(&path),
+        Err(GoalStoreError::CorruptData(message))
+            if message.contains("continuity_state_json")
+    ));
+}
+
+#[test]
 fn store_reopens_and_rejects_newer_schema() {
     let (directory, store) = fixture();
     let path = directory.path().join("goals.sqlite3");
@@ -1188,7 +1261,7 @@ fn store_reopens_and_rejects_newer_schema() {
         SqliteGoalStore::open(&path),
         Err(GoalStoreError::UnsupportedSchema {
             found: 99,
-            supported: 5
+            supported: 6
         })
     ));
 }

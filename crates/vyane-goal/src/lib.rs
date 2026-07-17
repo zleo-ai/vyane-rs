@@ -5,6 +5,7 @@
 //! persisted as descriptors; executing them belongs to a later verifier layer.
 
 mod acceptance;
+mod continuity;
 mod error;
 mod model;
 mod pursuit;
@@ -13,6 +14,11 @@ mod store;
 
 pub use acceptance::{
     AcceptanceVerifier, MAX_OUTPUT_TAIL_BYTES, MAX_VERIFIER_TIMEOUT, criterion_key,
+};
+pub use continuity::{
+    GoalContinuityAction, GoalContinuityMode, GoalContinuityPlan, GoalContinuityPolicy,
+    GoalContinuityState, GoalContinuityStatus, GoalContinuityStep, GoalContinuityStepStatus,
+    GoalExecutionTarget, GoalQuotaEvent, apply_quota_handoff_events,
 };
 pub use error::{GoalStoreError, Result};
 pub use model::{

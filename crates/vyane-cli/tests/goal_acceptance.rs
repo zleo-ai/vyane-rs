@@ -273,6 +273,75 @@ fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
 }
 
 #[test]
+fn create_persists_typed_continuity_policy_without_starting_handoff() {
+    let directory = TempDir::new().unwrap();
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let policy = r#"{"mode":"quota_handoff","primary":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"primary"},"takeover":[{"provider":"backup","protocol":"anthropic_messages","harness":"claude-code","model":"fallback","role":"takeover"}],"reviewer":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"reviewer"},"resume_primary_after_reset":true,"require_review_before_resume":true}"#;
+
+    let created = json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--json",
+            "--id",
+            "continuity-policy",
+            "--title",
+            "Keep work visible",
+            "--continuity-policy-json",
+            policy,
+        ],
+        0,
+    );
+
+    assert_eq!(
+        created["goal"]["continuity_policy"]["primary"]["harness"],
+        "codex-cli"
+    );
+    assert_eq!(
+        created["goal"]["continuity_policy"]["takeover"][0]["provider"],
+        "backup"
+    );
+    assert!(created["goal"]["continuity_state"].is_null());
+    let fetched = json_output(
+        &["goal", "get", "--db", &db, "--json", "continuity-policy"],
+        0,
+    );
+    assert_eq!(
+        fetched["goal"]["continuity_policy"]["mode"],
+        "quota_handoff"
+    );
+    assert!(fetched["goal"]["continuity_state"].is_null());
+}
+
+#[test]
+fn malformed_continuity_policy_fails_before_goal_creation() {
+    let directory = TempDir::new().unwrap();
+    let db = db_text(&directory.path().join("goals.sqlite3"));
+    let output = vyane()
+        .args([
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--id",
+            "bad-continuity",
+            "--title",
+            "Reject malformed policy",
+            "--continuity-policy-json",
+            "{not-json}",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("parse continuity policy JSON"));
+
+    let missing = json_output(&["goal", "get", "--db", &db, "--json", "bad-continuity"], 2);
+    assert_eq!(missing["status"], "error");
+}
+
+#[test]
 fn done_requires_satisfied_criteria_or_an_explicit_waiver() {
     let directory = TempDir::new().unwrap();
     let db = db_text(&directory.path().join("goals.sqlite3"));
