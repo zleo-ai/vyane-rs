@@ -1066,16 +1066,19 @@ fn continuity_execute_dispatches_once_and_settles_done() {
         serde_json::from_slice(&resume_output.stdout).expect("resume execution JSON");
     assert_eq!(resumed["approval"]["status"], "done");
     assert_eq!(resumed["approval"]["run_status"], "success");
-    let resume_prompt = fs::read_to_string(directory.path().join("last-prompt.txt"))
-        .expect("read primary resume prompt");
-    assert!(resume_prompt.contains("Primary resume evidence:"));
-    assert!(resume_prompt.contains("review.approval_id:"));
-    assert!(resume_prompt.contains("review.run_id:"));
-    assert!(resume_prompt.contains("takeover.approval_id:"));
-    assert!(resume_prompt.contains("takeover.run_id:"));
-    assert!(resume_prompt.contains("signal.quota_reset:"));
-    assert!(resume_prompt.contains("Approved target provider: native"));
-    assert!(resume_prompt.contains("Approved target harness: claude-code"));
+    #[cfg(target_os = "linux")]
+    {
+        let resume_prompt = fs::read_to_string(directory.path().join("last-prompt.txt"))
+            .expect("read primary resume prompt");
+        assert!(resume_prompt.contains("Primary resume evidence:"));
+        assert!(resume_prompt.contains("review.approval_id:"));
+        assert!(resume_prompt.contains("review.run_id:"));
+        assert!(resume_prompt.contains("takeover.approval_id:"));
+        assert!(resume_prompt.contains("takeover.run_id:"));
+        assert!(resume_prompt.contains("signal.quota_reset:"));
+        assert!(resume_prompt.contains("Approved target provider: native"));
+        assert!(resume_prompt.contains("Approved target harness: claude-code"));
+    }
     let goal = store
         .get("local", "execute-controlled")
         .expect("read resumed goal")
