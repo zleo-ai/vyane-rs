@@ -207,6 +207,15 @@ async fn submit(data_dir: &Path, run_id: &str, timeout: u64) -> reqwest::Respons
 }
 
 async fn submit_native(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
+    submit_native_with_timeout(data_dir, run_id, workdir, 2).await
+}
+
+async fn submit_native_with_timeout(
+    data_dir: &Path,
+    run_id: &str,
+    workdir: &Path,
+    timeout_seconds: u64,
+) -> reqwest::Response {
     let (base, token) = control(data_dir);
     reqwest::Client::new()
         .post(format!("{base}/v1/agent-runs"))
@@ -218,7 +227,7 @@ async fn submit_native(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest
             "sandbox": "read_only",
             "workdir": workdir,
             "execution_backend": "native_in_process",
-            "timeout_seconds": 2
+            "timeout_seconds": timeout_seconds
         }))
         .send()
         .await
@@ -385,11 +394,26 @@ async fn native_agent_submit_uses_the_shared_resident_lane() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert_eq!(output["output"], "native answer");
+    let native_spool_root = data_dir.path().join("native-agent-inputs");
+    assert!(regular_files_below(&native_spool_root).is_empty());
+    let owner_spool = fs::read_dir(&native_spool_root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .find(|entry| entry.file_type().unwrap().is_dir())
+        .unwrap()
+        .path();
+    let spool_modified_before_retry = fs::metadata(&owner_spool).unwrap().modified().unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
     let retry = submit_native(data_dir.path(), run_id, &workdir).await;
     assert_eq!(retry.status(), reqwest::StatusCode::ACCEPTED);
     assert_eq!(retry.json::<Value>().await.unwrap()["state"], "succeeded");
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    assert!(regular_files_below(&data_dir.path().join("native-agent-inputs")).is_empty());
+    assert!(regular_files_below(&native_spool_root).is_empty());
+    assert_eq!(
+        fs::metadata(owner_spool).unwrap().modified().unwrap(),
+        spool_modified_before_retry,
+        "an exact terminal retry must not rematerialize private native input"
+    );
     assert!(daemon.stop().status.success());
 }
 
@@ -465,7 +489,7 @@ async fn native_agent_cancel_uses_the_exact_in_process_controller() {
 
     let run_id = "0197f524-7a00-7000-8000-000000000111";
     assert_eq!(
-        submit_native(data_dir.path(), run_id, &workdir)
+        submit_native_with_timeout(data_dir.path(), run_id, &workdir, 30)
             .await
             .status(),
         reqwest::StatusCode::ACCEPTED

@@ -91,9 +91,9 @@ fn request(store: &SqliteGoalStore, dir: &TempDir) -> TakeoverApprovalRequest {
 }
 
 #[test]
-fn schema_v6_contains_durable_takeover_approval_table() {
+fn schema_v7_contains_durable_takeover_approval_table() {
     let (dir, _store) = setup();
-    assert_eq!(SCHEMA_VERSION, 6);
+    assert_eq!(SCHEMA_VERSION, 7);
     let connection = Connection::open(dir.path().join("goals.sqlite3")).unwrap();
     let exists: bool = connection
         .query_row(
