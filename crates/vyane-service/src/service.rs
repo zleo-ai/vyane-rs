@@ -386,6 +386,19 @@ impl VyaneService {
         &self.storage_paths
     }
 
+    /// Open the opt-in goal read surface with one previously authenticated
+    /// durable owner frozen into it.
+    ///
+    /// Ordinary service construction deliberately does not open or migrate the
+    /// goal database. Protocol hosts must opt in after establishing their
+    /// owner authority.
+    pub fn goal_reader(
+        &self,
+        context: OwnerContext,
+    ) -> std::result::Result<crate::GoalReadService, crate::GoalReadError> {
+        crate::GoalReadService::open(self.storage_paths(), context.owner())
+    }
+
     /// Assemble the owner-bound resident broker/projector loops for a daemon.
     /// Component construction stays behind the service boundary so a
     /// frontend cannot accidentally derive a second owner or storage scope.
