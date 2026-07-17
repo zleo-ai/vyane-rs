@@ -36,6 +36,7 @@ mod config;
 mod diagnostics;
 mod factory;
 mod goal;
+mod goal_observation;
 mod inprocess_agent;
 mod message;
 mod native_authority;
@@ -85,6 +86,15 @@ pub use factory::{AssemblerFactory, authorized_native_client, direct_http_client
 pub use goal::{
     GOAL_NEXT_ACTION_VIEW_SCHEMA, GoalNextActionKind, GoalNextActionView, GoalNextReasonCode,
     GoalOperatorCommand, GoalReadError, GoalReadService, GoalSignalKind,
+};
+pub use goal_observation::{
+    GoalObservation, GoalObservationIngress, GoalObservationIngressError, GoalObservationKind,
+    GoalObservationReceipt, GoalObservationRunner, GoalObservationRunnerError,
+    GoalObservationSignalKind, GoalObservationSink, GoalObservationStatus, GoalObservationTarget,
+    GoalObservationWatchContext, GoalObservationWatchPolicy, GoalObservationWatchReport,
+    GoalObservationWatchStatus, GoalObservationWatcher, GoalObservationWatcherError,
+    GoalObservationWatcherErrorCode, MAX_GOAL_OBSERVATION_CONCURRENCY,
+    MAX_GOAL_OBSERVATION_WATCHERS, MAX_GOAL_OBSERVATIONS_PER_WATCHER,
 };
 pub use inprocess_agent::{
     InProcessAgentComponents, InProcessAgentEffect, InProcessAgentOperation,
