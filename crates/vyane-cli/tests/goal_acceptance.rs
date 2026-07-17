@@ -1087,7 +1087,7 @@ fn continuity_execute_dispatches_once_and_settles_done() {
             "--workdir",
             &workdir,
             "--sandbox",
-            pursuit_test_sandbox(),
+            PURSUIT_SANDBOX,
             "--timeout-seconds",
             "30",
         ],
