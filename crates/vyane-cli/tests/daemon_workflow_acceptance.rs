@@ -21,6 +21,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const VYANE_BIN: &str = env!("CARGO_BIN_EXE_vyane");
 const EXPLICIT_RUN_ID: &str = "0197f524-7a00-7000-8000-000000000001";
 const MCP_RUN_ID: &str = "0197f524-7a00-7000-8000-000000000002";
+const STATUS_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 fn vyane() -> Command {
     Command::new(VYANE_BIN)
@@ -142,12 +144,14 @@ fn submit_workflow(data_dir: &Path, workflow: &Path) -> Value {
     serde_json::from_slice(&output).expect("workflow submission JSON")
 }
 
-fn workflow_status(data_dir: &Path) -> Option<Value> {
-    let output = vyane()
+fn workflow_status(data_dir: &Path, timeout: Duration) -> Option<Value> {
+    let mut command = vyane();
+    let output = command
         .env("VYANE_DATA_DIR", data_dir)
         .args(["workflow", "status", EXPLICIT_RUN_ID, "--json"])
+        .timeout(timeout)
         .output()
-        .expect("run workflow status");
+        .ok()?;
     if !output.status.success() || output.stdout.is_empty() {
         return None;
     }
@@ -158,7 +162,12 @@ fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
     let deadline = Instant::now() + budget;
     let mut last_state = "not yet observable".to_string();
     loop {
-        if let Some(view) = workflow_status(data_dir) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "daemon workflow did not finish within {budget:?}; last state = {last_state}"
+        );
+        if let Some(view) = workflow_status(data_dir, remaining.min(STATUS_COMMAND_TIMEOUT)) {
             let state = view["task"]["state"].as_str().unwrap_or("unknown");
             if !matches!(state, "queued" | "running" | "cancelling") {
                 return view;
@@ -169,7 +178,9 @@ fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
             Instant::now() < deadline,
             "daemon workflow did not finish within {budget:?}; last state = {last_state}"
         );
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(
+            STATUS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
 }
 
