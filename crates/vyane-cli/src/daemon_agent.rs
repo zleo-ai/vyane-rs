@@ -18,9 +18,9 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
 use uuid::Uuid;
 use vyane_agent::{
-    AgentRunRecord, AgentStore, CancelOutcome, CancelRequest, ControllerKind, ExecutionBackend,
-    NewAgentRun, NewWorker, RunCompletionStatus, RunFailureCode, RunMode, RunState,
-    SqliteAgentStore,
+    AgentRunRecord, AgentStore, AgentStoreError, CancelOutcome, CancelRequest, ControllerKind,
+    ExecutionBackend, NewAgentRun, NewWorker, RunCompletionStatus, RunFailureCode, RunMode,
+    RunState, SqliteAgentStore,
 };
 use vyane_core::{CancellationToken, PinnedWorkdir, Sandbox};
 use vyane_service::{
@@ -477,6 +477,13 @@ impl DaemonAgentHost {
             },
         )
         .map_err(|_| AgentApiError::bad_request())?;
+        if let Some(existing) = self.find_record(run_id.clone()).await? {
+            return if exact_native_retry(&existing, &input) {
+                self.view(existing).await
+            } else {
+                Err(AgentApiError::conflict())
+            };
+        }
         let spool_create = self
             .native_spool
             .create(&input)
@@ -507,17 +514,10 @@ impl DaemonAgentHost {
                 .map_err(|_| AgentApiError::unavailable())?;
         match created {
             Ok((_, record)) => self.view(record).await,
-            Err(_) => {
-                let store = Arc::clone(&self.store);
-                let lookup = run_id.clone();
-                let existing =
-                    tokio::task::spawn_blocking(move || store.get_run(LOCAL_TASK_OWNER, &lookup))
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .flatten();
-                if let Some(existing) = existing
-                    .filter(|existing| exact_native_retry(existing, &input, &self.native_spool))
+            Err(create_error) => {
+                let existing = self.find_record(run_id.clone()).await?;
+                if let Some(existing) =
+                    existing.filter(|existing| exact_native_retry(existing, &input))
                 {
                     if existing.state.is_terminal() {
                         self.native_spool
@@ -529,7 +529,11 @@ impl DaemonAgentHost {
                     if spool_create == NativeAgentSpoolCreate::Created {
                         let _ = self.native_spool.remove_exact(&input);
                     }
-                    Err(AgentApiError::conflict())
+                    if matches!(create_error, AgentStoreError::AlreadyExists { .. }) {
+                        Err(AgentApiError::conflict())
+                    } else {
+                        Err(AgentApiError::unavailable())
+                    }
                 }
             }
         }
@@ -676,6 +680,14 @@ impl DaemonAgentHost {
             .map_err(|_| AgentApiError::unavailable())?
             .map_err(|_| AgentApiError::unavailable())?
             .ok_or_else(AgentApiError::not_found)
+    }
+
+    async fn find_record(&self, run_id: String) -> Result<Option<AgentRunRecord>, AgentApiError> {
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || store.get_run(LOCAL_TASK_OWNER, &run_id))
+            .await
+            .map_err(|_| AgentApiError::unavailable())?
+            .map_err(|_| AgentApiError::unavailable())
     }
 
     async fn view(&self, record: AgentRunRecord) -> Result<AgentRunView, AgentApiError> {
@@ -871,11 +883,7 @@ fn exact_retry(record: &AgentRunRecord, input: &AgentSpoolInput) -> bool {
         && record.max_resume_attempts == 0
 }
 
-fn exact_native_retry(
-    record: &AgentRunRecord,
-    input: &NativeAgentInput,
-    spool: &NativeAgentInputSpool,
-) -> bool {
+fn exact_native_retry(record: &AgentRunRecord, input: &NativeAgentInput) -> bool {
     record.execution_backend == ExecutionBackend::NativeInProcess
         && record.owner == input.owner
         && record.id == input.run_id
@@ -886,9 +894,6 @@ fn exact_native_retry(
         && record.policy_digest == input.policy_sha256
         && record.timeout_seconds == input.policy.timeout_seconds
         && record.max_resume_attempts == 0
-        && spool
-            .read(&input.run_id, &input.worker_id)
-            .is_ok_and(|stored| stored == *input)
 }
 
 const fn exact_retry_backend(backend: ExecutionBackend) -> bool {
