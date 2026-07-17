@@ -71,7 +71,7 @@ difference。运行 `python3 .github/scripts/parity-report.py --format markdown`
 | 不含敏感正文的持久化 task metadata | `vyane-task` | [x] schema v2 以 `(owner,id)` 隔离 snapshot/event/CAS，并事务迁移 v1；内置前端仍显式选择 `local` |
 | owner-scoped 持久 AgentRun queue、worker topology 与 recovery 真相 | `vyane-agent` | [~] exact lease/deadline、active permit、有界 tree cancel、无正文 completion receipt/outbox 及 resident execution/recovery/publication 已为一条窄 Linux `Process` 路径完成生产 assembly，并提供 authenticated loopback submit/status/output/cancel API。仍无 `Remote`、native production execution、session/resume、distinct principal、live pause/resume 或自动 replay |
 | owner-scoped 事务型 message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO、延迟/幂等投递、fenced lease、TTL、ack/nack、无正文 outbox、外部 receipt 对账、隐藏 staged completion publication、有界 mailbox page 与 exact mailbox claim 已具备 |
-| owner-scoped goal 生命周期与进度真相源 | `vyane-goal` | [~] 同一 SQLite 事务更新当前快照并追加不可变事件；WP-68 至 WP-75 补齐有界验证/evidence、pursuit/checkpoint/daemon 组合，以及显式批准控制的 takeover 与 review handback。WP-76 增加精确 typed quota-reset 摄取，WP-77 将同一持久 decision 与 one-shot dispatch 边界扩展到 ready 的 primary continuation。WP-78 增加带 observation ID 与单调序号的 typed review-check pass/fail 证据，以及显式批准的 repair handback：旧观察重放不能重新开门；再次失败会重新打开 repair，resume 会递归绑定最新 repair/review/takeover 证据。WP-79 增加基于当前 goal revision 与 approval 证据的只读 operator next-action 投影。WP-80 仅通过 opt-in、owner-frozen、bearer-authenticated loopback REST GET 暴露这个原子、脱敏的快照。WP-81 增加独立的 owner-frozen/source-bound mutation port 与 one-shot 有界 typed watcher poller，只记录现有 continuity signal。自动 queue/approval/dispatch、具体 watcher、周期轮询、runtime-native resume 与通用 authenticated goal service 仍待后续层 |
+| owner-scoped goal 生命周期与进度真相源 | `vyane-goal` | [~] 同一 SQLite 事务更新当前快照并追加不可变事件；WP-68 至 WP-75 补齐有界验证/evidence、pursuit/checkpoint/daemon 组合，以及显式批准控制的 takeover 与 review handback。WP-76 增加精确 typed quota-reset 摄取，WP-77 将同一持久 decision 与 one-shot dispatch 边界扩展到 ready 的 primary continuation。WP-78 增加带 observation ID 与单调序号的 typed review-check pass/fail 证据，以及显式批准的 repair handback：旧观察重放不能重新开门；再次失败会重新打开 repair，resume 会递归绑定最新 repair/review/takeover 证据。WP-79 增加基于当前 goal revision 与 approval 证据的只读 operator next-action 投影。WP-80 仅通过 opt-in、owner-frozen、bearer-authenticated loopback REST GET 暴露这个原子、脱敏的快照。WP-81 增加独立的 owner-frozen/source-bound mutation port 与 one-shot 有界 typed watcher poller，只记录现有 continuity signal。WP-82 增加 purpose-authenticated、one-shot 有界 runner，只能用 exact projection fence 调用分别配置的 queue 与 approved-execution port；它没有 decision port，所有 approval decision 仍必须人工完成。具体 port、daemon 调度、runtime-native resume 与通用 authenticated goal service 仍待后续层 |
 | 有界、平台中立的 upstream quota snapshot | `vyane-quota` | [~] 已有 closed card/window/balance 与错误 schema、connector identity 校验、稳定排序、有界并发、整次操作 timeout、失败隔离、禁 redirect HTTP 与 body cap；仍无具体 provider connector、credential loader、持久历史、轮询 daemon、CLI snapshot surface 或自动动作 |
 | 有界 replay-safe delivery broker + 无正文 EventLog projectors | `vyane-broker` | [~] fake-adapter 契约、复用 stable source event id 的 message/AgentRun lifecycle 投影，以及 daemon 内显式 non-`Clone` `ResidentBrokerSupervisor` 已具备；当前 delivery lane 刻意为空，worker/message glue 与远程 A2A/Channels adapter 仍缺 |
 | 声明式 workflow 引擎（DAG + journal/resume/replay） | `vyane-workflow` | [x] exact-plan replay 新建 run 并复用 journal 记录的全成功前缀 |
@@ -337,6 +337,12 @@ target boundary 的 typed quota-reset 或带序号 review-check observation。on
 `GoalObservationRunner` 限制 watcher 数、并发、timeout 与 batch 大小，隔离单 watcher 失败，并按
 确定的 watcher 顺序写入合格 batch。它没有 HTTP/MCP/CLI endpoint、具体 connector、周期 loop、
 approval 或 execution authority，也不能完成 goal。精确边界见 [WP-81](docs/plan/WP-81.md)。
+
+`GoalContinuityRunner` 对有限 goal 集消费该闭合 next-action view。read、queue、execute credential
+分别通过各自 purpose policy 认证，并必须解析到同一 owner；queue 与 approved-execution port 只会
+收到 exact goal revision、quota boundary、step 与 approval fence。runner 没有 decision port、裸
+dispatch 输入、retry 或周期 loop；本 crate 也不提供具体 queue/execution adapter。精确边界见
+[WP-82](docs/plan/WP-82.md)。
 
 `vyane serve` 会拒绝非 loopback bind；每次启动都会生成 256-bit bearer capability，并把它原子写入
 启动日志所示的私有 `serve.token`（Unix 上为 mode-0600，数据目录为 mode-0700），所有 endpoint

@@ -410,6 +410,33 @@ impl VyaneService {
         crate::GoalObservationIngress::open(self.storage_paths(), context.owner())
     }
 
+    /// Assemble an opt-in, one-shot continuity runner from purpose-separated
+    /// authenticated authority and explicitly supplied queue/execution ports.
+    pub fn goal_continuity_runner(
+        &self,
+        authority: crate::GoalContinuityRunnerAuthority,
+        queue: Option<Arc<dyn crate::GoalContinuityQueuePort>>,
+        execute: Option<Arc<dyn crate::GoalContinuityExecutionPort>>,
+        options: crate::GoalContinuityRunnerOptions,
+    ) -> std::result::Result<crate::GoalContinuityRunner, crate::GoalContinuityRunnerError> {
+        let crate::GoalContinuityRunnerAuthority {
+            read,
+            queue: queue_context,
+            execute: execute_context,
+        } = authority;
+        let reader = self
+            .goal_reader(read)
+            .map_err(|_| crate::GoalContinuityRunnerError::Unavailable)?;
+        crate::GoalContinuityRunner::assemble(
+            Arc::new(reader),
+            queue_context.is_some(),
+            queue,
+            execute_context.is_some(),
+            execute,
+            options,
+        )
+    }
+
     /// Assemble the owner-bound resident broker/projector loops for a daemon.
     /// Component construction stays behind the service boundary so a
     /// frontend cannot accidentally derive a second owner or storage scope.
