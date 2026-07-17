@@ -12,14 +12,14 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    AcceptanceCriterion, AcceptanceVerification, GoalContinuityPolicy, GoalContinuityState,
-    GoalContinuityStepStatus, GoalEvent, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
-    GoalQuotaEvent, GoalRecord, GoalRecoveryCursor, GoalRecoveryFilter, GoalRecoveryPage,
-    GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact, NewGoal,
-    PursuitCheckpointStatus, Result, TakeoverApproval, TakeoverApprovalRequest,
-    TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision, TakeoverFinish,
-    TakeoverRunStatus, TakeoverSandbox,
-    continuity::{ready_approval_target, state_for_event, with_step_status},
+    AcceptanceCriterion, AcceptanceVerification, GoalContinuityPolicy, GoalContinuitySignal,
+    GoalContinuitySignalResult, GoalContinuityState, GoalContinuityStepStatus, GoalEvent,
+    GoalEventKind, GoalPursuitCheckpoint, GoalQuery, GoalQuotaEvent, GoalRecord,
+    GoalRecoveryCursor, GoalRecoveryFilter, GoalRecoveryPage, GoalStatus, GoalStore,
+    GoalStoreError, GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, Result,
+    TakeoverApproval, TakeoverApprovalRequest, TakeoverApprovalStatus, TakeoverBoundTarget,
+    TakeoverDecision, TakeoverFinish, TakeoverRunStatus, TakeoverSandbox,
+    continuity::{ready_approval_target, state_for_event, with_ready_signal, with_step_status},
     model::{
         validate_detail, validate_goal_id, validate_lease_seconds, validate_optional_reason,
         validate_owner, validate_stage, validate_worker,
@@ -1115,6 +1115,66 @@ impl GoalStore for SqliteGoalStore {
         )?;
         transaction.commit()?;
         Ok(after.continuity_state)
+    }
+
+    fn record_continuity_signal(
+        &self,
+        owner: &str,
+        id: &str,
+        signal: &GoalContinuitySignal,
+        at: DateTime<Utc>,
+    ) -> Result<GoalContinuitySignalResult> {
+        validate_owner(owner)?;
+        validate_goal_id(id)?;
+        signal.validate()?;
+        let at = normalize_timestamp(at)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before = get_in_transaction(&transaction, owner, id)?
+            .ok_or_else(|| GoalStoreError::NotFound { id: id.to_string() })?;
+        if before.status != GoalStatus::InProgress {
+            return Err(GoalStoreError::InvalidStatus {
+                id: id.to_string(),
+                operation: "record continuity signal for",
+                status: before.status,
+            });
+        }
+        let state = before.continuity_state.as_ref().ok_or_else(|| {
+            GoalStoreError::InvalidInput("goal has no visible continuity state".into())
+        })?;
+        let (next, persisted_signal, changed) = with_ready_signal(state, signal)?;
+        if !changed {
+            return Ok(GoalContinuitySignalResult {
+                goal_id: id.to_string(),
+                changed: false,
+                signal: persisted_signal,
+                state: next,
+            });
+        }
+        let persisted = next.clone();
+        let (after, _) = mutate_in_transaction(
+            &transaction,
+            &before,
+            GoalEventKind::Progress,
+            "record continuity signal for",
+            at,
+            move |_before, after, _effective_at| {
+                after.continuity_state = Some(persisted);
+                Ok((
+                    Some("continuity_signal".into()),
+                    Some("quota reset signal recorded".into()),
+                ))
+            },
+        )?;
+        transaction.commit()?;
+        Ok(GoalContinuitySignalResult {
+            goal_id: id.to_string(),
+            changed: true,
+            signal: persisted_signal,
+            state: after.continuity_state.ok_or_else(|| {
+                GoalStoreError::CorruptData("continuity signal state disappeared".into())
+            })?,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

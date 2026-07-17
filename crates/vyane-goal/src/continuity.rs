@@ -145,6 +145,7 @@ pub enum GoalContinuityStepStatus {
     WaitingForTakeover,
     WaitingForQuotaReset,
     WaitingForQuotaResetAndReview,
+    WaitingForReview,
     /// A takeover approval has been consumed and dispatch is (or was) in flight.
     InFlight,
     /// The takeover step finished successfully.
@@ -178,6 +179,75 @@ pub struct GoalContinuityState {
     pub require_review_before_resume: bool,
     pub handoff_plan: GoalContinuityPlan,
     pub applied_quota_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ready_signals: Vec<GoalContinuitySignal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalContinuitySignalKind {
+    QuotaReset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalContinuitySignal {
+    pub kind: GoalContinuitySignalKind,
+    pub quota_event_id: String,
+    pub provider: String,
+    pub harness: String,
+    pub model: String,
+    pub observed_at: DateTime<Utc>,
+    pub source: String,
+}
+
+impl GoalContinuitySignal {
+    pub(crate) fn validate(&self) -> Result<()> {
+        validate_text(
+            "continuity signal quota event id",
+            &self.quota_event_id,
+            256,
+        )?;
+        validate_text("continuity signal provider", &self.provider, 128)?;
+        validate_text("continuity signal harness", &self.harness, 128)?;
+        validate_text("continuity signal model", &self.model, 256)?;
+        validate_text("continuity signal source", &self.source, 128)
+    }
+
+    fn same_evidence(&self, other: &Self) -> bool {
+        let Self {
+            kind,
+            quota_event_id,
+            provider,
+            harness,
+            model,
+            observed_at: _,
+            source,
+        } = self;
+        let Self {
+            kind: other_kind,
+            quota_event_id: other_quota_event_id,
+            provider: other_provider,
+            harness: other_harness,
+            model: other_model,
+            observed_at: _,
+            source: other_source,
+        } = other;
+        kind == other_kind
+            && quota_event_id == other_quota_event_id
+            && provider == other_provider
+            && harness == other_harness
+            && model == other_model
+            && source == other_source
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GoalContinuitySignalResult {
+    pub goal_id: String,
+    pub changed: bool,
+    pub signal: GoalContinuitySignal,
+    pub state: GoalContinuityState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +276,26 @@ impl GoalContinuityState {
         }
         for event_id in &self.applied_quota_event_ids {
             validate_text("continuity applied quota event id", event_id, 256)?;
+        }
+        if self.ready_signals.len() > 8 {
+            return Err(GoalStoreError::InvalidInput(
+                "continuity ready signal history is too large".into(),
+            ));
+        }
+        for (index, signal) in self.ready_signals.iter().enumerate() {
+            signal.validate()?;
+            if signal.quota_event_id != self.quota_event_id
+                || signal.provider != self.primary.provider
+                || signal.harness != self.primary.harness
+                || signal.model != self.primary.model
+                || self.ready_signals[..index]
+                    .iter()
+                    .any(|candidate| candidate.kind == signal.kind)
+            {
+                return Err(GoalStoreError::InvalidInput(
+                    "continuity ready signal envelope is invalid".into(),
+                ));
+            }
         }
         if self.handoff_plan.version != 1
             || self.handoff_plan.state != self.state
@@ -409,6 +499,7 @@ pub(crate) fn state_for_event(
             steps,
         },
         applied_quota_event_ids: applied,
+        ready_signals: Vec::new(),
     };
     state.validate()?;
     Ok(Some(state))
@@ -447,6 +538,10 @@ pub(crate) fn with_step_status(
                 }
             }
         } else if step_id == "review_takeover" {
+            let quota_reset = next
+                .ready_signals
+                .iter()
+                .any(|signal| signal.kind == GoalContinuitySignalKind::QuotaReset);
             if let Some(resume) = next
                 .handoff_plan
                 .steps
@@ -454,7 +549,13 @@ pub(crate) fn with_step_status(
                 .find(|candidate| candidate.id == "resume_primary")
             {
                 if resume.status == GoalContinuityStepStatus::WaitingForQuotaResetAndReview {
-                    resume.status = GoalContinuityStepStatus::WaitingForQuotaReset;
+                    resume.status = if quota_reset {
+                        GoalContinuityStepStatus::Ready
+                    } else {
+                        GoalContinuityStepStatus::WaitingForQuotaReset
+                    };
+                } else if resume.status == GoalContinuityStepStatus::WaitingForReview {
+                    resume.status = GoalContinuityStepStatus::Ready;
                 }
             }
         }
@@ -467,6 +568,60 @@ pub(crate) fn with_step_status(
         .map_or_else(String::new, |candidate| candidate.id.clone());
     next.validate()?;
     Ok(next)
+}
+
+pub(crate) fn with_ready_signal(
+    state: &GoalContinuityState,
+    signal: &GoalContinuitySignal,
+) -> Result<(GoalContinuityState, GoalContinuitySignal, bool)> {
+    signal.validate()?;
+    if signal.quota_event_id != state.quota_event_id
+        || signal.provider != state.primary.provider
+        || signal.harness != state.primary.harness
+        || signal.model != state.primary.model
+    {
+        return Err(GoalStoreError::InvalidInput(
+            "continuity signal does not match the current primary quota boundary".into(),
+        ));
+    }
+    if let Some(existing) = state
+        .ready_signals
+        .iter()
+        .find(|existing| existing.kind == signal.kind)
+    {
+        if existing.same_evidence(signal) {
+            return Ok((state.clone(), existing.clone(), false));
+        }
+        return Err(GoalStoreError::InvalidInput(
+            "continuity signal kind was already recorded with different evidence".into(),
+        ));
+    }
+    let mut next = state.clone();
+    next.ready_signals.push(signal.clone());
+    if signal.kind == GoalContinuitySignalKind::QuotaReset {
+        if let Some(resume) = next
+            .handoff_plan
+            .steps
+            .iter_mut()
+            .find(|step| step.id == "resume_primary")
+        {
+            resume.status = match resume.status {
+                GoalContinuityStepStatus::WaitingForQuotaReset => GoalContinuityStepStatus::Ready,
+                GoalContinuityStepStatus::WaitingForQuotaResetAndReview => {
+                    GoalContinuityStepStatus::WaitingForReview
+                }
+                status => status,
+            };
+        }
+    }
+    next.handoff_plan.next_ready_step = next
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.status == GoalContinuityStepStatus::Ready)
+        .map_or_else(String::new, |step| step.id.clone());
+    next.validate()?;
+    Ok((next, signal.clone(), true))
 }
 
 /// The exact approval-gated continuity target currently ready for execution.

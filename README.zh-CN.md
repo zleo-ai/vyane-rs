@@ -46,7 +46,7 @@ token 都不等于这项授权。手动发布 workflow 还要求受保护的 `cr
 reviewer 批准，并要求输入的 release tag、当前 `main` 与 workflow SHA 精确指向同一个 commit；
 registry token 只注入最终 publish step。17 个 crate 的本地 package preflight 已通过，但没有任何 crate
 实际发布。这不表示已经完全对齐原始私有 Vyane。** 在当前公开集成基线上，固定双仓
-矩阵按 8 个域追踪 53 个能力项：7 个 `implemented`、21 个 `partial`、14 个 `missing`、
+矩阵按 8 个域追踪 53 个能力项：7 个 `implemented`、22 个 `partial`、13 个 `missing`、
 9 个刻意不同或待决策、2 个 `planned`。native harness、
 连续性、协作、治理、可观测性和接口仍有大量工作。未加限定的“完全对齐”默认指
 whole-system capability parity：私有凭据和部署细节不进入本公开仓，但对应 generic contract
@@ -71,7 +71,8 @@ difference。运行 `python3 .github/scripts/parity-report.py --format markdown`
 | 不含敏感正文的持久化 task metadata | `vyane-task` | [x] schema v2 以 `(owner,id)` 隔离 snapshot/event/CAS，并事务迁移 v1；内置前端仍显式选择 `local` |
 | owner-scoped 持久 AgentRun queue、worker topology 与 recovery 真相 | `vyane-agent` | [~] exact lease/deadline、active permit、有界 tree cancel、无正文 completion receipt/outbox 及 resident execution/recovery/publication 已为一条窄 Linux `Process` 路径完成生产 assembly，并提供 authenticated loopback submit/status/output/cancel API。仍无 `Remote`、native production execution、session/resume、distinct principal、live pause/resume 或自动 replay |
 | owner-scoped 事务型 message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO、延迟/幂等投递、fenced lease、TTL、ack/nack、无正文 outbox、外部 receipt 对账、隐藏 staged completion publication、有界 mailbox page 与 exact mailbox claim 已具备 |
-| owner-scoped goal 生命周期与进度真相源 | `vyane-goal` | [~] 同一 SQLite 事务更新当前快照并追加不可变事件；WP-68 增加有界本地 acceptance verifier，WP-69 保存不可变 evidence，WP-70 通过 fresh production dispatch segment 增加显式有界 manual pursuit，WP-71 增加持久、lease-fenced 的重启 checkpoint，WP-72 将显式启用的单 goal 自动 pursuit 接入常驻 daemon，WP-73 增加 typed continuity policy 与可见、幂等 quota handoff 状态，WP-74 增加持久显式批准与严格绑定的一次性 takeover 执行，WP-75 将 review 绑定到精确成功 takeover 证据并在 quota reset 前安全 handback；外部 quota 摄取、primary resume 与 authenticated goal service 仍待后续层 |
+| owner-scoped goal 生命周期与进度真相源 | `vyane-goal` | [~] 同一 SQLite 事务更新当前快照并追加不可变事件；WP-68 至 WP-75 补齐有界验证/evidence、pursuit/checkpoint/daemon 组合，以及显式批准控制的 takeover 与 review handback。WP-76 增加精确 typed quota-reset 摄取，review/reset 任意到达顺序都只释放对应依赖；primary resume execution 与 authenticated goal service 仍待后续层 |
+| 有界、平台中立的 upstream quota snapshot | `vyane-quota` | [~] 已有 closed card/window/balance 与错误 schema、connector identity 校验、稳定排序、有界并发、整次操作 timeout、失败隔离、禁 redirect HTTP 与 body cap；仍无具体 provider connector、credential loader、持久历史、轮询 daemon、CLI snapshot surface 或自动动作 |
 | 有界 replay-safe delivery broker + 无正文 EventLog projectors | `vyane-broker` | [~] fake-adapter 契约、复用 stable source event id 的 message/AgentRun lifecycle 投影，以及 daemon 内显式 non-`Clone` `ResidentBrokerSupervisor` 已具备；当前 delivery lane 刻意为空，worker/message glue 与远程 A2A/Channels adapter 仍缺 |
 | 声明式 workflow 引擎（DAG + journal/resume/replay） | `vyane-workflow` | [x] exact-plan replay 新建 run 并复用 journal 记录的全成功前缀 |
 | 常驻 workflow 与 Process AgentRun daemon（带认证的本地控制面） | `vyane-cli` | [x] workflow 控制，以及 Linux fresh sessionless CLI-harness AgentRun submit/status/output/cancel；无自动 replay 或 live pause/resume |

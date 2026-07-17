@@ -349,6 +349,156 @@ fn malformed_continuity_policy_fails_before_goal_creation() {
 }
 
 #[test]
+fn continuity_signal_is_typed_json_and_never_dispatches() {
+    let directory = TempDir::new().unwrap();
+    let db_path = directory.path().join("goals.sqlite3");
+    let db = db_text(&db_path);
+    let policy = r#"{"mode":"quota_handoff","primary":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"primary"},"takeover":[{"provider":"backup","protocol":"anthropic_messages","harness":"claude-code","model":"fallback","role":"takeover"}],"reviewer":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"reviewer"},"resume_primary_after_reset":true,"require_review_before_resume":true}"#;
+    json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--json",
+            "--id",
+            "signal-goal",
+            "--title",
+            "Typed signal",
+            "--continuity-policy-json",
+            policy,
+        ],
+        0,
+    );
+    json_output(&["goal", "start", "--db", &db, "--json", "signal-goal"], 0);
+    let store = SqliteGoalStore::open(&db_path).unwrap();
+    apply_quota_handoff_events(
+        &store,
+        "local",
+        &[GoalQuotaEvent {
+            event_id: "quota-signal".into(),
+            goal_id: Some("signal-goal".into()),
+            provider: "primary".into(),
+            harness: "codex-cli".into(),
+            model: "main".into(),
+            session_id: None,
+            observed_at: Utc.timestamp_opt(1_000, 0).unwrap(),
+            estimated_reset_at: None,
+        }],
+        Utc.timestamp_opt(1_001, 0).unwrap(),
+    )
+    .unwrap();
+
+    let wrong = json_output(
+        &[
+            "goal",
+            "continuity-signal",
+            "--db",
+            &db,
+            "--json",
+            "signal-goal",
+            "quota-reset",
+            "--quota-event-id",
+            "quota-signal",
+            "--provider",
+            "wrong-primary",
+            "--harness",
+            "codex-cli",
+            "--model",
+            "main",
+            "--source",
+            "test-reader",
+        ],
+        2,
+    );
+    assert_eq!(wrong["status"], "error");
+    assert!(
+        wrong["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not match the current primary quota boundary")
+    );
+
+    let recorded = json_output(
+        &[
+            "goal",
+            "continuity-signal",
+            "--db",
+            &db,
+            "--json",
+            "signal-goal",
+            "quota-reset",
+            "--quota-event-id",
+            "quota-signal",
+            "--provider",
+            "primary",
+            "--harness",
+            "codex-cli",
+            "--model",
+            "main",
+            "--source",
+            "test-reader",
+        ],
+        0,
+    );
+    assert_eq!(recorded["status"], "success");
+    assert_eq!(recorded["changed"], true);
+    assert_eq!(recorded["result"]["signal"]["kind"], "quota_reset");
+    assert_eq!(
+        recorded["result"]["state"]["ready_signals"][0]["quota_event_id"],
+        "quota-signal"
+    );
+    assert_eq!(
+        recorded["result"]["state"]["handoff_plan"]["steps"][2]["status"],
+        "waiting_for_review"
+    );
+
+    let goal = store.get("local", "signal-goal").unwrap().unwrap();
+    assert_eq!(goal.revision, 3);
+    assert_eq!(store.events("local", "signal-goal").unwrap().len(), 4);
+
+    let repeated = json_output(
+        &[
+            "goal",
+            "continuity-signal",
+            "--db",
+            &db,
+            "--json",
+            "signal-goal",
+            "quota-reset",
+            "--quota-event-id",
+            "quota-signal",
+            "--provider",
+            "primary",
+            "--harness",
+            "codex-cli",
+            "--model",
+            "main",
+            "--source",
+            "test-reader",
+        ],
+        0,
+    );
+    assert_eq!(repeated["changed"], false);
+    assert_eq!(
+        repeated["result"]["signal"]["observed_at"],
+        recorded["result"]["signal"]["observed_at"]
+    );
+    assert_eq!(
+        store.get("local", "signal-goal").unwrap().unwrap().revision,
+        3
+    );
+    assert_eq!(store.events("local", "signal-goal").unwrap().len(), 4);
+
+    let help = vyane()
+        .args(["goal", "continuity-signal", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("never dispatches"));
+}
+
+#[test]
 fn continuity_queue_and_decide_are_explicit_json_roundtrip() {
     let directory = TempDir::new().unwrap();
     let db_path = directory.path().join("goals.sqlite3");

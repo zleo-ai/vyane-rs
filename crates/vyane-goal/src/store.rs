@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    AcceptanceVerification, GoalContinuityState, GoalEvent, GoalPursuitCheckpoint, GoalQuery,
-    GoalQuotaEvent, GoalRecord, GoalVerificationArtifact, NewGoal, Result, TakeoverApproval,
-    TakeoverApprovalRequest, TakeoverDecision, TakeoverFinish,
+    AcceptanceVerification, GoalContinuitySignal, GoalContinuitySignalResult, GoalContinuityState,
+    GoalEvent, GoalPursuitCheckpoint, GoalQuery, GoalQuotaEvent, GoalRecord,
+    GoalVerificationArtifact, NewGoal, Result, TakeoverApproval, TakeoverApprovalRequest,
+    TakeoverDecision, TakeoverFinish,
 };
 
 pub trait GoalStore: Send + Sync {
@@ -112,6 +113,16 @@ pub trait GoalStore: Send + Sync {
         event: &GoalQuotaEvent,
         at: DateTime<Utc>,
     ) -> Result<Option<GoalContinuityState>>;
+
+    /// Idempotently record one exact external readiness fact. This may release
+    /// a visible plan dependency but never consumes approval or dispatches.
+    fn record_continuity_signal(
+        &self,
+        owner: &str,
+        id: &str,
+        signal: &GoalContinuitySignal,
+        at: DateTime<Utc>,
+    ) -> Result<GoalContinuitySignalResult>;
 
     /// CAS-write one lease-fenced checkpoint and append its event in the same
     /// transaction. `Paused` and `Achieved` also perform the matching goal

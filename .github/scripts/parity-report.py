@@ -22,8 +22,8 @@ CAPABILITY_MATRIX_PATH = REPO_ROOT / "docs" / "parity" / "ORIGINAL-VYANE-PARITY.
 CAPABILITY_STATUS_BASELINE = {
     "total": 53,
     "implemented": 7,
-    "partial": 21,
-    "missing": 14,
+    "partial": 22,
+    "missing": 13,
     "different": 9,
     "planned": 2,
 }

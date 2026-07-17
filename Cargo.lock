@@ -2600,6 +2600,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "vyane-quota"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "vyane-router"
 version = "0.1.0"
 dependencies = [

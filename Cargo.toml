@@ -5,6 +5,7 @@ members = [
     "crates/vyane-agent",
     "crates/vyane-message",
     "crates/vyane-goal",
+    "crates/vyane-quota",
     "crates/vyane-task",
     "crates/vyane-config",
     "crates/vyane-provider",
@@ -33,6 +34,7 @@ vyane-core = { path = "crates/vyane-core", version = "0.1.0" }
 vyane-agent = { path = "crates/vyane-agent", version = "0.1.0" }
 vyane-message = { path = "crates/vyane-message", version = "0.1.0" }
 vyane-goal = { path = "crates/vyane-goal", version = "0.1.0" }
+vyane-quota = { path = "crates/vyane-quota", version = "0.1.0" }
 vyane-task = { path = "crates/vyane-task", version = "0.1.0" }
 vyane-config = { path = "crates/vyane-config", version = "0.1.0" }
 vyane-provider = { path = "crates/vyane-provider", version = "0.1.0" }

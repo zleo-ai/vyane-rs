@@ -6,11 +6,11 @@ use chrono::{TimeZone as _, Utc};
 use rusqlite::Connection;
 use tempfile::TempDir;
 use vyane_goal::{
-    GoalContinuityMode, GoalContinuityPolicy, GoalContinuityStepStatus, GoalExecutionTarget,
-    GoalQuotaEvent, GoalStore, GoalStoreError, NewGoal, SCHEMA_VERSION, SqliteGoalStore,
-    TakeoverApproval, TakeoverApprovalRequest, TakeoverApprovalStatus, TakeoverBoundTarget,
-    TakeoverDecision, TakeoverFinish, TakeoverRunStatus, TakeoverSandbox,
-    apply_quota_handoff_events,
+    GoalContinuityMode, GoalContinuityPolicy, GoalContinuitySignal, GoalContinuitySignalKind,
+    GoalContinuityStepStatus, GoalExecutionTarget, GoalQuotaEvent, GoalStore, GoalStoreError,
+    NewGoal, SCHEMA_VERSION, SqliteGoalStore, TakeoverApproval, TakeoverApprovalRequest,
+    TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision, TakeoverFinish,
+    TakeoverRunStatus, TakeoverSandbox, apply_quota_handoff_events,
 };
 
 const OWNER: &str = "local";
@@ -153,6 +153,50 @@ fn review_request(
         upstream_run_id: takeover.run_id.clone(),
         upstream_run_status: takeover.run_status,
     }
+}
+
+fn quota_reset_signal() -> GoalContinuitySignal {
+    GoalContinuitySignal {
+        kind: GoalContinuitySignalKind::QuotaReset,
+        quota_event_id: "quota-a".into(),
+        provider: "primary-provider".into(),
+        harness: "codex-cli".into(),
+        model: "primary-model".into(),
+        observed_at: at(2_001),
+        source: "quota-reader".into(),
+    }
+}
+
+fn complete_review(store: &SqliteGoalStore, dir: &TempDir) {
+    let takeover = complete_takeover(store, dir);
+    let approval = store
+        .queue_takeover_approval(OWNER, &review_request(store, dir, &takeover), at(1_204))
+        .unwrap();
+    store
+        .decide_takeover_approval(
+            OWNER,
+            &approval.approval_id,
+            TakeoverDecision::Approve,
+            "operator",
+            None,
+            at(1_205),
+        )
+        .unwrap();
+    store
+        .consume_takeover_approval(OWNER, &approval.approval_id, at(1_206))
+        .unwrap();
+    store
+        .finish_takeover_approval(
+            OWNER,
+            &approval.approval_id,
+            &TakeoverFinish {
+                run_id: Some("review-run".into()),
+                run_status: TakeoverRunStatus::Success,
+                detail: "review completed".into(),
+            },
+            at(1_207),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -656,4 +700,156 @@ fn review_queue_rejects_mismatched_existing_upstream_run() {
         GoalStoreError::InvalidInput(ref message)
             if message == "review approval is not bound to the exact successful takeover run"
     ));
+}
+
+#[test]
+fn quota_reset_before_review_waits_then_review_releases_resume() {
+    let (dir, store) = setup();
+    let result = store
+        .record_continuity_signal(OWNER, "goal-a", &quota_reset_signal(), at(2_002))
+        .unwrap();
+    assert!(result.changed);
+    let resume = result
+        .state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.id == "resume_primary")
+        .unwrap();
+    assert_eq!(resume.status, GoalContinuityStepStatus::WaitingForReview);
+
+    complete_review(&store, &dir);
+    let state = store
+        .get(OWNER, "goal-a")
+        .unwrap()
+        .unwrap()
+        .continuity_state
+        .unwrap();
+    let resume = state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.id == "resume_primary")
+        .unwrap();
+    assert_eq!(resume.status, GoalContinuityStepStatus::Ready);
+    assert_eq!(state.handoff_plan.next_ready_step, "resume_primary");
+}
+
+#[test]
+fn review_before_quota_reset_releases_resume_without_dispatching() {
+    let (dir, store) = setup();
+    complete_review(&store, &dir);
+
+    let result = store
+        .record_continuity_signal(OWNER, "goal-a", &quota_reset_signal(), at(2_002))
+        .unwrap();
+
+    let resume = result
+        .state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.id == "resume_primary")
+        .unwrap();
+    assert_eq!(resume.status, GoalContinuityStepStatus::Ready);
+    assert_eq!(result.state.handoff_plan.next_ready_step, "resume_primary");
+    assert_eq!(result.state.ready_signals, vec![quota_reset_signal()]);
+}
+
+#[test]
+fn repeated_signal_evidence_is_idempotent_without_revision_or_event_drift() {
+    let (_dir, store) = setup();
+    let signal = quota_reset_signal();
+    let first = store
+        .record_continuity_signal(OWNER, "goal-a", &signal, at(2_002))
+        .unwrap();
+    let revision = store.get(OWNER, "goal-a").unwrap().unwrap().revision;
+    let event_count = store.events(OWNER, "goal-a").unwrap().len();
+
+    let mut retried = signal.clone();
+    retried.observed_at = at(2_100);
+    let repeated = store
+        .record_continuity_signal(OWNER, "goal-a", &retried, at(2_003))
+        .unwrap();
+
+    assert!(first.changed);
+    assert!(!repeated.changed);
+    assert_eq!(repeated.signal, signal);
+    assert_eq!(
+        store.get(OWNER, "goal-a").unwrap().unwrap().revision,
+        revision
+    );
+    assert_eq!(store.events(OWNER, "goal-a").unwrap().len(), event_count);
+}
+
+#[test]
+fn continuity_signal_conflicts_and_wrong_primary_boundaries_fail_closed() {
+    let (_dir, store) = setup();
+    let signal = quota_reset_signal();
+    store
+        .record_continuity_signal(OWNER, "goal-a", &signal, at(2_002))
+        .unwrap();
+    let mut conflicting = signal.clone();
+    conflicting.source = "different-reader".into();
+    assert!(matches!(
+        store.record_continuity_signal(OWNER, "goal-a", &conflicting, at(2_003)),
+        Err(GoalStoreError::InvalidInput(ref message))
+            if message == "continuity signal kind was already recorded with different evidence"
+    ));
+
+    for wrong in ["quota", "provider", "harness", "model"] {
+        let (_dir, store) = setup();
+        let mut signal = quota_reset_signal();
+        match wrong {
+            "quota" => signal.quota_event_id = "quota-other".into(),
+            "provider" => signal.provider = "provider-other".into(),
+            "harness" => signal.harness = "harness-other".into(),
+            "model" => signal.model = "model-other".into(),
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            store.record_continuity_signal(OWNER, "goal-a", &signal, at(2_002)),
+            Err(GoalStoreError::InvalidInput(ref message))
+                if message == "continuity signal does not match the current primary quota boundary"
+        ));
+    }
+}
+
+#[test]
+fn continuity_signal_rejects_foreign_terminal_and_missing_state_goals() {
+    let (_dir, store) = setup();
+    assert!(matches!(
+        store.record_continuity_signal("foreign", "goal-a", &quota_reset_signal(), at(2_002)),
+        Err(GoalStoreError::NotFound { .. })
+    ));
+    store
+        .fail(OWNER, "goal-a", None, "stopped", at(2_001))
+        .unwrap();
+    assert!(matches!(
+        store.record_continuity_signal(OWNER, "goal-a", &quota_reset_signal(), at(2_002)),
+        Err(GoalStoreError::InvalidStatus { .. })
+    ));
+
+    let mut plain = NewGoal::new("plain goal", at(3_000));
+    plain.id = Some("goal-plain".into());
+    store.create(OWNER, plain).unwrap();
+    store.start(OWNER, "goal-plain", at(3_001)).unwrap();
+    assert!(matches!(
+        store.record_continuity_signal(OWNER, "goal-plain", &quota_reset_signal(), at(3_002)),
+        Err(GoalStoreError::InvalidInput(ref message))
+            if message == "goal has no visible continuity state"
+    ));
+}
+
+#[test]
+fn empty_ready_signals_preserve_legacy_snapshot_serialization() {
+    let (_dir, store) = setup();
+    let state = store
+        .get(OWNER, "goal-a")
+        .unwrap()
+        .unwrap()
+        .continuity_state
+        .unwrap();
+    let value = serde_json::to_value(state).unwrap();
+    assert!(value.get("ready_signals").is_none());
 }
