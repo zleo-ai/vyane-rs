@@ -5,6 +5,7 @@
 //! persisted as descriptors; executing them belongs to a later verifier layer.
 
 mod acceptance;
+mod approval;
 mod continuity;
 mod error;
 mod model;
@@ -14,6 +15,10 @@ mod store;
 
 pub use acceptance::{
     AcceptanceVerifier, MAX_OUTPUT_TAIL_BYTES, MAX_VERIFIER_TIMEOUT, criterion_key,
+};
+pub use approval::{
+    MAX_TAKEOVER_TIMEOUT, TakeoverApproval, TakeoverApprovalRequest, TakeoverApprovalStatus,
+    TakeoverBoundTarget, TakeoverDecision, TakeoverFinish, TakeoverRunStatus, TakeoverSandbox,
 };
 pub use continuity::{
     GoalContinuityAction, GoalContinuityMode, GoalContinuityPlan, GoalContinuityPolicy,

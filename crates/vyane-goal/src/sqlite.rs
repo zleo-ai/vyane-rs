@@ -13,17 +13,20 @@ use uuid::Uuid;
 
 use crate::{
     AcceptanceCriterion, AcceptanceVerification, GoalContinuityPolicy, GoalContinuityState,
-    GoalEvent, GoalEventKind, GoalPursuitCheckpoint, GoalQuery, GoalQuotaEvent, GoalRecord,
-    GoalRecoveryCursor, GoalRecoveryFilter, GoalRecoveryPage, GoalStatus, GoalStore,
-    GoalStoreError, GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, Result,
-    continuity::state_for_event,
+    GoalContinuityStepStatus, GoalEvent, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
+    GoalQuotaEvent, GoalRecord, GoalRecoveryCursor, GoalRecoveryFilter, GoalRecoveryPage,
+    GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact, NewGoal,
+    PursuitCheckpointStatus, Result, TakeoverApproval, TakeoverApprovalRequest,
+    TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision, TakeoverFinish,
+    TakeoverRunStatus, TakeoverSandbox,
+    continuity::{ready_takeover_target, state_for_event, with_step_status},
     model::{
         validate_detail, validate_goal_id, validate_lease_seconds, validate_optional_reason,
         validate_owner, validate_stage, validate_worker,
     },
 };
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 const RECORD_SCHEMA: u32 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_0001: &str = include_str!("../migrations/0001_goals.sql");
@@ -32,7 +35,9 @@ const MIGRATION_0003: &str = include_str!("../migrations/0003_verification_artif
 const MIGRATION_0004: &str = include_str!("../migrations/0004_pursuit_checkpoint.sql");
 const MIGRATION_0005: &str = include_str!("../migrations/0005_recovery_indexes.sql");
 const MIGRATION_0006: &str = include_str!("../migrations/0006_goal_continuity.sql");
+const MIGRATION_0007: &str = include_str!("../migrations/0007_takeover_approval.sql");
 const MAX_VERIFICATION_PAYLOAD_BYTES: usize = 1024 * 1024;
+const MAX_PLAN_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const VERIFICATION_ARTIFACT_PAGE: i64 = 100;
 
 const GOAL_COLUMNS: &str = "\
@@ -41,7 +46,6 @@ const GOAL_COLUMNS: &str = "\
     completion_summary, failure_reason, pause_reason, cancel_reason, \
     claimed_by, claim_expires_at_ms, claim_generation, continuity_policy_json, \
     continuity_state_json";
-
 #[derive(Debug, Clone)]
 pub struct SqliteGoalStore {
     path: PathBuf,
@@ -222,6 +226,10 @@ impl SqliteGoalStore {
         if found == 5 {
             transaction.execute_batch(MIGRATION_0006)?;
             found = 6;
+        }
+        if found == 6 {
+            transaction.execute_batch(MIGRATION_0007)?;
+            found = 7;
         }
         if found != user_version(&transaction)? {
             transaction.pragma_update(None, "user_version", found)?;
@@ -1377,6 +1385,348 @@ impl GoalStore for SqliteGoalStore {
         )
         .map(|(record, _)| record)
     }
+
+    fn queue_takeover_approval(
+        &self,
+        owner: &str,
+        request: &TakeoverApprovalRequest,
+        at: DateTime<Utc>,
+    ) -> Result<TakeoverApproval> {
+        validate_owner(owner)?;
+        request.validate()?;
+        request.validate_live_workdir()?;
+        if request.goal_revision > i64::MAX as u64 {
+            return Err(GoalStoreError::CorruptData(
+                "takeover goal revision is outside SQLite range".into(),
+            ));
+        }
+        let plan_snapshot_json = serde_json::to_string(&request.plan_snapshot)?;
+        if plan_snapshot_json.len() > MAX_PLAN_SNAPSHOT_BYTES {
+            return Err(GoalStoreError::InvalidInput(
+                "takeover plan snapshot exceeds the bounded size".into(),
+            ));
+        }
+        let snapshot_digest = hex_digest(request.snapshot_payload()?.as_bytes());
+        let at = normalize_timestamp(at)?;
+        let timeout_secs = i64::try_from(request.timeout.as_secs())
+            .map_err(|_| GoalStoreError::InvalidInput("takeover timeout is out of range".into()))?;
+        let approval_id = format!("takeover-{}", Uuid::now_v7());
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let goal = get_in_transaction(&transaction, owner, &request.goal_id)?.ok_or_else(|| {
+            GoalStoreError::NotFound {
+                id: request.goal_id.clone(),
+            }
+        })?;
+        validate_takeover_request(request, &goal)?;
+        transaction.execute(
+            "INSERT INTO goal_takeover_approvals (approval_id, owner, goal_id, step_id, \
+             step_kind, quota_event_id, snapshot_digest, target_profile, target_provider, \
+             target_protocol, target_harness, target_model, workdir, sandbox, timeout_seconds, \
+             goal_revision, plan_snapshot_json, status, created_at_ms, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+             ?17, 'pending', ?18, ?18) \
+             ON CONFLICT(owner, snapshot_digest) DO NOTHING",
+            params![
+                approval_id,
+                owner,
+                request.goal_id,
+                request.step_id,
+                request.step_kind,
+                request.quota_event_id,
+                snapshot_digest,
+                request.target.profile,
+                request.target.provider,
+                request.target.protocol,
+                request.target.harness,
+                request.target.model,
+                request.workdir.to_str().ok_or_else(|| {
+                    GoalStoreError::InvalidInput("takeover workdir must be valid UTF-8".into())
+                })?,
+                request.sandbox.as_str(),
+                timeout_secs,
+                counter_to_i64(request.goal_revision, "takeover goal revision")?,
+                plan_snapshot_json,
+                at.timestamp_millis(),
+            ],
+        )?;
+        let approval = select_takeover_approval(&transaction, owner, &snapshot_digest)?;
+        transaction.commit()?;
+        Ok(approval)
+    }
+
+    fn decide_takeover_approval(
+        &self,
+        owner: &str,
+        approval_id: &str,
+        decision: TakeoverDecision,
+        decided_by: &str,
+        reason: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> Result<TakeoverApproval> {
+        validate_owner(owner)?;
+        validate_goal_id(approval_id)?;
+        validate_worker(decided_by)?;
+        validate_optional_reason("takeover decision reason", reason)?;
+        let at = normalize_timestamp(at)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before =
+            select_takeover_approval_by_id(&transaction, owner, approval_id)?.ok_or_else(|| {
+                GoalStoreError::TakeoverApprovalNotFound {
+                    id: approval_id.to_string(),
+                }
+            })?;
+        if before.status != TakeoverApprovalStatus::Pending {
+            return Err(GoalStoreError::TakeoverApprovalAlreadyDecided {
+                id: approval_id.to_string(),
+            });
+        }
+        let next_status = match decision {
+            TakeoverDecision::Approve => TakeoverApprovalStatus::Approved,
+            TakeoverDecision::Reject => TakeoverApprovalStatus::Rejected,
+        };
+        let changed = transaction.execute(
+            "UPDATE goal_takeover_approvals SET status = ?1, decided_by = ?2, \
+             decision_reason = ?3, decided_at_ms = ?4, updated_at_ms = ?4 \
+             WHERE owner = ?5 AND approval_id = ?6 AND status = 'pending'",
+            params![
+                next_status.as_str(),
+                decided_by,
+                reason,
+                at.timestamp_millis(),
+                owner,
+                approval_id,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(GoalStoreError::TakeoverApprovalAlreadyDecided {
+                id: approval_id.to_string(),
+            });
+        }
+        let after =
+            select_takeover_approval_by_id(&transaction, owner, approval_id)?.ok_or_else(|| {
+                GoalStoreError::TakeoverApprovalNotFound {
+                    id: approval_id.to_string(),
+                }
+            })?;
+        transaction.commit()?;
+        Ok(after)
+    }
+
+    fn consume_takeover_approval(
+        &self,
+        owner: &str,
+        approval_id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<TakeoverApproval> {
+        validate_owner(owner)?;
+        validate_goal_id(approval_id)?;
+        let occurred_at = normalize_timestamp(at)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let approval = select_takeover_approval_by_id(&transaction, owner, approval_id)?
+            .ok_or_else(|| GoalStoreError::TakeoverApprovalNotFound {
+                id: approval_id.to_string(),
+            })?;
+        if approval.status != TakeoverApprovalStatus::Approved {
+            return Err(GoalStoreError::TakeoverApprovalNotExecutable {
+                id: approval_id.to_string(),
+                status: approval.status,
+            });
+        }
+        let goal =
+            get_in_transaction(&transaction, owner, &approval.goal_id)?.ok_or_else(|| {
+                GoalStoreError::NotFound {
+                    id: approval.goal_id.clone(),
+                }
+            })?;
+        validate_takeover_boundary(&approval, &goal)?;
+        let (after, _event) = mutate_in_transaction(
+            &transaction,
+            &goal,
+            GoalEventKind::Progress,
+            "consume takeover approval for",
+            occurred_at,
+            |before, after, _effective_at| {
+                if before.status != GoalStatus::InProgress {
+                    return Err(GoalStoreError::InvalidStatus {
+                        id: before.id.clone(),
+                        operation: "consume takeover approval for",
+                        status: before.status,
+                    });
+                }
+                let Some(state) = before.continuity_state.as_ref() else {
+                    return Err(GoalStoreError::TakeoverBoundaryChanged {
+                        id: approval_id.to_string(),
+                    });
+                };
+                if ready_takeover_target(state).is_none() {
+                    return Err(GoalStoreError::TakeoverBoundaryChanged {
+                        id: approval_id.to_string(),
+                    });
+                }
+                after.continuity_state = Some(with_step_status(
+                    state,
+                    &approval.step_id,
+                    GoalContinuityStepStatus::InFlight,
+                )?);
+                Ok((
+                    Some("takeover.consume".into()),
+                    Some(format!("approval {approval_id} consumed")),
+                ))
+            },
+        )?;
+        let _ = after;
+        let changed = transaction.execute(
+            "UPDATE goal_takeover_approvals SET status = 'in_flight', updated_at_ms = ?1 \
+             WHERE owner = ?2 AND approval_id = ?3 AND status = 'approved'",
+            params![occurred_at.timestamp_millis(), owner, approval_id],
+        )?;
+        if changed != 1 {
+            return Err(GoalStoreError::TakeoverApprovalNotExecutable {
+                id: approval_id.to_string(),
+                status: approval.status,
+            });
+        }
+        let consumed = select_takeover_approval_by_id(&transaction, owner, approval_id)?
+            .ok_or_else(|| GoalStoreError::TakeoverApprovalNotFound {
+                id: approval_id.to_string(),
+            })?;
+        transaction.commit()?;
+        Ok(consumed)
+    }
+
+    fn finish_takeover_approval(
+        &self,
+        owner: &str,
+        approval_id: &str,
+        finish: &TakeoverFinish,
+        at: DateTime<Utc>,
+    ) -> Result<TakeoverApproval> {
+        validate_owner(owner)?;
+        validate_goal_id(approval_id)?;
+        finish.validate()?;
+        let occurred_at = normalize_timestamp(at)?;
+        let next_status = finish.terminal_approval_status();
+        let next_step_status = finish.terminal_step_status();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let approval = select_takeover_approval_by_id(&transaction, owner, approval_id)?
+            .ok_or_else(|| GoalStoreError::TakeoverApprovalNotFound {
+                id: approval_id.to_string(),
+            })?;
+        if approval.status != TakeoverApprovalStatus::InFlight {
+            return Err(GoalStoreError::TakeoverApprovalNotExecutable {
+                id: approval_id.to_string(),
+                status: approval.status,
+            });
+        }
+        let goal =
+            get_in_transaction(&transaction, owner, &approval.goal_id)?.ok_or_else(|| {
+                GoalStoreError::NotFound {
+                    id: approval.goal_id.clone(),
+                }
+            })?;
+        let (_, _event) = mutate_in_transaction(
+            &transaction,
+            &goal,
+            GoalEventKind::Progress,
+            "finish takeover approval for",
+            occurred_at,
+            |before, after, _effective_at| {
+                let Some(state) = before.continuity_state.as_ref() else {
+                    return Err(GoalStoreError::TakeoverBoundaryChanged {
+                        id: approval_id.to_string(),
+                    });
+                };
+                if !state.handoff_plan.steps.iter().any(|step| {
+                    step.id == approval.step_id && step.status == GoalContinuityStepStatus::InFlight
+                }) {
+                    return Err(GoalStoreError::TakeoverBoundaryChanged {
+                        id: approval_id.to_string(),
+                    });
+                }
+                after.continuity_state = Some(with_step_status(
+                    state,
+                    &approval.step_id,
+                    next_step_status,
+                )?);
+                Ok((Some("takeover.finish".into()), Some(finish.detail.clone())))
+            },
+        )?;
+        let blocker = if !finish.run_status.is_success() {
+            Some(&finish.detail)
+        } else {
+            None
+        };
+        let changed = transaction.execute(
+            "UPDATE goal_takeover_approvals SET status = ?1, run_id = ?2, run_status = ?3, \
+             blocker_reason = ?4, updated_at_ms = ?5 \
+             WHERE owner = ?6 AND approval_id = ?7 AND status = 'in_flight'",
+            params![
+                next_status.as_str(),
+                finish.run_id,
+                finish.run_status.as_str(),
+                blocker,
+                occurred_at.timestamp_millis(),
+                owner,
+                approval_id,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(GoalStoreError::TakeoverApprovalNotExecutable {
+                id: approval_id.to_string(),
+                status: approval.status,
+            });
+        }
+        let settled = select_takeover_approval_by_id(&transaction, owner, approval_id)?
+            .ok_or_else(|| GoalStoreError::TakeoverApprovalNotFound {
+                id: approval_id.to_string(),
+            })?;
+        transaction.commit()?;
+        Ok(settled)
+    }
+
+    fn get_takeover_approval(
+        &self,
+        owner: &str,
+        approval_id: &str,
+    ) -> Result<Option<TakeoverApproval>> {
+        validate_owner(owner)?;
+        validate_goal_id(approval_id)?;
+        let connection = self.connection()?;
+        select_takeover_approval_by_id(&connection, owner, approval_id)
+    }
+
+    fn list_takeover_approvals(
+        &self,
+        owner: &str,
+        goal_id: Option<&str>,
+    ) -> Result<Vec<TakeoverApproval>> {
+        validate_owner(owner)?;
+        if let Some(goal_id) = goal_id {
+            validate_goal_id(goal_id)?;
+        }
+        let connection = self.connection()?;
+        let sql = format!("SELECT {TAKEOVER_COLUMNS} FROM goal_takeover_approvals");
+        let mut statement = if let Some(goal_id) = goal_id {
+            let mut s = connection.prepare(&format!(
+                "{sql} WHERE owner = ?1 AND goal_id = ?2 ORDER BY created_at_ms ASC, approval_id ASC"
+            ))?;
+            let rows = s.query_map(params![owner, goal_id], row_to_takeover_approval)?;
+            return rows
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(GoalStoreError::from);
+        } else {
+            connection.prepare(&format!(
+                "{sql} WHERE owner = ?1 ORDER BY created_at_ms ASC, approval_id ASC"
+            ))?
+        };
+        let rows = statement.query_map(params![owner], row_to_takeover_approval)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(GoalStoreError::from)
+    }
 }
 
 fn ensure_transition(
@@ -1799,6 +2149,220 @@ fn hex_digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+const TAKEOVER_COLUMNS: &str = "\
+    approval_id, owner, goal_id, step_id, step_kind, quota_event_id, snapshot_digest, \
+    target_profile, target_provider, target_protocol, target_harness, target_model, workdir, \
+    sandbox, timeout_seconds, goal_revision, plan_snapshot_json, status, decided_by, \
+    decision_reason, run_id, run_status, blocker_reason, created_at_ms, decided_at_ms, updated_at_ms";
+
+fn select_takeover_approval_by_id(
+    connection: &Connection,
+    owner: &str,
+    approval_id: &str,
+) -> Result<Option<TakeoverApproval>> {
+    let sql = format!(
+        "SELECT {TAKEOVER_COLUMNS} FROM goal_takeover_approvals WHERE owner = ?1 AND approval_id = ?2"
+    );
+    connection
+        .query_row(&sql, params![owner, approval_id], row_to_takeover_approval)
+        .optional()
+        .map_err(GoalStoreError::from)
+}
+
+fn select_takeover_approval(
+    transaction: &Transaction<'_>,
+    owner: &str,
+    snapshot_digest: &str,
+) -> Result<TakeoverApproval> {
+    let sql = format!(
+        "SELECT {TAKEOVER_COLUMNS} FROM goal_takeover_approvals \
+         WHERE owner = ?1 AND snapshot_digest = ?2"
+    );
+    transaction
+        .query_row(
+            &sql,
+            params![owner, snapshot_digest],
+            row_to_takeover_approval,
+        )
+        .map_err(GoalStoreError::from)
+}
+
+fn row_to_takeover_approval(row: &Row<'_>) -> rusqlite::Result<TakeoverApproval> {
+    let plan_snapshot_json: String = row.get(16)?;
+    let plan_snapshot =
+        serde_json::from_str::<GoalContinuityState>(&plan_snapshot_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(16, Type::Text, Box::new(error))
+        })?;
+    let run_status = optional_enum_string(row, 21)?
+        .map(|value| TakeoverRunStatus::parse(&value))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(21, Type::Text, Box::new(error))
+        })?;
+    let status_string: String = row.get(17)?;
+    let status = TakeoverApprovalStatus::parse(&status_string).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(17, Type::Text, Box::new(error))
+    })?;
+    let sandbox_string: String = row.get(13)?;
+    let sandbox = TakeoverSandbox::parse(&sandbox_string).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(13, Type::Text, Box::new(error))
+    })?;
+    let target = TakeoverBoundTarget {
+        profile: row.get(7)?,
+        provider: row.get(8)?,
+        protocol: row.get(9)?,
+        harness: row.get(10)?,
+        model: row.get(11)?,
+    };
+    target.validate().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(8, Type::Text, Box::new(error))
+    })?;
+    plan_snapshot.validate().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(16, Type::Text, Box::new(error))
+    })?;
+    let workdir_string: String = row.get(12)?;
+    let workdir = PathBuf::from(workdir_string);
+    if !workdir.is_absolute() {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            12,
+            Type::Text,
+            "takeover workdir must be absolute".into(),
+        ));
+    }
+    let timeout_secs: i64 = row.get(14)?;
+    let timeout_secs = u64::try_from(timeout_secs).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(14, Type::Integer, Box::new(error))
+    })?;
+    let approval = TakeoverApproval {
+        approval_id: row.get(0)?,
+        owner: row.get(1)?,
+        goal_id: row.get(2)?,
+        step_id: row.get(3)?,
+        step_kind: row.get(4)?,
+        quota_event_id: row.get(5)?,
+        snapshot_digest: row.get(6)?,
+        target,
+        workdir,
+        sandbox,
+        timeout_secs,
+        goal_revision: counter_column(row, 15)?,
+        plan_snapshot,
+        status,
+        decided_by: row.get(18)?,
+        decision_reason: row.get(19)?,
+        run_id: row.get(20)?,
+        run_status,
+        blocker_reason: row.get(22)?,
+        created_at: timestamp_column(row, 23)?,
+        decided_at: optional_timestamp_column(row, 24)?,
+        updated_at: timestamp_column(row, 25)?,
+    };
+    let request = TakeoverApprovalRequest {
+        goal_id: approval.goal_id.clone(),
+        step_id: approval.step_id.clone(),
+        step_kind: approval.step_kind.clone(),
+        quota_event_id: approval.quota_event_id.clone(),
+        target: approval.target.clone(),
+        workdir: approval.workdir.clone(),
+        sandbox: approval.sandbox,
+        timeout: Duration::from_secs(approval.timeout_secs),
+        goal_revision: approval.goal_revision,
+        plan_snapshot: approval.plan_snapshot.clone(),
+    };
+    request.validate().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(16, Type::Text, Box::new(error))
+    })?;
+    let digest = request.snapshot_payload().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(6, Type::Text, Box::new(error))
+    })?;
+    if hex_digest(digest.as_bytes()) != approval.snapshot_digest {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            6,
+            Type::Text,
+            "takeover approval snapshot digest mismatch".into(),
+        ));
+    }
+    Ok(approval)
+}
+
+fn optional_enum_string(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<String>> {
+    row.get::<_, Option<String>>(index)
+}
+
+fn validate_takeover_boundary(approval: &TakeoverApproval, goal: &GoalRecord) -> Result<()> {
+    if goal.status != GoalStatus::InProgress {
+        return Err(GoalStoreError::InvalidStatus {
+            id: goal.id.clone(),
+            operation: "consume takeover approval for",
+            status: goal.status,
+        });
+    }
+    let Some(state) = &goal.continuity_state else {
+        return Err(GoalStoreError::TakeoverBoundaryChanged {
+            id: approval.approval_id.clone(),
+        });
+    };
+    if goal.revision != approval.goal_revision
+        || state != &approval.plan_snapshot
+        || state.quota_event_id != approval.quota_event_id
+    {
+        return Err(GoalStoreError::TakeoverBoundaryChanged {
+            id: approval.approval_id.clone(),
+        });
+    }
+    let Some((step_id, step_kind, target)) = ready_takeover_target(state) else {
+        return Err(GoalStoreError::TakeoverBoundaryChanged {
+            id: approval.approval_id.clone(),
+        });
+    };
+    let bound = TakeoverBoundTarget::from_execution(target);
+    if step_id != approval.step_id || step_kind != approval.step_kind || bound != approval.target {
+        return Err(GoalStoreError::TakeoverBoundaryChanged {
+            id: approval.approval_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_takeover_request(request: &TakeoverApprovalRequest, goal: &GoalRecord) -> Result<()> {
+    if goal.status != GoalStatus::InProgress {
+        return Err(GoalStoreError::InvalidStatus {
+            id: goal.id.clone(),
+            operation: "queue takeover approval for",
+            status: goal.status,
+        });
+    }
+    let Some(state) = &goal.continuity_state else {
+        return Err(GoalStoreError::InvalidInput(
+            "goal has no visible continuity state".into(),
+        ));
+    };
+    let Some((step_id, step_kind, target)) = ready_takeover_target(state) else {
+        return Err(GoalStoreError::InvalidInput(
+            "goal has no ready takeover step".into(),
+        ));
+    };
+    let requires_approval = state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.id == step_id)
+        .is_some_and(|step| step.requires_approval);
+    if !requires_approval
+        || goal.revision != request.goal_revision
+        || state != &request.plan_snapshot
+        || state.quota_event_id != request.quota_event_id
+        || step_id != request.step_id
+        || step_kind != request.step_kind
+        || TakeoverBoundTarget::from_execution(target) != request.target
+    {
+        return Err(GoalStoreError::InvalidInput(
+            "takeover approval request does not match the current ready step".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn enum_column<T>(row: &Row<'_>, index: usize) -> rusqlite::Result<T>
 where
     T: FromStr<Err = GoalStoreError>,
@@ -1917,12 +2481,15 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         ("table", "goal_events"),
         ("table", "goal_verifications"),
         ("table", "goal_pursuit_checkpoints"),
+        ("table", "goal_takeover_approvals"),
         ("trigger", "goal_events_immutable_update"),
         ("trigger", "goal_events_immutable_delete"),
         ("trigger", "goal_verifications_immutable_update"),
         ("trigger", "goal_verifications_immutable_delete"),
         ("index", "goals_owner_worker_lease_idx"),
         ("index", "goals_owner_lease_idx"),
+        ("index", "goal_takeover_approvals_owner_goal_idx"),
+        ("index", "goal_takeover_approvals_owner_status_idx"),
     ] {
         let exists: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2)",

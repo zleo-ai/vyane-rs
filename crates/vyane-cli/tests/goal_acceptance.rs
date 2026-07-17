@@ -11,8 +11,14 @@ use std::time::Duration;
 use std::{fs, os::unix::fs::PermissionsExt as _};
 
 use assert_cmd::Command;
+use chrono::{TimeZone as _, Utc};
 use serde_json::Value;
 use tempfile::TempDir;
+use vyane_goal::{
+    GoalContinuityMode, GoalContinuityPolicy, GoalContinuityStepStatus, GoalExecutionTarget,
+    GoalQuotaEvent, GoalStore, NewGoal, SqliteGoalStore, TakeoverApprovalStatus,
+    apply_quota_handoff_events,
+};
 
 fn vyane() -> Command {
     Command::cargo_bin("vyane").expect("vyane binary")
@@ -339,6 +345,262 @@ fn malformed_continuity_policy_fails_before_goal_creation() {
 
     let missing = json_output(&["goal", "get", "--db", &db, "--json", "bad-continuity"], 2);
     assert_eq!(missing["status"], "error");
+}
+
+#[test]
+fn continuity_queue_and_decide_are_explicit_json_roundtrip() {
+    let directory = TempDir::new().unwrap();
+    let db_path = directory.path().join("goals.sqlite3");
+    let db = db_text(&db_path);
+    let policy = r#"{"mode":"quota_handoff","primary":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"primary"},"takeover":[{"provider":"backup","protocol":"anthropic_messages","harness":"claude-code","model":"fallback","role":"takeover"}],"reviewer":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"reviewer"},"resume_primary_after_reset":true,"require_review_before_resume":true}"#;
+    json_output(
+        &[
+            "goal",
+            "create",
+            "--db",
+            &db,
+            "--json",
+            "--id",
+            "controlled",
+            "--title",
+            "Controlled takeover",
+            "--continuity-policy-json",
+            policy,
+        ],
+        0,
+    );
+    json_output(&["goal", "start", "--db", &db, "--json", "controlled"], 0);
+    let store = SqliteGoalStore::open(&db_path).unwrap();
+    apply_quota_handoff_events(
+        &store,
+        "local",
+        &[GoalQuotaEvent {
+            event_id: "quota-cli".into(),
+            goal_id: Some("controlled".into()),
+            provider: "primary".into(),
+            harness: "codex-cli".into(),
+            model: "main".into(),
+            session_id: None,
+            observed_at: Utc.timestamp_opt(1_000, 0).unwrap(),
+            estimated_reset_at: None,
+        }],
+        Utc.timestamp_opt(1_001, 0).unwrap(),
+    )
+    .unwrap();
+
+    let workdir = db_text(directory.path());
+    let queued = json_output(
+        &[
+            "goal",
+            "continuity-queue",
+            "--db",
+            &db,
+            "--json",
+            "controlled",
+            "--workdir",
+            &workdir,
+            "--sandbox",
+            "write",
+            "--timeout-seconds",
+            "30",
+        ],
+        0,
+    );
+    assert_eq!(queued["status"], "pending");
+    assert_eq!(queued["approval"]["target"]["provider"], "backup");
+    assert_eq!(queued["approval"]["timeout_secs"], 30);
+    let approval_id = queued["approval"]["approval_id"].as_str().unwrap();
+
+    let not_approved = json_output(
+        &[
+            "goal",
+            "continuity-execute",
+            "--db",
+            &db,
+            "--json",
+            approval_id,
+        ],
+        2,
+    );
+    assert!(not_approved["error"].as_str().unwrap().contains("pending"));
+    assert_eq!(
+        store
+            .get_takeover_approval("local", approval_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TakeoverApprovalStatus::Pending
+    );
+
+    let approved = json_output(
+        &[
+            "goal",
+            "continuity-decide",
+            "--db",
+            &db,
+            "--json",
+            approval_id,
+            "--decision",
+            "approve",
+            "--decided-by",
+            "operator",
+            "--reason",
+            "explicit",
+        ],
+        0,
+    );
+    assert_eq!(approved["status"], "approved");
+    assert_eq!(approved["approval"]["decided_by"], "operator");
+    assert_eq!(approved["approval"]["status"], "approved");
+    let repeated = json_output(
+        &[
+            "goal",
+            "continuity-queue",
+            "--db",
+            &db,
+            "--json",
+            "controlled",
+            "--workdir",
+            &workdir,
+            "--sandbox",
+            "write",
+            "--timeout-seconds",
+            "30",
+        ],
+        0,
+    );
+    assert_eq!(repeated["status"], "approved");
+    assert_eq!(repeated["approval"]["approval_id"], approval_id);
+}
+
+#[cfg(unix)]
+#[test]
+fn continuity_execute_dispatches_once_and_settles_done() {
+    let directory = TempDir::new().expect("temporary directory");
+    let data_dir = TempDir::new().expect("data directory");
+    let db_path = directory.path().join("goals.sqlite3");
+    let db = db_text(&db_path);
+    let (config, bin) = pursuit_fixture(&directory);
+    let target = |role: &str| GoalExecutionTarget {
+        provider: "native".into(),
+        protocol: "anthropic_messages".into(),
+        harness: "claude-code".into(),
+        model: "test-model".into(),
+        profile: Some("builder".into()),
+        role: role.into(),
+    };
+    let store = SqliteGoalStore::open(&db_path).expect("goal store");
+    let mut goal = NewGoal::new("Execute takeover", Utc.timestamp_opt(1_000, 0).unwrap());
+    goal.id = Some("execute-controlled".into());
+    goal.continuity_policy = Some(GoalContinuityPolicy {
+        mode: GoalContinuityMode::QuotaHandoff,
+        primary: target("primary"),
+        takeover: vec![target("takeover")],
+        reviewer: Some(target("reviewer")),
+        resume_primary_after_reset: true,
+        require_review_before_resume: true,
+    });
+    store.create("local", goal).expect("create goal");
+    store
+        .start(
+            "local",
+            "execute-controlled",
+            Utc.timestamp_opt(1_001, 0).unwrap(),
+        )
+        .expect("start goal");
+    apply_quota_handoff_events(
+        &store,
+        "local",
+        &[GoalQuotaEvent {
+            event_id: "quota-execute".into(),
+            goal_id: Some("execute-controlled".into()),
+            provider: "native".into(),
+            harness: "claude-code".into(),
+            model: "test-model".into(),
+            session_id: None,
+            observed_at: Utc.timestamp_opt(1_002, 0).unwrap(),
+            estimated_reset_at: None,
+        }],
+        Utc.timestamp_opt(1_003, 0).unwrap(),
+    )
+    .expect("apply quota event");
+
+    let workdir = db_text(directory.path());
+    let queued = json_output(
+        &[
+            "goal",
+            "continuity-queue",
+            "--db",
+            &db,
+            "--json",
+            "execute-controlled",
+            "--workdir",
+            &workdir,
+            "--sandbox",
+            PURSUIT_SANDBOX,
+            "--timeout-seconds",
+            "30",
+        ],
+        0,
+    );
+    let approval_id = queued["approval"]["approval_id"].as_str().unwrap();
+    json_output(
+        &[
+            "goal",
+            "continuity-decide",
+            "--db",
+            &db,
+            "--json",
+            approval_id,
+            "--decision",
+            "approve",
+            "--decided-by",
+            "operator",
+        ],
+        0,
+    );
+
+    let output = vyane()
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "continuity-execute",
+            "--db",
+            &db,
+            "--json",
+            approval_id,
+        ])
+        .output()
+        .expect("execute takeover");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let executed: Value = serde_json::from_slice(&output.stdout).expect("execution JSON");
+    assert_eq!(executed["status"], "success");
+    assert_eq!(executed["approval"]["status"], "done");
+    assert_eq!(executed["approval"]["run_status"], "success");
+    assert!(executed["approval"]["run_id"].is_string());
+    assert_eq!(
+        store
+            .get("local", "execute-controlled")
+            .expect("read goal")
+            .expect("goal exists")
+            .continuity_state
+            .expect("continuity state")
+            .handoff_plan
+            .steps[0]
+            .status,
+        GoalContinuityStepStatus::Done
+    );
 }
 
 #[test]

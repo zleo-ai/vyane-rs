@@ -6,20 +6,24 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::Utc;
 use serde::Serialize;
-use vyane_core::CancellationToken;
+use vyane_core::{CancellationToken, RunStatus, Sandbox};
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, AcceptanceVerifier, CriterionStatus, GoalEvent,
     GoalPursuer, GoalPursuitCheckpoint, GoalQuery, GoalRecord, GoalStatus, GoalStore,
     GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, PursuitConfig, PursuitOutcome,
-    PursuitStatus, SqliteGoalStore,
+    PursuitStatus, SqliteGoalStore, TakeoverApproval, TakeoverApprovalRequest,
+    TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision, TakeoverFinish,
+    TakeoverRunStatus, TakeoverSandbox,
 };
-use vyane_service::VyaneService;
+use vyane_service::{DispatchParams, VyaneService};
 
 use crate::app::StoragePaths;
 use crate::cli::{
-    GoalClaimArgs, GoalClaimNextArgs, GoalCommand, GoalCommonArgs, GoalCreateArgs, GoalDoneArgs,
-    GoalFailArgs, GoalGetArgs, GoalIdArgs, GoalListArgs, GoalNextArgs, GoalProgressArgs,
-    GoalPursueArgs, GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs, GoalStatusArg, GoalVerifyArgs,
+    GoalClaimArgs, GoalClaimNextArgs, GoalCommand, GoalCommonArgs, GoalContinuityDecisionArgs,
+    GoalContinuityExecuteArgs, GoalContinuityQueueArgs, GoalCreateArgs, GoalDoneArgs, GoalFailArgs,
+    GoalGetArgs, GoalIdArgs, GoalListArgs, GoalNextArgs, GoalProgressArgs, GoalPursueArgs,
+    GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs, GoalStatusArg, GoalTakeoverDecisionArg,
+    GoalVerifyArgs, SandboxArg,
 };
 use crate::goal_runtime::DispatchGoalRuntime;
 
@@ -114,6 +118,13 @@ struct PursueOutput {
 }
 
 #[derive(Debug, Serialize)]
+struct TakeoverApprovalOutput {
+    status: &'static str,
+    approval: TakeoverApproval,
+    db: String,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorOutput<'a> {
     status: &'static str,
     error: &'a str,
@@ -134,6 +145,9 @@ pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<E
         GoalCommand::Satisfy(args) => satisfy(args),
         GoalCommand::Verify(args) => verify(args),
         GoalCommand::Pursue(args) => pursue(config_path, args).await,
+        GoalCommand::ContinuityQueue(args) => continuity_queue(args),
+        GoalCommand::ContinuityDecide(args) => continuity_decide(args),
+        GoalCommand::ContinuityExecute(args) => continuity_execute(config_path, args).await,
         GoalCommand::Progress(args) => progress(args),
         GoalCommand::Pause(args) => pause(args),
         GoalCommand::Resume(args) => resume(args),
@@ -158,6 +172,178 @@ pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<E
             Ok(ExitCode::from(2))
         }
     }
+}
+
+fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
+    let (store, db) = open_store(&args.common)?;
+    let goal = require_goal(&store, &args.common.owner, &args.id)?;
+    let state = goal
+        .continuity_state
+        .as_ref()
+        .context("goal has no visible continuity state")?;
+    let step = state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| {
+            step.id == "takeover"
+                && step.kind == "start_takeover"
+                && step.status == vyane_goal::GoalContinuityStepStatus::Ready
+                && step.requires_approval
+        })
+        .context("goal has no approval-required ready takeover step")?;
+    let target = step
+        .target
+        .as_ref()
+        .context("ready takeover step has no target")?;
+    let workdir = std::fs::canonicalize(&args.workdir).context("canonicalize takeover workdir")?;
+    let request = TakeoverApprovalRequest {
+        goal_id: goal.id.clone(),
+        step_id: step.id.clone(),
+        step_kind: step.kind.clone(),
+        quota_event_id: state.quota_event_id.clone(),
+        target: TakeoverBoundTarget::from_execution(target),
+        workdir,
+        sandbox: takeover_sandbox(args.sandbox),
+        timeout: std::time::Duration::from_secs(args.timeout_seconds),
+        goal_revision: goal.revision,
+        plan_snapshot: state.clone(),
+    };
+    let approval = store
+        .queue_takeover_approval(&args.common.owner, &request, Utc::now())
+        .context("queue takeover approval")?;
+    let status = approval.status.as_str();
+    print_takeover_result(&args.common, &db, status, approval)
+}
+
+fn continuity_decide(args: GoalContinuityDecisionArgs) -> Result<ExitCode> {
+    let (store, db) = open_store(&args.common)?;
+    let decision = match args.decision {
+        GoalTakeoverDecisionArg::Approve => TakeoverDecision::Approve,
+        GoalTakeoverDecisionArg::Reject => TakeoverDecision::Reject,
+    };
+    let approval = store
+        .decide_takeover_approval(
+            &args.common.owner,
+            &args.approval_id,
+            decision,
+            &args.decided_by,
+            args.reason.as_deref(),
+            Utc::now(),
+        )
+        .context("decide takeover approval")?;
+    let status = match approval.status {
+        TakeoverApprovalStatus::Approved => "approved",
+        TakeoverApprovalStatus::Rejected => "rejected",
+        _ => "success",
+    };
+    print_takeover_result(&args.common, &db, status, approval)
+}
+
+async fn continuity_execute(
+    config_path: Option<PathBuf>,
+    args: GoalContinuityExecuteArgs,
+) -> Result<ExitCode> {
+    if args.common.owner != "local" {
+        bail!("goal continuity execute currently requires the local single-user owner scope");
+    }
+    let (store, db) = open_store(&args.common)?;
+    let approval = store
+        .get_takeover_approval(&args.common.owner, &args.approval_id)
+        .context("read takeover approval")?
+        .with_context(|| format!("takeover approval `{}` was not found", args.approval_id))?;
+    if approval.status != TakeoverApprovalStatus::Approved {
+        bail!(
+            "takeover approval `{}` is {} and cannot be executed",
+            approval.approval_id,
+            approval.status
+        );
+    }
+    let goal = require_goal(&store, &args.common.owner, &approval.goal_id)?;
+    let prompt = takeover_prompt(&goal, &approval);
+    let selector = approval.target.selector();
+    let service =
+        Arc::new(VyaneService::load(config_path.as_deref()).context("load takeover runtime")?);
+    let resolved = service
+        .resolve(&selector)
+        .context("resolve approved takeover target")?;
+    let [bound] = resolved.chain.as_slice() else {
+        bail!("approved takeover target must resolve to exactly one target");
+    };
+    validate_resolved_takeover(bound, &approval.target)?;
+    let current_workdir =
+        std::fs::canonicalize(&approval.workdir).context("revalidate approved takeover workdir")?;
+    if current_workdir != approval.workdir {
+        bail!("approved takeover workdir changed before execution");
+    }
+
+    let approval = store
+        .consume_takeover_approval(&args.common.owner, &args.approval_id, Utc::now())
+        .context("consume takeover approval")?;
+    let (cancel, signal_task) = cancellation_token();
+    let outcome = service
+        .dispatch(
+            DispatchParams {
+                task: prompt,
+                target: selector,
+                workdir: Some(approval.workdir.clone()),
+                sandbox: core_sandbox(approval.sandbox),
+                session: None,
+                system: None,
+                timeout_secs: Some(approval.timeout_secs),
+                labels: vec![
+                    "source=goal-continuity".into(),
+                    "continuity_step=takeover".into(),
+                ],
+            },
+            cancel,
+        )
+        .await;
+    signal_task.abort();
+    let _ = signal_task.await;
+    let (finish, exit) = match outcome {
+        Ok(outcome) => {
+            let run_status = takeover_run_status(outcome.record.status);
+            let exit = if run_status.is_success() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(4)
+            };
+            (
+                TakeoverFinish {
+                    run_id: Some(outcome.record.run_id),
+                    run_status,
+                    detail: format!("takeover dispatch finished with {}", run_status.as_str()),
+                },
+                exit,
+            )
+        }
+        Err(error) => (
+            TakeoverFinish {
+                run_id: None,
+                run_status: TakeoverRunStatus::Error,
+                detail: format!("takeover dispatch failed: {error:#}"),
+            },
+            ExitCode::from(4),
+        ),
+    };
+    let settled = store
+        .finish_takeover_approval(&args.common.owner, &args.approval_id, &finish, Utc::now())
+        .context("settle takeover approval")?;
+    if args.common.json {
+        print_json(&TakeoverApprovalOutput {
+            status: if exit == ExitCode::SUCCESS {
+                "success"
+            } else {
+                "blocked"
+            },
+            approval: settled,
+            db: path_text(&db),
+        })?;
+    } else {
+        println!("{}\t{}", settled.approval_id, settled.status);
+    }
+    Ok(exit)
 }
 
 async fn pursue(config_path: Option<PathBuf>, args: GoalPursueArgs) -> Result<ExitCode> {
@@ -677,6 +863,86 @@ fn print_goal_line(goal: &GoalRecord) -> Result<()> {
     stdout.flush().context("flush goal response")
 }
 
+fn print_takeover_result(
+    common: &GoalCommonArgs,
+    db: &Path,
+    status: &'static str,
+    approval: TakeoverApproval,
+) -> Result<ExitCode> {
+    if common.json {
+        print_json(&TakeoverApprovalOutput {
+            status,
+            approval,
+            db: path_text(db),
+        })?;
+    } else {
+        println!("{}\t{}", approval.approval_id, approval.status);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+const fn takeover_sandbox(value: SandboxArg) -> TakeoverSandbox {
+    match value {
+        SandboxArg::ReadOnly => TakeoverSandbox::ReadOnly,
+        SandboxArg::Write => TakeoverSandbox::Write,
+        SandboxArg::Full => TakeoverSandbox::Full,
+    }
+}
+
+const fn core_sandbox(value: TakeoverSandbox) -> Sandbox {
+    match value {
+        TakeoverSandbox::ReadOnly => Sandbox::ReadOnly,
+        TakeoverSandbox::Write => Sandbox::Write,
+        TakeoverSandbox::Full => Sandbox::Full,
+    }
+}
+
+const fn takeover_run_status(value: RunStatus) -> TakeoverRunStatus {
+    match value {
+        RunStatus::Success => TakeoverRunStatus::Success,
+        RunStatus::Error => TakeoverRunStatus::Error,
+        RunStatus::Timeout => TakeoverRunStatus::Timeout,
+        RunStatus::Cancelled => TakeoverRunStatus::Cancelled,
+    }
+}
+
+fn validate_resolved_takeover(
+    resolved: &vyane_core::BoundTarget,
+    approved: &TakeoverBoundTarget,
+) -> Result<()> {
+    let harness = resolved
+        .target
+        .harness
+        .as_ref()
+        .map_or("none", |value| value.as_str());
+    if resolved.target.provider.as_str() != approved.provider
+        || resolved.target.protocol.to_string() != approved.protocol
+        || harness != approved.harness
+        || resolved.target.model.as_str() != approved.model
+    {
+        bail!(
+            "resolved takeover target does not match the approved provider/protocol/harness/model boundary"
+        );
+    }
+    Ok(())
+}
+
+fn takeover_prompt(goal: &GoalRecord, approval: &TakeoverApproval) -> String {
+    let mut prompt = format!(
+        "Continue goal {}: {}\n\nTakeover step: {} ({})\nReason: primary quota blocked.\n",
+        goal.id, goal.title, approval.step_id, approval.step_kind
+    );
+    if !goal.description.trim().is_empty() {
+        prompt.push_str("\nGoal description:\n");
+        prompt.push_str(goal.description.trim());
+        prompt.push('\n');
+    }
+    prompt.push_str(
+        "\nWork only on this approved takeover step. Report changes, verification, and blockers before returning control.",
+    );
+    prompt
+}
+
 fn open_store(common: &GoalCommonArgs) -> Result<(SqliteGoalStore, PathBuf)> {
     let path = match &common.db {
         Some(path) => path.clone(),
@@ -701,6 +967,9 @@ fn common(command: &GoalCommand) -> &GoalCommonArgs {
         GoalCommand::Satisfy(args) => &args.common,
         GoalCommand::Verify(args) => &args.common,
         GoalCommand::Pursue(args) => &args.common,
+        GoalCommand::ContinuityQueue(args) => &args.common,
+        GoalCommand::ContinuityDecide(args) => &args.common,
+        GoalCommand::ContinuityExecute(args) => &args.common,
         GoalCommand::Progress(args) => &args.common,
         GoalCommand::Pause(args) => &args.common,
         GoalCommand::Resume(args) => &args.common,
