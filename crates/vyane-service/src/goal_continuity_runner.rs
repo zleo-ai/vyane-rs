@@ -162,25 +162,82 @@ pub trait GoalContinuityProjectionReader: Send + Sync {
 #[async_trait]
 impl GoalContinuityProjectionReader for GoalReadService {
     async fn continuity_next(&self, goal_id: &str) -> Result<GoalNextActionView, GoalReadError> {
-        let reader = self.clone();
-        let goal_id = goal_id.to_owned();
-        tokio::task::spawn_blocking(move || GoalReadService::continuity_next(&reader, &goal_id))
-            .await
-            .map_err(|_| GoalReadError::Unavailable)?
+        GoalReadService::continuity_next(self, goal_id)
     }
 }
 
-/// Queue port contract. Implementations must re-read the exact fence and call
-/// the existing durable approval queue transaction; this port never decides.
+pub(crate) struct BlockingGoalProjectionReader {
+    reader: GoalReadService,
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl BlockingGoalProjectionReader {
+    pub(crate) fn new(
+        reader: GoalReadService,
+        max_concurrency: usize,
+    ) -> Result<Self, GoalContinuityRunnerError> {
+        if max_concurrency == 0 || max_concurrency > MAX_GOAL_CONTINUITY_CONCURRENCY {
+            return Err(GoalContinuityRunnerError::InvalidOptions);
+        }
+        Ok(Self {
+            reader,
+            permits: Arc::new(tokio::sync::Semaphore::new(max_concurrency)),
+        })
+    }
+}
+
+#[async_trait]
+impl GoalContinuityProjectionReader for BlockingGoalProjectionReader {
+    async fn continuity_next(&self, goal_id: &str) -> Result<GoalNextActionView, GoalReadError> {
+        let reader = self.reader.clone();
+        let goal_id = goal_id.to_owned();
+        bounded_blocking_projection(Arc::clone(&self.permits), move || {
+            GoalReadService::continuity_next(&reader, &goal_id)
+        })
+        .await
+    }
+}
+
+async fn bounded_blocking_projection<F>(
+    permits: Arc<tokio::sync::Semaphore>,
+    operation: F,
+) -> Result<GoalNextActionView, GoalReadError>
+where
+    F: FnOnce() -> Result<GoalNextActionView, GoalReadError> + Send + 'static,
+{
+    let permit = permits
+        .acquire_owned()
+        .await
+        .map_err(|_| GoalReadError::Unavailable)?;
+    tokio::task::spawn_blocking(move || {
+        // A timed-out caller may drop the JoinHandle, but this permit remains
+        // inside the blocking job until the real read has stopped.
+        let _permit = permit;
+        operation()
+    })
+    .await
+    .map_err(|_| GoalReadError::Unavailable)?
+}
+
+/// Trusted owner-bound queue port contract. Implementations must re-read the
+/// exact fence and call the existing durable approval queue transaction; this
+/// port never decides.
 #[async_trait]
 pub trait GoalContinuityQueuePort: Send + Sync {
+    /// Opaque owner authority frozen into this trusted port.
+    fn owner_context(&self) -> &OwnerContext;
+
     async fn queue(&self, fence: GoalContinuityActionFence) -> GoalContinuityPortResult;
 }
 
-/// Approved one-shot execution port. Implementations must atomically consume
-/// the exact approved ID before dispatch and settle that same approval after.
+/// Trusted owner-bound approved one-shot execution port. Implementations must
+/// atomically consume the exact approved ID before dispatch and settle that
+/// same approval after.
 #[async_trait]
 pub trait GoalContinuityExecutionPort: Send + Sync {
+    /// Opaque owner authority frozen into this trusted port.
+    fn owner_context(&self) -> &OwnerContext;
+
     async fn execute(&self, fence: GoalContinuityActionFence) -> GoalContinuityPortResult;
 }
 
@@ -256,9 +313,9 @@ pub struct GoalContinuityRunner {
 impl GoalContinuityRunner {
     pub(crate) fn assemble(
         reader: Arc<dyn GoalContinuityProjectionReader>,
-        queue_authorized: bool,
+        queue_context: Option<OwnerContext>,
         queue: Option<Arc<dyn GoalContinuityQueuePort>>,
-        execute_authorized: bool,
+        execute_context: Option<OwnerContext>,
         execute: Option<Arc<dyn GoalContinuityExecutionPort>>,
         options: GoalContinuityRunnerOptions,
     ) -> Result<Self, GoalContinuityRunnerError> {
@@ -266,8 +323,8 @@ impl GoalContinuityRunner {
             || options.max_concurrency > MAX_GOAL_CONTINUITY_CONCURRENCY
             || options.action_timeout.is_zero()
             || options.action_timeout > MAX_GOAL_CONTINUITY_TIMEOUT
-            || queue_authorized != queue.is_some()
-            || execute_authorized != execute.is_some()
+            || !port_owner_matches(queue_context.as_ref(), queue.as_deref())
+            || !port_owner_matches(execute_context.as_ref(), execute.as_deref())
         {
             return Err(GoalContinuityRunnerError::InvalidOptions);
         }
@@ -375,6 +432,33 @@ impl GoalContinuityRunner {
             | GoalNextActionKind::WaitForExecution => GoalContinuityRunStatus::Waiting,
         };
         item(Some(goal_id), Some(action), status)
+    }
+}
+
+trait OwnerBoundPort {
+    fn owner_context(&self) -> &OwnerContext;
+}
+
+impl OwnerBoundPort for dyn GoalContinuityQueuePort {
+    fn owner_context(&self) -> &OwnerContext {
+        GoalContinuityQueuePort::owner_context(self)
+    }
+}
+
+impl OwnerBoundPort for dyn GoalContinuityExecutionPort {
+    fn owner_context(&self) -> &OwnerContext {
+        GoalContinuityExecutionPort::owner_context(self)
+    }
+}
+
+fn port_owner_matches<P: OwnerBoundPort + ?Sized>(
+    context: Option<&OwnerContext>,
+    port: Option<&P>,
+) -> bool {
+    match (context, port) {
+        (None, None) => true,
+        (Some(context), Some(port)) => context.owner() == port.owner_context().owner(),
+        _ => false,
     }
 }
 
@@ -662,6 +746,7 @@ mod tests {
     }
 
     struct RecordingPort {
+        owner: OwnerContext,
         calls: Mutex<Vec<GoalContinuityActionFence>>,
         result: GoalContinuityPortResult,
     }
@@ -669,6 +754,7 @@ mod tests {
     impl RecordingPort {
         fn new(result: GoalContinuityPortResult) -> Self {
             Self {
+                owner: OwnerContext::single_user_local(),
                 calls: Mutex::new(Vec::new()),
                 result,
             }
@@ -677,6 +763,10 @@ mod tests {
 
     #[async_trait]
     impl GoalContinuityQueuePort for RecordingPort {
+        fn owner_context(&self) -> &OwnerContext {
+            &self.owner
+        }
+
         async fn queue(&self, fence: GoalContinuityActionFence) -> GoalContinuityPortResult {
             self.calls.lock().unwrap().push(fence);
             self.result
@@ -685,6 +775,10 @@ mod tests {
 
     #[async_trait]
     impl GoalContinuityExecutionPort for RecordingPort {
+        fn owner_context(&self) -> &OwnerContext {
+            &self.owner
+        }
+
         async fn execute(&self, fence: GoalContinuityActionFence) -> GoalContinuityPortResult {
             self.calls.lock().unwrap().push(fence);
             self.result
@@ -744,11 +838,17 @@ mod tests {
         execute: Option<Arc<dyn GoalContinuityExecutionPort>>,
         options: GoalContinuityRunnerOptions,
     ) -> GoalContinuityRunner {
+        let queue_context = queue
+            .as_deref()
+            .map(|port| GoalContinuityQueuePort::owner_context(port).clone());
+        let execute_context = execute
+            .as_deref()
+            .map(|port| GoalContinuityExecutionPort::owner_context(port).clone());
         GoalContinuityRunner::assemble(
             reader,
-            queue.is_some(),
+            queue_context,
             queue,
-            execute.is_some(),
+            execute_context,
             execute,
             options,
         )
@@ -944,6 +1044,40 @@ mod tests {
         assert_eq!(timeout[0].status, GoalContinuityRunStatus::TimedOut);
     }
 
+    #[tokio::test]
+    async fn timed_out_blocking_read_retains_its_concurrency_permit() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+
+        for goal_id in ["first", "second"] {
+            let calls = Arc::clone(&calls);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            let operation = move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(current, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(40));
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok(view(goal_id, GoalNextActionKind::ContinuityComplete))
+            };
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(5),
+                    bounded_blocking_projection(Arc::clone(&permits), operation),
+                )
+                .await
+                .is_err()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(permits.available_permits(), 1);
+    }
+
     #[test]
     fn options_and_port_authority_pairing_fail_closed() {
         let reader = Arc::new(FakeReader::new([]));
@@ -951,9 +1085,27 @@ mod tests {
         assert_eq!(
             GoalContinuityRunner::assemble(
                 reader,
-                false,
+                None,
                 Some(port),
-                false,
+                None,
+                None,
+                GoalContinuityRunnerOptions::default(),
+            )
+            .unwrap_err(),
+            GoalContinuityRunnerError::InvalidOptions
+        );
+
+        let foreign_context = context_factory("queue:")
+            .authenticate(b"queue:alice")
+            .unwrap();
+        assert_eq!(
+            GoalContinuityRunner::assemble(
+                Arc::new(FakeReader::new([])),
+                Some(foreign_context),
+                Some(Arc::new(RecordingPort::new(
+                    GoalContinuityPortResult::Applied,
+                ))),
+                None,
                 None,
                 GoalContinuityRunnerOptions::default(),
             )

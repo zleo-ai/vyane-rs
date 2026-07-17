@@ -339,8 +339,9 @@ target boundary 的 typed quota-reset 或带序号 review-check observation。on
 approval 或 execution authority，也不能完成 goal。精确边界见 [WP-81](docs/plan/WP-81.md)。
 
 `GoalContinuityRunner` 对有限 goal 集消费该闭合 next-action view。read、queue、execute credential
-分别通过各自 purpose policy 认证，并必须解析到同一 owner；queue 与 approved-execution port 只会
-收到 exact goal revision、quota boundary、step 与 approval fence。runner 没有 decision port、裸
+分别通过各自 purpose policy 认证，并必须解析到同一 owner；每个 port 也保留同一 opaque owner
+context，assembly 会拒绝错绑。queue 与 approved-execution port 只会收到 exact goal revision、
+quota boundary、step 与 approval fence。runner 没有 decision port、裸
 dispatch 输入、retry 或周期 loop；本 crate 也不提供具体 queue/execution adapter。精确边界见
 [WP-82](docs/plan/WP-82.md)。
 

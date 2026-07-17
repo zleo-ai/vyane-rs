@@ -488,9 +488,10 @@ approval or execution authority; it cannot complete a goal. See
 
 `GoalContinuityRunner` consumes that closed next-action view for a bounded goal
 set. Read, queue and execute credentials are authenticated through separate
-purpose policies and must resolve to one owner. Queue and approved-execution
-ports receive only the exact goal revision, quota boundary, step and approval
-fence; there is no decision port, raw dispatch input, retry or periodic loop.
+purpose policies and must resolve to one owner. Each port retains that same
+opaque owner context, and assembly rejects a mismatched binding. Queue and
+approved-execution ports receive only the exact goal revision, quota boundary,
+step and approval fence; there is no decision port, raw dispatch input, retry or periodic loop.
 The crate supplies no concrete queue/execution adapter, so assembly remains
 explicit. See [WP-82](docs/plan/WP-82.md).
 

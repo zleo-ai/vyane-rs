@@ -427,11 +427,15 @@ impl VyaneService {
         let reader = self
             .goal_reader(read)
             .map_err(|_| crate::GoalContinuityRunnerError::Unavailable)?;
+        let reader = crate::goal_continuity_runner::BlockingGoalProjectionReader::new(
+            reader,
+            options.max_concurrency,
+        )?;
         crate::GoalContinuityRunner::assemble(
             Arc::new(reader),
-            queue_context.is_some(),
+            queue_context,
             queue,
-            execute_context.is_some(),
+            execute_context,
             execute,
             options,
         )
