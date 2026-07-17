@@ -35,6 +35,7 @@ mod agent_supervisor;
 mod config;
 mod diagnostics;
 mod factory;
+mod goal;
 mod inprocess_agent;
 mod message;
 mod native_authority;
@@ -81,6 +82,10 @@ pub use diagnostics::{
     RouteSelectionBasis,
 };
 pub use factory::{AssemblerFactory, authorized_native_client, direct_http_client};
+pub use goal::{
+    GOAL_NEXT_ACTION_VIEW_SCHEMA, GoalNextActionKind, GoalNextActionView, GoalNextReasonCode,
+    GoalOperatorCommand, GoalReadError, GoalReadService, GoalSignalKind,
+};
 pub use inprocess_agent::{
     InProcessAgentComponents, InProcessAgentEffect, InProcessAgentOperation,
     InProcessAgentOperationContext, InProcessAssemblyError, InProcessAuthorityError,

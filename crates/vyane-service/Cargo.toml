@@ -18,6 +18,7 @@ vyane-harness = { workspace = true }
 vyane-kernel = { workspace = true }
 vyane-ledger = { workspace = true }
 vyane-message = { workspace = true }
+vyane-goal = { workspace = true }
 vyane-broker = { workspace = true }
 vyane-router = { workspace = true }
 async-trait = { workspace = true }

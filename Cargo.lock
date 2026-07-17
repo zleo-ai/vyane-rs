@@ -2642,6 +2642,7 @@ dependencies = [
  "vyane-broker",
  "vyane-config",
  "vyane-core",
+ "vyane-goal",
  "vyane-harness",
  "vyane-kernel",
  "vyane-ledger",

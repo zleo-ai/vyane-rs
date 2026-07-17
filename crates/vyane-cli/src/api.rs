@@ -26,14 +26,15 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, FromRef, Path, Query, Request, State},
-    http::{StatusCode, header},
+    body::Bytes,
+    extract::{DefaultBodyLimit, FromRef, Path, Query, RawQuery, Request, State},
+    http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{MethodFilter, get, on, post},
 };
 use futures::{FutureExt as _, stream::Stream};
 use serde::{Deserialize, Serialize};
@@ -42,8 +43,9 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use vyane_core::{CancellationToken, RunStatus, Sandbox};
 use vyane_kernel::{DispatchOutcome, StreamDispatchEvent};
 use vyane_service::{
-    BroadcastParams, DispatchParams, HistoryFilter, OwnerContext, OwnerScopedService, RunView,
-    SessionView, VyaneService, parse_labels,
+    BroadcastParams, DispatchParams, GoalNextActionView, GoalReadError, GoalReadService,
+    HistoryFilter, OwnerContext, OwnerScopedService, RunView, SessionView, VyaneService,
+    parse_labels,
 };
 use vyane_task::{
     ControllerRef, FailureCode, NewTask, SqliteTaskStore, TaskKind, TaskOrigin, TaskQuery,
@@ -64,6 +66,7 @@ fn is_local_rest_dispatch(record: &TaskRecord) -> bool {
 pub struct ApiState {
     service: Arc<OwnerScopedService>,
     tasks: TaskSupervisor,
+    goals: Arc<GoalReadService>,
 }
 
 #[derive(Clone)]
@@ -1423,6 +1426,11 @@ struct HealthResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct GoalNextActionResponse {
+    next_action: GoalNextActionView,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
 }
@@ -1614,13 +1622,100 @@ fn origin_is_loopback(raw: &str) -> bool {
         && uri.query().is_none()
 }
 
-fn router_from_parts(service: VyaneService, tasks: TaskSupervisor, bearer_token: &str) -> Router {
+async fn goal_continuity_next(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    if query.is_some() {
+        return no_store(
+            ApiError::bad_request("goal continuity-next does not accept query parameters")
+                .into_response(),
+        );
+    }
+    if !body.is_empty() {
+        return no_store(
+            ApiError::bad_request("goal continuity-next does not accept a request body")
+                .into_response(),
+        );
+    }
+
+    let goals = Arc::clone(&state.goals);
+    let result = tokio::task::spawn_blocking(move || goals.continuity_next(&id)).await;
+    let response = match result {
+        Ok(Ok(next_action)) => Json(GoalNextActionResponse { next_action }).into_response(),
+        Ok(Err(GoalReadError::InvalidGoalId)) => {
+            ApiError::bad_request("invalid goal id").into_response()
+        }
+        Ok(Err(GoalReadError::NotFound)) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: "goal not found".into(),
+            }),
+        )
+            .into_response(),
+        Ok(Err(GoalReadError::ContinuityUnavailable)) => (
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: "goal continuity is unavailable".into(),
+            }),
+        )
+            .into_response(),
+        Ok(Err(GoalReadError::Unavailable)) => {
+            eprintln!("goal read service unavailable");
+            ApiError::internal("goal read unavailable").into_response()
+        }
+        Err(error) => {
+            eprintln!("goal read worker failed: {error}");
+            ApiError::internal("goal read unavailable").into_response()
+        }
+    };
+    no_store(response)
+}
+
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn goal_read_method_not_allowed() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(header::ALLOW, HeaderValue::from_static("GET"))],
+    )
+        .into_response()
+}
+
+async fn no_store_goal_read_responses(request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let is_goal_read = path
+        .strip_prefix("/v1/goals/")
+        .and_then(|suffix| suffix.strip_suffix("/continuity-next"))
+        .is_some_and(|goal_id| !goal_id.is_empty() && !goal_id.contains('/'));
+    let response = next.run(request).await;
+    if is_goal_read {
+        no_store(response)
+    } else {
+        response
+    }
+}
+
+fn router_from_parts(
+    service: VyaneService,
+    tasks: TaskSupervisor,
+    bearer_token: &str,
+) -> Result<Router> {
+    let goals = service.goal_reader(OwnerContext::single_user_local())?;
     let state = ApiState {
         service: Arc::new(service.scope(OwnerContext::single_user_local())),
         tasks,
+        goals: Arc::new(goals),
     };
 
-    Router::new()
+    Ok(Router::new()
         .route("/v1/health", get(health))
         .route("/v1/dispatch", post(dispatch))
         .route("/v1/dispatch/stream", post(dispatch_stream))
@@ -1631,6 +1726,12 @@ fn router_from_parts(service: VyaneService, tasks: TaskSupervisor, bearer_token:
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/runs", get(runs))
         .route("/v1/sessions", get(sessions))
+        .route(
+            "/v1/goals/{id}/continuity-next",
+            on(MethodFilter::GET, goal_continuity_next)
+                .on(MethodFilter::HEAD, goal_read_method_not_allowed)
+                .fallback(goal_read_method_not_allowed),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
         .layer(middleware::from_fn(require_loopback_authority))
@@ -1638,6 +1739,7 @@ fn router_from_parts(service: VyaneService, tasks: TaskSupervisor, bearer_token:
             ApiBearerToken(Arc::from(bearer_token)),
             require_api_bearer,
         ))
+        .layer(middleware::from_fn(no_store_goal_read_responses)))
 }
 
 /// Build the bearer-authenticated axum router against this service's durable
@@ -1664,7 +1766,7 @@ pub async fn build_router_with_task_db(
     let tasks = TaskSupervisor::open(task_db_path)
         .await
         .map_err(|error| anyhow::anyhow!("open task metadata database: {error}"))?;
-    Ok(router_from_parts(service, tasks, bearer_token))
+    router_from_parts(service, tasks, bearer_token)
 }
 
 /// Run the API server until interrupted. The caller loads the service and hands
@@ -1707,7 +1809,7 @@ pub async fn run_server(service: VyaneService, addr: SocketAddr) -> Result<()> {
     if recovered > 0 {
         tracing::warn!(recovered, "marked abandoned REST tasks interrupted");
     }
-    let router = router_from_parts(service, tasks.clone(), &token);
+    let router = router_from_parts(service, tasks.clone(), &token)?;
     eprintln!(
         "vyane serve listening on {addr}; bearer token file: {}",
         token_path.display()
@@ -2253,6 +2355,10 @@ mod tests {
     use tower::ServiceExt;
     use vyane_config::ProfilePatch;
     use vyane_core::{AuthStyle, ModelId, Protocol, RunQuery};
+    use vyane_goal::{
+        GoalContinuityMode, GoalContinuityPolicy, GoalExecutionTarget, GoalQuotaEvent, GoalStore,
+        NewGoal, SqliteGoalStore, apply_quota_handoff_events,
+    };
     use vyane_provider::{Provider, ProviderRegistry};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2465,6 +2571,74 @@ mod tests {
             vyane_service::StoragePaths::from_data_dir(data_dir),
         )
         .unwrap()
+    }
+
+    fn test_state(service: VyaneService, tasks: TaskSupervisor) -> ApiState {
+        let goals = service
+            .goal_reader(OwnerContext::single_user_local())
+            .unwrap();
+        ApiState {
+            service: Arc::new(service.scope(OwnerContext::single_user_local())),
+            tasks,
+            goals: Arc::new(goals),
+        }
+    }
+
+    fn goal_request(uri: &str, token: Option<&str>) -> axum::http::Request<axum::body::Body> {
+        let mut request = axum::http::Request::get(uri).header("host", "127.0.0.1:9721");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(axum::body::Body::empty()).unwrap()
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn create_continuity_goal(data_dir: &FsPath, owner: &str, id: &str) -> SqliteGoalStore {
+        let store = SqliteGoalStore::open(data_dir.join("goals.sqlite3")).unwrap();
+        let target = |role: &str| GoalExecutionTarget {
+            provider: "provider".into(),
+            protocol: "openai_chat".into(),
+            harness: "harness".into(),
+            model: "model".into(),
+            profile: None,
+            role: role.into(),
+        };
+        let mut goal = NewGoal::new("REST continuity projection", chrono::Utc::now());
+        goal.id = Some(id.into());
+        goal.continuity_policy = Some(GoalContinuityPolicy {
+            mode: GoalContinuityMode::QuotaHandoff,
+            primary: target("primary"),
+            takeover: vec![target("takeover")],
+            reviewer: Some(target("reviewer")),
+            resume_primary_after_reset: true,
+            require_review_before_resume: true,
+            wait_for_review_checks_before_resume: true,
+        });
+        store.create(owner, goal).unwrap();
+        store.start(owner, id, chrono::Utc::now()).unwrap();
+        apply_quota_handoff_events(
+            &store,
+            owner,
+            &[GoalQuotaEvent {
+                event_id: format!("quota-{id}"),
+                goal_id: Some(id.into()),
+                provider: "provider".into(),
+                harness: "harness".into(),
+                model: "model".into(),
+                session_id: None,
+                observed_at: chrono::Utc::now(),
+                estimated_reset_at: None,
+            }],
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        store
     }
 
     fn direct_http_test_service(data_dir: &FsPath, base_url: String) -> VyaneService {
@@ -2697,7 +2871,8 @@ mod tests {
             test_service(service_directory.path()),
             supervisor,
             API_TOKEN,
-        );
+        )
+        .unwrap();
 
         let missing_token = app
             .clone()
@@ -2748,6 +2923,286 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn goal_continuity_next_requires_exact_bearer_and_rejects_query_or_write_routes() {
+        let data = tempfile::tempdir().unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
+        let route = "/v1/goals/missing/continuity-next";
+
+        let missing = app
+            .clone()
+            .oneshot(goal_request(route, None))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong = "b".repeat(64);
+        let wrong = app
+            .clone()
+            .oneshot(goal_request(route, Some(&wrong)))
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app
+            .clone()
+            .oneshot(goal_request(route, Some(API_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            authenticated.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+
+        assert_eq!(
+            missing.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(
+            wrong.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+
+        let forbidden = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get(route)
+                    .header("host", "example.invalid")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            forbidden.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+
+        let query = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/goals/missing/continuity-next?owner=foreign",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(query.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(query).await,
+            serde_json::json!({
+                "error": "goal continuity-next does not accept query parameters"
+            })
+        );
+
+        let invalid = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/goals/%20/continuity-next",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(invalid).await,
+            serde_json::json!({ "error": "invalid goal id" })
+        );
+
+        for body in ["opaque", r#"{"owner":"foreign"}"#] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(route)
+                        .header("host", "127.0.0.1:9721")
+                        .header("authorization", format!("Bearer {API_TOKEN}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                "no-store"
+            );
+            assert_eq!(
+                response_json(response).await,
+                serde_json::json!({
+                    "error": "goal continuity-next does not accept a request body"
+                })
+            );
+        }
+
+        let head = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::HEAD)
+                    .uri(route)
+                    .header("host", "127.0.0.1:9721")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            head.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(head.headers().get(header::ALLOW).unwrap(), "GET");
+
+        let write = app
+            .oneshot(
+                axum::http::Request::post(route)
+                    .header("host", "127.0.0.1:9721")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(write.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            write.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(write.headers().get(header::ALLOW).unwrap(), "GET");
+    }
+
+    #[tokio::test]
+    async fn goal_continuity_next_is_stable_no_store_and_has_no_side_effects() {
+        let data = tempfile::tempdir().unwrap();
+        let store = create_continuity_goal(data.path(), LOCAL_TASK_OWNER, "rest-projection");
+        let before = store
+            .get(LOCAL_TASK_OWNER, "rest-projection")
+            .unwrap()
+            .unwrap();
+        let events_before = store.events(LOCAL_TASK_OWNER, "rest-projection").unwrap();
+        let approvals_before = store
+            .list_takeover_approvals(LOCAL_TASK_OWNER, Some("rest-projection"))
+            .unwrap();
+        assert!(approvals_before.is_empty());
+
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
+        let route = "/v1/goals/rest-projection/continuity-next";
+        let first = app
+            .clone()
+            .oneshot(goal_request(route, Some(API_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(
+            first.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let first = response_json(first).await;
+        let second = app
+            .oneshot(goal_request(route, Some(API_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second = response_json(second).await;
+
+        assert_eq!(first, second);
+        assert_eq!(first["next_action"]["view_schema"], 1);
+        assert_eq!(first["next_action"]["goal_id"], "rest-projection");
+        assert_eq!(first["next_action"]["action"], "queue_approval");
+        assert_eq!(first["next_action"]["command"], "continuity_queue");
+        assert_eq!(first["next_action"]["reason_code"], "approval_required");
+        let next_action = first["next_action"].as_object().unwrap();
+        for forbidden in ["owner", "workdir", "db", "reason"] {
+            assert!(!next_action.contains_key(forbidden), "leaked {forbidden}");
+        }
+
+        assert_eq!(
+            store
+                .get(LOCAL_TASK_OWNER, "rest-projection")
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            store.events(LOCAL_TASK_OWNER, "rest-projection").unwrap(),
+            events_before
+        );
+        assert_eq!(
+            store
+                .list_takeover_approvals(LOCAL_TASK_OWNER, Some("rest-projection"))
+                .unwrap(),
+            approvals_before
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_continuity_next_maps_absent_and_unavailable_without_internal_details() {
+        let data = tempfile::tempdir().unwrap();
+        let store = SqliteGoalStore::open(data.path().join("goals.sqlite3")).unwrap();
+        let mut goal = NewGoal::new("No continuity", chrono::Utc::now());
+        goal.id = Some("plain".into());
+        store.create(LOCAL_TASK_OWNER, goal).unwrap();
+        create_continuity_goal(data.path(), "foreign", "foreign-only");
+
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
+        let missing = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/goals/absent/continuity-next",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response_json(missing).await,
+            serde_json::json!({ "error": "goal not found" })
+        );
+
+        let absent = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/goals/absent/continuity-next",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        let foreign = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/goals/foreign-only/continuity-next",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), absent.status());
+        assert_eq!(foreign.headers(), absent.headers());
+        assert_eq!(response_json(foreign).await, response_json(absent).await);
+
+        let unavailable = app
+            .oneshot(goal_request(
+                "/v1/goals/plain/continuity-next",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            unavailable.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(
+            response_json(unavailable).await,
+            serde_json::json!({ "error": "goal continuity is unavailable" })
+        );
+    }
+
+    #[tokio::test]
     async fn rest_dispatch_broadcast_history_and_sessions_share_the_frozen_local_scope() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -2766,10 +3221,7 @@ mod tests {
         let service_directory = tempfile::tempdir().unwrap();
         let service = direct_http_test_service(service_directory.path(), server.uri());
         let (_task_directory, tasks) = temp_supervisor().await;
-        let state = ApiState {
-            service: Arc::new(service.scope(OwnerContext::single_user_local())),
-            tasks,
-        };
+        let state = test_state(service.clone(), tasks);
 
         let Json(dispatched) = dispatch(
             State(state.clone()),
@@ -2843,10 +3295,7 @@ mod tests {
         let service_directory = tempfile::tempdir().unwrap();
         let service = direct_http_test_service(service_directory.path(), server.uri());
         let (_task_directory, tasks) = temp_supervisor().await;
-        let state = ApiState {
-            service: Arc::new(service.scope(OwnerContext::single_user_local())),
-            tasks,
-        };
+        let state = test_state(service.clone(), tasks);
 
         let response = dispatch_stream(State(state), Json(dispatch_request(None)))
             .await
@@ -3559,7 +4008,8 @@ mod tests {
             test_service(service_directory.path()),
             supervisor.clone(),
             API_TOKEN,
-        );
+        )
+        .unwrap();
         let response = app
             .oneshot(
                 axum::http::Request::post("/v1/tasks")
@@ -3931,7 +4381,7 @@ mod tests {
             .unwrap();
 
         let (_task_directory, supervisor) = temp_supervisor().await;
-        let app = router_from_parts(service, supervisor, API_TOKEN);
+        let app = router_from_parts(service, supervisor, API_TOKEN).unwrap();
         for route in ["/v1/runs", "/v1/sessions"] {
             let response = app
                 .clone()
