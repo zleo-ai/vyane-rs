@@ -27,7 +27,10 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, FromRef, Path, Query, RawQuery, Request, State},
+    extract::{
+        DefaultBodyLimit, FromRef, Path, Query, RawQuery, Request, State,
+        rejection::{BytesRejection, PathRejection},
+    },
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
@@ -1624,9 +1627,9 @@ fn origin_is_loopback(raw: &str) -> bool {
 
 async fn goal_continuity_next(
     State(state): State<ApiState>,
-    Path(id): Path<String>,
+    path: Result<Path<String>, PathRejection>,
     RawQuery(query): RawQuery,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     if query.is_some() {
         return no_store(
@@ -1634,6 +1637,19 @@ async fn goal_continuity_next(
                 .into_response(),
         );
     }
+    let Path(id) = match path {
+        Ok(path) => path,
+        Err(_) => return no_store(ApiError::bad_request("invalid goal id").into_response()),
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return no_store(
+                ApiError::bad_request("goal continuity-next does not accept a request body")
+                    .into_response(),
+            );
+        }
+    };
     if !body.is_empty() {
         return no_store(
             ApiError::bad_request("goal continuity-next does not accept a request body")
@@ -1694,7 +1710,7 @@ async fn no_store_goal_read_responses(request: Request, next: Next) -> Response 
     let is_goal_read = path
         .strip_prefix("/v1/goals/")
         .and_then(|suffix| suffix.strip_suffix("/continuity-next"))
-        .is_some_and(|goal_id| !goal_id.is_empty() && !goal_id.contains('/'));
+        .is_some_and(|goal_id| !goal_id.contains('/'));
     let response = next.run(request).await;
     if is_goal_read {
         no_store(response)
@@ -2981,6 +2997,61 @@ mod tests {
             "no-store"
         );
 
+        let empty_route = "/v1/goals//continuity-next";
+        let empty_unauthorized = app
+            .clone()
+            .oneshot(goal_request(empty_route, None))
+            .await
+            .unwrap();
+        assert_eq!(empty_unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            empty_unauthorized
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store"
+        );
+
+        let empty_forbidden = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get(empty_route)
+                    .header("host", "example.invalid")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_forbidden.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            empty_forbidden
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store"
+        );
+
+        let empty_head = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::HEAD)
+                    .uri(empty_route)
+                    .header("host", "127.0.0.1:9721")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_head.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            empty_head.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(empty_head.headers().get(header::ALLOW).unwrap(), "GET");
+
         let query = app
             .clone()
             .oneshot(goal_request(
@@ -3011,6 +3082,24 @@ mod tests {
             serde_json::json!({ "error": "invalid goal id" })
         );
 
+        let invalid_utf8 = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/goals/%FF/continuity-next",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid_utf8.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            invalid_utf8.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(
+            response_json(invalid_utf8).await,
+            serde_json::json!({ "error": "invalid goal id" })
+        );
+
         for body in ["opaque", r#"{"owner":"foreign"}"#] {
             let response = app
                 .clone()
@@ -3035,6 +3124,29 @@ mod tests {
                 })
             );
         }
+
+        let oversized_body = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get(route)
+                    .header("host", "127.0.0.1:9721")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::from(vec![b'x'; MAX_BODY_BYTES + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oversized_body.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            oversized_body.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(
+            response_json(oversized_body).await,
+            serde_json::json!({
+                "error": "goal continuity-next does not accept a request body"
+            })
+        );
 
         let head = app
             .clone()
