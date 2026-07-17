@@ -1,4 +1,4 @@
--- Schema v6: durable owner-scoped takeover approval queue (WP-74).
+-- Schema v7: durable owner-scoped takeover approval queue (WP-74).
 --
 -- Records an explicit, unconsumed approval to execute one current ready
 -- takeover / start_takeover step. The queue never dispatches: it binds the
