@@ -536,15 +536,18 @@ async fn pursue(config_path: Option<PathBuf>, args: GoalPursueArgs) -> Result<Ex
     config.validate().context("validate goal pursuit")?;
     let service =
         Arc::new(VyaneService::load(config_path.as_deref()).context("load pursuit runtime")?);
-    service
-        .resolve(&args.target)
-        .context("resolve pursuit target")?;
+    if !args.target.eq_ignore_ascii_case("auto") {
+        service
+            .resolve(&args.target)
+            .context("resolve pursuit target")?;
+    }
     let (cancel, signal_task) = cancellation_token();
-    let runtime =
-        DispatchGoalRuntime::new(service, args.target.clone(), args.sandbox.into(), cancel);
+    let runtime = DispatchGoalRuntime::new(service, args.target.clone(), args.sandbox.into());
     let pursuer =
         GoalPursuer::new(&store, &runtime, &verifier, config).context("construct goal pursuer")?;
-    let outcome = pursuer.pursue(&args.common.owner, &args.id).await;
+    let outcome = pursuer
+        .pursue_with_cancel(&args.common.owner, &args.id, cancel)
+        .await;
     signal_task.abort();
     let _ = signal_task.await;
     let outcome = outcome.context("pursue goal")?;
