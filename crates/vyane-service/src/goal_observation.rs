@@ -379,6 +379,7 @@ impl fmt::Display for GoalObservationRunnerError {
 impl std::error::Error for GoalObservationRunnerError {}
 
 struct BoundWatcher {
+    id: String,
     watcher: Arc<dyn GoalObservationWatcher>,
     sink: GoalObservationSink,
 }
@@ -409,14 +410,14 @@ impl GoalObservationRunner {
         let mut ids = HashSet::with_capacity(watchers.len());
         let mut bound = Vec::with_capacity(watchers.len());
         for watcher in watchers {
-            let id = watcher.id();
+            let id = watcher.id().to_string();
             let sink = ingress
-                .bind_source(id)
+                .bind_source(id.clone())
                 .map_err(|_| GoalObservationRunnerError::InvalidConfiguration)?;
-            if !ids.insert(id.to_string()) {
+            if !ids.insert(id.clone()) {
                 return Err(GoalObservationRunnerError::DuplicateWatcher);
             }
-            bound.push(BoundWatcher { watcher, sink });
+            bound.push(BoundWatcher { id, watcher, sink });
         }
         Ok(Self {
             watchers: bound,
@@ -439,19 +440,19 @@ impl GoalObservationRunner {
             .buffer_unordered(self.concurrency)
             .collect::<Vec<_>>()
             .await;
-        fetched.sort_by(|(left, _), (right, _)| left.watcher.id().cmp(right.watcher.id()));
+        fetched.sort_by(|(left, _), (right, _)| left.id.cmp(&right.id));
 
         fetched
             .into_iter()
             .map(|(bound, result)| match result {
                 Err(_) => GoalObservationWatchReport {
-                    watcher_id: bound.watcher.id().to_string(),
+                    watcher_id: bound.id.clone(),
                     status: GoalObservationWatchStatus::Timeout,
                     receipts: Vec::new(),
                     error: None,
                 },
                 Ok(Err(error)) => GoalObservationWatchReport {
-                    watcher_id: bound.watcher.id().to_string(),
+                    watcher_id: bound.id.clone(),
                     status: GoalObservationWatchStatus::Error,
                     receipts: Vec::new(),
                     error: Some(error.code),
@@ -460,14 +461,14 @@ impl GoalObservationRunner {
                     if observations.len() > self.policy.max_observations_per_watcher =>
                 {
                     GoalObservationWatchReport {
-                        watcher_id: bound.watcher.id().to_string(),
+                        watcher_id: bound.id.clone(),
                         status: GoalObservationWatchStatus::InvalidBatch,
                         receipts: Vec::new(),
                         error: Some(GoalObservationWatcherErrorCode::InvalidResponse),
                     }
                 }
                 Ok(Ok(observations)) => GoalObservationWatchReport {
-                    watcher_id: bound.watcher.id().to_string(),
+                    watcher_id: bound.id.clone(),
                     status: GoalObservationWatchStatus::Complete,
                     receipts: observations
                         .into_iter()
@@ -496,6 +497,7 @@ impl fmt::Debug for GoalObservationRunner {
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use chrono::TimeZone as _;
     use tempfile::TempDir;
@@ -777,6 +779,29 @@ mod tests {
         })
     }
 
+    struct DriftingWatcher {
+        observed: AtomicBool,
+    }
+
+    #[async_trait]
+    impl GoalObservationWatcher for DriftingWatcher {
+        fn id(&self) -> &str {
+            if self.observed.load(Ordering::SeqCst) {
+                "a-drifted-sensitive-id"
+            } else {
+                "z-frozen"
+            }
+        }
+
+        async fn observe(
+            &self,
+            _context: GoalObservationWatchContext,
+        ) -> Result<Vec<GoalObservation>, GoalObservationWatcherError> {
+            self.observed.store(true, Ordering::SeqCst);
+            Ok(vec![reset("goal")])
+        }
+    }
+
     #[tokio::test]
     async fn runner_is_bounded_sorted_and_failure_isolated() {
         let directory = TempDir::new().unwrap();
@@ -846,6 +871,41 @@ mod tests {
         assert_eq!(reports[0].status, GoalObservationWatchStatus::InvalidBatch);
         assert!(reports[0].receipts.is_empty());
         assert_eq!(store.get("local", "goal").unwrap().unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn watcher_identity_is_frozen_for_source_ordering_and_reports() {
+        let directory = TempDir::new().unwrap();
+        let service = service(&directory);
+        let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
+        create_goal(&store, "local", "goal");
+        let ingress = service
+            .goal_observation_ingress(OwnerContext::single_user_local())
+            .unwrap();
+        let runner = GoalObservationRunner::new(
+            &ingress,
+            vec![
+                Arc::new(DriftingWatcher {
+                    observed: AtomicBool::new(false),
+                }),
+                watcher("m-stable", FakeResult::Batch(Vec::new())),
+            ],
+            2,
+            GoalObservationWatchPolicy::default(),
+        )
+        .unwrap();
+
+        let reports = runner.poll_once().await;
+
+        assert_eq!(reports[0].watcher_id, "m-stable");
+        assert_eq!(reports[1].watcher_id, "z-frozen");
+        let goal = store.get("local", "goal").unwrap().unwrap();
+        assert_eq!(
+            goal.continuity_state.unwrap().ready_signals[0].source,
+            "z-frozen"
+        );
+        let encoded = serde_json::to_string(&reports).unwrap();
+        assert!(!encoded.contains("a-drifted-sensitive-id"));
     }
 
     #[test]
