@@ -30,8 +30,8 @@ pub use continuity::{
 pub use error::{GoalStoreError, Result};
 pub use model::{
     AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalEvent,
-    GoalEventKind, GoalQuery, GoalRecord, GoalStatus, GoalVerificationArtifact, MAX_LEASE_SECONDS,
-    NewGoal,
+    GoalEventKind, GoalQuery, GoalRecord, GoalRecoveryCursor, GoalRecoveryFilter, GoalRecoveryPage,
+    GoalStatus, GoalVerificationArtifact, MAX_LEASE_SECONDS, NewGoal,
 };
 pub use projection::{
     GoalContinuityNextAction, GoalContinuityNextActionKind, GoalContinuityOperatorCommand,
