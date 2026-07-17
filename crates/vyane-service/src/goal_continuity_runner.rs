@@ -1051,30 +1051,54 @@ mod tests {
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
 
-        for goal_id in ["first", "second"] {
-            let calls = Arc::clone(&calls);
-            let active = Arc::clone(&active);
-            let max_active = Arc::clone(&max_active);
-            let operation = move || {
-                calls.fetch_add(1, Ordering::SeqCst);
-                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
-                max_active.fetch_max(current, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(40));
-                active.fetch_sub(1, Ordering::SeqCst);
-                Ok(view(goal_id, GoalNextActionKind::ContinuityComplete))
-            };
-            assert!(
-                tokio::time::timeout(
-                    Duration::from_millis(5),
-                    bounded_blocking_projection(Arc::clone(&permits), operation),
-                )
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let first_calls = Arc::clone(&calls);
+        let first_active = Arc::clone(&active);
+        let first_max_active = Arc::clone(&max_active);
+        let first_permits = Arc::clone(&permits);
+        let first = tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                bounded_blocking_projection(first_permits, move || {
+                    first_calls.fetch_add(1, Ordering::SeqCst);
+                    let current = first_active.fetch_add(1, Ordering::SeqCst) + 1;
+                    first_max_active.fetch_max(current, Ordering::SeqCst);
+                    let _ = started_tx.send(());
+                    release_rx.recv().unwrap();
+                    first_active.fetch_sub(1, Ordering::SeqCst);
+                    let _ = finished_tx.send(());
+                    Ok(view("first", GoalNextActionKind::ContinuityComplete))
+                }),
+            )
+            .await
+        });
+
+        started_rx.await.unwrap();
+        assert!(first.await.unwrap().is_err());
+
+        let second_calls = Arc::clone(&calls);
+        let second = tokio::time::timeout(
+            Duration::from_millis(20),
+            bounded_blocking_projection(Arc::clone(&permits), move || {
+                second_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(view("second", GoalNextActionKind::ContinuityComplete))
+            }),
+        )
+        .await;
+        assert!(second.is_err());
+
+        release_tx.send(()).unwrap();
+        finished_rx.await.unwrap();
+        let recovered =
+            tokio::time::timeout(Duration::from_secs(1), Arc::clone(&permits).acquire_owned())
                 .await
-                .is_err()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+                .unwrap()
+                .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        drop(recovered);
         assert_eq!(permits.available_permits(), 1);
     }
 
