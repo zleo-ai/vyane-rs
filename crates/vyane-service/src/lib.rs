@@ -36,6 +36,7 @@ mod config;
 mod diagnostics;
 mod factory;
 mod goal;
+mod goal_continuity_runner;
 mod goal_observation;
 mod inprocess_agent;
 mod message;
@@ -86,6 +87,14 @@ pub use factory::{AssemblerFactory, authorized_native_client, direct_http_client
 pub use goal::{
     GOAL_NEXT_ACTION_VIEW_SCHEMA, GoalNextActionKind, GoalNextActionView, GoalNextReasonCode,
     GoalOperatorCommand, GoalReadError, GoalReadService, GoalSignalKind,
+};
+pub use goal_continuity_runner::{
+    GoalContinuityActionFence, GoalContinuityExecutionPort, GoalContinuityPortResult,
+    GoalContinuityProjectionReader, GoalContinuityQueuePort, GoalContinuityRunItem,
+    GoalContinuityRunStatus, GoalContinuityRunner, GoalContinuityRunnerAuthority,
+    GoalContinuityRunnerAuthorityError, GoalContinuityRunnerAuthorityFactory,
+    GoalContinuityRunnerCredentials, GoalContinuityRunnerError, GoalContinuityRunnerOptions,
+    MAX_GOAL_CONTINUITY_CONCURRENCY, MAX_GOAL_CONTINUITY_GOALS,
 };
 pub use goal_observation::{
     GoalObservation, GoalObservationIngress, GoalObservationIngressError, GoalObservationKind,
