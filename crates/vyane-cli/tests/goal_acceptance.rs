@@ -12,12 +12,13 @@ use std::{fs, os::unix::fs::PermissionsExt as _};
 
 use assert_cmd::Command;
 use chrono::{TimeZone as _, Utc};
+use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::TempDir;
 use vyane_goal::{
     GoalContinuityMode, GoalContinuityPolicy, GoalContinuityStepStatus, GoalExecutionTarget,
-    GoalQuotaEvent, GoalStore, NewGoal, SqliteGoalStore, TakeoverApprovalStatus,
-    apply_quota_handoff_events,
+    GoalQuotaEvent, GoalStore, NewGoal, SqliteGoalStore, TakeoverApprovalStatus, TakeoverFinish,
+    TakeoverRunStatus, apply_quota_handoff_events,
 };
 
 fn vyane() -> Command {
@@ -473,6 +474,132 @@ fn continuity_queue_and_decide_are_explicit_json_roundtrip() {
     assert_eq!(repeated["approval"]["approval_id"], approval_id);
 }
 
+#[test]
+fn continuity_review_queue_requires_persisted_successful_takeover_evidence() {
+    let directory = TempDir::new().unwrap();
+    let db_path = directory.path().join("goals.sqlite3");
+    let db = db_text(&db_path);
+    let target = |role: &str| GoalExecutionTarget {
+        provider: "native".into(),
+        protocol: "anthropic_messages".into(),
+        harness: "claude-code".into(),
+        model: "test-model".into(),
+        profile: None,
+        role: role.into(),
+    };
+    let store = SqliteGoalStore::open(&db_path).unwrap();
+    let mut goal = NewGoal::new(
+        "Missing review evidence",
+        Utc.timestamp_opt(1_000, 0).unwrap(),
+    );
+    goal.id = Some("missing-review-evidence".into());
+    goal.continuity_policy = Some(GoalContinuityPolicy {
+        mode: GoalContinuityMode::QuotaHandoff,
+        primary: target("primary"),
+        takeover: vec![target("takeover")],
+        reviewer: Some(target("reviewer")),
+        resume_primary_after_reset: true,
+        require_review_before_resume: true,
+    });
+    store.create("local", goal).unwrap();
+    store
+        .start(
+            "local",
+            "missing-review-evidence",
+            Utc.timestamp_opt(1_001, 0).unwrap(),
+        )
+        .unwrap();
+    apply_quota_handoff_events(
+        &store,
+        "local",
+        &[GoalQuotaEvent {
+            event_id: "quota-missing-review".into(),
+            goal_id: Some("missing-review-evidence".into()),
+            provider: "native".into(),
+            harness: "claude-code".into(),
+            model: "test-model".into(),
+            session_id: None,
+            observed_at: Utc.timestamp_opt(1_002, 0).unwrap(),
+            estimated_reset_at: None,
+        }],
+        Utc.timestamp_opt(1_003, 0).unwrap(),
+    )
+    .unwrap();
+
+    let workdir = db_text(directory.path());
+    let queued = json_output(
+        &[
+            "goal",
+            "continuity-queue",
+            "--db",
+            &db,
+            "--json",
+            "missing-review-evidence",
+            "--workdir",
+            &workdir,
+        ],
+        0,
+    );
+    let approval_id = queued["approval"]["approval_id"].as_str().unwrap();
+    json_output(
+        &[
+            "goal",
+            "continuity-decide",
+            "--db",
+            &db,
+            "--json",
+            approval_id,
+            "--decision",
+            "approve",
+            "--decided-by",
+            "operator",
+        ],
+        0,
+    );
+    store
+        .consume_takeover_approval("local", approval_id, Utc::now())
+        .unwrap();
+    store
+        .finish_takeover_approval(
+            "local",
+            approval_id,
+            &TakeoverFinish {
+                run_id: Some("completed-run".into()),
+                run_status: TakeoverRunStatus::Success,
+                detail: "completed".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap();
+    Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "DELETE FROM goal_takeover_approvals WHERE approval_id = ?1",
+            [approval_id],
+        )
+        .unwrap();
+
+    let refused = json_output(
+        &[
+            "goal",
+            "continuity-queue",
+            "--db",
+            &db,
+            "--json",
+            "missing-review-evidence",
+            "--workdir",
+            &workdir,
+        ],
+        2,
+    );
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("review step has no exact successful takeover run evidence")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn continuity_execute_dispatches_once_and_settles_done() {
@@ -601,6 +728,98 @@ fn continuity_execute_dispatches_once_and_settles_done() {
             .status,
         GoalContinuityStepStatus::Done
     );
+
+    let review_queued = json_output(
+        &[
+            "goal",
+            "continuity-queue",
+            "--db",
+            &db,
+            "--json",
+            "execute-controlled",
+            "--workdir",
+            &workdir,
+            "--sandbox",
+            PURSUIT_SANDBOX,
+            "--timeout-seconds",
+            "30",
+        ],
+        0,
+    );
+    assert_eq!(review_queued["approval"]["step_id"], "review_takeover");
+    assert_eq!(
+        review_queued["approval"]["upstream_approval_id"],
+        approval_id
+    );
+    assert!(review_queued["approval"]["upstream_run_id"].is_string());
+    let review_approval_id = review_queued["approval"]["approval_id"]
+        .as_str()
+        .expect("review approval id");
+    json_output(
+        &[
+            "goal",
+            "continuity-decide",
+            "--db",
+            &db,
+            "--json",
+            review_approval_id,
+            "--decision",
+            "approve",
+            "--decided-by",
+            "operator",
+        ],
+        0,
+    );
+    let review_output = vyane()
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("HOME", directory.path())
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "goal",
+            "continuity-execute",
+            "--db",
+            &db,
+            "--json",
+            review_approval_id,
+        ])
+        .output()
+        .expect("execute review");
+    assert_eq!(
+        review_output.status.code(),
+        Some(0),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&review_output.stdout),
+        String::from_utf8_lossy(&review_output.stderr)
+    );
+    let reviewed: Value =
+        serde_json::from_slice(&review_output.stdout).expect("review execution JSON");
+    assert_eq!(reviewed["approval"]["status"], "done");
+    let goal = store
+        .get("local", "execute-controlled")
+        .expect("read reviewed goal")
+        .expect("reviewed goal exists");
+    let state = goal.continuity_state.expect("reviewed continuity state");
+    let review = state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.id == "review_takeover")
+        .expect("review step");
+    let resume = state
+        .handoff_plan
+        .steps
+        .iter()
+        .find(|step| step.id == "resume_primary")
+        .expect("resume step");
+    assert_eq!(review.status, GoalContinuityStepStatus::Done);
+    assert_eq!(
+        resume.status,
+        GoalContinuityStepStatus::WaitingForQuotaReset
+    );
+    assert!(state.handoff_plan.next_ready_step.is_empty());
 }
 
 #[test]

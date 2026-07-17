@@ -415,8 +415,8 @@ pub(crate) fn state_for_event(
 }
 
 /// Produce a cloned continuity state with the named step's status replaced,
-/// re-validating the result. Used by the takeover approval consume/finish
-/// transitions to keep the visible handoff plan in lockstep with approval state.
+/// release the next local dependency when possible, and re-validate the result.
+/// External readiness such as quota reset remains outside this helper.
 pub(crate) fn with_step_status(
     state: &GoalContinuityState,
     step_id: &str,
@@ -434,6 +434,31 @@ pub(crate) fn with_step_status(
             ))
         })?;
     step.status = status;
+    if status == GoalContinuityStepStatus::Done {
+        if step_id == "takeover" {
+            if let Some(review) = next
+                .handoff_plan
+                .steps
+                .iter_mut()
+                .find(|candidate| candidate.id == "review_takeover")
+            {
+                if review.status == GoalContinuityStepStatus::WaitingForTakeover {
+                    review.status = GoalContinuityStepStatus::Ready;
+                }
+            }
+        } else if step_id == "review_takeover" {
+            if let Some(resume) = next
+                .handoff_plan
+                .steps
+                .iter_mut()
+                .find(|candidate| candidate.id == "resume_primary")
+            {
+                if resume.status == GoalContinuityStepStatus::WaitingForQuotaResetAndReview {
+                    resume.status = GoalContinuityStepStatus::WaitingForQuotaReset;
+                }
+            }
+        }
+    }
     next.handoff_plan.next_ready_step = next
         .handoff_plan
         .steps
@@ -444,18 +469,19 @@ pub(crate) fn with_step_status(
     Ok(next)
 }
 
-/// The takeover target currently bound to a ready `start_takeover` step, if any.
-pub(crate) fn ready_takeover_target(
-    state: &GoalContinuityState,
-) -> Option<(String, String, &GoalExecutionTarget)> {
+/// The exact approval-gated continuity target currently ready for execution.
+pub(crate) fn ready_approval_target<'a>(
+    state: &'a GoalContinuityState,
+    step_id: &str,
+    step_kind: &str,
+) -> Option<&'a GoalExecutionTarget> {
     state.handoff_plan.steps.iter().find_map(|step| {
         if step.status == GoalContinuityStepStatus::Ready
-            && step.kind == "start_takeover"
-            && step.id == "takeover"
+            && step.requires_approval
+            && step.id == step_id
+            && step.kind == step_kind
         {
-            step.target
-                .as_ref()
-                .map(|target| (step.id.clone(), step.kind.clone(), target))
+            step.target.as_ref()
         } else {
             None
         }

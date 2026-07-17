@@ -1207,7 +1207,7 @@ fn v5_database_migrates_continuity_without_losing_recovery_indexes() {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read schema version");
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     for name in [
         "goals_owner_worker_lease_idx",
         "goals_owner_lease_idx",
@@ -1260,7 +1260,7 @@ fn v6_database_migrates_takeover_approval_without_losing_goal_data() {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read schema version");
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     for name in [
         "goal_takeover_approvals",
         "goal_takeover_approvals_owner_goal_idx",
@@ -1316,6 +1316,25 @@ fn current_schema_without_takeover_table_is_rejected_at_open() {
 }
 
 #[test]
+fn current_schema_without_review_handback_column_is_rejected_at_open() {
+    let (directory, store) = fixture();
+    let path = directory.path().join("goals.sqlite3");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open raw database");
+    connection
+        .execute_batch("ALTER TABLE goal_takeover_approvals DROP COLUMN upstream_run_id;")
+        .expect("damage current schema");
+    drop(connection);
+
+    assert!(matches!(
+        SqliteGoalStore::open(&path),
+        Err(GoalStoreError::CorruptData(message))
+            if message.contains("upstream_run_id")
+    ));
+}
+
+#[test]
 fn store_reopens_and_rejects_newer_schema() {
     let (directory, store) = fixture();
     let path = directory.path().join("goals.sqlite3");
@@ -1337,7 +1356,7 @@ fn store_reopens_and_rejects_newer_schema() {
         SqliteGoalStore::open(&path),
         Err(GoalStoreError::UnsupportedSchema {
             found: 99,
-            supported: 7
+            supported: 8
         })
     ));
 }

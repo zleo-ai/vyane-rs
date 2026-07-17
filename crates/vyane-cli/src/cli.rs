@@ -100,11 +100,11 @@ pub enum GoalCommand {
     Verify(GoalVerifyArgs),
     /// Repeatedly verify and dispatch fresh bounded work segments until achieved or paused.
     Pursue(GoalPursueArgs),
-    /// Queue one approval bound to the current ready takeover step; never dispatches.
+    /// Queue one approval bound to the current ready takeover or review step; never dispatches.
     ContinuityQueue(GoalContinuityQueueArgs),
-    /// Explicitly approve or reject one pending takeover approval.
+    /// Explicitly approve or reject one pending continuity approval.
     ContinuityDecide(GoalContinuityDecisionArgs),
-    /// Consume one approved takeover approval and execute exactly once.
+    /// Consume one approved continuity approval and execute exactly once.
     ContinuityExecute(GoalContinuityExecuteArgs),
     /// Append a progress event without changing lifecycle state.
     Progress(GoalProgressArgs),
@@ -164,7 +164,7 @@ pub struct GoalCreateArgs {
 pub struct GoalContinuityQueueArgs {
     #[command(flatten)]
     pub common: GoalCommonArgs,
-    /// Goal whose current ready takeover step should be queued.
+    /// Goal whose current supported ready continuity step should be queued.
     pub id: String,
     /// Existing worktree or workspace bound into the approval.
     #[arg(long, value_name = "PATH")]
