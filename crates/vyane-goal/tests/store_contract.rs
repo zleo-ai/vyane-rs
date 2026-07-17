@@ -4,7 +4,8 @@ use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
-    GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus, SqliteGoalStore,
+    GoalRecoveryFilter, GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus,
+    SqliteGoalStore,
 };
 
 const OWNER_A: &str = "owner-a";
@@ -212,7 +213,6 @@ fn queue_and_list_order_are_stable_and_owner_scoped() {
             .collect::<Vec<_>>(),
         ["later-urgent", "normal"]
     );
-
     let parented = store
         .list(
             OWNER_A,
@@ -225,6 +225,173 @@ fn queue_and_list_order_are_stable_and_owner_scoped() {
         .expect("parent list");
     assert_eq!(parented.len(), 1);
     assert_eq!(parented[0].id, "later-urgent");
+}
+
+#[test]
+fn recovery_pages_filter_leases_and_ignore_mutable_update_order() {
+    let (_directory, store) = fixture();
+    let base = timestamp(1_700_000_000);
+    for (id, priority, offset) in [("available-a", 0, 0), ("available-b", 0, 1)] {
+        store
+            .create(
+                OWNER_A,
+                new_goal(id, id, priority, base + TimeDelta::seconds(offset)),
+            )
+            .expect("create available goal");
+        store
+            .start(OWNER_A, id, base)
+            .expect("start available goal");
+    }
+    store
+        .create(OWNER_A, new_goal("stable", "stable", 1, base))
+        .expect("create stable goal");
+    store
+        .claim(OWNER_A, "stable", "daemon-worker", 60, base)
+        .expect("claim stable goal");
+    store
+        .create(OWNER_A, new_goal("foreign", "foreign", 0, base))
+        .expect("create foreign goal");
+    store
+        .claim(OWNER_A, "foreign", "foreign-worker", 60, base)
+        .expect("claim foreign goal");
+
+    let active = store
+        .list_recovery_page(
+            OWNER_A,
+            &GoalRecoveryFilter::ActiveWorker {
+                worker_id: "daemon-worker".into(),
+                at: base + TimeDelta::seconds(1),
+            },
+            None,
+            10,
+        )
+        .expect("stable-worker page");
+    assert_eq!(
+        active
+            .candidates
+            .iter()
+            .map(|goal| goal.id.as_str())
+            .collect::<Vec<_>>(),
+        ["stable"]
+    );
+
+    let filter = GoalRecoveryFilter::Available { at: base };
+    let first = store
+        .list_recovery_page(OWNER_A, &filter, None, 2)
+        .expect("first recovery page");
+    assert_eq!(first.candidates[0].id, "available-a");
+    let cursor = first.next.expect("raw page cursor");
+    store
+        .progress(
+            OWNER_A,
+            "available-b",
+            "concurrent",
+            "move mutable updated_at",
+            base + TimeDelta::seconds(30),
+        )
+        .expect("update second recovery goal");
+    let second = store
+        .list_recovery_page(OWNER_A, &filter, Some(&cursor), 2)
+        .expect("second recovery page");
+    assert_eq!(second.candidates[0].id, "available-b");
+}
+
+#[test]
+fn recovery_page_bounds_rows_examined_before_lease_filtering() {
+    let (directory, store) = fixture();
+    let base = timestamp(1_700_000_000);
+    for index in 0..20 {
+        let id = format!("foreign-{index:02}");
+        store
+            .create(OWNER_A, new_goal(&id, &id, 0, base))
+            .expect("create foreign goal");
+        store
+            .claim(OWNER_A, &id, "foreign-worker", 60, base)
+            .expect("claim foreign goal");
+    }
+
+    let page = store
+        .list_recovery_page(
+            OWNER_A,
+            &GoalRecoveryFilter::Available {
+                at: base + TimeDelta::seconds(1),
+            },
+            None,
+            5,
+        )
+        .expect("bounded raw page");
+    assert!(page.candidates.is_empty());
+    assert!(page.next.is_some(), "five examined rows advance the cursor");
+
+    let connection = Connection::open(directory.path().join("goals.sqlite3"))
+        .expect("open query-plan connection");
+    let detail: String = connection
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT id FROM goals INDEXED BY goals_owner_queue_idx \
+             WHERE owner = ?1 AND status = 'in_progress' \
+             ORDER BY priority, created_at_ms, id LIMIT 5",
+            [OWNER_A],
+            |row| row.get(3),
+        )
+        .expect("recovery query plan");
+    assert!(detail.contains("goals_owner_queue_idx"), "{detail}");
+
+    for (index, predicate) in [
+        (
+            "goals_owner_worker_lease_idx",
+            "claimed_by = 'daemon-worker' AND claim_expires_at_ms > 0",
+        ),
+        ("goals_owner_lease_idx", "claim_expires_at_ms <= 0"),
+    ] {
+        let sql = format!(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM goals INDEXED BY {index} \
+             WHERE owner = 'owner-a' AND status = 'in_progress' AND {predicate} LIMIT 1"
+        );
+        let plan: String = connection
+            .query_row(&sql, [], |row| row.get(3))
+            .expect("recovery confirmation query plan");
+        assert!(plan.contains(index), "{plan}");
+    }
+}
+
+#[test]
+fn queued_claim_is_atomically_gated_by_recovery_candidates() {
+    let (_directory, store) = fixture();
+    let base = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("expired", "expired", 0, base))
+        .expect("create expired goal");
+    store
+        .claim(OWNER_A, "expired", "foreign-worker", 1, base)
+        .expect("claim expired goal");
+    store
+        .create(OWNER_A, new_goal("queued", "queued", 1, base))
+        .expect("create queued goal");
+    let after_expiry = base + TimeDelta::seconds(2);
+
+    assert!(
+        store
+            .claim_next_if_no_recovery(OWNER_A, "daemon-worker", 60, &[], after_expiry)
+            .expect("recovery-gated claim")
+            .is_none()
+    );
+    let queued = store
+        .get(OWNER_A, "queued")
+        .expect("get queued")
+        .expect("queued goal remains");
+    assert_eq!(queued.status, GoalStatus::Queued);
+
+    let claimed = store
+        .claim_next_if_no_recovery(
+            OWNER_A,
+            "daemon-worker",
+            60,
+            &["expired".into()],
+            after_expiry,
+        )
+        .expect("cooldown-excluded claim")
+        .expect("queued claim");
+    assert_eq!(claimed.id, "queued");
 }
 
 #[test]
@@ -633,7 +800,7 @@ fn pursuit_checkpoint_is_revision_and_lease_generation_fenced() {
             at + TimeDelta::seconds(1),
         )
         .expect("record initial checkpoint");
-    assert_eq!(first.checkpoint_revision, 0);
+    assert_eq!(first.checkpoint_revision, 1);
     assert_eq!(first.goal_revision, event.revision);
     assert_eq!(event.kind, GoalEventKind::Progress);
     assert_eq!(
@@ -681,7 +848,7 @@ fn pursuit_checkpoint_is_revision_and_lease_generation_fenced() {
             at + TimeDelta::seconds(121),
         )
         .expect("adopt checkpoint under new generation");
-    assert_eq!(second.checkpoint_revision, 1);
+    assert_eq!(second.checkpoint_revision, 2);
     assert_eq!(second.claim_generation, reclaimed.claim_generation);
     assert_eq!(second.worker_id, "worker-b");
     let current = store
@@ -716,6 +883,61 @@ fn pursuit_checkpoint_is_revision_and_lease_generation_fenced() {
         ),
         Err(GoalStoreError::LeaseHeld { .. })
     ));
+}
+
+#[test]
+fn checkpoint_can_read_a_foreign_platform_absolute_workdir() {
+    let (_directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("foreign-path", "Foreign path", 2, at))
+        .expect("create");
+    let claimed = store
+        .claim(OWNER_A, "foreign-path", "worker-a", 60, at)
+        .expect("claim");
+    #[cfg(unix)]
+    let workdir = std::path::PathBuf::from(r"C:\workspace\vyane");
+    #[cfg(windows)]
+    let workdir = std::path::PathBuf::from("/workspace/vyane");
+    let checkpoint = GoalPursuitCheckpoint {
+        owner: OWNER_A.into(),
+        goal_id: "foreign-path".into(),
+        checkpoint_revision: 0,
+        goal_revision: claimed.revision,
+        claim_generation: claimed.claim_generation,
+        worker_id: "worker-a".into(),
+        runtime: "builder".into(),
+        workdir: workdir.clone(),
+        started_at: at,
+        updated_at: at,
+        segments_started: 0,
+        segments_completed: 0,
+        consecutive_failures: 0,
+        status: PursuitCheckpointStatus::Running,
+        last_run_id: None,
+        last_verification_id: None,
+    };
+
+    store
+        .record_pursuit_checkpoint(
+            OWNER_A,
+            "foreign-path",
+            "worker-a",
+            &checkpoint,
+            "pursuit.started",
+            "foreign path fixture",
+            at + TimeDelta::seconds(1),
+        )
+        .expect("record foreign path checkpoint");
+
+    assert_eq!(
+        store
+            .pursuit_checkpoint(OWNER_A, "foreign-path")
+            .expect("read foreign path checkpoint")
+            .expect("checkpoint")
+            .workdir,
+        workdir
+    );
 }
 
 #[test]
@@ -904,6 +1126,8 @@ fn v2_database_migrates_current_goal_features_without_losing_goals() {
     connection
         .execute_batch(
             "DROP INDEX goal_pursuit_checkpoints_owner_updated_idx;
+             DROP INDEX goals_owner_worker_lease_idx;
+             DROP INDEX goals_owner_lease_idx;
              DROP TABLE goal_pursuit_checkpoints;
              DROP TRIGGER goal_verifications_immutable_update;
              DROP TRIGGER goal_verifications_immutable_delete;
@@ -945,6 +1169,77 @@ fn v2_database_migrates_current_goal_features_without_losing_goals() {
 }
 
 #[test]
+fn v5_database_migrates_continuity_without_losing_recovery_indexes() {
+    let (directory, store) = fixture();
+    let path = directory.path().join("goals.sqlite3");
+    let at = timestamp(1_700_000_000);
+    store
+        .create(OWNER_A, new_goal("v5-existing", "Existing", 2, at))
+        .expect("create");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open raw database");
+    connection
+        .execute_batch(
+            "ALTER TABLE goals DROP COLUMN continuity_state_json;
+             ALTER TABLE goals DROP COLUMN continuity_policy_json;
+             PRAGMA user_version = 5;",
+        )
+        .expect("restore v5 schema shape");
+    drop(connection);
+
+    let migrated = SqliteGoalStore::open(&path).expect("migrate v5 to current");
+    assert!(
+        migrated
+            .get(OWNER_A, "v5-existing")
+            .expect("get existing goal")
+            .is_some()
+    );
+    drop(migrated);
+
+    let connection = Connection::open(&path).expect("inspect migrated database");
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read schema version");
+    assert_eq!(version, 6);
+    for name in [
+        "goals_owner_worker_lease_idx",
+        "goals_owner_lease_idx",
+        "continuity_policy_json",
+        "continuity_state_json",
+    ] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1 \
+                 UNION ALL SELECT 1 FROM pragma_table_info('goals') WHERE name = ?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .expect("inspect migrated schema object");
+        assert!(exists, "missing migrated schema object {name}");
+    }
+}
+
+#[test]
+fn current_schema_without_continuity_column_is_rejected_at_open() {
+    let (directory, store) = fixture();
+    let path = directory.path().join("goals.sqlite3");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open raw database");
+    connection
+        .execute_batch("ALTER TABLE goals DROP COLUMN continuity_state_json;")
+        .expect("damage current schema");
+    drop(connection);
+
+    assert!(matches!(
+        SqliteGoalStore::open(&path),
+        Err(GoalStoreError::CorruptData(message))
+            if message.contains("continuity_state_json")
+    ));
+}
+
+#[test]
 fn store_reopens_and_rejects_newer_schema() {
     let (directory, store) = fixture();
     let path = directory.path().join("goals.sqlite3");
@@ -966,7 +1261,7 @@ fn store_reopens_and_rejects_newer_schema() {
         SqliteGoalStore::open(&path),
         Err(GoalStoreError::UnsupportedSchema {
             found: 99,
-            supported: 5
+            supported: 6
         })
     ));
 }
