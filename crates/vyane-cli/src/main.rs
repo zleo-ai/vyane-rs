@@ -16,9 +16,11 @@ mod daemon;
 #[cfg(target_os = "linux")]
 mod daemon_agent;
 mod daemon_client;
+mod daemon_goal;
 mod daemon_workflow;
 mod factory;
 mod goal;
+mod goal_runtime;
 mod mcp_workflow;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]

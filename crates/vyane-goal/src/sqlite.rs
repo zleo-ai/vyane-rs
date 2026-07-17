@@ -13,21 +13,22 @@ use uuid::Uuid;
 
 use crate::{
     AcceptanceCriterion, AcceptanceVerification, GoalEvent, GoalEventKind, GoalPursuitCheckpoint,
-    GoalQuery, GoalRecord, GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact,
-    NewGoal, PursuitCheckpointStatus, Result,
+    GoalQuery, GoalRecord, GoalRecoveryCursor, GoalRecoveryFilter, GoalRecoveryPage, GoalStatus,
+    GoalStore, GoalStoreError, GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, Result,
     model::{
         validate_detail, validate_goal_id, validate_lease_seconds, validate_optional_reason,
         validate_owner, validate_stage, validate_worker,
     },
 };
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 const RECORD_SCHEMA: u32 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_0001: &str = include_str!("../migrations/0001_goals.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_claim_lease.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_verification_artifacts.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_pursuit_checkpoint.sql");
+const MIGRATION_0005: &str = include_str!("../migrations/0005_recovery_indexes.sql");
 const MAX_VERIFICATION_PAYLOAD_BYTES: usize = 1024 * 1024;
 const VERIFICATION_ARTIFACT_PAGE: i64 = 100;
 
@@ -52,6 +53,130 @@ impl SqliteGoalStore {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// List one bounded page of resident-recovery candidates using immutable
+    /// `(priority, created_at, id)` ordering.
+    pub fn list_recovery_page(
+        &self,
+        owner: &str,
+        filter: &GoalRecoveryFilter,
+        after: Option<&GoalRecoveryCursor>,
+        limit: usize,
+    ) -> Result<GoalRecoveryPage> {
+        validate_owner(owner)?;
+        if !(1..=1_000).contains(&limit) {
+            return Err(GoalStoreError::InvalidInput(
+                "goal recovery page limit must be between 1 and 1000".into(),
+            ));
+        }
+        if let Some(after) = after {
+            after.validate()?;
+        }
+        let connection = self.connection()?;
+        let mut sql = format!(
+            "SELECT {GOAL_COLUMNS} FROM goals INDEXED BY goals_owner_queue_idx \
+             WHERE owner = ? AND status = 'in_progress'"
+        );
+        let mut values = vec![Value::Text(owner.to_string())];
+        match filter {
+            GoalRecoveryFilter::ActiveWorker { worker_id, .. } => validate_worker(worker_id)?,
+            GoalRecoveryFilter::Available { .. } => {}
+        }
+        if let Some(after) = after {
+            sql.push_str(
+                " AND (priority > ? OR (priority = ? AND created_at_ms > ?) OR \
+                 (priority = ? AND created_at_ms = ? AND id > ?))",
+            );
+            let priority = Value::Integer(i64::from(after.priority));
+            let created_at = Value::Integer(after.created_at.timestamp_millis());
+            values.extend([
+                priority.clone(),
+                priority.clone(),
+                created_at.clone(),
+                priority,
+                created_at,
+                Value::Text(after.id.clone()),
+            ]);
+        }
+        sql.push_str(" ORDER BY priority ASC, created_at_ms ASC, id ASC LIMIT ?");
+        values.push(Value::Integer(i64::try_from(limit).map_err(|_| {
+            GoalStoreError::InvalidInput("goal recovery page limit is outside range".into())
+        })?));
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(values), row_to_record)?;
+        let examined = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(GoalStoreError::from)?;
+        let next = (examined.len() == limit)
+            .then(|| examined.last().map(GoalRecoveryCursor::from))
+            .flatten();
+        let candidates = examined
+            .into_iter()
+            .filter(|goal| match filter {
+                GoalRecoveryFilter::ActiveWorker { worker_id, at } => {
+                    goal.claimed_by.as_deref() == Some(worker_id.as_str()) && goal.lease_active(*at)
+                }
+                GoalRecoveryFilter::Available { at } => !goal.lease_active(*at),
+            })
+            .collect();
+        Ok(GoalRecoveryPage { candidates, next })
+    }
+
+    /// Claim queued work only when the same write transaction observes no
+    /// resident-recovery candidate. Temporarily cooling goals may be excluded;
+    /// the exclusion set is deliberately bounded by the resident supervisor.
+    pub fn claim_next_if_no_recovery(
+        &self,
+        owner: &str,
+        worker_id: &str,
+        lease_seconds: u64,
+        excluded_goal_ids: &[String],
+        at: DateTime<Utc>,
+    ) -> Result<Option<GoalRecord>> {
+        validate_owner(owner)?;
+        validate_worker(worker_id)?;
+        validate_lease_seconds(lease_seconds)?;
+        if excluded_goal_ids.len() > 256 {
+            return Err(GoalStoreError::InvalidInput(
+                "goal recovery exclusions must contain at most 256 ids".into(),
+            ));
+        }
+        for id in excluded_goal_ids {
+            validate_goal_id(id)?;
+        }
+        let occurred_at = normalize_timestamp(at)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if recovery_candidate_exists(
+            &transaction,
+            owner,
+            worker_id,
+            occurred_at,
+            excluded_goal_ids,
+        )? {
+            return Ok(None);
+        }
+        let sql = format!(
+            "SELECT {GOAL_COLUMNS} FROM goals WHERE owner = ?1 AND status = 'queued' \
+             ORDER BY priority ASC, created_at_ms ASC, id ASC LIMIT 1"
+        );
+        let Some(before) = transaction
+            .query_row(&sql, [owner], row_to_record)
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let (after, _) = mutate_in_transaction(
+            &transaction,
+            &before,
+            GoalEventKind::Claimed,
+            "claim",
+            occurred_at,
+            apply_claim(worker_id, lease_seconds),
+        )?;
+        transaction.commit()?;
+        Ok(Some(after))
     }
 
     fn initialize(&self) -> Result<()> {
@@ -85,6 +210,10 @@ impl SqliteGoalStore {
         if found == 3 {
             transaction.execute_batch(MIGRATION_0004)?;
             found = 4;
+        }
+        if found == 4 {
+            transaction.execute_batch(MIGRATION_0005)?;
+            found = 5;
         }
         if found != user_version(&transaction)? {
             transaction.pragma_update(None, "user_version", found)?;
@@ -148,6 +277,52 @@ impl SqliteGoalStore {
         transaction.commit()?;
         Ok((after, event))
     }
+}
+
+fn recovery_candidate_exists(
+    transaction: &Transaction<'_>,
+    owner: &str,
+    worker_id: &str,
+    at: DateTime<Utc>,
+    excluded_goal_ids: &[String],
+) -> Result<bool> {
+    let exclusions = if excluded_goal_ids.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " AND id NOT IN ({})",
+            vec!["?"; excluded_goal_ids.len()].join(",")
+        )
+    };
+    let checks = [
+        (
+            "goals_owner_worker_lease_idx",
+            "claimed_by = ? AND claim_expires_at_ms > ?",
+            Some(worker_id),
+        ),
+        ("goals_owner_worker_lease_idx", "claimed_by IS NULL", None),
+        ("goals_owner_lease_idx", "claim_expires_at_ms <= ?", None),
+    ];
+    for (index, predicate, worker) in checks {
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM goals INDEXED BY {index} \
+             WHERE owner = ? AND status = 'in_progress' AND {predicate}{exclusions})"
+        );
+        let mut values = vec![Value::Text(owner.to_string())];
+        if let Some(worker) = worker {
+            values.push(Value::Text(worker.to_string()));
+        }
+        if predicate.contains("claim_expires_at_ms") {
+            values.push(Value::Integer(at.timestamp_millis()));
+        }
+        values.extend(excluded_goal_ids.iter().cloned().map(Value::Text));
+        let exists: bool =
+            transaction.query_row(&sql, params_from_iter(values), |row| row.get(0))?;
+        if exists {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn mutate_in_transaction<F>(
@@ -1653,6 +1828,8 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         ("trigger", "goal_events_immutable_delete"),
         ("trigger", "goal_verifications_immutable_update"),
         ("trigger", "goal_verifications_immutable_delete"),
+        ("index", "goals_owner_worker_lease_idx"),
+        ("index", "goals_owner_lease_idx"),
     ] {
         let exists: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2)",

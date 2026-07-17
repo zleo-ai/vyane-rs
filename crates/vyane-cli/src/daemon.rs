@@ -22,7 +22,7 @@ use tokio::process::Command;
 use vyane_service::{StoragePaths, VyaneService};
 use vyane_workflow::WORKFLOW_SOURCE_MAX_TOTAL_BYTES;
 
-use crate::cli::{DaemonRunArgs, DaemonStartArgs, DaemonStatusArgs};
+use crate::cli::{DaemonGoalArgs, DaemonRunArgs, DaemonStartArgs, DaemonStatusArgs};
 use crate::daemon_workflow::{DaemonWorkflowSupervisor, WORKFLOW_VARS_MAX_TOTAL_BYTES};
 use crate::supervisor::{PreparedShutdownSignal, acquire_task_supervisor_lock};
 use crate::task::LOCAL_TASK_OWNER;
@@ -186,6 +186,7 @@ pub(crate) async fn run_daemon(
 ) -> Result<ExitCode> {
     let requested = parse_loopback_addr(&args.addr)?;
     let service = Arc::new(VyaneService::load(config_path.as_deref())?);
+    let goal_config = crate::daemon_goal::DaemonGoalConfig::from_args(&service, &args.goals)?;
     let paths = DaemonPaths::from_storage(service.storage_paths());
     let listener = tokio::net::TcpListener::bind(requested)
         .await
@@ -228,6 +229,11 @@ pub(crate) async fn run_daemon(
     let broker_cancel = vyane_core::CancellationToken::new();
     let broker_task_cancel = broker_cancel.clone();
     let broker_task = tokio::spawn(async move { broker_supervisor.run(broker_task_cancel).await });
+    let goal_cancel = vyane_core::CancellationToken::new();
+    let goal_supervisor = goal_config
+        .map(|config| crate::daemon_goal::DaemonGoalSupervisor::open(Arc::clone(&service), config))
+        .transpose()
+        .context("open resident goal supervisor")?;
     let app = daemon_router(
         &descriptor.instance_id,
         &token,
@@ -238,7 +244,16 @@ pub(crate) async fn run_daemon(
     let shutdown = PreparedShutdownSignal::install()
         .context("install daemon shutdown handlers before control publication")?;
 
-    publish_control(&paths, &token, &descriptor)?;
+    let goal_task = publish_control_then_start_goal(&paths, &token, &descriptor, || {
+        goal_supervisor.map(|supervisor| {
+            let cancel = goal_cancel.clone();
+            tokio::spawn(async move {
+                if let Err(error) = supervisor.run(cancel).await {
+                    tracing::error!(error = %error, "resident goal supervisor failed");
+                }
+            })
+        })
+    })?;
 
     eprintln!("vyane daemon listening on {addr}");
     let (signal_seen_tx, signal_seen_rx) = tokio::sync::oneshot::channel();
@@ -246,12 +261,14 @@ pub(crate) async fn run_daemon(
     #[cfg(target_os = "linux")]
     let shutdown_agents = agents.clone();
     let shutdown_broker_cancel = broker_cancel.clone();
+    let shutdown_goal_cancel = goal_cancel.clone();
     let graceful_shutdown = async move {
         shutdown.wait().await;
         shutdown_workflows.begin_shutdown();
         #[cfg(target_os = "linux")]
         shutdown_agents.begin_shutdown();
         shutdown_broker_cancel.cancel();
+        shutdown_goal_cancel.cancel();
         let _ = signal_seen_tx.send(());
     };
     let serve_result = {
@@ -287,23 +304,38 @@ pub(crate) async fn run_daemon(
         agents.drain_submissions().await;
         agent_cancel.cancel();
         broker_cancel.cancel();
-        let (workflow_result, agent_result, broker_result) =
-            tokio::join!(workflows.shutdown_and_drain(), agent_task, broker_task);
+        goal_cancel.cancel();
+        let (workflow_result, agent_result, broker_result, goal_result) = tokio::join!(
+            workflows.shutdown_and_drain(),
+            agent_task,
+            broker_task,
+            await_optional_task(goal_task),
+        );
         if agent_result.is_err() {
             tracing::warn!("daemon AgentRun supervisor task failed during shutdown");
         }
         if broker_result.is_err() {
             tracing::warn!("daemon broker supervisor task failed during shutdown");
         }
+        if goal_result.is_err() {
+            tracing::warn!("daemon goal supervisor task failed during shutdown");
+        }
         workflow_result
     };
     #[cfg(not(target_os = "linux"))]
     let drain_result = {
         broker_cancel.cancel();
-        let (workflow_result, broker_result) =
-            tokio::join!(workflows.shutdown_and_drain(), broker_task);
+        goal_cancel.cancel();
+        let (workflow_result, broker_result, goal_result) = tokio::join!(
+            workflows.shutdown_and_drain(),
+            broker_task,
+            await_optional_task(goal_task),
+        );
         if broker_result.is_err() {
             tracing::warn!("daemon broker supervisor task failed during shutdown");
+        }
+        if goal_result.is_err() {
+            tracing::warn!("daemon goal supervisor task failed during shutdown");
         }
         workflow_result
     };
@@ -330,6 +362,11 @@ pub(crate) async fn start_daemon(
                     existing.pid
                 )
             })?;
+        if args.goals.goal_auto_pursue {
+            bail!(
+                "a daemon is already running; stop it before changing or reasserting automatic goal pursuit"
+            );
+        }
         println!("vyane daemon already running at {}", existing.addr);
         return Ok(ExitCode::SUCCESS);
     }
@@ -345,7 +382,9 @@ pub(crate) async fn start_daemon(
         .arg("daemon")
         .arg("run")
         .arg("--addr")
-        .arg(requested.to_string())
+        .arg(requested.to_string());
+    append_goal_args(&mut command, &args.goals);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr));
@@ -409,6 +448,43 @@ pub(crate) async fn start_daemon(
             Err(error)
         }
     }
+}
+
+async fn await_optional_task(
+    task: Option<tokio::task::JoinHandle<()>>,
+) -> std::result::Result<(), tokio::task::JoinError> {
+    match task {
+        Some(task) => task.await,
+        None => Ok(()),
+    }
+}
+
+fn append_goal_args(command: &mut Command, args: &DaemonGoalArgs) {
+    if !args.goal_auto_pursue {
+        return;
+    }
+    command.arg("--goal-auto-pursue");
+    if let Some(target) = &args.goal_target {
+        command.arg("--goal-target").arg(target);
+    }
+    if let Some(workdir) = &args.goal_workdir {
+        command.arg("--goal-workdir").arg(workdir);
+    }
+    command
+        .arg("--goal-sandbox")
+        .arg(args.goal_sandbox.to_string())
+        .arg("--goal-overall-timeout-seconds")
+        .arg(args.goal_overall_timeout_seconds.to_string())
+        .arg("--goal-segment-timeout-seconds")
+        .arg(args.goal_segment_timeout_seconds.to_string())
+        .arg("--goal-verifier-timeout-seconds")
+        .arg(args.goal_verifier_timeout_seconds.to_string())
+        .arg("--goal-max-segments")
+        .arg(args.goal_max_segments.to_string())
+        .arg("--goal-max-failures")
+        .arg(args.goal_max_failures.to_string())
+        .arg("--goal-poll-millis")
+        .arg(args.goal_poll_millis.to_string());
 }
 
 pub(crate) async fn status_daemon(args: DaemonStatusArgs) -> Result<ExitCode> {
@@ -908,6 +984,16 @@ fn publish_control(paths: &DaemonPaths, token: &str, descriptor: &DaemonDescript
     Ok(())
 }
 
+fn publish_control_then_start_goal<T>(
+    paths: &DaemonPaths,
+    token: &str,
+    descriptor: &DaemonDescriptor,
+    start_goal: impl FnOnce() -> T,
+) -> Result<T> {
+    publish_control(paths, token, descriptor)?;
+    Ok(start_goal())
+}
+
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(anyhow::Error::new)
@@ -1304,6 +1390,53 @@ mod tests {
         assert!(read_live_control(&paths).unwrap().is_none());
         assert!(!paths.descriptor().exists());
         assert!(!paths.token().exists());
+    }
+
+    #[test]
+    fn failed_control_publication_does_not_start_goal_work() {
+        use vyane_goal::{GoalStatus, GoalStore as _, NewGoal, SqliteGoalStore};
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
+        let mut goal = NewGoal::new("publication-gate", Utc::now());
+        goal.id = Some("publication-gate".into());
+        store.create(LOCAL_TASK_OWNER, goal).unwrap();
+
+        let blocked_control_root = directory.path().join("not-a-directory");
+        std::fs::write(&blocked_control_root, b"blocked").unwrap();
+        let paths = DaemonPaths {
+            data_dir: blocked_control_root,
+        };
+        let descriptor = DaemonDescriptor {
+            schema: DAEMON_DESCRIPTOR_SCHEMA,
+            instance_id: INSTANCE_A.into(),
+            pid: 101,
+            pgid: 101,
+            started_at: Utc::now(),
+            birth_fingerprint: Some("birth-101".into()),
+            addr: "127.0.0.1:9722".parse().unwrap(),
+        };
+
+        let result = publish_control_then_start_goal(&paths, &"a".repeat(64), &descriptor, || {
+            store
+                .claim(
+                    LOCAL_TASK_OWNER,
+                    "publication-gate",
+                    "must-not-run",
+                    60,
+                    Utc::now(),
+                )
+                .unwrap()
+        });
+
+        assert!(result.is_err());
+        let untouched = store
+            .get(LOCAL_TASK_OWNER, "publication-gate")
+            .unwrap()
+            .unwrap();
+        assert_eq!(untouched.status, GoalStatus::Queued);
+        assert_eq!(untouched.claim_generation, 0);
+        assert!(untouched.claimed_by.is_none());
     }
 
     #[cfg(unix)]

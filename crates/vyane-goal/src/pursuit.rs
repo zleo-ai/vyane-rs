@@ -254,6 +254,12 @@ pub struct GoalPursuer<'a, S, R> {
     config: PursuitConfig,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CancellationDisposition {
+    Pause,
+    PreserveRunning,
+}
+
 impl<'a, S, R> GoalPursuer<'a, S, R>
 where
     S: GoalStore,
@@ -284,6 +290,39 @@ where
         owner: &str,
         goal_id: &str,
         cancel: CancellationToken,
+    ) -> Result<PursuitOutcome> {
+        self.pursue_with_cancellation_disposition(
+            owner,
+            goal_id,
+            cancel,
+            CancellationDisposition::Pause,
+        )
+        .await
+    }
+
+    /// Cancel in-flight verifier and runtime work, but keep the durable
+    /// checkpoint running so a resident supervisor replacement may resume it.
+    pub async fn pursue_with_cancel_preserving_checkpoint(
+        &self,
+        owner: &str,
+        goal_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<PursuitOutcome> {
+        self.pursue_with_cancellation_disposition(
+            owner,
+            goal_id,
+            cancel,
+            CancellationDisposition::PreserveRunning,
+        )
+        .await
+    }
+
+    async fn pursue_with_cancellation_disposition(
+        &self,
+        owner: &str,
+        goal_id: &str,
+        cancel: CancellationToken,
+        cancellation: CancellationDisposition,
     ) -> Result<PursuitOutcome> {
         let goal = self.require_running(owner, goal_id)?;
         let now = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
@@ -362,12 +401,12 @@ where
             };
             let goal = latest;
             if cancel.is_cancelled() {
-                return self.pause(
+                return self.finish_cancellation(
                     owner,
                     goal_id,
                     &mut checkpoint,
-                    "pursuit cancelled",
                     previous_verification,
+                    cancellation,
                 );
             }
             self.store.renew_lease(
@@ -406,12 +445,12 @@ where
                 )? {
                     return Ok(stopped);
                 }
-                return self.pause(
+                return self.finish_cancellation(
                     owner,
                     goal_id,
                     &mut checkpoint,
-                    "pursuit cancelled",
                     previous_verification,
+                    cancellation,
                 );
             };
             if let Some(stopped) = self.stopped_if_drifted(
@@ -426,12 +465,12 @@ where
                 return Ok(stopped);
             }
             if cancel.is_cancelled() {
-                return self.pause(
+                return self.finish_cancellation(
                     owner,
                     goal_id,
                     &mut checkpoint,
-                    "pursuit cancelled",
                     previous_verification,
+                    cancellation,
                 );
             }
             let verified_at = Utc::now();
@@ -494,12 +533,12 @@ where
                 return Ok(stopped);
             }
             if cancel.is_cancelled() {
-                return self.pause(
+                return self.finish_cancellation(
                     owner,
                     goal_id,
                     &mut checkpoint,
-                    "pursuit cancelled",
                     last_verification,
+                    cancellation,
                 );
             }
             if verification.all_satisfied {
@@ -592,12 +631,12 @@ where
                 verification,
             };
             if cancel.is_cancelled() {
-                return self.pause(
+                return self.finish_cancellation(
                     owner,
                     goal_id,
                     &mut checkpoint,
-                    "pursuit cancelled",
                     last_verification,
+                    cancellation,
                 );
             }
             if let Some(stopped) = self.stopped_if_drifted(
@@ -648,6 +687,17 @@ where
             )? {
                 return Ok(stopped);
             }
+            if result.status == PursuitSegmentStatus::Cancelled
+                && matches!(cancellation, CancellationDisposition::PreserveRunning)
+            {
+                return self.finish_cancellation(
+                    owner,
+                    goal_id,
+                    &mut checkpoint,
+                    last_verification,
+                    cancellation,
+                );
+            }
             checkpoint.segments_completed = checkpoint.segments_completed.saturating_add(1);
             let valid_run_id = result.run_id.as_deref().filter(|value| {
                 !value.is_empty()
@@ -678,12 +728,12 @@ where
             };
             self.record_checkpoint(owner, goal_id, &mut checkpoint, stage, &detail)?;
             if result.status == PursuitSegmentStatus::Cancelled {
-                return self.pause(
+                return self.finish_cancellation(
                     owner,
                     goal_id,
                     &mut checkpoint,
-                    "pursuit cancelled",
                     last_verification,
+                    cancellation,
                 );
             }
             if result.status != PursuitSegmentStatus::Success
@@ -856,6 +906,45 @@ where
             checkpoint.consecutive_failures,
             &summary,
             reason,
+            verification,
+        ))
+    }
+
+    fn finish_cancellation(
+        &self,
+        owner: &str,
+        goal_id: &str,
+        checkpoint: &mut GoalPursuitCheckpoint,
+        verification: Option<AcceptanceVerification>,
+        disposition: CancellationDisposition,
+    ) -> Result<PursuitOutcome> {
+        if matches!(disposition, CancellationDisposition::Pause) {
+            return self.pause(
+                owner,
+                goal_id,
+                checkpoint,
+                "pursuit cancelled",
+                verification,
+            );
+        }
+        let running = self
+            .store
+            .get(owner, goal_id)?
+            .ok_or_else(|| GoalStoreError::NotFound {
+                id: goal_id.to_string(),
+            })?;
+        let summary = verification.as_ref().map_or_else(
+            || "pursuit cancelled".to_string(),
+            |value| value.summary.clone(),
+        );
+        Ok(outcome(
+            &running,
+            PursuitStatus::Stopped,
+            checkpoint.segments_started,
+            checkpoint.segments_completed,
+            checkpoint.consecutive_failures,
+            &summary,
+            "pursuit cancelled",
             verification,
         ))
     }

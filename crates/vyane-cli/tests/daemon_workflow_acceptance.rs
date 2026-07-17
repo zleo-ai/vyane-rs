@@ -222,7 +222,11 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
         "initial journal must be non-terminal: {submitted}"
     );
 
-    let terminal = poll_workflow_terminal(data_dir.path(), Duration::from_secs(30));
+    // Coverage instrumentation can make the detached daemon substantially
+    // slower on shared CI runners. Keep the explicit 10s in-flight proof, but
+    // give the independent resident process enough time to publish terminal
+    // state before treating it as stuck.
+    let terminal = poll_workflow_terminal(data_dir.path(), Duration::from_secs(120));
     assert_eq!(terminal["task"]["id"], EXPLICIT_RUN_ID);
     assert_eq!(terminal["task"]["state"], "succeeded");
     assert_eq!(terminal["journal"]["id"], EXPLICIT_RUN_ID);
