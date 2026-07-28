@@ -41,6 +41,7 @@ const COMMAND_PROCESS_HEADROOM: u64 = 64;
 const COMMAND_PROCESS_LIMIT_MAX: u64 = 4096;
 const COMMAND_OPEN_FILES: u64 = 256;
 const COMMAND_FILE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
 const SECCOMP_FILTER_FD: &str = "7";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,8 +112,10 @@ pub enum NativeCommandHostError {
     Unsupported,
 }
 
+#[cfg(target_os = "linux")]
 struct ProbeAuthority;
 
+#[cfg(target_os = "linux")]
 #[async_trait]
 impl NativeExecutionAuthority for ProbeAuthority {
     async fn revalidate(&self, _effect: NativeSideEffect) -> VyaneResult<()> {
