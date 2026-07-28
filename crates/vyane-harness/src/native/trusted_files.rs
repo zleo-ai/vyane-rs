@@ -187,6 +187,8 @@ impl CompiledReadPolicy {
                 || total_bytes > MAX_EXCLUDED_TOTAL_BYTES
                 || raw.contains('\0')
                 || pattern.starts_with('/')
+                || pattern.ends_with('/')
+                || pattern.contains("//")
                 || Path::new(&pattern)
                     .components()
                     .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
@@ -350,10 +352,9 @@ impl NativeTool for SearchFilesTool {
         };
 
         let mut pending = vec![(root, 0usize)];
+        let mut regular_paths = Vec::new();
         let mut visited_files = 0usize;
         let mut visited_entries = 0usize;
-        let mut output = String::new();
-        let mut match_count = 0usize;
         while let Some((directory, depth)) = pending.pop() {
             if context.cancellation_token().is_cancelled() {
                 return Ok(Err(ToolError::new("search cancelled")));
@@ -384,27 +385,14 @@ impl NativeTool for SearchFilesTool {
                         child_directories.push(relative);
                     }
                     Ok(OpenedEntry::Regular(file)) => {
+                        drop(file);
                         visited_files += 1;
                         if visited_files > MAX_SEARCH_FILES {
                             return Ok(Err(ToolError::new(
                                 "search exceeded the workspace file limit",
                             )));
                         }
-                        let text = match read_utf8_bounded(file).await {
-                            Ok(text) => text,
-                            Err(_) => continue,
-                        };
-                        let display = display_components(&relative);
-                        for (index, line) in text.lines().enumerate() {
-                            if line.contains(query) {
-                                match_count += 1;
-                                if !append_search_match(&mut output, &display, index + 1, line)
-                                    || match_count == max_results
-                                {
-                                    return Ok(Ok(output));
-                                }
-                            }
-                        }
+                        regular_paths.push(relative);
                     }
                     Ok(OpenedEntry::Other) | Err(_) => {}
                     Ok(OpenedEntry::Directory) => {}
@@ -416,6 +404,34 @@ impl NativeTool for SearchFilesTool {
                     .into_iter()
                     .map(|child| (child, depth + 1)),
             );
+        }
+
+        regular_paths.sort();
+        let mut output = String::new();
+        let mut match_count = 0usize;
+        for relative in regular_paths {
+            if context.cancellation_token().is_cancelled() {
+                return Ok(Err(ToolError::new("search cancelled")));
+            }
+            let file = match open_regular_components(pinned, &relative, authority, effect).await? {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+            let text = match read_utf8_bounded(file).await {
+                Ok(text) => text,
+                Err(_) => continue,
+            };
+            let display = display_components(&relative);
+            for (index, line) in text.lines().enumerate() {
+                if line.contains(query) {
+                    match_count += 1;
+                    if !append_search_match(&mut output, &display, index + 1, line)
+                        || match_count == max_results
+                    {
+                        return Ok(Ok(output));
+                    }
+                }
+            }
         }
 
         Ok(Ok(if output.is_empty() {

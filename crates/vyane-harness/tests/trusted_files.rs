@@ -256,6 +256,7 @@ async fn search_is_deterministic_bounded_and_honors_exclusions() {
     std::fs::create_dir_all(root.path().join(".git")).expect("git");
     std::fs::write(root.path().join("b/two.txt"), "needle two\n").expect("two");
     std::fs::write(root.path().join("a/one.txt"), "needle one\nneedle again\n").expect("one");
+    std::fs::write(root.path().join("z.txt"), "needle root\n").expect("root file");
     std::fs::write(root.path().join(".env"), "needle password\n").expect("env");
     std::fs::write(root.path().join(".git/config"), "needle token\n").expect("git config");
 
@@ -396,7 +397,15 @@ async fn configured_exclusions_apply_to_reads_and_recursive_search() {
 
 #[test]
 fn malformed_or_unbounded_exclusions_are_rejected() {
-    for pattern in ["../outside", r"..\outside", "/absolute", "["] {
+    for pattern in [
+        "../outside",
+        r"..\outside",
+        "/absolute",
+        "private/",
+        "private//nested",
+        r"private\",
+        "[",
+    ] {
         assert!(
             NativeReadPolicy::excluding(vec![pattern.into()])
                 .validate()

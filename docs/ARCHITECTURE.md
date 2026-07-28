@@ -254,12 +254,15 @@ enumeration. The default policy makes that admitted workspace broadly readable,
 including dotfiles; a submission can freeze workspace-relative glob exclusions
 into the native policy digest, and both direct read and recursive search enforce
 the same exclusions. Exclusion patterns containing current- or parent-directory
-components fail validation, excluded directory roots are never enumerated, and
-search accumulation is capped at the model-facing output budget. Blocking
+components or noncanonical separators fail validation, excluded directory roots
+are never enumerated, and the bounded regular-file set is globally path-sorted
+before search accumulation capped at the model-facing output budget. Blocking
 filesystem opens, metadata reads, enumeration and content reads run on Tokio's
-blocking pool so the async timeout/cancellation path remains pollable. Read,
-write, command, command-network and web-search permissions remain separate axes
-rather than one expanding "full" boolean.
+blocking pool so the async timeout/cancellation path remains pollable. Native
+OpenAI-compatible requests force `parallel_tool_calls=false` because the driver
+serializes one call per turn. Read, write, command, command-network and
+web-search permissions remain separate axes rather than one expanding "full"
+boolean.
 This remains narrower than a general `Harness`: it provides no
 write/edit, command/network, child-process host sandbox, session/domain
 authority, checkpoint/session-commit consumer, approval resume, or native

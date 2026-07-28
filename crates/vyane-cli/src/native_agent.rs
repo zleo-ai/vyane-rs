@@ -495,12 +495,16 @@ fn native_request(input: &NativeAgentInput, bound: &vyane_core::BoundTarget) -> 
     messages.push(ToolChatMessage::Text(ChatMessage::user(
         input.prompt.clone(),
     )));
+    let mut params = bound.params.clone();
+    params
+        .extra
+        .insert("parallel_tool_calls".into(), serde_json::Value::Bool(false));
     ToolChatRequest {
         model: bound.target.model.clone(),
         messages,
         tools: read_only_tool_definitions(),
         tool_choice: ToolChoice::Auto,
-        params: bound.params.clone(),
+        params,
     }
 }
 
@@ -904,7 +908,11 @@ mod tests {
         let (service, paths) = service(&root, &server);
         let spool = NativeAgentInputSpool::open(root.path().join("native-input"), OWNER).unwrap();
         let input = input(&service, &workdir);
-        let bound = service.resolve(PROFILE).unwrap().chain.remove(0);
+        let mut bound = service.resolve(PROFILE).unwrap().chain.remove(0);
+        bound
+            .params
+            .extra
+            .insert("parallel_tool_calls".into(), serde_json::Value::Bool(true));
         let request = native_request(&input, &bound);
         assert_eq!(
             request
@@ -915,6 +923,10 @@ mod tests {
             vec!["read_file", "search_files"]
         );
         assert_eq!(request.tool_choice, ToolChoice::Auto);
+        assert_eq!(
+            request.params.extra.get("parallel_tool_calls"),
+            Some(&serde_json::Value::Bool(false))
+        );
         spool.create(&input).unwrap();
 
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
