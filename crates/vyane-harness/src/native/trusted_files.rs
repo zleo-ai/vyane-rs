@@ -193,7 +193,11 @@ impl CompiledReadPolicy {
                 return Err(NativeReadPolicyError::InvalidPattern);
             }
             add_exclusion_glob(&mut builder, &pattern)?;
-            if !pattern.ends_with("/**") {
+            if let Some(directory) = pattern.strip_suffix("/**") {
+                if !directory.is_empty() {
+                    add_exclusion_glob(&mut builder, directory)?;
+                }
+            } else {
                 add_exclusion_glob(&mut builder, &format!("{pattern}/**"))?;
             }
         }
@@ -269,12 +273,11 @@ impl NativeTool for ReadFileTool {
             }
             Err(error) => return Ok(Err(error)),
         };
-        let mut file = match open_regular_components(pinned, &components, authority, effect).await?
-        {
+        let file = match open_regular_components(pinned, &components, authority, effect).await? {
             Ok(file) => file,
             Err(error) => return Ok(Err(error)),
         };
-        Ok(read_utf8_bounded(&mut file))
+        Ok(read_utf8_bounded(file).await)
     }
 }
 
@@ -360,10 +363,11 @@ impl NativeTool for SearchFilesTool {
             };
             authority.revalidate(effect).await?;
             let remaining_entries = MAX_SEARCH_ENTRIES - visited_entries;
-            let (mut entries, observed_entries) = match directory_entries(&dir, remaining_entries) {
-                Ok(entries) => entries,
-                Err(error) => return Ok(Err(error)),
-            };
+            let (mut entries, observed_entries) =
+                match directory_entries(dir, remaining_entries).await {
+                    Ok(entries) => entries,
+                    Err(error) => return Ok(Err(error)),
+                };
             visited_entries += observed_entries;
             entries.sort();
 
@@ -377,14 +381,14 @@ impl NativeTool for SearchFilesTool {
                     Ok(OpenedEntry::Directory) if depth < MAX_SEARCH_DEPTH => {
                         child_directories.push(relative);
                     }
-                    Ok(OpenedEntry::Regular(mut file)) => {
+                    Ok(OpenedEntry::Regular(file)) => {
                         visited_files += 1;
                         if visited_files > MAX_SEARCH_FILES {
                             return Ok(Err(ToolError::new(
                                 "search exceeded the workspace file limit",
                             )));
                         }
-                        let text = match read_utf8_bounded(&mut file) {
+                        let text = match read_utf8_bounded(file).await {
                             Ok(text) => text,
                             Err(_) => continue,
                         };
@@ -548,11 +552,6 @@ async fn open_entry(
     authority: &dyn NativeExecutionAuthority,
     effect: NativeSideEffect,
 ) -> VyaneResult<Result<OpenedEntry, ToolError>> {
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::fs::MetadataExt as _;
-
-    use rustix::fs::{Mode, OFlags, openat2};
-
     let (name, parents) = match components.split_last() {
         Some(parts) => parts,
         None => return Ok(Err(ToolError::new("file path must not be empty"))),
@@ -562,54 +561,90 @@ async fn open_entry(
         Err(error) => return Ok(Err(error)),
     };
     authority.revalidate(effect).await?;
-    let fd = match openat2(
+    let name = name.clone();
+    let expected_device = pinned.identity().device;
+    let inspected =
+        match tokio::task::spawn_blocking(move || inspect_entry(directory, &name, expected_device))
+            .await
+        {
+            Ok(Ok(inspected)) => inspected,
+            Ok(Err(error)) => return Ok(Err(error)),
+            Err(_) => {
+                return Ok(Err(ToolError::new(
+                    "could not inspect requested workspace entry",
+                )));
+            }
+        };
+    Ok(Ok(match inspected {
+        InspectedEntry::Regular(file) => {
+            // O_PATH cannot read file content. Revalidate at the actual read-open
+            // boundary, then reopen this exact stable object through procfs rather
+            // than resolving the model-provided pathname again.
+            authority.revalidate(effect).await?;
+            let readable = match tokio::task::spawn_blocking(move || reopen_for_read(&file)).await {
+                Ok(Ok(readable)) => readable,
+                Ok(Err(())) | Err(_) => {
+                    return Ok(Err(ToolError::new(
+                        "could not open requested workspace file for reading",
+                    )));
+                }
+            };
+            OpenedEntry::Regular(readable)
+        }
+        InspectedEntry::Directory => OpenedEntry::Directory,
+        InspectedEntry::Other => OpenedEntry::Other,
+    }))
+}
+
+#[cfg(target_os = "linux")]
+enum InspectedEntry {
+    Directory,
+    Regular(File),
+    Other,
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_entry(
+    directory: File,
+    name: &OsString,
+    expected_device: u64,
+) -> Result<InspectedEntry, ToolError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    use rustix::fs::{Mode, OFlags, openat2};
+
+    let fd = openat2(
         &directory,
         name,
         OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
         confined_resolution(),
-    ) {
-        Ok(fd) => fd,
-        Err(_) => {
-            return Ok(Err(ToolError::new(
-                "could not open requested workspace entry",
-            )));
-        }
-    };
+    )
+    .map_err(|_| ToolError::new("could not open requested workspace entry"))?;
     let file = File::from(fd);
-    let metadata = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => {
-            return Ok(Err(ToolError::new(
-                "could not inspect requested workspace entry",
-            )));
-        }
-    };
-    if metadata.dev() != pinned.identity().device {
-        return Ok(Err(ToolError::new(
+    let metadata = file
+        .metadata()
+        .map_err(|_| ToolError::new("could not inspect requested workspace entry"))?;
+    if metadata.dev() != expected_device {
+        return Err(ToolError::new(
             "requested workspace entry crosses a filesystem boundary",
-        )));
+        ));
     }
-    Ok(Ok(if metadata.is_file() {
-        // O_PATH cannot read file content. Revalidate at the actual read-open
-        // boundary, then reopen this exact stable object through procfs rather
-        // than resolving the model-provided pathname again.
-        authority.revalidate(effect).await?;
-        let proc_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
-        let readable = match File::open(proc_path) {
-            Ok(readable) => readable,
-            Err(_) => {
-                return Ok(Err(ToolError::new(
-                    "could not open requested workspace file for reading",
-                )));
-            }
-        };
-        OpenedEntry::Regular(readable)
+    Ok(if metadata.is_file() {
+        InspectedEntry::Regular(file)
     } else if metadata.is_dir() {
-        OpenedEntry::Directory
+        InspectedEntry::Directory
     } else {
-        OpenedEntry::Other
-    }))
+        InspectedEntry::Other
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn reopen_for_read(file: &File) -> Result<File, ()> {
+    use std::os::fd::AsRawFd as _;
+
+    let proc_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+    File::open(proc_path).map_err(|_| ())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -631,10 +666,6 @@ async fn open_directory_components(
     authority: &dyn NativeExecutionAuthority,
     effect: NativeSideEffect,
 ) -> VyaneResult<Result<File, ToolError>> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    use rustix::fs::{Mode, OFlags, openat2};
-
     let mut directory = match pinned.handle().try_clone() {
         Ok(directory) => directory,
         Err(_) => {
@@ -645,36 +676,53 @@ async fn open_directory_components(
     };
     for component in components {
         authority.revalidate(effect).await?;
-        let fd = match openat2(
-            &directory,
-            component,
-            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-            confined_resolution(),
-        ) {
-            Ok(fd) => fd,
+        let component = component.clone();
+        let expected_device = pinned.identity().device;
+        directory = match tokio::task::spawn_blocking(move || {
+            open_directory_component(directory, &component, expected_device)
+        })
+        .await
+        {
+            Ok(Ok(directory)) => directory,
+            Ok(Err(error)) => return Ok(Err(error)),
             Err(_) => {
                 return Ok(Err(ToolError::new(
                     "could not open requested workspace directory",
                 )));
             }
         };
-        directory = File::from(fd);
-        let metadata = match directory.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                return Ok(Err(ToolError::new(
-                    "could not inspect requested workspace directory",
-                )));
-            }
-        };
-        if metadata.dev() != pinned.identity().device {
-            return Ok(Err(ToolError::new(
-                "requested workspace directory crosses a filesystem boundary",
-            )));
-        }
     }
     Ok(Ok(directory))
+}
+
+#[cfg(target_os = "linux")]
+fn open_directory_component(
+    directory: File,
+    component: &OsString,
+    expected_device: u64,
+) -> Result<File, ToolError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    use rustix::fs::{Mode, OFlags, openat2};
+
+    let fd = openat2(
+        &directory,
+        component,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        confined_resolution(),
+    )
+    .map_err(|_| ToolError::new("could not open requested workspace directory"))?;
+    let directory = File::from(fd);
+    let metadata = directory
+        .metadata()
+        .map_err(|_| ToolError::new("could not inspect requested workspace directory"))?;
+    if metadata.dev() != expected_device {
+        return Err(ToolError::new(
+            "requested workspace directory crosses a filesystem boundary",
+        ));
+    }
+    Ok(directory)
 }
 
 #[cfg(target_os = "linux")]
@@ -705,7 +753,17 @@ async fn open_directory_components(
  * it, after the exact directory object has been opened.
  */
 #[cfg(target_os = "linux")]
-fn directory_entries(
+async fn directory_entries(
+    directory: File,
+    remaining: usize,
+) -> Result<(Vec<OsString>, usize), ToolError> {
+    tokio::task::spawn_blocking(move || directory_entries_blocking(&directory, remaining))
+        .await
+        .map_err(|_| ToolError::new("could not enumerate requested workspace directory"))?
+}
+
+#[cfg(target_os = "linux")]
+fn directory_entries_blocking(
     directory: &File,
     remaining: usize,
 ) -> Result<(Vec<OsString>, usize), ToolError> {
@@ -736,8 +794,8 @@ fn directory_entries(
 }
 
 #[cfg(not(target_os = "linux"))]
-fn directory_entries(
-    _directory: &File,
+async fn directory_entries(
+    _directory: File,
     _remaining: usize,
 ) -> Result<(Vec<OsString>, usize), ToolError> {
     Err(ToolError::new(
@@ -759,7 +817,13 @@ fn display_components(components: &[OsString]) -> String {
         .join("/")
 }
 
-fn read_utf8_bounded(file: &mut File) -> Result<String, ToolError> {
+async fn read_utf8_bounded(mut file: File) -> Result<String, ToolError> {
+    tokio::task::spawn_blocking(move || read_utf8_bounded_blocking(&mut file))
+        .await
+        .map_err(|_| ToolError::new("could not read requested workspace file"))?
+}
+
+fn read_utf8_bounded_blocking(file: &mut File) -> Result<String, ToolError> {
     file.seek(SeekFrom::Start(0))
         .map_err(|_| ToolError::new("could not read requested workspace file"))?;
     let mut bytes = Vec::new();
@@ -774,19 +838,34 @@ fn read_utf8_bounded(file: &mut File) -> Result<String, ToolError> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::directory_entries;
+    use super::{CompiledReadPolicy, NativeReadPolicy, directory_entries};
 
-    #[test]
-    fn directory_enumeration_enforces_the_raw_entry_budget() {
+    #[tokio::test]
+    async fn directory_enumeration_enforces_the_raw_entry_budget() {
         let root = tempfile::tempdir().expect("root");
         std::fs::write(root.path().join("one"), "one").expect("one");
         std::fs::write(root.path().join("two"), "two").expect("two");
         let directory = std::fs::File::open(root.path()).expect("directory");
 
-        let error = directory_entries(&directory, 1).expect_err("entry budget");
+        let error = directory_entries(directory, 1)
+            .await
+            .expect_err("entry budget");
         assert_eq!(
             error.to_string(),
             "search exceeded the workspace entry limit"
         );
+    }
+
+    #[test]
+    fn trailing_globstar_excludes_the_named_directory_itself() {
+        let policy =
+            CompiledReadPolicy::new(&NativeReadPolicy::excluding(vec!["private/**".into()]))
+                .expect("policy");
+        assert!(!policy.allows(&[std::ffi::OsString::from("private")]));
+        assert!(!policy.allows(&[
+            std::ffi::OsString::from("private"),
+            std::ffi::OsString::from("nested"),
+        ]));
+        assert!(policy.allows(&[std::ffi::OsString::from("public")]));
     }
 }
