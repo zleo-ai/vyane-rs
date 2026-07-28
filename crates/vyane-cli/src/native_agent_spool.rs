@@ -17,6 +17,7 @@ use vyane_core::{Effort, PinnedWorkdir, WorkdirIdentity};
 use vyane_harness::native::{NativeReadPolicy, NativeWritePolicy};
 
 const SCHEMA: u32 = 4;
+const READ_ONLY_SCHEMA: u32 = 3;
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 768 * 1024;
 const MAX_SYSTEM_BYTES: usize = 128 * 1024;
@@ -251,7 +252,9 @@ impl NativeAgentInput {
     }
 
     fn validate(&self) -> Result<(), NativeAgentSpoolError> {
-        if self.schema != SCHEMA
+        let supported_schema = self.schema == SCHEMA
+            || (self.schema == READ_ONLY_SCHEMA && self.policy.filesystem_write.is_none());
+        if !supported_schema
             || !valid_text(&self.owner, MAX_ID_BYTES)
             || !valid_text(&self.run_id, MAX_ID_BYTES)
             || !valid_text(&self.worker_id, MAX_ID_BYTES)
@@ -1038,6 +1041,36 @@ mod tests {
         assert_eq!(
             spool.read("run-marker", "worker-marker"),
             Err(NativeAgentSpoolError::DigestMismatch)
+        );
+    }
+
+    #[test]
+    fn schema_three_read_only_input_remains_recoverable_without_write_authority() {
+        let (_directory, spool) = fixture();
+        let path = spool.input_path("run-marker").unwrap();
+        let mut legacy = input();
+        legacy.schema = READ_ONLY_SCHEMA;
+        write_private(&path, serde_json::to_vec(&legacy).unwrap());
+
+        assert_eq!(spool.read("run-marker", "worker-marker").unwrap(), legacy);
+        spool.remove_exact(&legacy).unwrap();
+        assert!(!path.exists());
+
+        let mut write_policy = policy();
+        write_policy.filesystem_write = Some(NativeWritePolicy::workspace());
+        let mut invalid = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            write_policy,
+        )
+        .unwrap();
+        invalid.schema = READ_ONLY_SCHEMA;
+        write_private(&path, serde_json::to_vec(&invalid).unwrap());
+        assert_eq!(
+            spool.read("run-marker", "worker-marker"),
+            Err(NativeAgentSpoolError::CorruptInput)
         );
     }
 
