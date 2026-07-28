@@ -35,6 +35,7 @@ use super::{
 
 const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
+#[cfg(target_os = "linux")]
 const MAX_EDIT_MATCHES: usize = 10_000;
 const MAX_SEARCH_FILES: usize = 10_000;
 const MAX_SEARCH_ENTRIES: usize = 20_000;
