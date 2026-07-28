@@ -156,6 +156,7 @@ exit 125
 "#;
 
 type SharedOutput = Arc<Mutex<Vec<u8>>>;
+const UNBOUNDED_CAPTURE: usize = usize::MAX;
 
 #[cfg(unix)]
 type SentinelStatusReader = UnixStream;
@@ -822,6 +823,30 @@ pub(crate) async fn run_capture_with_pinned(
     env: &BTreeMap<String, String>,
     control: RunControl,
 ) -> Result<RunResult> {
+    run_capture_with_pinned_limit(
+        program,
+        args,
+        cwd,
+        pinned_workdir,
+        env,
+        control,
+        UNBOUNDED_CAPTURE,
+    )
+    .await
+}
+
+/// Native-tool capture variant that keeps draining both pipes after their
+/// retained prefixes reach `capture_limit`. This bounds resident memory
+/// without changing child exit behavior through an early pipe close.
+pub(crate) async fn run_capture_with_pinned_limit(
+    program: &str,
+    args: &[String],
+    cwd: Option<&std::path::Path>,
+    pinned_workdir: Option<&PinnedWorkdir>,
+    env: &BTreeMap<String, String>,
+    control: RunControl,
+    capture_limit: usize,
+) -> Result<RunResult> {
     let RunControl {
         cancel,
         timeout,
@@ -931,8 +956,8 @@ pub(crate) async fn run_capture_with_pinned(
     // otherwise a child that fills its stdout pipe buffer blocks forever.
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
-    let drain_out = spawn_drain(child.stdout.take(), Arc::clone(&stdout_buf));
-    let drain_err = spawn_drain(child.stderr.take(), Arc::clone(&stderr_buf));
+    let drain_out = spawn_drain(child.stdout.take(), Arc::clone(&stdout_buf), capture_limit);
+    let drain_err = spawn_drain(child.stderr.take(), Arc::clone(&stderr_buf), capture_limit);
 
     // Race: normal exit vs. cancellation vs. timeout. `tokio::select!` polls the
     // wait while background tasks drain pipes so pipe backpressure can't
@@ -1044,7 +1069,7 @@ pub(crate) async fn run_capture_with_pinned(
     })
 }
 
-fn spawn_drain<R>(reader: Option<R>, output: SharedOutput) -> JoinHandle<()>
+fn spawn_drain<R>(reader: Option<R>, output: SharedOutput, capture_limit: usize) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -1054,7 +1079,11 @@ where
         loop {
             match reader.read(&mut chunk).await {
                 Ok(0) => break,
-                Ok(n) => output.lock().await.extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    let mut retained = output.lock().await;
+                    let remaining = capture_limit.saturating_sub(retained.len());
+                    retained.extend_from_slice(&chunk[..n.min(remaining)]);
+                }
                 Err(_) => break,
             }
         }
@@ -1247,7 +1276,11 @@ pub(crate) async fn run_stream_capture_with_pinned(
     let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
     let drain_out = spawn_line_drain(child.stdout.take(), Arc::clone(&stdout_buf), on_line);
-    let drain_err = spawn_drain(child.stderr.take(), Arc::clone(&stderr_buf));
+    let drain_err = spawn_drain(
+        child.stderr.take(),
+        Arc::clone(&stderr_buf),
+        UNBOUNDED_CAPTURE,
+    );
 
     // Same race: normal exit vs. cancellation vs. timeout.
     let sentinel_controlled = sentinel_status.is_some();

@@ -46,7 +46,9 @@ use crate::native_agent_spool::{
 };
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
-use vyane_harness::native::{NativeReadPolicy, NativeWritePolicy};
+use vyane_harness::native::{
+    NativeCommandPolicy, NativeReadPolicy, NativeWritePolicy, validate_command_host,
+};
 
 const INPUT_DIR: &str = "agent-inputs";
 const NATIVE_INPUT_DIR: &str = "native-agent-inputs";
@@ -90,6 +92,9 @@ pub(crate) struct NativePermissionRequest {
     /// permits writes.
     #[serde(default)]
     pub(crate) filesystem_write: Option<NativeWritePolicy>,
+    /// Omission keeps native subprocess execution disabled.
+    #[serde(default)]
+    pub(crate) command_execution: Option<NativeCommandPolicy>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -486,10 +491,28 @@ impl DaemonAgentHost {
                 .validate()
                 .map_err(|_| AgentApiError::bad_request())?;
         }
+        if let Some(policy) = &request.native_permissions.command_execution {
+            if !request
+                .native_permissions
+                .filesystem_read
+                .exclude
+                .is_empty()
+            {
+                return Err(AgentApiError::bad_request());
+            }
+            policy
+                .validate()
+                .map_err(|_| AgentApiError::bad_request())?;
+        }
         let workdir = request
             .workdir
             .ok_or_else(AgentApiError::bad_request)
             .and_then(|path| PinnedWorkdir::open(path).map_err(|_| AgentApiError::bad_request()))?;
+        if let Some(policy) = &request.native_permissions.command_execution {
+            validate_command_host(&workdir, policy)
+                .await
+                .map_err(|_| AgentApiError::bad_request())?;
+        }
         let scoped = self.service.scope(OwnerContext::single_user_local());
         let chain = scoped
             .resolve(&request.target)
@@ -510,6 +533,7 @@ impl DaemonAgentHost {
                 workdir: &workdir,
                 filesystem_read: request.native_permissions.filesystem_read,
                 filesystem_write: request.native_permissions.filesystem_write,
+                command_execution: request.native_permissions.command_execution,
                 system: request.system,
                 timeout_seconds,
             },
@@ -1087,6 +1111,7 @@ mod tests {
                 .is_empty()
         );
         assert!(default.native_permissions.filesystem_write.is_none());
+        assert!(default.native_permissions.command_execution.is_none());
 
         let mut configured = base;
         configured["native_permissions"] = serde_json::json!({
@@ -1095,6 +1120,12 @@ mod tests {
             },
             "filesystem_write": {
                 "exclude": [".git/**"]
+            },
+            "command_execution": {
+                "allow": [
+                    { "program": "git", "args_prefix": ["status"] }
+                ],
+                "max_seconds": 30
             }
         });
         let configured: AgentRunSubmitRequest =
@@ -1111,6 +1142,37 @@ mod tests {
                 .exclude,
             [".git/**"]
         );
+        let command = configured
+            .native_permissions
+            .command_execution
+            .expect("explicit command policy");
+        assert_eq!(command.allow[0].program, "git");
+        assert_eq!(command.allow[0].args_prefix, ["status"]);
+        assert_eq!(command.max_seconds, 30);
+    }
+
+    #[test]
+    fn command_request_cannot_bypass_native_read_exclusions() {
+        let request: AgentRunSubmitRequest = serde_json::from_value(serde_json::json!({
+            "run_id": "019fa927-f343-7940-8c4f-1a3e79258335",
+            "task": "inspect the workspace",
+            "target": "native",
+            "native_permissions": {
+                "filesystem_read": { "exclude": [".env*"] },
+                "command_execution": {
+                    "allow": [{ "program": "cat" }]
+                }
+            }
+        }))
+        .expect("request shape");
+        assert!(
+            !request
+                .native_permissions
+                .filesystem_read
+                .exclude
+                .is_empty()
+        );
+        assert!(request.native_permissions.command_execution.is_some());
     }
 
     #[tokio::test]

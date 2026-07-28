@@ -15,6 +15,7 @@
 mod permissions;
 mod text_edit;
 mod tools;
+mod trusted_commands;
 mod trusted_files;
 mod turn_driver;
 
@@ -29,6 +30,11 @@ pub use text_edit::{
 pub use tools::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, ToolCall, ToolCallLimits, ToolContext, ToolContextError,
     ToolError, ToolInvocation, ToolInvocationStatus, ToolRegistry, ToolRegistryError,
+};
+pub use trusted_commands::{
+    NativeCommandHostError, NativeCommandPolicy, NativeCommandPolicyError, NativeCommandRule,
+    command_permission_policy, command_tool_definition, command_tool_registry,
+    register_command_tool, validate_command_host,
 };
 pub use trusted_files::{
     NativeFilesystemPolicyError, NativeReadHostError, NativeReadPolicy, NativeReadPolicyError,

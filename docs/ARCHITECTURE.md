@@ -302,10 +302,25 @@ native operation waits for the activity count to reach zero before it can
 return a quiesced settlement. If the service hard deadline drops the operation
 first, it does not settle or delete the recovery input. Native OpenAI-compatible
 requests force `parallel_tool_calls=false` because the driver serializes one
-call per turn. Read, write, command, command-network and web-search permissions
-remain separate axes rather than one expanding "full" boolean.
-This remains narrower than a general `Harness`: it provides no
-command/network, child-process host sandbox, session/domain authority,
+call per turn. [WP-84](plan/WP-84.md) adds an independently configured
+structured `run_command` tool. Exact program and argument-prefix rules are
+frozen into the native policy digest. Linux Bubblewrap mounts the live pinned
+workspace descriptor read-only, exposes only fixed system runtime trees,
+provides a private temporary directory, unshares the network and process
+namespaces, and delegates timeout/cancellation/descendant cleanup to the
+existing process-group driver. Submission probes that exact profile before a
+model request. Command-side workspace writes, unconfigured shell access, extra
+runtime roots and all child network remain disabled. Because this first process
+sandbox mounts the complete workspace read-only, submissions combining command
+execution with filesystem-read exclusions fail closed rather than allowing a
+command to bypass those exclusions. Shells and interpreters are ordinary
+programs and remain unavailable unless an exact program/argument prefix rule
+admits them.
+
+Read, write, command, command-network and web-search permissions remain
+separate axes rather than one expanding "full" boolean. This remains narrower
+than a general `Harness`: it provides no command network, writable command
+profile, session/domain authority,
 checkpoint/session-commit consumer, approval resume, or native resume.
 
 ## Dispatch lifecycle
