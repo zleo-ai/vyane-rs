@@ -9,9 +9,12 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+#[cfg(target_os = "linux")]
+use std::io::Write as _;
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Component, Path};
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
@@ -25,10 +28,11 @@ use vyane_core::{
     ToolDefinition,
 };
 
+#[cfg(target_os = "linux")]
+use super::{EditRequest, compute_edit};
 use super::{
-    EditRequest, MAX_TOOL_OUTPUT_CHARS, NativeTool, PermissionEffect, PermissionPolicy,
-    PermissionRule, PermissionRuleError, ToolContext, ToolError, ToolRegistry, ToolRegistryError,
-    compute_edit,
+    MAX_TOOL_OUTPUT_CHARS, NativeTool, PermissionEffect, PermissionPolicy, PermissionRule,
+    PermissionRuleError, ToolContext, ToolError, ToolRegistry, ToolRegistryError,
 };
 
 const MAX_READ_BYTES: usize = 1024 * 1024;
@@ -44,6 +48,7 @@ const MAX_EXCLUDED_PATTERNS: usize = 128;
 const MAX_EXCLUDED_PATTERN_BYTES: usize = 4096;
 const MAX_EXCLUDED_TOTAL_BYTES: usize = 64 * 1024;
 const SEARCH_OUTPUT_LIMIT_MARKER: &str = "\n... [search output limit reached]";
+#[cfg(target_os = "linux")]
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Configurable read boundary inside an already admitted workspace.
