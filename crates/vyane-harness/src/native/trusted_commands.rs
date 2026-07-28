@@ -116,7 +116,7 @@ pub enum NativeCommandPolicyError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum NativeCommandHostError {
-    #[error("native command tools require Linux bubblewrap confinement")]
+    #[error("native command tools require x86_64 or aarch64 Linux bubblewrap confinement")]
     Unsupported,
 }
 
@@ -204,6 +204,9 @@ pub async fn validate_command_host(
     policy
         .validate()
         .map_err(|_| NativeCommandHostError::Unsupported)?;
+    if !command_arch_supported() {
+        return Err(NativeCommandHostError::Unsupported);
+    }
     if [BWRAP, PRLIMIT, KEYCTL]
         .iter()
         .any(|path| !std::path::Path::new(path).is_file())
@@ -535,6 +538,9 @@ fn command_environment() -> BTreeMap<String, String> {
 }
 
 fn launcher_args(program: &str, args: &[String], cpu_seconds: u64) -> Result<Vec<String>, ()> {
+    if !command_arch_supported() {
+        return Err(());
+    }
     let process_count = current_uid_thread_count()?
         .checked_add(COMMAND_PROCESS_HEADROOM)
         .filter(|count| *count <= COMMAND_PROCESS_LIMIT_MAX)
@@ -554,6 +560,13 @@ fn launcher_args(program: &str, args: &[String], cpu_seconds: u64) -> Result<Vec
     ];
     launcher.extend(sandbox_args(program, args));
     Ok(launcher)
+}
+
+const fn command_arch_supported() -> bool {
+    cfg!(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -733,6 +746,17 @@ mod tests {
         assert!(!nproc_limit_is_enforced(1000, 1 << CAP_SYS_ADMIN_BIT));
         assert!(!nproc_limit_is_enforced(1000, 1 << CAP_SYS_RESOURCE_BIT));
         assert!(nproc_limit_is_enforced(1000, 0));
+    }
+
+    #[test]
+    fn command_architecture_support_is_explicit() {
+        assert_eq!(
+            command_arch_supported(),
+            cfg!(all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))
+        );
     }
 
     #[test]

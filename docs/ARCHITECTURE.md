@@ -304,7 +304,8 @@ first, it does not settle or delete the recovery input. Native OpenAI-compatible
 requests force `parallel_tool_calls=false` because the driver serializes one
 call per turn. [WP-84](plan/WP-84.md) adds an independently configured
 structured `run_command` tool. Exact program and argument-prefix rules are
-frozen into the native policy digest. Linux Bubblewrap mounts the live pinned
+frozen into the native policy digest. On supported Linux x86_64/aarch64 hosts,
+Bubblewrap mounts the live pinned
 workspace descriptor read-only, exposes only fixed system runtime trees,
 provides a private temporary directory, unshares the network and process
 namespaces, and delegates timeout/cancellation/descendant cleanup to the
