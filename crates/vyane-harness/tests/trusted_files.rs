@@ -646,7 +646,8 @@ async fn edit_file_composes_guarded_text_edit_and_preserves_mode() {
     let root = tempdir().expect("root");
     let path = root.path().join("script.sh");
     std::fs::write(&path, "echo old\n").expect("seed");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).expect("executable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o7750))
+        .expect("executable with special bits");
     let registry = workspace_tool_registry_with_policy(
         NativeReadPolicy::workspace(),
         Some(NativeWritePolicy::workspace()),
@@ -682,8 +683,50 @@ async fn edit_file_composes_guarded_text_edit_and_preserves_mode() {
             .expect("metadata")
             .permissions()
             .mode()
-            & 0o777,
-        0o750
+            & 0o7777,
+        0o7750
+    );
+}
+
+#[tokio::test]
+async fn write_file_does_not_require_directory_read_permission() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempdir().expect("root");
+    let directory = root.path().join("write-only");
+    std::fs::create_dir(&directory).expect("directory");
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o300))
+        .expect("write and search only");
+    let registry = workspace_tool_registry_with_policy(
+        NativeReadPolicy::workspace(),
+        Some(NativeWritePolicy::workspace()),
+    )
+    .expect("registry");
+
+    let invocation = registry
+        .execute_authorized(
+            call(
+                "write_file",
+                args(&[
+                    ("path", json!("write-only/created.txt")),
+                    ("content", json!("created\n")),
+                ]),
+            ),
+            &context(root.path()),
+            &workspace_permission_policy(true).expect("policy"),
+            &RecordingAuthority::default(),
+            10,
+            2,
+        )
+        .await
+        .expect("write");
+
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+        .expect("restore directory permissions");
+    assert_eq!(invocation.status, ToolInvocationStatus::Executed);
+    assert_eq!(
+        std::fs::read_to_string(directory.join("created.txt")).expect("created"),
+        "created\n"
     );
 }
 

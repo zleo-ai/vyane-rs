@@ -993,7 +993,7 @@ impl FileSnapshot {
             device: metadata.dev(),
             inode: metadata.ino(),
             size: metadata.size(),
-            mode: metadata.mode() & 0o777,
+            mode: metadata.mode() & 0o7777,
             modified_seconds: metadata.mtime(),
             modified_nanoseconds: metadata.mtime_nsec(),
             changed_seconds: metadata.ctime(),
@@ -1005,7 +1005,6 @@ impl FileSnapshot {
 #[cfg(target_os = "linux")]
 struct StagedFile {
     parent: File,
-    sync_directory: File,
     name: OsString,
     published: bool,
 }
@@ -1024,9 +1023,7 @@ impl StagedFile {
         ) {
             Ok(()) => {
                 self.published = true;
-                self.sync_directory
-                    .sync_all()
-                    .map_err(|_| ToolError::new("could not sync published workspace file"))
+                Ok(())
             }
             Err(rustix::io::Errno::EXIST) => Err(ToolError::new("workspace file already exists")),
             Err(_) => Err(ToolError::new("could not publish workspace file")),
@@ -1037,9 +1034,7 @@ impl StagedFile {
         rustix::fs::renameat(&self.parent, &self.name, &self.parent, target)
             .map_err(|_| ToolError::new("could not publish workspace edit"))?;
         self.published = true;
-        self.sync_directory
-            .sync_all()
-            .map_err(|_| ToolError::new("could not sync published workspace edit"))
+        Ok(())
     }
 }
 
@@ -1303,8 +1298,6 @@ fn stage_content_blocking(
     use rustix::fs::{Mode, OFlags, openat2};
     use std::os::unix::fs::PermissionsExt as _;
 
-    let sync_directory = File::open(proc_fd_path(&parent))
-        .map_err(|_| ToolError::new("could not open workspace directory for syncing"))?;
     for _ in 0..16 {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let name = OsString::from(format!(
@@ -1328,16 +1321,16 @@ fn stage_content_blocking(
         let mut file = File::from(descriptor);
         let staged = StagedFile {
             parent,
-            sync_directory,
             name,
             published: false,
         };
+        file.write_all(content)
+            .map_err(|_| ToolError::new("could not stage workspace file"))?;
         if let Some(mode) = preserved_mode {
             file.set_permissions(std::fs::Permissions::from_mode(mode))
                 .map_err(|_| ToolError::new("could not stage workspace file"))?;
         }
-        file.write_all(content)
-            .and_then(|()| file.sync_all())
+        file.sync_all()
             .map_err(|_| ToolError::new("could not stage workspace file"))?;
         return Ok(staged);
     }

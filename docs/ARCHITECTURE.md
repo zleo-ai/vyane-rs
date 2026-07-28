@@ -272,15 +272,19 @@ device/inode evidence; loss of the live handle fails closed.
 Write tools use a second frozen policy axis and are assembled only when both
 the outer sandbox ceiling permits writes and the submission explicitly
 supplies `filesystem_write`. Read authority never implies write authority.
-New files are staged and synced under the exact opened parent then published
-with `RENAME_NOREPLACE`. Existing-file edits compose the pure guarded text
+New files are staged under the exact opened parent, their complete content is
+synced, and they are then published with `RENAME_NOREPLACE`. Existing-file
+edits compose the pure guarded text
 edit with a source identity/timestamp snapshot and a final byte-for-byte
 reread. Drift, ambiguity, cancellation, or authority revocation before the
 last publication check removes the stage and leaves the target unchanged.
 The final same-directory rename is atomic. Linux has no
 rename-if-target-inode-is-unchanged primitive, so this contract does not claim
 kernel compare-and-swap against an uncooperative external writer in the
-syscall-sized interval after the final reread.
+syscall-sized interval after the final reread. Publication does not require
+directory read permission; the directory entry itself is not fsynced, so the
+contract covers atomic visibility but not survival of the rename across a
+power-loss or kernel-crash boundary.
 
 Blocking closures carry shared activity guards: dropping a join future does not
 erase active work, the waiter is registered before checking the count, and the
