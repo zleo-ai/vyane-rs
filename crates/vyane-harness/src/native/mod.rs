@@ -5,16 +5,17 @@
 //! model-produced [`ToolCall`] passes through an ordered [`PermissionPolicy`]
 //! and then, only when allowed, into a real [`ToolRegistry`] executor.
 //!
-//! Permission matching is not an OS sandbox. In particular,
-//! [`risky_operations_policy`] is only an approval classifier and does not
-//! include the protected-path security floor. Until path capabilities are
-//! enforced below the shell, [`protected_paths_policy`] denies `run_bash`
-//! entirely; native tools must independently resolve paths and reject symlink
-//! or capability escapes before performing side effects.
+//! Permission matching is not an OS sandbox. The trusted read/search built-ins
+//! add a narrower Linux descriptor-relative filesystem capability and recheck
+//! live authority at each open; that does not authorize subprocesses or network
+//! access. [`risky_operations_policy`] remains only an approval classifier, and
+//! [`protected_paths_policy`] continues to deny `run_bash` until a separately
+//! enforced child-process sandbox exists.
 
 mod permissions;
 mod text_edit;
 mod tools;
+mod trusted_files;
 mod turn_driver;
 
 pub use permissions::{
@@ -27,6 +28,10 @@ pub use text_edit::{
 pub use tools::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, ToolCall, ToolCallLimits, ToolContext, ToolContextError,
     ToolError, ToolInvocation, ToolInvocationStatus, ToolRegistry, ToolRegistryError,
+};
+pub use trusted_files::{
+    NativeReadPolicy, NativeReadPolicyError, read_only_permission_policy,
+    read_only_tool_definitions, read_only_tool_registry, read_only_tool_registry_with_policy,
 };
 pub use turn_driver::{
     DEFAULT_NATIVE_MODEL_TURNS, MAX_NATIVE_MODEL_TURNS, NativeAssistantReply, NativeTurnDriver,

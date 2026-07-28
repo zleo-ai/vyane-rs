@@ -2,7 +2,7 @@
 //!
 //! The operation resolves all body-bearing input from the private spool only
 //! after the durable run is active.  It supports exactly one direct OpenAI
-//! Chat target, no tools, no sessions, and no restart replay.
+//! Chat target, confined read/search tools, no sessions, and no restart replay.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,8 @@ use vyane_core::{
     ToolChatRequest, ToolChoice,
 };
 use vyane_harness::native::{
-    NativeTurnDriver, NativeTurnLimits, NativeTurnStop, PermissionPolicy, ToolContext, ToolRegistry,
+    NativeReadPolicy, NativeTurnDriver, NativeTurnLimits, NativeTurnStop, ToolContext,
+    read_only_permission_policy, read_only_tool_definitions, read_only_tool_registry_with_policy,
 };
 use vyane_message::{
     EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
@@ -211,6 +212,7 @@ pub(crate) fn native_input_for_submission(
         selector,
         bound,
         workdir,
+        filesystem_read,
         system,
         timeout_seconds,
     } = details;
@@ -248,9 +250,10 @@ pub(crate) fn native_input_for_submission(
             },
             canonical_workdir: workdir.canonical_path().to_path_buf(),
             workdir_identity: workdir.identity().clone(),
+            filesystem_read,
             system,
             timeout_seconds,
-            max_model_turns: 2,
+            max_model_turns: 8,
         },
     )
 }
@@ -260,6 +263,7 @@ pub(crate) struct NativeSubmissionDetails<'a> {
     pub(crate) selector: &'a str,
     pub(crate) bound: &'a vyane_core::BoundTarget,
     pub(crate) workdir: &'a PinnedWorkdir,
+    pub(crate) filesystem_read: NativeReadPolicy,
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
 }
@@ -328,10 +332,12 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         let Ok(limits) = NativeTurnLimits::new(input.policy.max_model_turns) else {
             return AgentExecutorOutcome::Unknown;
         };
-        let Ok(tool_context) = ToolContext::new(&input.policy.canonical_workdir) else {
-            return AgentExecutorOutcome::Unknown;
-        };
-        if tool_context.workdir() != workdir.canonical_path() {
+        let tool_context = ToolContext::from_pinned_workdir(workdir.clone());
+        if tool_context.workdir() != workdir.canonical_path()
+            || tool_context
+                .pinned_workdir()
+                .is_none_or(|pinned| pinned.identity() != workdir.identity())
+        {
             return AgentExecutorOutcome::Unknown;
         }
         let tool_context = tool_context
@@ -339,12 +345,15 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             .with_timeout(Duration::from_secs(input.policy.timeout_seconds))
             .with_deadline(context.deadline());
         let request = native_request(&input, &bound);
-        let driver = NativeTurnDriver::with_limits(
-            client,
-            ToolRegistry::new(),
-            PermissionPolicy::deny_by_default(),
-            limits,
-        );
+        let Ok(registry) =
+            read_only_tool_registry_with_policy(input.policy.filesystem_read.clone())
+        else {
+            return AgentExecutorOutcome::Unknown;
+        };
+        let Ok(permission_policy) = read_only_permission_policy() else {
+            return AgentExecutorOutcome::Unknown;
+        };
+        let driver = NativeTurnDriver::with_limits(client, registry, permission_policy, limits);
         let turn = tokio::time::timeout_at(
             context.deadline(),
             driver.run(request, &tool_context, &native_authority),
@@ -489,8 +498,8 @@ fn native_request(input: &NativeAgentInput, bound: &vyane_core::BoundTarget) -> 
     ToolChatRequest {
         model: bound.target.model.clone(),
         messages,
-        tools: Vec::new(),
-        tool_choice: ToolChoice::None,
+        tools: read_only_tool_definitions(),
+        tool_choice: ToolChoice::Auto,
         params: bound.params.clone(),
     }
 }
@@ -553,7 +562,10 @@ const fn failure_code(kind: ErrorKind) -> RunFailureCode {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use chrono::Utc;
     use tempfile::TempDir;
@@ -649,9 +661,10 @@ mod tests {
             },
             canonical_workdir: workdir.canonical_path().to_path_buf(),
             workdir_identity: workdir.identity().clone(),
+            filesystem_read: NativeReadPolicy::workspace(),
             system: Some("Answer concisely.".into()),
             timeout_seconds: 30,
-            max_model_turns: 2,
+            max_model_turns: 8,
         }
     }
 
@@ -845,30 +858,63 @@ mod tests {
         assert_pre_wire_rejection(PreWireCase::CancelledBeforeClaim).await;
 
         let server = MockServer::start().await;
+        let response_index = Arc::new(AtomicUsize::new(0));
+        let response_index_for_mock = Arc::clone(&response_index);
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "model": "mock-model",
-                "choices": [{
-                    "message": {"role": "assistant", "content": "native answer"},
-                    "finish_reason": "stop"
-                }]
-            })))
-            .expect(1)
+            .respond_with(move |_: &wiremock::Request| {
+                if response_index_for_mock.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "model": "mock-model",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [{
+                                    "id": "read-call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": "{\"path\":\"note.txt\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }]
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "model": "mock-model",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "native answer"},
+                            "finish_reason": "stop"
+                        }]
+                    }))
+                }
+            })
+            .expect(2)
             .mount(&server)
             .await;
 
         let root = tempfile::tempdir().unwrap();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
+        std::fs::write(workdir_path.join("note.txt"), "workspace evidence\n").unwrap();
         let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
         let (service, paths) = service(&root, &server);
         let spool = NativeAgentInputSpool::open(root.path().join("native-input"), OWNER).unwrap();
         let input = input(&service, &workdir);
         let bound = service.resolve(PROFILE).unwrap().chain.remove(0);
         let request = native_request(&input, &bound);
-        assert!(request.tools.is_empty());
-        assert_eq!(request.tool_choice, ToolChoice::None);
+        assert_eq!(
+            request
+                .tools
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["read_file", "search_files"]
+        );
+        assert_eq!(request.tool_choice, ToolChoice::Auto);
         spool.create(&input).unwrap();
 
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
@@ -941,10 +987,15 @@ mod tests {
         assert_eq!(second.scanned, 0);
 
         let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 2);
         let request: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(request["model"], "mock-model");
         assert_eq!(request["messages"][1]["content"], "Return the test answer.");
+        let continuation: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(
+            continuation["messages"][3]["content"],
+            "workspace evidence\n"
+        );
         assert_eq!(
             completion_message(&input, "completion-key", "body".into()).conversation_id,
             format!("agent-run-{RUN_ID}")

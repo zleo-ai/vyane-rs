@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use vyane_core::{Effort, WorkdirIdentity};
+use vyane_harness::native::NativeReadPolicy;
 
-const SCHEMA: u32 = 2;
+const SCHEMA: u32 = 3;
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 768 * 1024;
 const MAX_SYSTEM_BYTES: usize = 128 * 1024;
@@ -152,6 +153,7 @@ pub(crate) struct NativeAgentPolicy {
     pub(crate) target: NativeTargetSnapshot,
     pub(crate) canonical_workdir: PathBuf,
     pub(crate) workdir_identity: WorkdirIdentity,
+    pub(crate) filesystem_read: NativeReadPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
@@ -166,6 +168,10 @@ impl std::fmt::Debug for NativeAgentPolicy {
             .field("target", &self.target)
             .field("canonical_workdir", &"[REDACTED]")
             .field("workdir_identity", &"[OPAQUE]")
+            .field(
+                "filesystem_read_exclusions",
+                &self.filesystem_read.exclude.len(),
+            )
             .field("system", &self.system.as_ref().map(|_| "[REDACTED]"))
             .field("timeout_seconds", &self.timeout_seconds)
             .field("max_model_turns", &self.max_model_turns)
@@ -453,6 +459,10 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
         return Err(NativeAgentSpoolError::InvalidInput);
     }
     validate_path(&policy.canonical_workdir)?;
+    policy
+        .filesystem_read
+        .validate()
+        .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
     if !policy.canonical_workdir.is_absolute() {
         return Err(NativeAgentSpoolError::InvalidInput);
     }
@@ -657,6 +667,7 @@ mod tests {
                 device: 7,
                 inode: 11,
             },
+            filesystem_read: NativeReadPolicy::workspace(),
             system: Some("system-body-marker".into()),
             timeout_seconds: 120,
             max_model_turns: 8,
@@ -996,6 +1007,9 @@ mod tests {
         variants.push(value);
         let mut value = base.clone();
         value.workdir_identity.inode += 1;
+        variants.push(value);
+        let mut value = base.clone();
+        value.filesystem_read.exclude.push("private/**".into());
         variants.push(value);
         let mut value = base.clone();
         value.system = None;

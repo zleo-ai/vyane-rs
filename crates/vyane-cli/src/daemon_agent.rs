@@ -44,6 +44,7 @@ use crate::native_agent::{
 use crate::native_agent_spool::{NativeAgentInput, NativeAgentInputSpool, NativeAgentSpoolCreate};
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
+use vyane_harness::native::NativeReadPolicy;
 
 const INPUT_DIR: &str = "agent-inputs";
 const NATIVE_INPUT_DIR: &str = "native-agent-inputs";
@@ -72,6 +73,17 @@ pub(crate) struct AgentRunSubmitRequest {
     pub(crate) labels: Vec<String>,
     #[serde(default)]
     pub(crate) execution_backend: AgentExecutionBackend,
+    /// Native-only, per-submission policy. Omission means the admitted
+    /// workspace is broadly readable; exclusions may only narrow it.
+    #[serde(default)]
+    pub(crate) native_permissions: NativePermissionRequest,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativePermissionRequest {
+    #[serde(default)]
+    pub(crate) filesystem_read: NativeReadPolicy,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -336,6 +348,9 @@ impl DaemonAgentHost {
         ) {
             return self.submit_native_admitted(request, timeout_seconds).await;
         }
+        if request.native_permissions != NativePermissionRequest::default() {
+            return Err(AgentApiError::bad_request());
+        }
         let sandbox = match request.sandbox {
             AgentSpoolSandbox::ReadOnly => Sandbox::ReadOnly,
             AgentSpoolSandbox::Write => Sandbox::Write,
@@ -450,6 +465,11 @@ impl DaemonAgentHost {
         if request.sandbox != AgentSpoolSandbox::ReadOnly {
             return Err(AgentApiError::bad_request());
         }
+        request
+            .native_permissions
+            .filesystem_read
+            .validate()
+            .map_err(|_| AgentApiError::bad_request())?;
         let workdir = request
             .workdir
             .ok_or_else(AgentApiError::bad_request)
@@ -472,6 +492,7 @@ impl DaemonAgentHost {
                 selector: &request.target,
                 bound: &chain.chain[0],
                 workdir: &workdir,
+                filesystem_read: request.native_permissions.filesystem_read,
                 system: request.system,
                 timeout_seconds,
             },
@@ -952,10 +973,42 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        SubmissionGate, cancel_operation_id, exact_retry_backend, freeze_requested_workdir,
+        AgentRunSubmitRequest, SubmissionGate, cancel_operation_id, exact_retry_backend,
+        freeze_requested_workdir,
     };
     use vyane_agent::ExecutionBackend;
     use vyane_core::Sandbox;
+
+    #[test]
+    fn native_read_exclusions_are_explicit_and_default_to_workspace_read() {
+        let base = serde_json::json!({
+            "run_id": "019fa927-f343-7940-8c4f-1a3e79258335",
+            "task": "inspect the workspace",
+            "target": "native"
+        });
+        let default: AgentRunSubmitRequest =
+            serde_json::from_value(base.clone()).expect("default request");
+        assert!(
+            default
+                .native_permissions
+                .filesystem_read
+                .exclude
+                .is_empty()
+        );
+
+        let mut configured = base;
+        configured["native_permissions"] = serde_json::json!({
+            "filesystem_read": {
+                "exclude": [".env*", ".git", "private/**"]
+            }
+        });
+        let configured: AgentRunSubmitRequest =
+            serde_json::from_value(configured).expect("configured request");
+        assert_eq!(
+            configured.native_permissions.filesystem_read.exclude,
+            [".env*", ".git", "private/**"]
+        );
+    }
 
     #[tokio::test]
     async fn closed_submission_gate_rejects_new_work() {

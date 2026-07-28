@@ -246,10 +246,19 @@ failover-eligible error. `NativeTurnOutcome` is not serializable, and its custom
 `Debug` omits prompt, reasoning, tool arguments/output, transcript, final reply,
 and approval-plan contents.
 
-This driver is still a dark library component. No factory, service operation,
-CLI, daemon, or runtime constructs it; it is not a `Harness`. It provides no
-trusted built-ins, session/domain authority, checkpoint or session-commit
-consumer, approval resume, or native resume.
+The explicit fresh/sessionless resident native AgentRun lane constructs this
+driver with Linux descriptor-relative `read_file` and `search_files` built-ins.
+The exact admitted `PinnedWorkdir` supplies their root capability, and live
+native authority is revalidated before every path-component open and directory
+enumeration. The default policy makes that admitted workspace broadly readable,
+including dotfiles; a submission can freeze workspace-relative glob exclusions
+into the native policy digest, and both direct read and recursive search enforce
+the same exclusions. Read, write, command, command-network and web-search
+permissions remain separate axes rather than one expanding "full" boolean.
+This remains narrower than a general `Harness`: it provides no
+write/edit, command/network, child-process host sandbox, session/domain
+authority, checkpoint/session-commit consumer, approval resume, or native
+resume.
 
 ## Dispatch lifecycle
 

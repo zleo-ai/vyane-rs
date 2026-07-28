@@ -64,7 +64,7 @@ difference。运行 `python3 .github/scripts/parity-report.py --format markdown`
 | config & profiles | `vyane-config` | [x] |
 | OpenAI Chat/Responses + Anthropic Messages | `vyane-protocol` | [x] 基础 client；[~] 有界 typed tool turn 与 per-wire authorized path 目前只覆盖非流式 OpenAI Chat |
 | Claude Code + Codex CLI harnesses（含 stdout 事件流） | `vyane-harness` | [x] additive scoped execution 可同时携带 Linux pinned workdir 与 live spawn authority；Process AgentRun host 已为 fresh sessionless CLI run 构造该 authority，gated capture/streaming 会在 wrapper spawn 与真实 target release 前重验。这仍是 adapter-delegated，不是 host sandbox |
-| native permission/tool 执行接缝（尚不是 `Harness` 实现） | `vyane-harness` + `vyane-service` | [~] AgentRun scope atomic validation、per-wire model authorization、allowed-tool registry gate、fresh-sessionless bridge、有界 turn driver、lifetime-bound in-process native-scope composition 与通用 crash-consistent completion handback 已作为 dark components 落地；仍无 concrete product operation 或 production factory/runtime。session-bearing authority、trusted built-ins、OS sandbox、checkpoint/session commit、approval resume、native resume 均未完成 |
+| native permission/tool 执行接缝（尚不是通用 `Harness` 实现） | `vyane-harness` + `vyane-service` | [~] resident fresh/sessionless native AgentRun lane 已组合 scope atomic validation、per-wire model authorization、有界 turn driver 与 durable completion；[WP-83](docs/plan/WP-83.md) 新增绑定 admitted `PinnedWorkdir` 的 Linux descriptor-relative `read_file`/`search_files`，每个路径分量 open 都重验 live authority并拒绝路径穿越/符号链接。已授权工作区默认广泛可读，也可以在每次提交时冻结 glob 排除规则，同时收紧 read/search。write/edit、child-process host sandbox、命令/网络工具、session authority、checkpoint/session commit、approval resume、failover/replay 与 native resume 仍待完成 |
 | dispatch / broadcast / failover kernel + streaming | `vyane-kernel` | [x] early execution id、整链 trusted capability admission、one-shot prepared dispatch 与 original-ordinal failover evidence |
 | append-only run ledger + owner 隔离 session record | `vyane-ledger` | [x] direct-HTTP transcript continuity、strict revisioned V2 snapshot、store-level CAS `Reset` / `ForkFresh` / `Commit` 与 exact 本地文件系统执行期 lease 已具备；CLI/service 仅提供 owner-local list/inspect/reset-native，没有公开 fork、REST mutation、分布式 lease 协议或生产 native resume |
 | 可 replay 的 owner-scoped event store | `vyane-ledger` | [~] storage/cursor、有界 message/AgentRun lifecycle 投影，以及 daemon 内 owner-bound 常驻 broker/projector assembly 已具备；delivery lane、dispatch/workflow producer、subscription、retention 与统一 timeline 尚未完成 |
@@ -129,8 +129,9 @@ failure 会转成 redacted non-replayable stop，而不是向外返回可 failov
 只生成静态、不回显原文的 tool result，绝不执行。tool description/schema 只是 non-authoritative
 model guidance；每个 `NativeTool` 必须校验实际收到的 argument。
 
-driver outcome 不可序列化且 `Debug` 已脱敏，但 driver 不是 `Harness`，也没有生产 factory/runtime
-构造它；trusted built-ins、checkpoint/session-commit consumer、approval resume 与 native resume 仍缺。
+driver outcome 不可序列化且 `Debug` 已脱敏。显式 fresh/sessionless resident native lane 现在会
+用两个只读 trusted filesystem built-in 构造它，但仍窄于通用 `Harness`；write/edit、命令/网络、
+checkpoint/session-commit consumer、approval resume 与 native resume 仍缺。
 另有 `AgentProjectionComponents::open` 提供显式 owner-bound one-shot AgentRun projector 路径，同时
 封装 raw store。ordinary dispatch 不会打开该数据库，也不会启动 projection 或其他 resident work。
 
