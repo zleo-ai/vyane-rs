@@ -160,6 +160,14 @@ async fn network_namespace_has_no_loopback_connectivity() {
     )
     .await;
     assert!(!output.contains("exit_code: 0"), "{output}");
+    assert!(
+        !output.contains("bwrap:"),
+        "the sandbox itself must start before the network probe: {output}"
+    );
+    assert!(
+        output.contains("Traceback") || output.contains("Network is unreachable"),
+        "{output}"
+    );
 }
 
 #[tokio::test]
