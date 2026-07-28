@@ -531,6 +531,10 @@ async fn open_regular_components(
     )))
 }
 
+// Non-Linux builds keep the closed return shape so the public tool registry can
+// fail at runtime without conditional API types; only the Linux implementation
+// constructs these variants.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum OpenedEntry {
     Directory,
     Regular(File),
