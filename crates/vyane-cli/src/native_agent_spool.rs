@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use vyane_core::{Effort, PinnedWorkdir, WorkdirIdentity};
-use vyane_harness::native::NativeReadPolicy;
+use vyane_harness::native::{NativeReadPolicy, NativeWritePolicy};
 
-const SCHEMA: u32 = 3;
+const SCHEMA: u32 = 4;
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 768 * 1024;
 const MAX_SYSTEM_BYTES: usize = 128 * 1024;
@@ -166,6 +166,8 @@ pub(crate) struct NativeAgentPolicy {
     pub(crate) workdir_identity: WorkdirIdentity,
     pub(crate) filesystem_read: NativeReadPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) filesystem_write: Option<NativeWritePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_model_turns: u32,
@@ -182,6 +184,13 @@ impl std::fmt::Debug for NativeAgentPolicy {
             .field(
                 "filesystem_read_exclusions",
                 &self.filesystem_read.exclude.len(),
+            )
+            .field(
+                "filesystem_write_exclusions",
+                &self
+                    .filesystem_write
+                    .as_ref()
+                    .map(|policy| policy.exclude.len()),
             )
             .field("system", &self.system.as_ref().map(|_| "[REDACTED]"))
             .field("timeout_seconds", &self.timeout_seconds)
@@ -565,6 +574,11 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
         .filesystem_read
         .validate()
         .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
+    if let Some(write_policy) = &policy.filesystem_write {
+        write_policy
+            .validate()
+            .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
+    }
     if !policy.canonical_workdir.is_absolute() {
         return Err(NativeAgentSpoolError::InvalidInput);
     }
@@ -770,6 +784,7 @@ mod tests {
                 inode: 11,
             },
             filesystem_read: NativeReadPolicy::workspace(),
+            filesystem_write: None,
             system: Some("system-body-marker".into()),
             timeout_seconds: 120,
             max_model_turns: 8,
@@ -1151,6 +1166,9 @@ mod tests {
         variants.push(value);
         let mut value = base.clone();
         value.filesystem_read.exclude.push("private/**".into());
+        variants.push(value);
+        let mut value = base.clone();
+        value.filesystem_write = Some(NativeWritePolicy::excluding(vec!["generated/**".into()]));
         variants.push(value);
         let mut value = base.clone();
         value.system = None;

@@ -100,7 +100,7 @@ Two consequences:
 | `vyane-config` | `vyane-provider` | parse TOML, resolve profiles + failover chains → `BoundTarget` |
 | `vyane-provider` | — | provider registry, endpoints, auth styles, env-injection rules |
 | `vyane-protocol` | — | `ChatClient` over HTTP (OpenAI Chat / Responses, Anthropic Messages), including bounded non-streaming OpenAI Chat typed tool turns, a separately authorized OpenAI Chat turn path, and the shared HTTP base validator and endpoint-routing digest |
-| `vyane-harness` | — | `Harness` wrapping coding CLIs, additive process-local execution context, pinned-workdir child handoff, process-group control, a guarded native tool-registry boundary, and an unwired bounded native turn driver |
+| `vyane-harness` | — | `Harness` wrapping coding CLIs, additive process-local execution context, pinned-workdir child handoff, process-group control, guarded native filesystem tools, and a bounded native turn driver |
 | `vyane-kernel` | — (traits only) | early execution identity, whole-chain capability admission, prepared dispatch, dispatch / broadcast / failover state machine |
 | `vyane-ledger` | — | JSONL `Ledger`, filesystem `SessionStore` with strict revisioned native-session snapshots/CAS transitions, cost table |
 | `vyane-task` | — | owner-qualified SQLite task lifecycle snapshots/events, revision + executor-epoch CAS, transactional schema migration |
@@ -189,8 +189,9 @@ session and fresh-versus-resumed binding proof. Heartbeat and activity changes
 may advance the row revision without invalidating that authority; cancellation,
 terminal state, lease/deadline expiry or identity drift fail closed.
 
-Two lower-level consumers exist, but remain unwired. The authorized OpenAI Chat
-path revalidates every explicit physical send. The authorized tool-registry path
+The resident native AgentRun lane wires both lower-level consumers. The
+authorized OpenAI Chat path revalidates every explicit physical send. The
+authorized tool-registry path
 revalidates only after validation and permission evaluation select an allowed
 call, immediately before the tool executor is polled; pure invalid, unknown,
 deny, ask, cancelled and expired outcomes consume no authority. Revocation is
@@ -203,12 +204,10 @@ an owned `ActiveExecutionPermit`, `NativeExecutionScope`, and `AgentStore` to
 the abstract authority contract. Construction accepts only a fresh,
 sessionless scope. Each one-based `ModelSend` or `ToolOperation` revalidation
 runs the synchronous store check on Tokio's blocking pool. Session-bearing
-scopes, checkpoint prepare/publish, and session commit fail closed. The type is
-exported for explicit future assembly but is not registered in a production
-factory, called by an existing runtime/native loop, or composed with
-`SessionExecutionLease` and exact `NativeSessionDomain` authority. These
-contracts therefore close bypasses at their individual boundaries without
-enabling `NativeHarness`, native resume, or any built-in tool.
+scopes, checkpoint prepare/publish, and session commit fail closed. The
+fresh/sessionless resident operation uses this bridge; regular `Harness`
+dispatch, session-aware native resume, `SessionExecutionLease`, and exact
+`NativeSessionDomain` authority remain separate.
 
 The paired in-process backend can additionally bind its lifetime-bound
 `InProcessEffectAuthority` to one exact fresh sessionless scope. The bind
@@ -216,8 +215,9 @@ performs an immediate atomic native-permit validation; the returned opaque,
 non-`Clone`, non-serializable `InProcessNativeAuthority` repeats it for every
 positive one-based model send and tool operation. Raw store/permit access,
 session/resume scopes, checkpoint/session-commit effects and unknown effects
-remain closed. This makes the authority chain composable inside a future
-operation but supplies no resolver, client, or concrete product operation.
+remain closed. The resident operation supplies the resolver, direct HTTP
+client, frozen private input, confined registry, and bounded turn driver for
+that one fresh-only product path.
 The generic crash-consistent completion sink/receipt boundary is added
 separately by [WP-53](plan/WP-53.md); it still does not assemble a product
 native runtime. See [WP-52](plan/WP-52.md).
@@ -247,7 +247,8 @@ failover-eligible error. `NativeTurnOutcome` is not serializable, and its custom
 and approval-plan contents.
 
 The explicit fresh/sessionless resident native AgentRun lane constructs this
-driver with Linux descriptor-relative `read_file` and `search_files` built-ins.
+driver with Linux descriptor-relative `read_file`, `search_files`,
+`write_file`, and `edit_file` built-ins.
 The exact admitted `PinnedWorkdir` supplies their root capability, and live
 native authority is revalidated before every path-component open and directory
 enumeration. The default policy makes that admitted workspace broadly readable,
@@ -268,6 +269,19 @@ process-local handoff shared by the submission host and resident operation.
 Execution never reconstructs authority from the serialized path and
 device/inode evidence; loss of the live handle fails closed.
 
+Write tools use a second frozen policy axis and are assembled only when both
+the outer sandbox ceiling permits writes and the submission explicitly
+supplies `filesystem_write`. Read authority never implies write authority.
+New files are staged and synced under the exact opened parent then published
+with `RENAME_NOREPLACE`. Existing-file edits compose the pure guarded text
+edit with a source identity/timestamp snapshot and a final byte-for-byte
+reread. Drift, ambiguity, cancellation, or authority revocation before the
+last publication check removes the stage and leaves the target unchanged.
+The final same-directory rename is atomic. Linux has no
+rename-if-target-inode-is-unchanged primitive, so this contract does not claim
+kernel compare-and-swap against an uncooperative external writer in the
+syscall-sized interval after the final reread.
+
 Blocking closures carry shared activity guards: dropping a join future does not
 erase active work, the waiter is registered before checking the count, and the
 native operation waits for the activity count to reach zero before it can
@@ -277,9 +291,8 @@ requests force `parallel_tool_calls=false` because the driver serializes one
 call per turn. Read, write, command, command-network and web-search permissions
 remain separate axes rather than one expanding "full" boolean.
 This remains narrower than a general `Harness`: it provides no
-write/edit, command/network, child-process host sandbox, session/domain
-authority, checkpoint/session-commit consumer, approval resume, or native
-resume.
+command/network, child-process host sandbox, session/domain authority,
+checkpoint/session-commit consumer, approval resume, or native resume.
 
 ## Dispatch lifecycle
 
@@ -1261,17 +1274,13 @@ daemon is not a remote or multi-user boundary.
 
 Explicitly out of scope for the current release, to keep the core honest:
 
-- **No native harness or host-enforced sandbox yet.** Whole-chain capability
-  admission and Linux pinned-workdir identity are implemented, but
-  `AdapterDelegated` is not same-UID confinement, a container or a microVM.
-  Mutating dispatch fails closed outside Linux. Guarded model-send and tool-
-  registry entry points can consume an abstract live authority, and a concrete
-  bridge now revalidates `ActiveExecutionPermit` plus the AgentRun store for
-  fresh sessionless model/tool effects. A bounded serial turn driver consumes
-  the abstract authorized model/tool boundaries, but neither component is
-  wired into a production factory/runtime or registered as a `Harness`. The
-  bridge rejects session-bearing, checkpoint and session-commit authority;
-  trusted built-in tools and approval resume are also absent. The strict
+- **No general native harness or command/network sandbox yet.** The fresh,
+  sessionless resident AgentRun lane now assembles an authorized native model
+  loop with Linux confined read/search/write/edit tools. This is a narrow
+  production slice, not `AdapterDelegated` same-UID isolation, a container, or
+  a microVM, and it does not expose subprocess or network effects. The bridge
+  rejects session-bearing, checkpoint and session-commit authority, and
+  approval resume is absent. The strict
   `NativeSessionDomain`
   persistence contract and
   reset/fresh-fork/commit CAS data contract exists, but neither legacy-unbound

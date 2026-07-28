@@ -16,9 +16,9 @@ use vyane_core::{
     ToolChatRequest, ToolChoice,
 };
 use vyane_harness::native::{
-    NativeReadPolicy, NativeTurnDriver, NativeTurnLimits, NativeTurnStop, ToolContext,
-    read_only_permission_policy, read_only_tool_definitions, read_only_tool_registry_with_policy,
-    validate_read_only_host,
+    NativeReadPolicy, NativeTurnDriver, NativeTurnLimits, NativeTurnStop, NativeWritePolicy,
+    ToolContext, validate_read_only_host, workspace_permission_policy, workspace_tool_definitions,
+    workspace_tool_registry_with_policy,
 };
 use vyane_message::{
     EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
@@ -222,6 +222,7 @@ pub(crate) fn native_input_for_submission(
         bound,
         workdir,
         filesystem_read,
+        filesystem_write,
         system,
         timeout_seconds,
     } = details;
@@ -261,6 +262,7 @@ pub(crate) fn native_input_for_submission(
             canonical_workdir: workdir.canonical_path().to_path_buf(),
             workdir_identity: workdir.identity().clone(),
             filesystem_read,
+            filesystem_write,
             system,
             timeout_seconds,
             max_model_turns: 8,
@@ -274,6 +276,7 @@ pub(crate) struct NativeSubmissionDetails<'a> {
     pub(crate) bound: &'a vyane_core::BoundTarget,
     pub(crate) workdir: &'a PinnedWorkdir,
     pub(crate) filesystem_read: NativeReadPolicy,
+    pub(crate) filesystem_write: Option<NativeWritePolicy>,
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
 }
@@ -356,12 +359,14 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             .with_timeout(Duration::from_secs(input.policy.timeout_seconds))
             .with_deadline(context.deadline());
         let request = native_request(&input, &bound);
-        let Ok(registry) =
-            read_only_tool_registry_with_policy(input.policy.filesystem_read.clone())
-        else {
+        let write_enabled = input.policy.filesystem_write.is_some();
+        let Ok(registry) = workspace_tool_registry_with_policy(
+            input.policy.filesystem_read.clone(),
+            input.policy.filesystem_write.clone(),
+        ) else {
             return AgentExecutorOutcome::Unknown;
         };
-        let Ok(permission_policy) = read_only_permission_policy() else {
+        let Ok(permission_policy) = workspace_permission_policy(write_enabled) else {
             return AgentExecutorOutcome::Unknown;
         };
         let driver = NativeTurnDriver::with_limits(client, registry, permission_policy, limits);
@@ -517,7 +522,7 @@ fn native_request(input: &NativeAgentInput, bound: &vyane_core::BoundTarget) -> 
     ToolChatRequest {
         model: bound.target.model.clone(),
         messages,
-        tools: read_only_tool_definitions(),
+        tools: workspace_tool_definitions(input.policy.filesystem_write.is_some()),
         tool_choice: ToolChoice::Auto,
         params,
     }
@@ -683,6 +688,7 @@ mod tests {
             canonical_workdir: workdir.canonical_path().to_path_buf(),
             workdir_identity: workdir.identity().clone(),
             filesystem_read: NativeReadPolicy::workspace(),
+            filesystem_write: None,
             system: Some("Answer concisely.".into()),
             timeout_seconds: 30,
             max_model_turns: 8,

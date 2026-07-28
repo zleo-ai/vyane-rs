@@ -10,9 +10,10 @@ use vyane_core::{
     ErrorKind, NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir, VyaneError,
 };
 use vyane_harness::native::{
-    NativeReadPolicy, PermissionEffect, PermissionPolicy, ToolCall, ToolContext,
+    NativeReadPolicy, NativeWritePolicy, PermissionEffect, PermissionPolicy, ToolCall, ToolContext,
     ToolInvocationStatus, read_only_permission_policy, read_only_tool_definitions,
     read_only_tool_registry, read_only_tool_registry_with_policy, validate_read_only_host,
+    workspace_permission_policy, workspace_tool_definitions, workspace_tool_registry_with_policy,
 };
 
 #[derive(Default)]
@@ -41,6 +42,28 @@ impl NativeExecutionAuthority for RecordingAuthority {
         effects.push(effect);
         if self.fail_at == Some(effects.len()) {
             return Err(VyaneError::new(ErrorKind::Auth, "test authority revoked"));
+        }
+        Ok(())
+    }
+}
+
+struct MutatingAuthority {
+    effects: Mutex<Vec<NativeSideEffect>>,
+    mutate_at: usize,
+    path: std::path::PathBuf,
+    content: &'static str,
+}
+
+#[async_trait]
+impl NativeExecutionAuthority for MutatingAuthority {
+    async fn revalidate(&self, effect: NativeSideEffect) -> vyane_core::Result<()> {
+        let should_mutate = {
+            let mut effects = self.effects.lock().expect("effects lock");
+            effects.push(effect);
+            effects.len() == self.mutate_at
+        };
+        if should_mutate {
+            std::fs::write(&self.path, self.content).expect("mutate source");
         }
         Ok(())
     }
@@ -451,6 +474,11 @@ fn malformed_or_unbounded_exclusions_are_rejected() {
             .validate()
             .is_err()
     );
+    assert!(
+        NativeWritePolicy::excluding(vec!["../outside".into()])
+            .validate()
+            .is_err()
+    );
 }
 
 #[test]
@@ -496,4 +524,387 @@ fn production_policy_allows_only_the_advertised_read_tools() {
             .effect,
         PermissionEffect::Deny
     );
+}
+
+#[test]
+fn write_tools_require_an_explicit_write_policy() {
+    let read_only = workspace_tool_registry_with_policy(NativeReadPolicy::workspace(), None)
+        .expect("read-only registry");
+    assert_eq!(
+        read_only.names().collect::<Vec<_>>(),
+        vec!["read_file", "search_files"]
+    );
+
+    let writable = workspace_tool_registry_with_policy(
+        NativeReadPolicy::workspace(),
+        Some(NativeWritePolicy::workspace()),
+    )
+    .expect("writable registry");
+    assert_eq!(
+        writable.names().collect::<Vec<_>>(),
+        vec!["edit_file", "read_file", "search_files", "write_file"]
+    );
+    assert_eq!(
+        workspace_tool_definitions(true)
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        writable.names().collect::<std::collections::BTreeSet<_>>()
+    );
+}
+
+#[tokio::test]
+async fn write_file_atomically_creates_but_never_overwrites() {
+    let root = tempdir().expect("root");
+    let registry = workspace_tool_registry_with_policy(
+        NativeReadPolicy::workspace(),
+        Some(NativeWritePolicy::workspace()),
+    )
+    .expect("registry");
+    let policy = workspace_permission_policy(true).expect("policy");
+
+    let created = registry
+        .execute_authorized(
+            call(
+                "write_file",
+                args(&[("path", json!("new.txt")), ("content", json!("first\n"))]),
+            ),
+            &context(root.path()),
+            &policy,
+            &RecordingAuthority::default(),
+            9,
+            1,
+        )
+        .await
+        .expect("create");
+    assert_eq!(created.status, ToolInvocationStatus::Executed);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("new.txt")).expect("created content"),
+        "first\n"
+    );
+
+    let conflict = registry
+        .execute_authorized(
+            call(
+                "write_file",
+                args(&[("path", json!("new.txt")), ("content", json!("second\n"))]),
+            ),
+            &context(root.path()),
+            &policy,
+            &RecordingAuthority::default(),
+            9,
+            2,
+        )
+        .await
+        .expect("conflict");
+    assert_eq!(conflict.status, ToolInvocationStatus::ToolError);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("new.txt")).expect("preserved content"),
+        "first\n"
+    );
+
+    let raced_path = root.path().join("raced.txt");
+    let raced = registry
+        .execute_authorized(
+            call(
+                "write_file",
+                args(&[("path", json!("raced.txt")), ("content", json!("model\n"))]),
+            ),
+            &context(root.path()),
+            &policy,
+            &MutatingAuthority {
+                effects: Mutex::new(Vec::new()),
+                mutate_at: 3,
+                path: raced_path.clone(),
+                content: "external\n",
+            },
+            9,
+            3,
+        )
+        .await
+        .expect("concurrent create");
+    assert_eq!(raced.status, ToolInvocationStatus::ToolError);
+    assert_eq!(
+        std::fs::read_to_string(raced_path).expect("raced content"),
+        "external\n"
+    );
+    assert!(
+        std::fs::read_dir(root.path())
+            .expect("entries")
+            .all(|entry| !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".vyane-write-"))
+    );
+}
+
+#[tokio::test]
+async fn edit_file_composes_guarded_text_edit_and_preserves_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempdir().expect("root");
+    let path = root.path().join("script.sh");
+    std::fs::write(&path, "echo old\n").expect("seed");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).expect("executable");
+    let registry = workspace_tool_registry_with_policy(
+        NativeReadPolicy::workspace(),
+        Some(NativeWritePolicy::workspace()),
+    )
+    .expect("registry");
+
+    let invocation = registry
+        .execute_authorized(
+            call(
+                "edit_file",
+                args(&[
+                    ("path", json!("script.sh")),
+                    ("old_string", json!("old")),
+                    ("new_string", json!("new")),
+                ]),
+            ),
+            &context(root.path()),
+            &workspace_permission_policy(true).expect("policy"),
+            &RecordingAuthority::default(),
+            10,
+            1,
+        )
+        .await
+        .expect("edit");
+
+    assert_eq!(invocation.status, ToolInvocationStatus::Executed);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("edited"),
+        "echo new\n"
+    );
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o750
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_edit_and_source_drift_fail_before_publication() {
+    let root = tempdir().expect("root");
+    let path = root.path().join("note.txt");
+    std::fs::write(&path, "same\nsame\n").expect("seed");
+    let registry = workspace_tool_registry_with_policy(
+        NativeReadPolicy::workspace(),
+        Some(NativeWritePolicy::workspace()),
+    )
+    .expect("registry");
+    let policy = workspace_permission_policy(true).expect("policy");
+    let ambiguous = registry
+        .execute_authorized(
+            call(
+                "edit_file",
+                args(&[
+                    ("path", json!("note.txt")),
+                    ("old_string", json!("same")),
+                    ("new_string", json!("changed")),
+                ]),
+            ),
+            &context(root.path()),
+            &policy,
+            &RecordingAuthority::default(),
+            11,
+            1,
+        )
+        .await
+        .expect("ambiguous");
+    assert_eq!(ambiguous.status, ToolInvocationStatus::ToolError);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("unchanged"),
+        "same\nsame\n"
+    );
+
+    std::fs::write(&path, "old\n").expect("reset");
+    let drift = registry
+        .execute_authorized(
+            call(
+                "edit_file",
+                args(&[
+                    ("path", json!("note.txt")),
+                    ("old_string", json!("old")),
+                    ("new_string", json!("new")),
+                ]),
+            ),
+            &context(root.path()),
+            &policy,
+            &MutatingAuthority {
+                effects: Mutex::new(Vec::new()),
+                mutate_at: 5,
+                path: path.clone(),
+                content: "external\n",
+            },
+            11,
+            2,
+        )
+        .await
+        .expect("drift result");
+    assert_eq!(drift.status, ToolInvocationStatus::ToolError);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("external content preserved"),
+        "external\n"
+    );
+    assert!(
+        std::fs::read_dir(root.path())
+            .expect("entries")
+            .all(|entry| !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".vyane-write-"))
+    );
+}
+
+#[tokio::test]
+async fn authority_revocation_at_edit_publication_preserves_source() {
+    let root = tempdir().expect("root");
+    let path = root.path().join("note.txt");
+    std::fs::write(&path, "old\n").expect("seed");
+    let registry = workspace_tool_registry_with_policy(
+        NativeReadPolicy::workspace(),
+        Some(NativeWritePolicy::workspace()),
+    )
+    .expect("registry");
+    let authority = RecordingAuthority::failing_at(7);
+
+    let error = registry
+        .execute_authorized(
+            call(
+                "edit_file",
+                args(&[
+                    ("path", json!("note.txt")),
+                    ("old_string", json!("old")),
+                    ("new_string", json!("new")),
+                ]),
+            ),
+            &context(root.path()),
+            &workspace_permission_policy(true).expect("policy"),
+            &authority,
+            12,
+            1,
+        )
+        .await
+        .expect_err("revoked publication");
+
+    assert_eq!(error.kind, ErrorKind::Auth);
+    assert_eq!(std::fs::read_to_string(&path).expect("source"), "old\n");
+    assert!(
+        std::fs::read_dir(root.path())
+            .expect("entries")
+            .all(|entry| !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".vyane-write-"))
+    );
+}
+
+#[tokio::test]
+async fn write_exclusions_do_not_inherit_from_read_or_widen_it() {
+    let root = tempdir().expect("root");
+    std::fs::write(root.path().join("read-denied.txt"), "old\n").expect("seed");
+    let registry = workspace_tool_registry_with_policy(
+        NativeReadPolicy::excluding(vec!["read-denied.txt".into()]),
+        Some(NativeWritePolicy::excluding(vec![
+            "write-denied.txt".into(),
+        ])),
+    )
+    .expect("registry");
+    let policy = workspace_permission_policy(true).expect("policy");
+
+    let read_denied_edit = registry
+        .execute_authorized(
+            call(
+                "edit_file",
+                args(&[
+                    ("path", json!("read-denied.txt")),
+                    ("old_string", json!("old")),
+                    ("new_string", json!("new")),
+                ]),
+            ),
+            &context(root.path()),
+            &policy,
+            &RecordingAuthority::default(),
+            13,
+            1,
+        )
+        .await
+        .expect("read denial");
+    assert_eq!(read_denied_edit.status, ToolInvocationStatus::ToolError);
+
+    let write_denied = registry
+        .execute_authorized(
+            call(
+                "write_file",
+                args(&[
+                    ("path", json!("write-denied.txt")),
+                    ("content", json!("blocked")),
+                ]),
+            ),
+            &context(root.path()),
+            &policy,
+            &RecordingAuthority::default(),
+            13,
+            2,
+        )
+        .await
+        .expect("write denial");
+    assert_eq!(write_denied.status, ToolInvocationStatus::ToolError);
+    assert!(!root.path().join("write-denied.txt").exists());
+
+    let allowed = registry
+        .execute_authorized(
+            call(
+                "write_file",
+                args(&[("path", json!("allowed.txt")), ("content", json!("ok"))]),
+            ),
+            &context(root.path()),
+            &policy,
+            &RecordingAuthority::default(),
+            13,
+            3,
+        )
+        .await
+        .expect("allowed write");
+    assert_eq!(allowed.status, ToolInvocationStatus::Executed);
+}
+
+#[tokio::test]
+async fn write_tools_reject_traversal_absolute_and_symlink_parent_paths() {
+    let root = tempdir().expect("root");
+    let outside = tempdir().expect("outside");
+    std::os::unix::fs::symlink(outside.path(), root.path().join("escape"))
+        .expect("directory symlink");
+    let registry = workspace_tool_registry_with_policy(
+        NativeReadPolicy::workspace(),
+        Some(NativeWritePolicy::workspace()),
+    )
+    .expect("registry");
+    let policy = workspace_permission_policy(true).expect("policy");
+
+    for path in ["../outside.txt", "/tmp/absolute.txt", "escape/linked.txt"] {
+        let invocation = registry
+            .execute_authorized(
+                call(
+                    "write_file",
+                    args(&[("path", json!(path)), ("content", json!("blocked"))]),
+                ),
+                &context(root.path()),
+                &policy,
+                &RecordingAuthority::default(),
+                14,
+                1,
+            )
+            .await
+            .expect("closed write");
+        assert_eq!(invocation.status, ToolInvocationStatus::ToolError);
+    }
+    assert!(!outside.path().join("linked.txt").exists());
 }

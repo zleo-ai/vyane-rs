@@ -46,7 +46,7 @@ use crate::native_agent_spool::{
 };
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
-use vyane_harness::native::NativeReadPolicy;
+use vyane_harness::native::{NativeReadPolicy, NativeWritePolicy};
 
 const INPUT_DIR: &str = "agent-inputs";
 const NATIVE_INPUT_DIR: &str = "native-agent-inputs";
@@ -86,6 +86,10 @@ pub(crate) struct AgentRunSubmitRequest {
 pub(crate) struct NativePermissionRequest {
     #[serde(default)]
     pub(crate) filesystem_read: NativeReadPolicy,
+    /// Omission keeps the native lane read-only even when the outer sandbox
+    /// permits writes.
+    #[serde(default)]
+    pub(crate) filesystem_write: Option<NativeWritePolicy>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -467,7 +471,9 @@ impl DaemonAgentHost {
         timeout_seconds: u64,
     ) -> Result<AgentRunView, AgentApiError> {
         let _native_submit_guard = self.native_submit_gate.lock().await;
-        if request.sandbox != AgentSpoolSandbox::ReadOnly {
+        if request.sandbox == AgentSpoolSandbox::ReadOnly
+            && request.native_permissions.filesystem_write.is_some()
+        {
             return Err(AgentApiError::bad_request());
         }
         request
@@ -475,6 +481,11 @@ impl DaemonAgentHost {
             .filesystem_read
             .validate()
             .map_err(|_| AgentApiError::bad_request())?;
+        if let Some(policy) = &request.native_permissions.filesystem_write {
+            policy
+                .validate()
+                .map_err(|_| AgentApiError::bad_request())?;
+        }
         let workdir = request
             .workdir
             .ok_or_else(AgentApiError::bad_request)
@@ -498,6 +509,7 @@ impl DaemonAgentHost {
                 bound: &chain.chain[0],
                 workdir: &workdir,
                 filesystem_read: request.native_permissions.filesystem_read,
+                filesystem_write: request.native_permissions.filesystem_write,
                 system: request.system,
                 timeout_seconds,
             },
@@ -1074,11 +1086,15 @@ mod tests {
                 .exclude
                 .is_empty()
         );
+        assert!(default.native_permissions.filesystem_write.is_none());
 
         let mut configured = base;
         configured["native_permissions"] = serde_json::json!({
             "filesystem_read": {
                 "exclude": [".env*", ".git", "private/**"]
+            },
+            "filesystem_write": {
+                "exclude": [".git/**"]
             }
         });
         let configured: AgentRunSubmitRequest =
@@ -1086,6 +1102,14 @@ mod tests {
         assert_eq!(
             configured.native_permissions.filesystem_read.exclude,
             [".env*", ".git", "private/**"]
+        );
+        assert_eq!(
+            configured
+                .native_permissions
+                .filesystem_write
+                .expect("explicit write policy")
+                .exclude,
+            [".git/**"]
         );
     }
 
