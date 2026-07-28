@@ -9,6 +9,8 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::File;
+#[cfg(target_os = "linux")]
+use std::io::Write as _;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Component, Path};
 use std::sync::Arc;
@@ -24,12 +26,17 @@ use vyane_core::{
     ToolDefinition,
 };
 
+#[cfg(target_os = "linux")]
+use super::{EditError, EditRequest, compute_edit_bounded};
 use super::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, PermissionEffect, PermissionPolicy, PermissionRule,
     PermissionRuleError, ToolContext, ToolError, ToolRegistry, ToolRegistryError,
 };
 
 const MAX_READ_BYTES: usize = 1024 * 1024;
+const MAX_WRITE_BYTES: usize = 1024 * 1024;
+#[cfg(target_os = "linux")]
+const MAX_EDIT_MATCHES: usize = 10_000;
 const MAX_SEARCH_FILES: usize = 10_000;
 const MAX_SEARCH_ENTRIES: usize = 20_000;
 const MAX_SEARCH_DEPTH: usize = 32;
@@ -65,7 +72,7 @@ impl NativeReadPolicy {
     }
 
     pub fn validate(&self) -> Result<(), NativeReadPolicyError> {
-        CompiledReadPolicy::new(self).map(|_| ())
+        CompiledPathPolicy::new(self).map(|_| ())
     }
 }
 
@@ -81,6 +88,58 @@ pub enum NativeReadPolicyError {
 pub enum NativeReadHostError {
     #[error("native read tools require Linux openat2 confinement")]
     Unsupported,
+}
+
+/// Explicit, independently configurable write boundary inside the admitted
+/// workspace. Merely granting read access never constructs this policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeWritePolicy {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+}
+
+impl NativeWritePolicy {
+    pub fn workspace() -> Self {
+        Self::default()
+    }
+
+    pub fn excluding(exclude: Vec<String>) -> Self {
+        Self { exclude }
+    }
+
+    pub fn validate(&self) -> Result<(), NativeWritePolicyError> {
+        CompiledPathPolicy::from_exclusions(&self.exclude)
+            .map(|_| ())
+            .map_err(NativeWritePolicyError::from)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NativeWritePolicyError {
+    #[error("native write policy contains too many excluded path patterns")]
+    TooManyPatterns,
+    #[error("native write policy contains an invalid excluded path pattern")]
+    InvalidPattern,
+}
+
+impl From<NativeReadPolicyError> for NativeWritePolicyError {
+    fn from(error: NativeReadPolicyError) -> Self {
+        match error {
+            NativeReadPolicyError::TooManyPatterns => Self::TooManyPatterns,
+            NativeReadPolicyError::InvalidPattern => Self::InvalidPattern,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NativeFilesystemPolicyError {
+    #[error("native filesystem read policy is invalid")]
+    InvalidReadPolicy,
+    #[error("native filesystem write policy is invalid")]
+    InvalidWritePolicy,
+    #[error("native filesystem tool registry could not be assembled")]
+    Registry,
 }
 
 /// Prove that the admitted workdir supports the exact `openat2` confinement
@@ -126,7 +185,12 @@ pub fn validate_read_only_host(_pinned: &PinnedWorkdir) -> Result<(), NativeRead
 
 /// Deterministic definitions advertised by the production read-only native lane.
 pub fn read_only_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+    workspace_tool_definitions(false)
+}
+
+/// Deterministic definitions for the exact configured workspace capability.
+pub fn workspace_tool_definitions(write_enabled: bool) -> Vec<ToolDefinition> {
+    let mut definitions = vec![
         ToolDefinition {
             name: "read_file".into(),
             description: "Read one UTF-8 text file beneath the admitted workspace.".into(),
@@ -170,7 +234,60 @@ pub fn read_only_tool_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         },
-    ]
+    ];
+    if write_enabled {
+        definitions.extend([
+            ToolDefinition {
+                name: "write_file".into(),
+                description: "Create one new UTF-8 text file beneath the admitted workspace."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Workspace-relative new file path"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Complete UTF-8 file content"
+                        }
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "edit_file".into(),
+                description: "Apply one guarded text replacement to an existing workspace file."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Workspace-relative existing file path"
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "Text to replace"
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "Replacement text"
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "default": false
+                        }
+                    },
+                    "required": ["path", "old_string", "new_string"],
+                    "additionalProperties": false
+                }),
+            },
+        ]);
+    }
+    definitions
 }
 
 /// Construct the exact executable registry matching
@@ -178,7 +295,7 @@ pub fn read_only_tool_definitions() -> Vec<ToolDefinition> {
 pub fn read_only_tool_registry() -> Result<ToolRegistry, ToolRegistryError> {
     let mut registry = ToolRegistry::new();
     let policy = Arc::new(
-        CompiledReadPolicy::new(&NativeReadPolicy::workspace())
+        CompiledPathPolicy::new(&NativeReadPolicy::workspace())
             .map_err(|_| ToolRegistryError::UnsafeName)?,
     );
     registry.register(Arc::new(ReadFileTool {
@@ -193,7 +310,7 @@ pub fn read_only_tool_registry() -> Result<ToolRegistry, ToolRegistryError> {
 pub fn read_only_tool_registry_with_policy(
     policy: NativeReadPolicy,
 ) -> Result<ToolRegistry, NativeReadPolicyError> {
-    let policy = Arc::new(CompiledReadPolicy::new(&policy)?);
+    let policy = Arc::new(CompiledPathPolicy::new(&policy)?);
     let mut registry = ToolRegistry::new();
     registry
         .register(Arc::new(ReadFileTool {
@@ -206,28 +323,90 @@ pub fn read_only_tool_registry_with_policy(
     Ok(registry)
 }
 
+/// Construct the exact executable workspace registry. Write tools exist only
+/// when an explicit write policy is supplied.
+pub fn workspace_tool_registry_with_policy(
+    read_policy: NativeReadPolicy,
+    write_policy: Option<NativeWritePolicy>,
+) -> Result<ToolRegistry, NativeFilesystemPolicyError> {
+    let read_policy = Arc::new(
+        CompiledPathPolicy::new(&read_policy)
+            .map_err(|_| NativeFilesystemPolicyError::InvalidReadPolicy)?,
+    );
+    let write_policy = write_policy
+        .map(|policy| {
+            CompiledPathPolicy::from_exclusions(&policy.exclude)
+                .map(Arc::new)
+                .map_err(|_| NativeFilesystemPolicyError::InvalidWritePolicy)
+        })
+        .transpose()?;
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(ReadFileTool {
+            policy: Arc::clone(&read_policy),
+        }))
+        .map_err(|_| NativeFilesystemPolicyError::Registry)?;
+    registry
+        .register(Arc::new(SearchFilesTool {
+            policy: Arc::clone(&read_policy),
+        }))
+        .map_err(|_| NativeFilesystemPolicyError::Registry)?;
+    if let Some(write_policy) = write_policy {
+        registry
+            .register(Arc::new(WriteFileTool {
+                policy: Arc::clone(&write_policy),
+            }))
+            .map_err(|_| NativeFilesystemPolicyError::Registry)?;
+        registry
+            .register(Arc::new(EditFileTool {
+                read_policy,
+                write_policy,
+            }))
+            .map_err(|_| NativeFilesystemPolicyError::Registry)?;
+    }
+    Ok(registry)
+}
+
 /// Construct the deny-by-default policy for the exact read-only registry.
 pub fn read_only_permission_policy() -> Result<PermissionPolicy, PermissionRuleError> {
-    Ok(PermissionPolicy::deny_by_default()
+    workspace_permission_policy(false)
+}
+
+/// Construct the deny-by-default policy for the exact configured workspace
+/// registry.
+pub fn workspace_permission_policy(
+    write_enabled: bool,
+) -> Result<PermissionPolicy, PermissionRuleError> {
+    let mut policy = PermissionPolicy::deny_by_default()
         .with_rule(PermissionRule::new("read_file", PermissionEffect::Allow)?)
         .with_rule(PermissionRule::new(
             "search_files",
             PermissionEffect::Allow,
-        )?))
+        )?);
+    if write_enabled {
+        policy = policy
+            .with_rule(PermissionRule::new("write_file", PermissionEffect::Allow)?)
+            .with_rule(PermissionRule::new("edit_file", PermissionEffect::Allow)?);
+    }
+    Ok(policy)
 }
 
-struct CompiledReadPolicy {
+struct CompiledPathPolicy {
     excluded: GlobSet,
 }
 
-impl CompiledReadPolicy {
+impl CompiledPathPolicy {
     fn new(policy: &NativeReadPolicy) -> Result<Self, NativeReadPolicyError> {
-        if policy.exclude.len() > MAX_EXCLUDED_PATTERNS {
+        Self::from_exclusions(&policy.exclude)
+    }
+
+    fn from_exclusions(exclude: &[String]) -> Result<Self, NativeReadPolicyError> {
+        if exclude.len() > MAX_EXCLUDED_PATTERNS {
             return Err(NativeReadPolicyError::TooManyPatterns);
         }
         let mut builder = GlobSetBuilder::new();
         let mut total_bytes = 0usize;
-        for raw in &policy.exclude {
+        for raw in exclude {
             total_bytes = total_bytes.saturating_add(raw.len());
             let pattern = raw.replace('\\', "/");
             if raw.is_empty()
@@ -281,7 +460,7 @@ fn add_exclusion_glob(
 }
 
 struct ReadFileTool {
-    policy: Arc<CompiledReadPolicy>,
+    policy: Arc<CompiledPathPolicy>,
 }
 
 #[async_trait]
@@ -338,7 +517,7 @@ impl NativeTool for ReadFileTool {
 }
 
 struct SearchFilesTool {
-    policy: Arc<CompiledReadPolicy>,
+    policy: Arc<CompiledPathPolicy>,
 }
 
 #[async_trait]
@@ -501,6 +680,154 @@ impl NativeTool for SearchFilesTool {
     }
 }
 
+struct WriteFileTool {
+    policy: Arc<CompiledPathPolicy>,
+}
+
+#[async_trait]
+impl NativeTool for WriteFileTool {
+    fn name(&self) -> &str {
+        "write_file"
+    }
+
+    async fn execute(
+        &self,
+        _arguments: &BTreeMap<String, Value>,
+        _context: &ToolContext,
+    ) -> Result<String, ToolError> {
+        Err(ToolError::new(
+            "trusted write_file requires live native authority",
+        ))
+    }
+
+    async fn execute_authorized(
+        &self,
+        arguments: &BTreeMap<String, Value>,
+        context: &ToolContext,
+        authority: &dyn NativeExecutionAuthority,
+        effect: NativeSideEffect,
+    ) -> VyaneResult<Result<String, ToolError>> {
+        if let Err(error) = reject_unknown_arguments(arguments, &["path", "content"]) {
+            return Ok(Err(error));
+        }
+        let path = match required_string(arguments, "path") {
+            Ok(path) => path,
+            Err(error) => return Ok(Err(error)),
+        };
+        let content = match required_string(arguments, "content") {
+            Ok(content) if content.len() <= MAX_WRITE_BYTES => content,
+            Ok(_) => return Ok(Err(ToolError::new("file content exceeds the write limit"))),
+            Err(error) => return Ok(Err(error)),
+        };
+        let components = match checked_components(path, false) {
+            Ok(components) if self.policy.allows(&components) => components,
+            Ok(_) => {
+                return Ok(Err(ToolError::new(
+                    "workspace write policy denied this path",
+                )));
+            }
+            Err(error) => return Ok(Err(error)),
+        };
+        let Some(pinned) = context.pinned_workdir() else {
+            return Ok(Err(ToolError::new(
+                "trusted filesystem tools require a pinned Linux workdir",
+            )));
+        };
+        write_new_file(
+            pinned,
+            &components,
+            content.as_bytes(),
+            context,
+            authority,
+            effect,
+        )
+        .await
+    }
+}
+
+struct EditFileTool {
+    read_policy: Arc<CompiledPathPolicy>,
+    write_policy: Arc<CompiledPathPolicy>,
+}
+
+#[async_trait]
+impl NativeTool for EditFileTool {
+    fn name(&self) -> &str {
+        "edit_file"
+    }
+
+    async fn execute(
+        &self,
+        _arguments: &BTreeMap<String, Value>,
+        _context: &ToolContext,
+    ) -> Result<String, ToolError> {
+        Err(ToolError::new(
+            "trusted edit_file requires live native authority",
+        ))
+    }
+
+    async fn execute_authorized(
+        &self,
+        arguments: &BTreeMap<String, Value>,
+        context: &ToolContext,
+        authority: &dyn NativeExecutionAuthority,
+        effect: NativeSideEffect,
+    ) -> VyaneResult<Result<String, ToolError>> {
+        if let Err(error) = reject_unknown_arguments(
+            arguments,
+            &["path", "old_string", "new_string", "replace_all"],
+        ) {
+            return Ok(Err(error));
+        }
+        let path = match required_string(arguments, "path") {
+            Ok(path) => path,
+            Err(error) => return Ok(Err(error)),
+        };
+        let old_string = match required_string(arguments, "old_string") {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
+        let new_string = match required_string(arguments, "new_string") {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
+        let replace_all = match optional_bool(arguments, "replace_all", false) {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
+        let components = match checked_components(path, false) {
+            Ok(components)
+                if self.read_policy.allows(&components)
+                    && self.write_policy.allows(&components) =>
+            {
+                components
+            }
+            Ok(_) => {
+                return Ok(Err(ToolError::new(
+                    "workspace read or write policy denied this path",
+                )));
+            }
+            Err(error) => return Ok(Err(error)),
+        };
+        let Some(pinned) = context.pinned_workdir() else {
+            return Ok(Err(ToolError::new(
+                "trusted filesystem tools require a pinned Linux workdir",
+            )));
+        };
+        edit_existing_file(
+            pinned,
+            &components,
+            old_string,
+            new_string,
+            replace_all,
+            context,
+            authority,
+            effect,
+        )
+        .await
+    }
+}
+
 fn append_search_match(output: &mut String, path: &str, line_number: usize, line: &str) -> bool {
     let separator = if output.is_empty() { "" } else { "\n" };
     let prefix = format!("{separator}{path}:{line_number}:");
@@ -597,6 +924,19 @@ fn optional_usize(
     }
 }
 
+fn optional_bool(
+    arguments: &BTreeMap<String, Value>,
+    name: &str,
+    default: bool,
+) -> Result<bool, ToolError> {
+    match arguments.get(name) {
+        None => Ok(default),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| ToolError::new(format!("argument `{name}` must be a boolean"))),
+    }
+}
+
 fn checked_components(path: &str, allow_root: bool) -> Result<Vec<OsString>, ToolError> {
     let path = Path::new(path);
     if path.is_absolute() {
@@ -621,6 +961,589 @@ fn checked_components(path: &str, allow_root: bool) -> Result<Vec<OsString>, Too
         return Err(ToolError::new("path exceeds the component limit"));
     }
     Ok(components)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileSnapshot {
+    device: u64,
+    inode: u64,
+    size: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+#[cfg(target_os = "linux")]
+impl FileSnapshot {
+    fn from_file(file: &File) -> Result<Self, ToolError> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = file
+            .metadata()
+            .map_err(|_| ToolError::new("could not inspect workspace file for editing"))?;
+        if !metadata.is_file() {
+            return Err(ToolError::new("requested edit path is not a regular file"));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.size(),
+            mode: metadata.mode() & 0o7777,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+        })
+    }
+
+    fn preservation(self) -> FilePreservation {
+        FilePreservation {
+            mode: self.mode,
+            uid: self.uid,
+            gid: self.gid,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_no_extended_attributes(file: &File) -> Result<(), ToolError> {
+    let mut probe = [0u8; 1];
+    match rustix::fs::flistxattr(file, &mut probe) {
+        Ok(0) => Ok(()),
+        Ok(_) | Err(rustix::io::Errno::RANGE) => Err(ToolError::new(
+            "workspace file security metadata cannot be preserved",
+        )),
+        Err(_) => Err(ToolError::new(
+            "could not inspect workspace file security metadata",
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn ensure_no_extended_attributes_async(
+    file: &File,
+    context: &ToolContext,
+) -> Result<(), ToolError> {
+    let file = file
+        .try_clone()
+        .map_err(|_| ToolError::new("could not duplicate workspace file"))?;
+    tracked_blocking(context, move || ensure_no_extended_attributes(&file))
+        .await
+        .map_err(|_| ToolError::new("could not inspect workspace file security metadata"))?
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FilePreservation {
+    mode: u32,
+    uid: u32,
+    gid: u32,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectorySnapshot {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl DirectorySnapshot {
+    fn from_file(file: &File) -> Result<Self, ToolError> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = file
+            .metadata()
+            .map_err(|_| ToolError::new("could not inspect workspace directory"))?;
+        if !metadata.is_dir() {
+            return Err(ToolError::new("workspace parent is not a directory"));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct StagedFile {
+    parent: File,
+    file: File,
+    name: OsString,
+    require_no_xattrs: bool,
+    published: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl StagedFile {
+    fn publish_new(mut self, target: &OsString) -> Result<(), ToolError> {
+        use rustix::fs::{RenameFlags, renameat_with};
+
+        self.validate_named_inode()?;
+        match renameat_with(
+            &self.parent,
+            &self.name,
+            &self.parent,
+            target,
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {
+                self.published = true;
+                Ok(())
+            }
+            Err(rustix::io::Errno::EXIST) => Err(ToolError::new("workspace file already exists")),
+            Err(_) => Err(ToolError::new("could not publish workspace file")),
+        }
+    }
+
+    fn publish_replacement(mut self, target: &OsString) -> Result<(), ToolError> {
+        self.validate_named_inode()?;
+        rustix::fs::renameat(&self.parent, &self.name, &self.parent, target)
+            .map_err(|_| ToolError::new("could not publish workspace edit"))?;
+        self.published = true;
+        Ok(())
+    }
+
+    fn validate_named_inode(&self) -> Result<(), ToolError> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        use rustix::fs::{Mode, OFlags, openat2};
+
+        let descriptor = openat2(
+            &self.parent,
+            &self.name,
+            OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            confined_resolution(),
+        )
+        .map_err(|_| ToolError::new("staged workspace file changed before publication"))?;
+        let named = File::from(descriptor);
+        let held_metadata = self
+            .file
+            .metadata()
+            .map_err(|_| ToolError::new("could not inspect staged workspace file"))?;
+        let named_metadata = named
+            .metadata()
+            .map_err(|_| ToolError::new("could not inspect staged workspace file"))?;
+        if !held_metadata.is_file()
+            || !named_metadata.is_file()
+            || held_metadata.dev() != named_metadata.dev()
+            || held_metadata.ino() != named_metadata.ino()
+        {
+            return Err(ToolError::new(
+                "staged workspace file changed before publication",
+            ));
+        }
+        if self.require_no_xattrs {
+            ensure_no_extended_attributes(&self.file)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = rustix::fs::unlinkat(&self.parent, &self.name, rustix::fs::AtFlags::empty());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn write_new_file(
+    pinned: &PinnedWorkdir,
+    components: &[OsString],
+    content: &[u8],
+    context: &ToolContext,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+) -> VyaneResult<Result<String, ToolError>> {
+    let Some((name, parents)) = components.split_last() else {
+        return Ok(Err(ToolError::new("file path must not be empty")));
+    };
+    let parent =
+        match open_directory_components(pinned, parents, context, authority, effect).await? {
+            Ok(parent) => parent,
+            Err(error) => return Ok(Err(error)),
+        };
+    let parent_snapshot = match directory_snapshot(&parent, context).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(Err(error)),
+    };
+    authority.revalidate(effect).await?;
+    let staged = match stage_content(parent, name, content.to_vec(), None, context).await {
+        Ok(staged) => staged,
+        Err(error) => return Ok(Err(error)),
+    };
+    if context.cancellation_token().is_cancelled() {
+        return Ok(Err(ToolError::new("file write cancelled")));
+    }
+    match reopen_unchanged_parent(pinned, parents, parent_snapshot, context, authority, effect)
+        .await?
+    {
+        Ok(_) => {}
+        Err(error) => return Ok(Err(error)),
+    }
+    authority.revalidate(effect).await?;
+    if context.cancellation_token().is_cancelled() {
+        return Ok(Err(ToolError::new("file write cancelled")));
+    }
+    let byte_count = content.len();
+    let display = display_components(components);
+    Ok(staged
+        .publish_new(name)
+        .map(|()| format!("Created {display} ({byte_count} bytes).")))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn write_new_file(
+    _pinned: &PinnedWorkdir,
+    _components: &[OsString],
+    _content: &[u8],
+    _context: &ToolContext,
+    _authority: &dyn NativeExecutionAuthority,
+    _effect: NativeSideEffect,
+) -> VyaneResult<Result<String, ToolError>> {
+    Ok(Err(ToolError::new(
+        "trusted filesystem tools are supported only on Linux",
+    )))
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+async fn edit_existing_file(
+    pinned: &PinnedWorkdir,
+    components: &[OsString],
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    context: &ToolContext,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+) -> VyaneResult<Result<String, ToolError>> {
+    let Some((name, parents)) = components.split_last() else {
+        return Ok(Err(ToolError::new("file path must not be empty")));
+    };
+    let parent =
+        match open_directory_components(pinned, parents, context, authority, effect).await? {
+            Ok(parent) => parent,
+            Err(error) => return Ok(Err(error)),
+        };
+    let parent_snapshot = match directory_snapshot(&parent, context).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(Err(error)),
+    };
+    let (original, original_snapshot) =
+        match read_regular_from_parent(&parent, name, context, authority, effect).await? {
+            Ok(source) => source,
+            Err(error) => return Ok(Err(error)),
+        };
+    let edit_content = original.clone();
+    let old_string = old_string.to_owned();
+    let new_string = new_string.to_owned();
+    let outcome = match tracked_blocking(context, move || {
+        compute_edit_bounded(
+            &EditRequest {
+                content: &edit_content,
+                old_string: &old_string,
+                new_string: &new_string,
+                replace_all,
+            },
+            MAX_WRITE_BYTES,
+            MAX_EDIT_MATCHES,
+        )
+    })
+    .await
+    {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(EditError::OutputTooLarge { .. })) => {
+            return Ok(Err(ToolError::new("edited file exceeds the write limit")));
+        }
+        Ok(Err(EditError::TooManyMatches { .. })) => {
+            return Ok(Err(ToolError::new(
+                "edit exceeds the workspace match limit",
+            )));
+        }
+        Ok(Err(error)) => return Ok(Err(ToolError::new(error.to_string()))),
+        Err(_) => return Ok(Err(ToolError::new("could not compute workspace edit"))),
+    };
+
+    authority.revalidate(effect).await?;
+    let staging_parent = match parent.try_clone() {
+        Ok(parent) => parent,
+        Err(_) => {
+            return Ok(Err(ToolError::new(
+                "could not duplicate workspace directory",
+            )));
+        }
+    };
+    let staged = match stage_content(
+        staging_parent,
+        name,
+        outcome.new_content.as_bytes().to_vec(),
+        Some(original_snapshot.preservation()),
+        context,
+    )
+    .await
+    {
+        Ok(staged) => staged,
+        Err(error) => return Ok(Err(error)),
+    };
+    if context.cancellation_token().is_cancelled() {
+        return Ok(Err(ToolError::new("file edit cancelled")));
+    }
+
+    let current_parent =
+        match reopen_unchanged_parent(pinned, parents, parent_snapshot, context, authority, effect)
+            .await?
+        {
+            Ok(parent) => parent,
+            Err(error) => return Ok(Err(error)),
+        };
+    let current =
+        match read_regular_from_parent(&current_parent, name, context, authority, effect).await? {
+            Ok(current) => current,
+            Err(_) => {
+                return Ok(Err(ToolError::new(
+                    "workspace file changed before edit publication",
+                )));
+            }
+        };
+    if current.1 != original_snapshot || current.0 != original {
+        return Ok(Err(ToolError::new(
+            "workspace file changed before edit publication",
+        )));
+    }
+    authority.revalidate(effect).await?;
+    if context.cancellation_token().is_cancelled() {
+        return Ok(Err(ToolError::new("file edit cancelled")));
+    }
+    let display = display_components(components);
+    let replacements = outcome.replacements;
+    Ok(staged
+        .publish_replacement(name)
+        .map(|()| format!("Updated {display} ({replacements} replacements).")))
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+async fn edit_existing_file(
+    _pinned: &PinnedWorkdir,
+    _components: &[OsString],
+    _old_string: &str,
+    _new_string: &str,
+    _replace_all: bool,
+    _context: &ToolContext,
+    _authority: &dyn NativeExecutionAuthority,
+    _effect: NativeSideEffect,
+) -> VyaneResult<Result<String, ToolError>> {
+    Ok(Err(ToolError::new(
+        "trusted filesystem tools are supported only on Linux",
+    )))
+}
+
+#[cfg(target_os = "linux")]
+async fn read_regular_from_parent(
+    parent: &File,
+    name: &OsString,
+    context: &ToolContext,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+) -> VyaneResult<Result<(String, FileSnapshot), ToolError>> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    authority.revalidate(effect).await?;
+    let expected_device = match parent.metadata() {
+        Ok(metadata) => metadata.dev(),
+        Err(_) => return Ok(Err(ToolError::new("could not inspect workspace directory"))),
+    };
+    let inspected_parent = match parent.try_clone() {
+        Ok(parent) => parent,
+        Err(_) => {
+            return Ok(Err(ToolError::new(
+                "could not duplicate workspace directory",
+            )));
+        }
+    };
+    let inspected_name = name.clone();
+    let source = match tracked_blocking(context, move || {
+        inspect_entry(inspected_parent, &inspected_name, expected_device)
+    })
+    .await
+    {
+        Ok(Ok(InspectedEntry::Regular(source))) => source,
+        Ok(Ok(_)) => {
+            return Ok(Err(ToolError::new(
+                "requested edit path is not a regular file",
+            )));
+        }
+        Ok(Err(error)) => return Ok(Err(error)),
+        Err(_) => return Ok(Err(ToolError::new("could not inspect workspace file"))),
+    };
+    let before = match FileSnapshot::from_file(&source) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(Err(error)),
+    };
+    authority.revalidate(effect).await?;
+    let read_source = match source.try_clone() {
+        Ok(source) => source,
+        Err(_) => {
+            return Ok(Err(ToolError::new("could not duplicate workspace file")));
+        }
+    };
+    let readable = match tracked_blocking(context, move || reopen_for_read(&read_source)).await {
+        Ok(Ok(readable)) => readable,
+        Ok(Err(())) | Err(_) => {
+            return Ok(Err(ToolError::new(
+                "could not open workspace file for editing",
+            )));
+        }
+    };
+    if let Err(error) = ensure_no_extended_attributes_async(&readable, context).await {
+        return Ok(Err(error));
+    }
+    let content = match read_utf8_bounded(readable, context).await {
+        Ok(content) => content,
+        Err(error) => return Ok(Err(error)),
+    };
+    let after = match FileSnapshot::from_file(&source) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(Err(error)),
+    };
+    if before != after {
+        return Ok(Err(ToolError::new(
+            "workspace file changed while it was being read",
+        )));
+    }
+    Ok(Ok((content, before)))
+}
+
+#[cfg(target_os = "linux")]
+async fn stage_content(
+    parent: File,
+    target: &OsString,
+    content: Vec<u8>,
+    preservation: Option<FilePreservation>,
+    context: &ToolContext,
+) -> Result<StagedFile, ToolError> {
+    let target = target.clone();
+    tracked_blocking(context, move || {
+        stage_content_blocking(parent, &target, &content, preservation)
+    })
+    .await
+    .map_err(|_| ToolError::new("could not stage workspace file"))?
+}
+
+#[cfg(target_os = "linux")]
+fn stage_content_blocking(
+    parent: File,
+    target: &OsString,
+    content: &[u8],
+    preservation: Option<FilePreservation>,
+) -> Result<StagedFile, ToolError> {
+    use rustix::fs::{Mode, OFlags, openat2};
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    for _ in 0..16 {
+        let name = OsString::from(format!(".vyane-write-{}.tmp", uuid::Uuid::now_v7()));
+        if &name == target {
+            continue;
+        }
+        let descriptor = match openat2(
+            &parent,
+            &name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::from_bits_retain(if preservation.is_some() { 0o600 } else { 0o666 }),
+            confined_resolution(),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(_) => return Err(ToolError::new("could not stage workspace file")),
+        };
+        let file = File::from(descriptor);
+        let mut staged = StagedFile {
+            parent,
+            file,
+            name,
+            require_no_xattrs: preservation.is_some(),
+            published: false,
+        };
+        staged
+            .file
+            .write_all(content)
+            .map_err(|_| ToolError::new("could not stage workspace file"))?;
+        if let Some(preservation) = preservation {
+            ensure_no_extended_attributes(&staged.file)?;
+            let metadata = staged
+                .file
+                .metadata()
+                .map_err(|_| ToolError::new("could not inspect staged workspace file"))?;
+            if metadata.uid() != preservation.uid || metadata.gid() != preservation.gid {
+                return Err(ToolError::new(
+                    "could not preserve workspace file ownership",
+                ));
+            }
+            staged
+                .file
+                .set_permissions(std::fs::Permissions::from_mode(preservation.mode))
+                .map_err(|_| ToolError::new("could not stage workspace file"))?;
+        }
+        staged
+            .file
+            .sync_all()
+            .map_err(|_| ToolError::new("could not stage workspace file"))?;
+        return Ok(staged);
+    }
+    Err(ToolError::new(
+        "could not allocate a temporary workspace file",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+async fn reopen_unchanged_parent(
+    pinned: &PinnedWorkdir,
+    components: &[OsString],
+    expected: DirectorySnapshot,
+    context: &ToolContext,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+) -> VyaneResult<Result<File, ToolError>> {
+    let parent =
+        match open_directory_components(pinned, components, context, authority, effect).await? {
+            Ok(parent) => parent,
+            Err(_) => {
+                return Ok(Err(ToolError::new(
+                    "workspace parent changed before publication",
+                )));
+            }
+        };
+    match directory_snapshot(&parent, context).await {
+        Ok(observed) if observed == expected => Ok(Ok(parent)),
+        Ok(_) | Err(_) => Ok(Err(ToolError::new(
+            "workspace parent changed before publication",
+        ))),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn directory_snapshot(
+    directory: &File,
+    context: &ToolContext,
+) -> Result<DirectorySnapshot, ToolError> {
+    let directory = directory
+        .try_clone()
+        .map_err(|_| ToolError::new("could not duplicate workspace directory"))?;
+    tracked_blocking(context, move || DirectorySnapshot::from_file(&directory))
+        .await
+        .map_err(|_| ToolError::new("could not inspect workspace directory"))?
 }
 
 #[cfg(target_os = "linux")]
@@ -992,10 +1915,14 @@ fn read_utf8_bounded_blocking(file: &mut File) -> Result<String, ToolError> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
-        CompiledReadPolicy, MAX_PATH_COMPONENTS, MAX_TOOL_OUTPUT_CHARS, NativeReadPolicy,
-        SEARCH_OUTPUT_LIMIT_MARKER, append_search_match, checked_components, directory_entries,
+        CompiledPathPolicy, FilePreservation, MAX_PATH_COMPONENTS, MAX_TOOL_OUTPUT_CHARS,
+        NativeReadPolicy, SEARCH_OUTPUT_LIMIT_MARKER, append_search_match, checked_components,
+        directory_entries, stage_content_blocking,
     };
     use crate::native::ToolContext;
+    use std::ffi::OsString;
+    use std::fs::File;
+    use std::os::unix::fs::MetadataExt as _;
 
     #[tokio::test]
     async fn directory_enumeration_enforces_the_raw_entry_budget() {
@@ -1017,7 +1944,7 @@ mod tests {
     #[test]
     fn trailing_globstar_excludes_the_named_directory_itself() {
         let policy =
-            CompiledReadPolicy::new(&NativeReadPolicy::excluding(vec!["private/**".into()]))
+            CompiledPathPolicy::new(&NativeReadPolicy::excluding(vec!["private/**".into()]))
                 .expect("policy");
         assert!(!policy.allows(&[std::ffi::OsString::from("private")]));
         assert!(!policy.allows(&[
@@ -1030,7 +1957,7 @@ mod tests {
     #[test]
     fn current_directory_components_are_rejected_in_exclusions() {
         let policy = NativeReadPolicy::excluding(vec!["./private/**".into()]);
-        assert!(CompiledReadPolicy::new(&policy).is_err());
+        assert!(CompiledPathPolicy::new(&policy).is_err());
     }
 
     #[test]
@@ -1061,6 +1988,36 @@ mod tests {
                 .expect_err("over-deep path")
                 .to_string(),
             "path exceeds the component limit"
+        );
+    }
+
+    #[test]
+    fn staged_edit_rejects_ownership_drift_before_restoring_special_bits() {
+        let root = tempfile::tempdir().expect("root");
+        let parent = File::open(root.path()).expect("parent");
+        let metadata = parent.metadata().expect("metadata");
+        let preservation = FilePreservation {
+            mode: 0o4755,
+            uid: metadata.uid().wrapping_add(1),
+            gid: metadata.gid(),
+        };
+
+        let result = stage_content_blocking(
+            parent,
+            &OsString::from("target"),
+            b"replacement",
+            Some(preservation),
+        );
+
+        assert!(result.is_err());
+        assert!(
+            std::fs::read_dir(root.path())
+                .expect("entries")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".vyane-write-"))
         );
     }
 }

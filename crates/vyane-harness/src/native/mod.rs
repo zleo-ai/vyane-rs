@@ -23,16 +23,19 @@ pub use permissions::{
     PermissionRuleError, protected_paths_policy, risky_operations_policy,
 };
 pub use text_edit::{
-    EditError, EditOutcome, EditRequest, MatchPass, MatchSearch, ReplacedSpan, compute_edit, locate,
+    EditError, EditOutcome, EditRequest, MatchPass, MatchSearch, ReplacedSpan, compute_edit,
+    compute_edit_bounded, locate,
 };
 pub use tools::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, ToolCall, ToolCallLimits, ToolContext, ToolContextError,
     ToolError, ToolInvocation, ToolInvocationStatus, ToolRegistry, ToolRegistryError,
 };
 pub use trusted_files::{
-    NativeReadHostError, NativeReadPolicy, NativeReadPolicyError, read_only_permission_policy,
+    NativeFilesystemPolicyError, NativeReadHostError, NativeReadPolicy, NativeReadPolicyError,
+    NativeWritePolicy, NativeWritePolicyError, read_only_permission_policy,
     read_only_tool_definitions, read_only_tool_registry, read_only_tool_registry_with_policy,
-    validate_read_only_host,
+    validate_read_only_host, workspace_permission_policy, workspace_tool_definitions,
+    workspace_tool_registry_with_policy,
 };
 pub use turn_driver::{
     DEFAULT_NATIVE_MODEL_TURNS, MAX_NATIVE_MODEL_TURNS, NativeAssistantReply, NativeTurnDriver,

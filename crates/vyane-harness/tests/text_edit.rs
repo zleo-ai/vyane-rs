@@ -9,7 +9,9 @@
 
 #![allow(clippy::unwrap_used)]
 
-use vyane_harness::native::{EditError, EditRequest, MatchPass, MatchSearch, compute_edit, locate};
+use vyane_harness::native::{
+    EditError, EditRequest, MatchPass, MatchSearch, compute_edit, compute_edit_bounded, locate,
+};
 
 /// Build a non-`replace_all` request.
 fn edit<'a>(content: &'a str, old: &'a str, new: &'a str) -> EditRequest<'a> {
@@ -343,4 +345,24 @@ fn empty_to_empty_new_file() {
     let out = compute_edit(&edit("", "", "")).unwrap();
     assert_eq!(out.new_content, "");
     assert_eq!(out.matched_pass, MatchPass::NewContent);
+}
+
+#[test]
+fn bounded_edit_rejects_oversized_replace_all_before_splicing() {
+    let request = edit_all("aaaa", "a", "0123456789");
+
+    assert_eq!(
+        compute_edit_bounded(&request, 32, 10),
+        Err(EditError::OutputTooLarge { limit: 32 })
+    );
+}
+
+#[test]
+fn bounded_edit_stops_before_accumulating_excessive_matches() {
+    let request = edit_all("aaaaaaaaaa", "a", "b");
+
+    assert_eq!(
+        compute_edit_bounded(&request, 32, 4),
+        Err(EditError::TooManyMatches { limit: 4 })
+    );
 }

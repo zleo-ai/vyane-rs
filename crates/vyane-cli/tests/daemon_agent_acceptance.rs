@@ -5,6 +5,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
@@ -234,6 +236,28 @@ async fn submit_native_with_timeout(
         .unwrap()
 }
 
+async fn submit_native_write(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
+    let (base, token) = control(data_dir);
+    reqwest::Client::new()
+        .post(format!("{base}/v1/agent-runs"))
+        .bearer_auth(token)
+        .json(&json!({
+            "run_id": run_id,
+            "task": "create the requested workspace file",
+            "target": "native",
+            "sandbox": "write",
+            "workdir": workdir,
+            "execution_backend": "native_in_process",
+            "native_permissions": {
+                "filesystem_write": {}
+            },
+            "timeout_seconds": 5
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
 async fn get_json(data_dir: &Path, suffix: &str) -> (reqwest::StatusCode, Value) {
     let (base, token) = control(data_dir);
     let response = reqwest::Client::new()
@@ -413,6 +437,99 @@ async fn native_agent_submit_uses_the_shared_resident_lane() {
         fs::metadata(owner_spool).unwrap().modified().unwrap(),
         spool_modified_before_retry,
         "an exact terminal retry must not rematerialize private native input"
+    );
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn native_write_permission_reaches_the_real_resident_tool_lane() {
+    let server = MockServer::start().await;
+    let response_index = Arc::new(AtomicUsize::new(0));
+    let response_index_for_mock = Arc::clone(&response_index);
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |_: &wiremock::Request| {
+            if response_index_for_mock.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "write-call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "write_file",
+                                    "arguments": "{\"path\":\"created.txt\",\"content\":\"native write evidence\\n\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "write completed"},
+                        "finish_reason": "stop"
+                    }]
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-write-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    let run_id = "0197f524-7a00-7000-8000-000000000116";
+
+    let (base, token) = control(data_dir.path());
+    let mismatched = reqwest::Client::new()
+        .post(format!("{base}/v1/agent-runs"))
+        .bearer_auth(token)
+        .json(&json!({
+            "run_id": "0197f524-7a00-7000-8000-000000000117",
+            "task": "must not write",
+            "target": "native",
+            "sandbox": "read_only",
+            "workdir": &workdir,
+            "execution_backend": "native_in_process",
+            "native_permissions": {"filesystem_write": {}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mismatched.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let response = submit_native_write(data_dir.path(), run_id, &workdir).await;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(15)).await;
+    assert_eq!(done["state"], "succeeded");
+    assert_eq!(
+        fs::read_to_string(workdir.join("created.txt")).unwrap(),
+        "native write evidence\n"
+    );
+
+    let requests = server.received_requests().await.unwrap();
+    let first: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let advertised = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        advertised,
+        ["edit_file", "read_file", "search_files", "write_file"]
+            .into_iter()
+            .collect()
     );
     assert!(daemon.stop().status.success());
 }
