@@ -309,10 +309,12 @@ workspace descriptor read-only, exposes only fixed system runtime trees,
 provides a private temporary directory, unshares the network and process
 namespaces, and delegates timeout/cancellation/descendant cleanup to the
 existing process-group driver. A fresh anonymous session keyring, a seccomp
-floor denying key-management and Unix-socket creation, and hard address-space,
-process/thread, CPU, file-descriptor and file-size limits close remaining host
-resource and IPC paths. Live authority is checked before every physical spawn
-attempt. Submission probes that exact profile before a model request.
+floor denying key-management, io_uring and all socket creation, a size-capped
+private tmpfs, and hard address-space, process/thread, CPU, file-descriptor and
+file-size limits close remaining host resource and IPC paths. Live authority
+is checked before every physical spawn attempt. Submission probes that exact
+profile and every allowlisted executable inside the sandbox view before a
+model request.
 Command-side workspace writes, unconfigured shell access, extra runtime roots
 and all child network remain disabled. Because this first process
 sandbox mounts the complete workspace read-only, submissions combining command

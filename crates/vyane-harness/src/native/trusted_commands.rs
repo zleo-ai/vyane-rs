@@ -41,6 +41,7 @@ const COMMAND_PROCESS_HEADROOM: u64 = 64;
 const COMMAND_PROCESS_LIMIT_MAX: u64 = 4096;
 const COMMAND_OPEN_FILES: u64 = 256;
 const COMMAND_FILE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+const COMMAND_TMP_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const SECCOMP_FILTER_FD: &str = "7";
 
@@ -202,8 +203,29 @@ pub async fn validate_command_host(
     {
         return Err(NativeCommandHostError::Unsupported);
     }
-    let args =
-        launcher_args("/usr/bin/true", &[], 5).map_err(|_| NativeCommandHostError::Unsupported)?;
+    let mut probe_arguments = vec![
+        "-c".into(),
+        concat!(
+            "for vyane_program do ",
+            "{ [ -f \"/usr/bin/$vyane_program\" ] && ",
+            "[ -x \"/usr/bin/$vyane_program\" ]; } || ",
+            "{ [ -f \"/bin/$vyane_program\" ] && ",
+            "[ -x \"/bin/$vyane_program\" ]; } || exit 127; ",
+            "done"
+        )
+        .into(),
+        "vyane-command-program-probe".into(),
+    ];
+    let mut programs = policy
+        .allow
+        .iter()
+        .map(|rule| rule.program.clone())
+        .collect::<Vec<_>>();
+    programs.sort();
+    programs.dedup();
+    probe_arguments.extend(programs);
+    let args = launcher_args("/bin/sh", &probe_arguments, 5)
+        .map_err(|_| NativeCommandHostError::Unsupported)?;
     let probe_authority = ProbeAuthority;
     let result = run_capture_with_pinned_limit_authorized(
         PRLIMIT,
@@ -414,6 +436,8 @@ fn sandbox_args(program: &str, args: &[String]) -> Vec<String> {
         "/proc".into(),
         "--dev".into(),
         "/dev".into(),
+        "--size".into(),
+        COMMAND_TMP_BYTES.to_string(),
         "--tmpfs".into(),
         "/tmp".into(),
         "--dir".into(),
@@ -550,7 +574,6 @@ fn command_seccomp_filter() -> Vec<u8> {
     const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
     const SECCOMP_DATA_NR: u32 = 0;
     const SECCOMP_DATA_ARCH: u32 = 4;
-    const SECCOMP_DATA_ARG0: u32 = 16;
     #[cfg(target_arch = "x86_64")]
     const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
     #[cfg(target_arch = "aarch64")]
@@ -582,14 +605,10 @@ fn command_seccomp_filter() -> Vec<u8> {
         libc::SYS_io_uring_setup,
         libc::SYS_io_uring_enter,
         libc::SYS_io_uring_register,
+        libc::SYS_socket,
+        libc::SYS_socketpair,
     ] {
         instruction(BPF_JMP_JEQ_K, 0, 1, syscall as u32);
-        instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | libc::EPERM as u32);
-    }
-    for syscall in [libc::SYS_socket, libc::SYS_socketpair] {
-        instruction(BPF_JMP_JEQ_K, 0, 3, syscall as u32);
-        instruction(BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG0);
-        instruction(BPF_JMP_JEQ_K, 0, 1, libc::AF_UNIX as u32);
         instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | libc::EPERM as u32);
     }
     instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW);

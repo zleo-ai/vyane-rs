@@ -155,6 +155,17 @@ async fn host_probe_and_descriptor_bound_read_succeed() {
 }
 
 #[tokio::test]
+async fn host_probe_rejects_allowlisted_program_missing_from_sandbox() {
+    let root = tempdir().expect("workspace");
+    let missing = policy(&[("vyane-program-that-does-not-exist", &[])]);
+    assert!(
+        validate_command_host(&PinnedWorkdir::open(root.path()).expect("pin"), &missing)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn workspace_is_read_only_and_host_etc_is_not_mounted() {
     let root = tempdir().expect("workspace");
     let write_output = execute(
@@ -238,13 +249,15 @@ async fn unix_sockets_and_kernel_keyring_calls_are_blocked() {
 async fn command_process_has_hard_resource_ceilings() {
     let root = tempdir().expect("workspace");
     let source = concat!(
-        "import resource; ",
+        "import os,resource; ",
         "print(resource.getrlimit(resource.RLIMIT_AS)); ",
         "nproc=resource.getrlimit(resource.RLIMIT_NPROC); ",
         "assert nproc[0] == nproc[1] and 0 < nproc[0] <= 4096; print(nproc); ",
         "print(resource.getrlimit(resource.RLIMIT_NOFILE)); ",
         "print(resource.getrlimit(resource.RLIMIT_FSIZE)); ",
-        "print(resource.getrlimit(resource.RLIMIT_CORE))"
+        "print(resource.getrlimit(resource.RLIMIT_CORE)); ",
+        "tmp=os.statvfs('/tmp'); ",
+        "assert tmp.f_blocks * tmp.f_frsize <= 67108864"
     );
     let output = execute(
         root.path(),
