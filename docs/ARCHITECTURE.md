@@ -256,13 +256,16 @@ into the native policy digest, and both direct read and recursive search enforce
 the same exclusions. Exclusion patterns containing current- or parent-directory
 components, backslashes or noncanonical separators fail validation, excluded
 directory roots are never enumerated, and the bounded regular-file set is
-globally path-sorted before search accumulation capped at the model-facing
+capped at 32 components. Search classifies candidates with confined `O_PATH`
+descriptors and performs the exact procfd content reopen only while processing
+the globally path-sorted file set; accumulation is capped at the model-facing
 output budget. Blocking filesystem opens, metadata reads, enumeration and
 content reads run on Tokio's blocking pool so the async timeout/cancellation
 path remains pollable. Native admission first probes the exact `openat2` flags
-against the pinned root, then installs that same live `PinnedWorkdir` in a
-bounded process-local handoff shared by the submission host and resident
-operation. Execution never reconstructs authority from the serialized path and
+and the required `/proc/self/fd` reopen/enumeration operations against the
+pinned root, then installs that same live `PinnedWorkdir` in a bounded
+process-local handoff shared by the submission host and resident operation.
+Execution never reconstructs authority from the serialized path and
 device/inode evidence; loss of the live handle fails closed.
 
 Blocking closures carry shared activity guards: dropping a join future does not

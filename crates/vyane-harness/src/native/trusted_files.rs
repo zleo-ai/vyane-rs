@@ -33,6 +33,7 @@ const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_SEARCH_FILES: usize = 10_000;
 const MAX_SEARCH_ENTRIES: usize = 20_000;
 const MAX_SEARCH_DEPTH: usize = 32;
+const MAX_PATH_COMPONENTS: usize = 32;
 const DEFAULT_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_RESULTS: usize = 200;
 const MAX_QUERY_CHARS: usize = 1024;
@@ -106,6 +107,15 @@ pub fn validate_read_only_host(pinned: &PinnedWorkdir) -> Result<(), NativeReadH
     if !metadata.is_dir() || metadata.dev() != pinned.identity().device {
         return Err(NativeReadHostError::Unsupported);
     }
+    let proc_path = proc_fd_path(&directory);
+    let reopened = File::open(&proc_path).map_err(|_| NativeReadHostError::Unsupported)?;
+    let reopened_metadata = reopened
+        .metadata()
+        .map_err(|_| NativeReadHostError::Unsupported)?;
+    if !reopened_metadata.is_dir() || reopened_metadata.dev() != pinned.identity().device {
+        return Err(NativeReadHostError::Unsupported);
+    }
+    std::fs::read_dir(proc_path).map_err(|_| NativeReadHostError::Unsupported)?;
     Ok(())
 }
 
@@ -425,12 +435,14 @@ impl NativeTool for SearchFilesTool {
                 if !self.policy.allows(&relative) {
                     continue;
                 }
-                match open_entry(pinned, &relative, context, authority, effect).await? {
-                    Ok(OpenedEntry::Directory) if depth < MAX_SEARCH_DEPTH => {
+                if relative.len() > MAX_PATH_COMPONENTS {
+                    continue;
+                }
+                match classify_entry(pinned, &relative, context, authority, effect).await? {
+                    Ok(EntryKind::Directory) if depth < MAX_SEARCH_DEPTH => {
                         child_directories.push(relative);
                     }
-                    Ok(OpenedEntry::Regular(file)) => {
-                        drop(file);
+                    Ok(EntryKind::Regular) => {
                         visited_files += 1;
                         if visited_files > MAX_SEARCH_FILES {
                             return Ok(Err(ToolError::new(
@@ -439,8 +451,8 @@ impl NativeTool for SearchFilesTool {
                         }
                         regular_paths.push(relative);
                     }
-                    Ok(OpenedEntry::Other) | Err(_) => {}
-                    Ok(OpenedEntry::Directory) => {}
+                    Ok(EntryKind::Other) | Err(_) => {}
+                    Ok(EntryKind::Directory) => {}
                 }
             }
             child_directories.reverse();
@@ -605,6 +617,9 @@ fn checked_components(path: &str, allow_root: bool) -> Result<Vec<OsString>, Too
     if components.is_empty() && !allow_root {
         return Err(ToolError::new("file path must not be empty"));
     }
+    if components.len() > MAX_PATH_COMPONENTS {
+        return Err(ToolError::new("path exceeds the component limit"));
+    }
     Ok(components)
 }
 
@@ -616,13 +631,21 @@ async fn open_regular_components(
     authority: &dyn NativeExecutionAuthority,
     effect: NativeSideEffect,
 ) -> VyaneResult<Result<File, ToolError>> {
+    let inspected = match inspect_components(pinned, components, context, authority, effect).await?
+    {
+        Ok(inspected) => inspected,
+        Err(error) => return Ok(Err(error)),
+    };
+    let InspectedEntry::Regular(file) = inspected else {
+        return Ok(Err(ToolError::new("requested path is not a regular file")));
+    };
+    authority.revalidate(effect).await?;
     Ok(
-        match open_entry(pinned, components, context, authority, effect).await? {
-            Ok(OpenedEntry::Regular(file)) => Ok(file),
-            Ok(OpenedEntry::Directory | OpenedEntry::Other) => {
-                Err(ToolError::new("requested path is not a regular file"))
-            }
-            Err(error) => Err(error),
+        match tracked_blocking(context, move || reopen_for_read(&file)).await {
+            Ok(Ok(readable)) => Ok(readable),
+            Ok(Err(())) | Err(_) => Err(ToolError::new(
+                "could not open requested workspace file for reading",
+            )),
         },
     )
 }
@@ -640,24 +663,40 @@ async fn open_regular_components(
     )))
 }
 
-// Non-Linux builds keep the closed return shape so the public tool registry can
-// fail at runtime without conditional API types; only the Linux implementation
-// constructs these variants.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-enum OpenedEntry {
+#[derive(Clone, Copy)]
+enum EntryKind {
     Directory,
-    Regular(File),
+    Regular,
     Other,
 }
 
 #[cfg(target_os = "linux")]
-async fn open_entry(
+async fn classify_entry(
     pinned: &PinnedWorkdir,
     components: &[OsString],
     context: &ToolContext,
     authority: &dyn NativeExecutionAuthority,
     effect: NativeSideEffect,
-) -> VyaneResult<Result<OpenedEntry, ToolError>> {
+) -> VyaneResult<Result<EntryKind, ToolError>> {
+    Ok(
+        match inspect_components(pinned, components, context, authority, effect).await? {
+            Ok(InspectedEntry::Directory) => Ok(EntryKind::Directory),
+            Ok(InspectedEntry::Regular(_)) => Ok(EntryKind::Regular),
+            Ok(InspectedEntry::Other) => Ok(EntryKind::Other),
+            Err(error) => Err(error),
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+async fn inspect_components(
+    pinned: &PinnedWorkdir,
+    components: &[OsString],
+    context: &ToolContext,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+) -> VyaneResult<Result<InspectedEntry, ToolError>> {
     let (name, parents) = match components.split_last() {
         Some(parts) => parts,
         None => return Ok(Err(ToolError::new("file path must not be empty"))),
@@ -683,25 +722,7 @@ async fn open_entry(
             )));
         }
     };
-    Ok(Ok(match inspected {
-        InspectedEntry::Regular(file) => {
-            // O_PATH cannot read file content. Revalidate at the actual read-open
-            // boundary, then reopen this exact stable object through procfs rather
-            // than resolving the model-provided pathname again.
-            authority.revalidate(effect).await?;
-            let readable = match tracked_blocking(context, move || reopen_for_read(&file)).await {
-                Ok(Ok(readable)) => readable,
-                Ok(Err(())) | Err(_) => {
-                    return Ok(Err(ToolError::new(
-                        "could not open requested workspace file for reading",
-                    )));
-                }
-            };
-            OpenedEntry::Regular(readable)
-        }
-        InspectedEntry::Directory => OpenedEntry::Directory,
-        InspectedEntry::Other => OpenedEntry::Other,
-    }))
+    Ok(Ok(inspected))
 }
 
 #[cfg(target_os = "linux")]
@@ -749,20 +770,24 @@ fn inspect_entry(
 
 #[cfg(target_os = "linux")]
 fn reopen_for_read(file: &File) -> Result<File, ()> {
+    File::open(proc_fd_path(file)).map_err(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+fn proc_fd_path(file: &File) -> PathBuf {
     use std::os::fd::AsRawFd as _;
 
-    let proc_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
-    File::open(proc_path).map_err(|_| ())
+    PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn open_entry(
+async fn classify_entry(
     _pinned: &PinnedWorkdir,
     _components: &[OsString],
     _context: &ToolContext,
     _authority: &dyn NativeExecutionAuthority,
     _effect: NativeSideEffect,
-) -> VyaneResult<Result<OpenedEntry, ToolError>> {
+) -> VyaneResult<Result<EntryKind, ToolError>> {
     Ok(Err(ToolError::new(
         "trusted filesystem tools are supported only on Linux",
     )))
@@ -881,10 +906,7 @@ fn directory_entries_blocking(
     directory: &File,
     remaining: usize,
 ) -> Result<(Vec<OsString>, usize), ToolError> {
-    use std::os::fd::AsRawFd as _;
-
-    let path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
-    let entries = std::fs::read_dir(path)
+    let entries = std::fs::read_dir(proc_fd_path(directory))
         .map_err(|_| ToolError::new("could not enumerate requested workspace directory"))?;
     let mut names = Vec::new();
     let mut observed = 0usize;
@@ -970,8 +992,8 @@ fn read_utf8_bounded_blocking(file: &mut File) -> Result<String, ToolError> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
-        CompiledReadPolicy, MAX_TOOL_OUTPUT_CHARS, NativeReadPolicy, SEARCH_OUTPUT_LIMIT_MARKER,
-        append_search_match, directory_entries,
+        CompiledReadPolicy, MAX_PATH_COMPONENTS, MAX_TOOL_OUTPUT_CHARS, NativeReadPolicy,
+        SEARCH_OUTPUT_LIMIT_MARKER, append_search_match, checked_components, directory_entries,
     };
     use crate::native::ToolContext;
 
@@ -1019,5 +1041,26 @@ mod tests {
         assert!(!append_search_match(&mut output, "large.txt", 1, &line));
         assert_eq!(output.chars().count(), MAX_TOOL_OUTPUT_CHARS);
         assert!(output.ends_with(SEARCH_OUTPUT_LIMIT_MARKER));
+    }
+
+    #[test]
+    fn model_paths_have_a_fixed_component_limit() {
+        let accepted = std::iter::repeat_n("a", MAX_PATH_COMPONENTS)
+            .collect::<Vec<_>>()
+            .join("/");
+        let rejected = format!("{accepted}/b");
+
+        assert_eq!(
+            checked_components(&accepted, false)
+                .expect("bounded path")
+                .len(),
+            MAX_PATH_COMPONENTS
+        );
+        assert_eq!(
+            checked_components(&rejected, false)
+                .expect_err("over-deep path")
+                .to_string(),
+            "path exceeds the component limit"
+        );
     }
 }

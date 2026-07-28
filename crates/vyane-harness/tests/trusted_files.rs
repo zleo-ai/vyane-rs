@@ -298,6 +298,32 @@ async fn search_is_deterministic_bounded_and_honors_exclusions() {
 }
 
 #[tokio::test]
+async fn search_classifies_before_opening_a_candidate_for_reading_once() {
+    let root = tempdir().expect("root");
+    std::fs::write(root.path().join("note.txt"), "needle\n").expect("note");
+    let authority = RecordingAuthority::default();
+
+    let invocation = read_only_tool_registry()
+        .expect("registry")
+        .execute_authorized(
+            call("search_files", args(&[("query", json!("needle"))])),
+            &context(root.path()),
+            &PermissionPolicy::allow_by_default(),
+            &authority,
+            3,
+            1,
+        )
+        .await
+        .expect("search");
+
+    assert_eq!(invocation.status, ToolInvocationStatus::Executed);
+    assert_eq!(invocation.output, "note.txt:1:needle");
+    // Registry dispatch + directory enumeration + discovery O_PATH +
+    // content O_PATH + exact procfd read-open.
+    assert_eq!(authority.effects().len(), 5);
+}
+
+#[tokio::test]
 async fn authority_revocation_at_file_open_escapes_as_outer_error() {
     let root = tempdir().expect("root");
     std::fs::write(root.path().join("note.txt"), "not disclosed").expect("note");
