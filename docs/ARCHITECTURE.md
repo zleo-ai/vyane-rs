@@ -246,10 +246,40 @@ failover-eligible error. `NativeTurnOutcome` is not serializable, and its custom
 `Debug` omits prompt, reasoning, tool arguments/output, transcript, final reply,
 and approval-plan contents.
 
-This driver is still a dark library component. No factory, service operation,
-CLI, daemon, or runtime constructs it; it is not a `Harness`. It provides no
-trusted built-ins, session/domain authority, checkpoint or session-commit
-consumer, approval resume, or native resume.
+The explicit fresh/sessionless resident native AgentRun lane constructs this
+driver with Linux descriptor-relative `read_file` and `search_files` built-ins.
+The exact admitted `PinnedWorkdir` supplies their root capability, and live
+native authority is revalidated before every path-component open and directory
+enumeration. The default policy makes that admitted workspace broadly readable,
+including dotfiles; a submission can freeze workspace-relative glob exclusions
+into the native policy digest, and both direct read and recursive search enforce
+the same exclusions. Exclusion patterns containing current- or parent-directory
+components, backslashes or noncanonical separators fail validation, excluded
+directory roots are never enumerated, and the bounded regular-file set is
+capped at 32 components. Search classifies candidates with confined `O_PATH`
+descriptors and performs the exact procfd content reopen only while processing
+the globally path-sorted file set; accumulation is capped at the model-facing
+output budget. Blocking filesystem opens, metadata reads, enumeration and
+content reads run on Tokio's blocking pool so the async timeout/cancellation
+path remains pollable. Native admission first probes the exact `openat2` flags
+and the required `/proc/self/fd` reopen/enumeration operations against the
+pinned root, then installs that same live `PinnedWorkdir` in a bounded
+process-local handoff shared by the submission host and resident operation.
+Execution never reconstructs authority from the serialized path and
+device/inode evidence; loss of the live handle fails closed.
+
+Blocking closures carry shared activity guards: dropping a join future does not
+erase active work, the waiter is registered before checking the count, and the
+native operation waits for the activity count to reach zero before it can
+return a quiesced settlement. If the service hard deadline drops the operation
+first, it does not settle or delete the recovery input. Native OpenAI-compatible
+requests force `parallel_tool_calls=false` because the driver serializes one
+call per turn. Read, write, command, command-network and web-search permissions
+remain separate axes rather than one expanding "full" boolean.
+This remains narrower than a general `Harness`: it provides no
+write/edit, command/network, child-process host sandbox, session/domain
+authority, checkpoint/session-commit consumer, approval resume, or native
+resume.
 
 ## Dispatch lifecycle
 

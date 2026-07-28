@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,9 +10,12 @@ use futures::FutureExt as _;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
+use tokio::sync::Notify;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use vyane_core::{NativeExecutionAuthority, NativeSideEffect, Result as VyaneResult};
+use vyane_core::{
+    NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir, Result as VyaneResult,
+};
 
 use super::{ApprovalPlan, PermissionEffect, PermissionPolicy};
 
@@ -100,9 +104,29 @@ impl ToolCallValidationError {
 #[derive(Debug, Clone)]
 pub struct ToolContext {
     workdir: PathBuf,
+    pinned_workdir: Option<PinnedWorkdir>,
     cancellation: CancellationToken,
     timeout: Option<Duration>,
     deadline: Option<Instant>,
+    blocking_activity: Arc<BlockingActivity>,
+}
+
+#[derive(Debug, Default)]
+struct BlockingActivity {
+    active: AtomicUsize,
+    changed: Notify,
+}
+
+pub(crate) struct BlockingActivityGuard {
+    activity: Arc<BlockingActivity>,
+}
+
+impl Drop for BlockingActivityGuard {
+    fn drop(&mut self) {
+        if self.activity.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.activity.changed.notify_waiters();
+        }
+    }
 }
 
 impl ToolContext {
@@ -120,14 +144,36 @@ impl ToolContext {
         }
         Ok(Self {
             workdir,
+            pinned_workdir: None,
             cancellation: CancellationToken::new(),
             timeout: None,
             deadline: None,
+            blocking_activity: Arc::new(BlockingActivity::default()),
         })
     }
 
     pub fn workdir(&self) -> &std::path::Path {
         &self.workdir
+    }
+
+    /// Bind native tools to the exact directory handle admitted by the caller.
+    ///
+    /// A canonical path is retained only for audit and approval hashing. Trusted
+    /// filesystem tools derive authority from this opened handle and never
+    /// reopen the path as their execution root.
+    pub fn from_pinned_workdir(pinned_workdir: PinnedWorkdir) -> Self {
+        Self {
+            workdir: pinned_workdir.canonical_path().to_path_buf(),
+            pinned_workdir: Some(pinned_workdir),
+            cancellation: CancellationToken::new(),
+            timeout: None,
+            deadline: None,
+            blocking_activity: Arc::new(BlockingActivity::default()),
+        }
+    }
+
+    pub fn pinned_workdir(&self) -> Option<&PinnedWorkdir> {
+        self.pinned_workdir.as_ref()
     }
 
     #[must_use]
@@ -150,6 +196,29 @@ impl ToolContext {
 
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation
+    }
+
+    pub(crate) fn begin_blocking_activity(&self) -> BlockingActivityGuard {
+        self.blocking_activity.active.fetch_add(1, Ordering::AcqRel);
+        BlockingActivityGuard {
+            activity: Arc::clone(&self.blocking_activity),
+        }
+    }
+
+    /// Wait until every blocking operation started through this context has
+    /// actually returned. Dropping a Tokio `spawn_blocking` join future does
+    /// not stop its closure, so native controllers must call this before
+    /// reporting a quiesced settlement.
+    pub async fn wait_for_blocking_quiescence(&self) {
+        loop {
+            let changed = self.blocking_activity.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.blocking_activity.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            changed.await;
+        }
     }
 
     fn effective_deadline(&self) -> Option<Instant> {
@@ -211,6 +280,21 @@ pub trait NativeTool: Send + Sync {
         arguments: &BTreeMap<String, Value>,
         context: &ToolContext,
     ) -> Result<String, ToolError>;
+
+    /// Execute through the live authority used by a production native loop.
+    ///
+    /// Ordinary injected tools retain the compatibility behavior by default.
+    /// Trusted built-ins override this method and revalidate immediately before
+    /// every additional open, publish, spawn, or network linearization point.
+    async fn execute_authorized(
+        &self,
+        arguments: &BTreeMap<String, Value>,
+        context: &ToolContext,
+        _authority: &dyn NativeExecutionAuthority,
+        _effect: NativeSideEffect,
+    ) -> VyaneResult<Result<String, ToolError>> {
+        Ok(self.execute(arguments, context).await)
+    }
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -385,7 +469,14 @@ impl ToolRegistry {
                         }
                         result = &mut validation => {
                             result?;
-                            self.execute_allowed(call, context, deadline).await
+                            self.execute_allowed_authorized(
+                                call,
+                                context,
+                                deadline,
+                                authority,
+                                NativeSideEffect::ToolOperation { turn, ordinal },
+                            )
+                            .await?
                         }
                     }
                 }
@@ -554,6 +645,77 @@ impl ToolRegistry {
             ),
         }
     }
+
+    async fn execute_allowed_authorized(
+        &self,
+        call: ToolCall,
+        context: &ToolContext,
+        deadline: Option<Instant>,
+        authority: &dyn NativeExecutionAuthority,
+        effect: NativeSideEffect,
+    ) -> VyaneResult<ToolInvocation> {
+        if let Some((status, output)) = terminal_outcome(context, deadline) {
+            return Ok(ToolInvocation::new(call, status, output.into(), None));
+        }
+        let Some(tool) = self.tools.get(&call.name) else {
+            return Ok(ToolInvocation::new(
+                call,
+                ToolInvocationStatus::ToolError,
+                "ERROR: registered tool became unavailable".into(),
+                None,
+            ));
+        };
+        let execution = {
+            let execution = AssertUnwindSafe(tool.execute_authorized(
+                &call.arguments,
+                context,
+                authority,
+                effect,
+            ))
+            .catch_unwind();
+            let deadline = wait_for_deadline(deadline);
+            tokio::pin!(execution);
+            tokio::pin!(deadline);
+            tokio::select! {
+                biased;
+                _ = context.cancellation_token().cancelled() => AuthorizedToolExecution::Cancelled,
+                _ = &mut deadline => AuthorizedToolExecution::TimedOut,
+                result = &mut execution => match result {
+                    Ok(Ok(Ok(output))) => AuthorizedToolExecution::Completed(output),
+                    Ok(Ok(Err(error))) => AuthorizedToolExecution::Failed(error),
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => AuthorizedToolExecution::Panicked,
+                },
+            }
+        };
+        Ok(match execution {
+            AuthorizedToolExecution::Completed(output) => {
+                ToolInvocation::new(call, ToolInvocationStatus::Executed, output, None)
+            }
+            AuthorizedToolExecution::Failed(error) => ToolInvocation::new(
+                call,
+                ToolInvocationStatus::ToolError,
+                format!("ERROR: {error}"),
+                None,
+            ),
+            AuthorizedToolExecution::Panicked => {
+                let output = format!("ERROR: tool `{}` panicked during execution", call.name);
+                ToolInvocation::new(call, ToolInvocationStatus::ToolError, output, None)
+            }
+            AuthorizedToolExecution::Cancelled => ToolInvocation::new(
+                call,
+                ToolInvocationStatus::Cancelled,
+                "ERROR: tool execution cancelled".into(),
+                None,
+            ),
+            AuthorizedToolExecution::TimedOut => ToolInvocation::new(
+                call,
+                ToolInvocationStatus::TimedOut,
+                "ERROR: tool execution timed out".into(),
+                None,
+            ),
+        })
+    }
 }
 
 struct PreparedToolInvocation {
@@ -712,6 +874,14 @@ fn report_post(
 }
 
 enum ToolExecution {
+    Completed(String),
+    Failed(ToolError),
+    Panicked,
+    Cancelled,
+    TimedOut,
+}
+
+enum AuthorizedToolExecution {
     Completed(String),
     Failed(ToolError),
     Panicked,
@@ -1444,6 +1614,33 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn blocking_quiescence_survives_a_dropped_join_handle() {
+        let context = context();
+        let activity = context.begin_blocking_activity();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let handle = tokio::task::spawn_blocking(move || {
+            let _activity = activity;
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv();
+        });
+        entered_rx.await.unwrap();
+        drop(handle);
+
+        let quiescence = context.wait_for_blocking_quiescence();
+        tokio::pin!(quiescence);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut quiescence)
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), quiescence)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

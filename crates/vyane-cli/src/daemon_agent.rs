@@ -41,9 +41,12 @@ use crate::daemon::DaemonHttpState;
 use crate::native_agent::{
     FreshNativeAgentOperation, NativeSubmissionDetails, native_input_for_submission,
 };
-use crate::native_agent_spool::{NativeAgentInput, NativeAgentInputSpool, NativeAgentSpoolCreate};
+use crate::native_agent_spool::{
+    NativeAgentInput, NativeAgentInputSpool, NativeAgentSpoolCreate, NativeWorkdirInstall,
+};
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
+use vyane_harness::native::NativeReadPolicy;
 
 const INPUT_DIR: &str = "agent-inputs";
 const NATIVE_INPUT_DIR: &str = "native-agent-inputs";
@@ -72,6 +75,17 @@ pub(crate) struct AgentRunSubmitRequest {
     pub(crate) labels: Vec<String>,
     #[serde(default)]
     pub(crate) execution_backend: AgentExecutionBackend,
+    /// Native-only, per-submission policy. Omission means the admitted
+    /// workspace is broadly readable; exclusions may only narrow it.
+    #[serde(default)]
+    pub(crate) native_permissions: NativePermissionRequest,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativePermissionRequest {
+    #[serde(default)]
+    pub(crate) filesystem_read: NativeReadPolicy,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -112,6 +126,7 @@ pub(crate) struct DaemonAgentHost {
     native_controller: Arc<dyn AgentControllerAdapter>,
     submissions: Arc<SubmissionGate>,
     cancel_gate: Arc<Mutex<()>>,
+    native_submit_gate: Arc<Mutex<()>>,
     cancel_owner: Arc<str>,
 }
 
@@ -293,6 +308,7 @@ impl DaemonAgentHost {
                 native_controller,
                 submissions: Arc::new(SubmissionGate::new()),
                 cancel_gate: Arc::new(Mutex::new(())),
+                native_submit_gate: Arc::new(Mutex::new(())),
                 cancel_owner: Arc::from(format!("agent-cancel-{instance_key}")),
             },
             supervisor,
@@ -335,6 +351,9 @@ impl DaemonAgentHost {
             AgentExecutionBackend::NativeInProcess
         ) {
             return self.submit_native_admitted(request, timeout_seconds).await;
+        }
+        if request.native_permissions != NativePermissionRequest::default() {
+            return Err(AgentApiError::bad_request());
         }
         let sandbox = match request.sandbox {
             AgentSpoolSandbox::ReadOnly => Sandbox::ReadOnly,
@@ -447,9 +466,15 @@ impl DaemonAgentHost {
         request: AgentRunSubmitRequest,
         timeout_seconds: u64,
     ) -> Result<AgentRunView, AgentApiError> {
+        let _native_submit_guard = self.native_submit_gate.lock().await;
         if request.sandbox != AgentSpoolSandbox::ReadOnly {
             return Err(AgentApiError::bad_request());
         }
+        request
+            .native_permissions
+            .filesystem_read
+            .validate()
+            .map_err(|_| AgentApiError::bad_request())?;
         let workdir = request
             .workdir
             .ok_or_else(AgentApiError::bad_request)
@@ -472,6 +497,7 @@ impl DaemonAgentHost {
                 selector: &request.target,
                 bound: &chain.chain[0],
                 workdir: &workdir,
+                filesystem_read: request.native_permissions.filesystem_read,
                 system: request.system,
                 timeout_seconds,
             },
@@ -479,7 +505,16 @@ impl DaemonAgentHost {
         .map_err(|_| AgentApiError::bad_request())?;
         if let Some(existing) = self.find_record(run_id.clone()).await? {
             return if exact_native_retry(&existing, &input) {
-                self.view(existing).await
+                if existing.state.is_terminal() {
+                    if !self.cleanup_terminal_native_input(&existing) {
+                        return Err(AgentApiError::unavailable());
+                    }
+                    self.view(existing).await
+                } else if self.native_spool.exact_workdir(&input).is_some() {
+                    self.view(existing).await
+                } else {
+                    Err(AgentApiError::unavailable())
+                }
             } else {
                 Err(AgentApiError::conflict())
             };
@@ -488,6 +523,24 @@ impl DaemonAgentHost {
             .native_spool
             .create(&input)
             .map_err(|_| AgentApiError::unavailable())?;
+        let workdir_install = match self.native_spool.install_workdir(&input, &workdir) {
+            Ok(install) => install,
+            Err(_) => {
+                if spool_create == NativeAgentSpoolCreate::Created {
+                    let _ = self.native_spool.remove_exact(&input);
+                }
+                return Err(AgentApiError::unavailable());
+            }
+        };
+        if !native_admission_pair_is_consistent(spool_create, workdir_install) {
+            if spool_create == NativeAgentSpoolCreate::Created {
+                let _ = self.native_spool.remove_exact(&input);
+            }
+            if workdir_install == NativeWorkdirInstall::Created {
+                let _ = self.native_spool.remove_workdir_exact(&input);
+            }
+            return Err(AgentApiError::unavailable());
+        }
         let run = NewAgentRun {
             id: run_id.clone(),
             worker_id: worker_id.clone(),
@@ -523,11 +576,15 @@ impl DaemonAgentHost {
                         self.native_spool
                             .remove_exact(&input)
                             .map_err(|_| AgentApiError::unavailable())?;
+                        if !self.native_spool.remove_workdir_exact(&input) {
+                            return Err(AgentApiError::unavailable());
+                        }
                     }
                     self.view(existing).await
                 } else {
                     if spool_create == NativeAgentSpoolCreate::Created {
                         let _ = self.native_spool.remove_exact(&input);
+                        let _ = self.native_spool.remove_workdir_exact(&input);
                     }
                     if matches!(create_error, AgentStoreError::AlreadyExists { .. }) {
                         Err(AgentApiError::conflict())
@@ -581,6 +638,9 @@ impl DaemonAgentHost {
         let _cancel_guard = self.cancel_gate.lock().await;
         let record = self.get_record(run_id.clone()).await?;
         if record.state.is_terminal() {
+            if !self.cleanup_terminal_native_input(&record) {
+                return Err(AgentApiError::unavailable());
+            }
             return self.view(record).await;
         }
         if record.state == RunState::Cancelling {
@@ -670,7 +730,30 @@ impl DaemonAgentHost {
             Some(root) => root,
             None => self.get_record(run_id).await?,
         };
+        if !self.cleanup_terminal_native_input(&root) {
+            return Err(AgentApiError::unavailable());
+        }
         self.view(root).await
+    }
+
+    fn cleanup_terminal_native_input(&self, record: &AgentRunRecord) -> bool {
+        if record.execution_backend != ExecutionBackend::NativeInProcess
+            || !record.state.is_terminal()
+        {
+            return true;
+        }
+        match self.native_spool.read(&record.id, &record.worker_id) {
+            Ok(input) if exact_native_retry(record, &input) => {
+                if self.native_spool.remove_exact(&input).is_err() {
+                    return false;
+                }
+                self.native_spool.remove_workdir_exact(&input)
+            }
+            Err(crate::native_agent_spool::NativeAgentSpoolError::NotFound) => self
+                .native_spool
+                .remove_workdir_pending(&record.id, &record.worker_id, &record.policy_digest),
+            Ok(_) | Err(_) => false,
+        }
     }
 
     async fn get_record(&self, run_id: String) -> Result<AgentRunRecord, AgentApiError> {
@@ -900,6 +983,22 @@ const fn exact_retry_backend(backend: ExecutionBackend) -> bool {
     matches!(backend, ExecutionBackend::CliHarnessProcess)
 }
 
+const fn native_admission_pair_is_consistent(
+    spool: NativeAgentSpoolCreate,
+    workdir: NativeWorkdirInstall,
+) -> bool {
+    matches!(
+        (spool, workdir),
+        (
+            NativeAgentSpoolCreate::Created,
+            NativeWorkdirInstall::Created
+        ) | (
+            NativeAgentSpoolCreate::ExistingExact,
+            NativeWorkdirInstall::Created | NativeWorkdirInstall::ExistingExact
+        )
+    )
+}
+
 fn worker_id(run_id: &str) -> String {
     format!("worker-{}", opaque_digest(WORKER_DOMAIN, run_id))
 }
@@ -952,10 +1051,43 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        SubmissionGate, cancel_operation_id, exact_retry_backend, freeze_requested_workdir,
+        AgentRunSubmitRequest, SubmissionGate, cancel_operation_id, exact_retry_backend,
+        freeze_requested_workdir, native_admission_pair_is_consistent,
     };
+    use crate::native_agent_spool::{NativeAgentSpoolCreate, NativeWorkdirInstall};
     use vyane_agent::ExecutionBackend;
     use vyane_core::Sandbox;
+
+    #[test]
+    fn native_read_exclusions_are_explicit_and_default_to_workspace_read() {
+        let base = serde_json::json!({
+            "run_id": "019fa927-f343-7940-8c4f-1a3e79258335",
+            "task": "inspect the workspace",
+            "target": "native"
+        });
+        let default: AgentRunSubmitRequest =
+            serde_json::from_value(base.clone()).expect("default request");
+        assert!(
+            default
+                .native_permissions
+                .filesystem_read
+                .exclude
+                .is_empty()
+        );
+
+        let mut configured = base;
+        configured["native_permissions"] = serde_json::json!({
+            "filesystem_read": {
+                "exclude": [".env*", ".git", "private/**"]
+            }
+        });
+        let configured: AgentRunSubmitRequest =
+            serde_json::from_value(configured).expect("configured request");
+        assert_eq!(
+            configured.native_permissions.filesystem_read.exclude,
+            [".env*", ".git", "private/**"]
+        );
+    }
 
     #[tokio::test]
     async fn closed_submission_gate_rejects_new_work() {
@@ -1066,5 +1198,25 @@ mod tests {
         ] {
             assert!(!exact_retry_backend(backend));
         }
+    }
+
+    #[test]
+    fn exact_orphaned_native_spool_can_receive_a_restarted_live_handle() {
+        assert!(native_admission_pair_is_consistent(
+            NativeAgentSpoolCreate::ExistingExact,
+            NativeWorkdirInstall::Created,
+        ));
+        assert!(native_admission_pair_is_consistent(
+            NativeAgentSpoolCreate::ExistingExact,
+            NativeWorkdirInstall::ExistingExact,
+        ));
+        assert!(native_admission_pair_is_consistent(
+            NativeAgentSpoolCreate::Created,
+            NativeWorkdirInstall::Created,
+        ));
+        assert!(!native_admission_pair_is_consistent(
+            NativeAgentSpoolCreate::Created,
+            NativeWorkdirInstall::ExistingExact,
+        ));
     }
 }

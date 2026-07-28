@@ -16,8 +16,10 @@ tokio-util = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 sha2 = { workspace = true }
 regex = { workspace = true }
+globset = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tempfile = { workspace = true }

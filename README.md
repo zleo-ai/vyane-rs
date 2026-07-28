@@ -95,7 +95,7 @@ reference implementation.
 | config & profiles | `vyane-config` | [x] |
 | OpenAI-Chat + Responses + Anthropic-Messages clients | `vyane-protocol` | [x] baseline clients; [~] bounded typed tool turns and the per-wire authorized path currently cover non-streaming OpenAI Chat only |
 | Claude Code + Codex CLI harnesses, including stdout event streaming | `vyane-harness` | [x] additive scoped execution carries the Linux pinned workdir and an optional live spawn authority; the Process AgentRun host constructs that authority for fresh sessionless CLI runs, and gated capture/streaming revalidate before wrapper spawn and real-target release. This remains adapter-delegated rather than a host sandbox |
-| native permission/tool execution seam (not yet a `Harness` implementation) | `vyane-harness` + `vyane-service` | [~] atomic AgentRun scope validation, per-wire model authorization, an allowed-tool registry gate, a fresh-sessionless permit/store bridge, bounded serial turn driver, lifetime-bound in-process native-scope composition, and a generic crash-consistent completion handback boundary exist as dark components. [WP-65](docs/plan/WP-65.md) composes a private-spool, exact fresh-sessionless, tool-free OpenAI Chat operation and durable message-completion E2E; it remains dark and is not registered with a daemon or public API. Session-bearing authority, trusted built-ins, OS sandbox, checkpoint/session commit, approval resume, failover/replay and native resume remain absent |
+| native permission/tool execution seam (not yet a general `Harness` implementation) | `vyane-harness` + `vyane-service` | [~] the resident fresh/sessionless native AgentRun lane combines atomic scope validation, per-wire model authorization, the bounded serial turn driver and durable completion. [WP-83](docs/plan/WP-83.md) adds Linux descriptor-relative `read_file`/`search_files` built-ins bound to the admitted `PinnedWorkdir`; each path-component open revalidates live authority and rejects traversal/symlinks. The admitted workspace is broadly readable by default, while frozen per-submission glob exclusions can narrow both read and search. Write/edit, child-process host sandbox, command/network tools, session authority, checkpoint/session commit, approval resume, failover/replay and native resume remain open |
 | dispatch / broadcast / failover kernel | `vyane-kernel` | [x] early execution id, whole-chain trusted capability admission, one-shot prepared dispatch and original-ordinal failover evidence |
 | append-only run ledger + owner-isolated session records | `vyane-ledger` | [x] direct-HTTP transcript continuation plus strict revisioned V2 snapshots, store-level CAS `Reset` / `ForkFresh` / `Commit`, and an exact local-filesystem execution-period lease; CLI/service control is limited to owner-local list/inspect/reset-native, with no public fork, REST mutation, distributed lease protocol, or production native resume |
 | replayable owner-scoped event store | `vyane-ledger` | [~] storage/cursors, bounded message and AgentRun lifecycle projection, and owner-bound resident broker/projector assembly in the daemon now exist; delivery lanes, dispatch/workflow producers, subscription, retention and a unified timeline remain |
@@ -179,20 +179,22 @@ produce static non-echo tool text and never execute. Tool descriptions and
 schemas are non-authoritative model guidance; each `NativeTool` must validate
 the actual arguments it receives.
 
-The driver's outcome is non-serializable and has redacted `Debug`, but the
-driver is not a `Harness` and no factory/runtime constructs it. There are still
-no trusted built-ins, checkpoint/session-commit consumers, approval resume, or
-native resume. Separately, `AgentProjectionComponents::open` provides an
+The driver's outcome is non-serializable and has redacted `Debug`. The explicit
+fresh/sessionless resident native lane now constructs it with the two
+read-only trusted filesystem built-ins; this is still narrower than a general
+`Harness`. There are still no write/edit, command/network, checkpoint/session-
+commit consumers, approval resume, or native resume. Separately,
+`AgentProjectionComponents::open` provides an
 explicit owner-bound path to the one-shot AgentRun projector while keeping the
 raw store encapsulated. Ordinary dispatch neither opens that database nor
 starts projection or other resident work.
 
-[WP-65](docs/plan/WP-65.md) provides a dark composition slice: a private native
+[WP-65](docs/plan/WP-65.md) provided the original dark composition slice: a private native
 spool, exact fresh/sessionless scope, authorized OpenAI Chat client, tool-free
 `NativeTurnDriver`, and exact durable message-completion acceptance path. It is
-not a daemon, CLI, REST, or MCP native
-target; it adds no trusted built-ins, sandbox, session/resume/checkpoint or
-approval authority, failover, replay, or general production-parity claim.
+now production-assembled by the later native lane; WP-83 adds the read-only
+trusted filesystem slice without claiming a child-process OS sandbox,
+session/resume/checkpoint authority, failover, replay, or general parity.
 
 `vyane-service::AgentRunRecoveryDriver` is another explicit fixed-owner,
 non-`Clone` one-shot seam. Construction freezes the owner, injected store,

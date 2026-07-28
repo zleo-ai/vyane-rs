@@ -2,7 +2,7 @@
 //!
 //! The operation resolves all body-bearing input from the private spool only
 //! after the durable run is active.  It supports exactly one direct OpenAI
-//! Chat target, no tools, no sessions, and no restart replay.
+//! Chat target, confined read/search tools, no sessions, and no restart replay.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,9 @@ use vyane_core::{
     ToolChatRequest, ToolChoice,
 };
 use vyane_harness::native::{
-    NativeTurnDriver, NativeTurnLimits, NativeTurnStop, PermissionPolicy, ToolContext, ToolRegistry,
+    NativeReadPolicy, NativeTurnDriver, NativeTurnLimits, NativeTurnStop, ToolContext,
+    read_only_permission_policy, read_only_tool_definitions, read_only_tool_registry_with_policy,
+    validate_read_only_host,
 };
 use vyane_message::{
     EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
@@ -141,6 +143,11 @@ impl FreshNativeAgentOperation {
             Err(NativeAgentSpoolError::NotFound) => true,
             Ok(_) | Err(_) => false,
         };
+        let _ = self.spool.remove_workdir_pending(
+            &pending.run_id,
+            &pending.worker_id,
+            &pending.policy_digest,
+        );
         // Durable confirmation consumes the exact recovery tombstone even when
         // private-file cleanup is unavailable, so there is no safe retry path.
         // Release the bounded in-memory slot; uncertain spool content remains
@@ -174,6 +181,9 @@ impl FreshNativeAgentOperation {
 
     fn remove_quiesced(&self, controller: &ControllerRef, input: &NativeAgentInput) -> bool {
         if self.spool.remove_exact(input).is_err() {
+            return false;
+        }
+        if !self.spool.remove_workdir_exact(input) {
             return false;
         }
         self.forget_pending(controller);
@@ -211,6 +221,7 @@ pub(crate) fn native_input_for_submission(
         selector,
         bound,
         workdir,
+        filesystem_read,
         system,
         timeout_seconds,
     } = details;
@@ -231,6 +242,7 @@ pub(crate) fn native_input_for_submission(
     });
     let routing_digest = endpoint_routing_digest(&endpoint.base_url)
         .map_err(|_| NativeAgentSpoolError::BindingMismatch)?;
+    validate_read_only_host(workdir).map_err(|_| NativeAgentSpoolError::UnsupportedHost)?;
     NativeAgentInput::fresh(
         owner,
         run_id,
@@ -248,9 +260,10 @@ pub(crate) fn native_input_for_submission(
             },
             canonical_workdir: workdir.canonical_path().to_path_buf(),
             workdir_identity: workdir.identity().clone(),
+            filesystem_read,
             system,
             timeout_seconds,
-            max_model_turns: 2,
+            max_model_turns: 8,
         },
     )
 }
@@ -260,6 +273,7 @@ pub(crate) struct NativeSubmissionDetails<'a> {
     pub(crate) selector: &'a str,
     pub(crate) bound: &'a vyane_core::BoundTarget,
     pub(crate) workdir: &'a PinnedWorkdir,
+    pub(crate) filesystem_read: NativeReadPolicy,
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
 }
@@ -302,11 +316,12 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         let Some(bound) = self.exact_target(&input) else {
             return AgentExecutorOutcome::Unknown;
         };
-        let Ok(workdir) = PinnedWorkdir::open(&input.policy.canonical_workdir) else {
+        let Some(workdir) = self.spool.exact_workdir(&input) else {
             return AgentExecutorOutcome::Unknown;
         };
         if workdir.canonical_path() != input.policy.canonical_workdir
             || workdir.identity() != &input.policy.workdir_identity
+            || validate_read_only_host(&workdir).is_err()
         {
             return AgentExecutorOutcome::Unknown;
         }
@@ -328,10 +343,12 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         let Ok(limits) = NativeTurnLimits::new(input.policy.max_model_turns) else {
             return AgentExecutorOutcome::Unknown;
         };
-        let Ok(tool_context) = ToolContext::new(&input.policy.canonical_workdir) else {
-            return AgentExecutorOutcome::Unknown;
-        };
-        if tool_context.workdir() != workdir.canonical_path() {
+        let tool_context = ToolContext::from_pinned_workdir(workdir.clone());
+        if tool_context.workdir() != workdir.canonical_path()
+            || tool_context
+                .pinned_workdir()
+                .is_none_or(|pinned| pinned.identity() != workdir.identity())
+        {
             return AgentExecutorOutcome::Unknown;
         }
         let tool_context = tool_context
@@ -339,17 +356,21 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             .with_timeout(Duration::from_secs(input.policy.timeout_seconds))
             .with_deadline(context.deadline());
         let request = native_request(&input, &bound);
-        let driver = NativeTurnDriver::with_limits(
-            client,
-            ToolRegistry::new(),
-            PermissionPolicy::deny_by_default(),
-            limits,
-        );
+        let Ok(registry) =
+            read_only_tool_registry_with_policy(input.policy.filesystem_read.clone())
+        else {
+            return AgentExecutorOutcome::Unknown;
+        };
+        let Ok(permission_policy) = read_only_permission_policy() else {
+            return AgentExecutorOutcome::Unknown;
+        };
+        let driver = NativeTurnDriver::with_limits(client, registry, permission_policy, limits);
         let turn = tokio::time::timeout_at(
             context.deadline(),
             driver.run(request, &tool_context, &native_authority),
         )
         .await;
+        tool_context.wait_for_blocking_quiescence().await;
         drop(native_authority);
         drop(workdir);
 
@@ -409,6 +430,9 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             .messages
             .stage_completion_with_cleanup(prepared, message, move || {
                 if cleanup_spool.remove_exact(&cleanup_input).is_err() {
+                    return false;
+                }
+                if !cleanup_spool.remove_workdir_exact(&cleanup_input) {
                     return false;
                 }
                 forget_pending(&cleanup_pending, &cleanup_controller);
@@ -486,12 +510,16 @@ fn native_request(input: &NativeAgentInput, bound: &vyane_core::BoundTarget) -> 
     messages.push(ToolChatMessage::Text(ChatMessage::user(
         input.prompt.clone(),
     )));
+    let mut params = bound.params.clone();
+    params
+        .extra
+        .insert("parallel_tool_calls".into(), serde_json::Value::Bool(false));
     ToolChatRequest {
         model: bound.target.model.clone(),
         messages,
-        tools: Vec::new(),
-        tool_choice: ToolChoice::None,
-        params: bound.params.clone(),
+        tools: read_only_tool_definitions(),
+        tool_choice: ToolChoice::Auto,
+        params,
     }
 }
 
@@ -553,7 +581,10 @@ const fn failure_code(kind: ErrorKind) -> RunFailureCode {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use chrono::Utc;
     use tempfile::TempDir;
@@ -571,7 +602,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::native_agent_spool::{NativeAgentPolicy, NativeAgentSpoolError};
+    use crate::native_agent_spool::{
+        NativeAgentPolicy, NativeAgentSpoolCreate, NativeAgentSpoolError, NativeWorkdirInstall,
+    };
 
     const OWNER: &str = "local";
     const PROFILE: &str = "native-test";
@@ -649,9 +682,10 @@ mod tests {
             },
             canonical_workdir: workdir.canonical_path().to_path_buf(),
             workdir_identity: workdir.identity().clone(),
+            filesystem_read: NativeReadPolicy::workspace(),
             system: Some("Answer concisely.".into()),
             timeout_seconds: 30,
-            max_model_turns: 2,
+            max_model_turns: 8,
         }
     }
 
@@ -664,6 +698,21 @@ mod tests {
             policy(service, workdir),
         )
         .unwrap()
+    }
+
+    fn create_input(
+        spool: &NativeAgentInputSpool,
+        input: &NativeAgentInput,
+        workdir: &PinnedWorkdir,
+    ) {
+        assert_eq!(
+            spool.create(input).unwrap(),
+            NativeAgentSpoolCreate::Created
+        );
+        assert_eq!(
+            spool.install_workdir(input, workdir).unwrap(),
+            NativeWorkdirInstall::Created
+        );
     }
 
     fn create_run(store: &SqliteAgentStore, input: &NativeAgentInput, timeout_seconds: u64) {
@@ -777,7 +826,7 @@ mod tests {
             frozen_policy,
         )
         .unwrap();
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
         let sqlite_store =
             Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());
@@ -845,31 +894,77 @@ mod tests {
         assert_pre_wire_rejection(PreWireCase::CancelledBeforeClaim).await;
 
         let server = MockServer::start().await;
+        let response_index = Arc::new(AtomicUsize::new(0));
+        let response_index_for_mock = Arc::clone(&response_index);
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "model": "mock-model",
-                "choices": [{
-                    "message": {"role": "assistant", "content": "native answer"},
-                    "finish_reason": "stop"
-                }]
-            })))
-            .expect(1)
+            .respond_with(move |_: &wiremock::Request| {
+                if response_index_for_mock.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "model": "mock-model",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [{
+                                    "id": "read-call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": "{\"path\":\"note.txt\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }]
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "model": "mock-model",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "native answer"},
+                            "finish_reason": "stop"
+                        }]
+                    }))
+                }
+            })
+            .expect(2)
             .mount(&server)
             .await;
 
         let root = tempfile::tempdir().unwrap();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
+        std::fs::write(workdir_path.join("note.txt"), "workspace evidence\n").unwrap();
         let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
         let (service, paths) = service(&root, &server);
         let spool = NativeAgentInputSpool::open(root.path().join("native-input"), OWNER).unwrap();
         let input = input(&service, &workdir);
-        let bound = service.resolve(PROFILE).unwrap().chain.remove(0);
+        let mut bound = service.resolve(PROFILE).unwrap().chain.remove(0);
+        bound
+            .params
+            .extra
+            .insert("parallel_tool_calls".into(), serde_json::Value::Bool(true));
         let request = native_request(&input, &bound);
-        assert!(request.tools.is_empty());
-        assert_eq!(request.tool_choice, ToolChoice::None);
-        spool.create(&input).unwrap();
+        assert_eq!(
+            request
+                .tools
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["read_file", "search_files"]
+        );
+        assert_eq!(request.tool_choice, ToolChoice::Auto);
+        assert_eq!(
+            request.params.extra.get("parallel_tool_calls"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        create_input(&spool, &input, &workdir);
+        let moved_workdir = root.path().join("admitted-workspace");
+        std::fs::rename(&workdir_path, &moved_workdir).unwrap();
+        std::fs::create_dir(&workdir_path).unwrap();
+        std::fs::write(workdir_path.join("note.txt"), "replacement evidence\n").unwrap();
+        drop(workdir);
 
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
         let sqlite_store =
@@ -920,6 +1015,21 @@ mod tests {
             spool.read(RUN_ID, WORKER_ID),
             Err(NativeAgentSpoolError::NotFound)
         ));
+        let requests = server.received_requests().await.unwrap();
+        let model_bodies = requests
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body))
+            .collect::<Vec<_>>();
+        assert!(
+            model_bodies
+                .iter()
+                .any(|body| body.contains("workspace evidence"))
+        );
+        assert!(
+            !model_bodies
+                .iter()
+                .any(|body| body.contains("replacement evidence"))
+        );
 
         let publisher = components
             .completion_publisher(
@@ -941,10 +1051,15 @@ mod tests {
         assert_eq!(second.scanned, 0);
 
         let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 2);
         let request: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(request["model"], "mock-model");
         assert_eq!(request["messages"][1]["content"], "Return the test answer.");
+        let continuation: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(
+            continuation["messages"][3]["content"],
+            "workspace evidence\n"
+        );
         assert_eq!(
             completion_message(&input, "completion-key", "body".into()).conversation_id,
             format!("agent-run-{RUN_ID}")
@@ -963,7 +1078,7 @@ mod tests {
         let spool_root = root.path().join("native-input");
         let spool = NativeAgentInputSpool::open(&spool_root, OWNER).unwrap();
         let input = input(&service, &workdir);
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
         std::fs::write(
             only_input_path(&spool_root),
             br#"{"prompt":"TEST_MALFORMED_BODY_CANARY""#,
@@ -1032,7 +1147,7 @@ mod tests {
             frozen_policy,
         )
         .unwrap();
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
         let store = Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());
         create_run(store.as_ref(), &input, 1);
@@ -1083,7 +1198,7 @@ mod tests {
         let (service, paths) = service(&root, &server);
         let spool = NativeAgentInputSpool::open(root.path().join("native-input"), OWNER).unwrap();
         let input = input(&service, &workdir);
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
         let store = Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());
         create_run(store.as_ref(), &input, 30);
@@ -1142,7 +1257,7 @@ mod tests {
         let (service, paths) = service(&root, &server);
         let spool = NativeAgentInputSpool::open(root.path().join("native-input"), OWNER).unwrap();
         let input = input(&service, &workdir);
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
         std::fs::remove_file(paths.message_db_path()).unwrap();
         let store = Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());
