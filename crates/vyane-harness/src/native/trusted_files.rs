@@ -25,8 +25,8 @@ use vyane_core::{
 };
 
 use super::{
-    NativeTool, PermissionEffect, PermissionPolicy, PermissionRule, PermissionRuleError,
-    ToolContext, ToolError, ToolRegistry, ToolRegistryError,
+    MAX_TOOL_OUTPUT_CHARS, NativeTool, PermissionEffect, PermissionPolicy, PermissionRule,
+    PermissionRuleError, ToolContext, ToolError, ToolRegistry, ToolRegistryError,
 };
 
 const MAX_READ_BYTES: usize = 1024 * 1024;
@@ -39,6 +39,7 @@ const MAX_QUERY_CHARS: usize = 1024;
 const MAX_EXCLUDED_PATTERNS: usize = 128;
 const MAX_EXCLUDED_PATTERN_BYTES: usize = 4096;
 const MAX_EXCLUDED_TOTAL_BYTES: usize = 64 * 1024;
+const SEARCH_OUTPUT_LIMIT_MARKER: &str = "\n... [search output limit reached]";
 
 /// Configurable read boundary inside an already admitted workspace.
 ///
@@ -188,7 +189,7 @@ impl CompiledReadPolicy {
                 || pattern.starts_with('/')
                 || Path::new(&pattern)
                     .components()
-                    .any(|component| matches!(component, Component::ParentDir))
+                    .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
             {
                 return Err(NativeReadPolicyError::InvalidPattern);
             }
@@ -351,7 +352,8 @@ impl NativeTool for SearchFilesTool {
         let mut pending = vec![(root, 0usize)];
         let mut visited_files = 0usize;
         let mut visited_entries = 0usize;
-        let mut matches = Vec::new();
+        let mut output = String::new();
+        let mut match_count = 0usize;
         while let Some((directory, depth)) = pending.pop() {
             if context.cancellation_token().is_cancelled() {
                 return Ok(Err(ToolError::new("search cancelled")));
@@ -395,9 +397,11 @@ impl NativeTool for SearchFilesTool {
                         let display = display_components(&relative);
                         for (index, line) in text.lines().enumerate() {
                             if line.contains(query) {
-                                matches.push(format!("{display}:{}:{line}", index + 1));
-                                if matches.len() == max_results {
-                                    return Ok(Ok(matches.join("\n")));
+                                match_count += 1;
+                                if !append_search_match(&mut output, &display, index + 1, line)
+                                    || match_count == max_results
+                                {
+                                    return Ok(Ok(output));
                                 }
                             }
                         }
@@ -414,11 +418,47 @@ impl NativeTool for SearchFilesTool {
             );
         }
 
-        Ok(Ok(if matches.is_empty() {
+        Ok(Ok(if output.is_empty() {
             "No matches found.".into()
         } else {
-            matches.join("\n")
+            output
         }))
+    }
+}
+
+fn append_search_match(output: &mut String, path: &str, line_number: usize, line: &str) -> bool {
+    let separator = if output.is_empty() { "" } else { "\n" };
+    let prefix = format!("{separator}{path}:{line_number}:");
+    let current_chars = output.chars().count();
+    let candidate_chars = prefix.chars().count().saturating_add(line.chars().count());
+    if current_chars.saturating_add(candidate_chars) <= MAX_TOOL_OUTPUT_CHARS {
+        output.push_str(&prefix);
+        output.push_str(line);
+        return true;
+    }
+
+    let content_limit =
+        MAX_TOOL_OUTPUT_CHARS.saturating_sub(SEARCH_OUTPUT_LIMIT_MARKER.chars().count());
+    truncate_to_chars(output, content_limit);
+    let remaining = content_limit.saturating_sub(output.chars().count());
+    append_up_to_chars(output, &prefix, remaining);
+    let remaining = content_limit.saturating_sub(output.chars().count());
+    append_up_to_chars(output, line, remaining);
+    output.push_str(SEARCH_OUTPUT_LIMIT_MARKER);
+    false
+}
+
+fn truncate_to_chars(value: &mut String, limit: usize) {
+    if let Some((byte_index, _)) = value.char_indices().nth(limit) {
+        value.truncate(byte_index);
+    }
+}
+
+fn append_up_to_chars(output: &mut String, value: &str, limit: usize) {
+    if value.chars().count() <= limit {
+        output.push_str(value);
+    } else {
+        output.extend(value.chars().take(limit));
     }
 }
 
@@ -838,7 +878,10 @@ fn read_utf8_bounded_blocking(file: &mut File) -> Result<String, ToolError> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::{CompiledReadPolicy, NativeReadPolicy, directory_entries};
+    use super::{
+        CompiledReadPolicy, MAX_TOOL_OUTPUT_CHARS, NativeReadPolicy, SEARCH_OUTPUT_LIMIT_MARKER,
+        append_search_match, directory_entries,
+    };
 
     #[tokio::test]
     async fn directory_enumeration_enforces_the_raw_entry_budget() {
@@ -867,5 +910,21 @@ mod tests {
             std::ffi::OsString::from("nested"),
         ]));
         assert!(policy.allows(&[std::ffi::OsString::from("public")]));
+    }
+
+    #[test]
+    fn current_directory_components_are_rejected_in_exclusions() {
+        let policy = NativeReadPolicy::excluding(vec!["./private/**".into()]);
+        assert!(CompiledReadPolicy::new(&policy).is_err());
+    }
+
+    #[test]
+    fn search_output_is_bounded_while_accumulating_matches() {
+        let mut output = String::new();
+        let line = "雪".repeat(MAX_TOOL_OUTPUT_CHARS);
+
+        assert!(!append_search_match(&mut output, "large.txt", 1, &line));
+        assert_eq!(output.chars().count(), MAX_TOOL_OUTPUT_CHARS);
+        assert!(output.ends_with(SEARCH_OUTPUT_LIMIT_MARKER));
     }
 }
