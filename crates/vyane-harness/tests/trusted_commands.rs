@@ -114,6 +114,33 @@ async fn revocation_at_the_tool_owned_spawn_check_prevents_execution() {
 }
 
 #[tokio::test]
+async fn revocation_at_the_physical_spawn_check_prevents_execution() {
+    let root = tempdir().expect("workspace");
+    let registry = command_tool_registry(policy(&[("printf", &[])])).expect("command registry");
+    let permissions =
+        command_permission_policy(PermissionPolicy::deny_by_default()).expect("permissions");
+    let context = ToolContext::from_pinned_workdir(
+        PinnedWorkdir::open(root.path()).expect("pin command workspace"),
+    );
+    let authority = RecordingAuthority {
+        effects: Mutex::new(Vec::new()),
+        fail_at: Some(3),
+    };
+    let result = registry
+        .execute_authorized(
+            call("printf", &["must-not-run"]),
+            &context,
+            &permissions,
+            &authority,
+            3,
+            2,
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(authority.effects.lock().expect("effects").len(), 3);
+}
+
+#[tokio::test]
 async fn host_probe_and_descriptor_bound_read_succeed() {
     let root = tempdir().expect("workspace");
     std::fs::write(root.path().join("visible.txt"), "workspace-data").expect("fixture");
@@ -168,6 +195,68 @@ async fn network_namespace_has_no_loopback_connectivity() {
         output.contains("Traceback") || output.contains("Network is unreachable"),
         "{output}"
     );
+}
+
+#[tokio::test]
+async fn unix_sockets_and_kernel_keyring_calls_are_blocked() {
+    use std::os::unix::net::UnixListener;
+
+    let root = tempdir().expect("workspace");
+    let socket_path = root.path().join("service.sock");
+    let listener = UnixListener::bind(&socket_path).expect("host unix listener");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let source = "import socket; s=socket.socket(socket.AF_UNIX); s.connect('service.sock')";
+    let output = execute(
+        root.path(),
+        policy(&[("python3", &["-c"])]),
+        call("python3", &["-c", source]),
+    )
+    .await;
+    assert!(!output.contains("exit_code: 0"), "{output}");
+    assert!(
+        output.contains("PermissionError") || output.contains("Operation not permitted"),
+        "{output}"
+    );
+    assert!(
+        listener.accept().is_err(),
+        "sandbox reached the host unix socket"
+    );
+
+    let output = execute(
+        root.path(),
+        policy(&[("keyctl", &["show"])]),
+        call("keyctl", &["show"]),
+    )
+    .await;
+    assert!(!output.contains("exit_code: 0"), "{output}");
+    assert!(output.contains("Operation not permitted"), "{output}");
+}
+
+#[tokio::test]
+async fn command_process_has_hard_resource_ceilings() {
+    let root = tempdir().expect("workspace");
+    let source = concat!(
+        "import resource; ",
+        "print(resource.getrlimit(resource.RLIMIT_AS)); ",
+        "nproc=resource.getrlimit(resource.RLIMIT_NPROC); ",
+        "assert nproc[0] == nproc[1] and 0 < nproc[0] <= 4096; print(nproc); ",
+        "print(resource.getrlimit(resource.RLIMIT_NOFILE)); ",
+        "print(resource.getrlimit(resource.RLIMIT_FSIZE)); ",
+        "print(resource.getrlimit(resource.RLIMIT_CORE))"
+    );
+    let output = execute(
+        root.path(),
+        policy(&[("python3", &["-c"])]),
+        call("python3", &["-c", source]),
+    )
+    .await;
+    assert!(output.contains("exit_code: 0"), "{output}");
+    assert!(output.contains("(2147483648, 2147483648)"), "{output}");
+    assert!(output.contains("(256, 256)"), "{output}");
+    assert!(output.contains("(67108864, 67108864)"), "{output}");
+    assert!(output.contains("(0, 0)"), "{output}");
 }
 
 #[tokio::test]

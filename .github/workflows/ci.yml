@@ -54,7 +54,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap
+          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap keyutils
           if [[ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]]; then
             sudo install -m 0644 \
               /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
@@ -105,7 +105,7 @@ jobs:
       - name: Install Linux command sandbox
         run: |
           sudo apt-get update
-          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap
+          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap keyutils
           if [[ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]]; then
             sudo install -m 0644 \
               /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \

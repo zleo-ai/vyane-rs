@@ -17,7 +17,7 @@ use vyane_core::{
     ToolDefinition,
 };
 
-use crate::spawn::{RunControl, Termination, run_capture_with_pinned_limit};
+use crate::spawn::{RunControl, Termination, run_capture_with_pinned_limit_authorized};
 
 use super::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, PermissionEffect, PermissionPolicy, PermissionRule,
@@ -25,6 +25,8 @@ use super::{
 };
 
 const BWRAP: &str = "/usr/bin/bwrap";
+const PRLIMIT: &str = "/usr/bin/prlimit";
+const KEYCTL: &str = "/usr/bin/keyctl";
 const DEFAULT_COMMAND_SECONDS: u64 = 60;
 const MAX_COMMAND_SECONDS: u64 = 60 * 60;
 const MAX_RULES: usize = 128;
@@ -34,6 +36,12 @@ const MAX_ARG_BYTES: usize = 4096;
 const MAX_TOTAL_ARG_BYTES: usize = 64 * 1024;
 const CAPTURE_BYTES_PER_STREAM: usize = 32 * 1024;
 const DISPLAY_CHARS_PER_STREAM: usize = 14_000;
+const COMMAND_ADDRESS_SPACE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const COMMAND_PROCESS_HEADROOM: u64 = 64;
+const COMMAND_PROCESS_LIMIT_MAX: u64 = 4096;
+const COMMAND_OPEN_FILES: u64 = 256;
+const COMMAND_FILE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+const SECCOMP_FILTER_FD: &str = "7";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,6 +109,15 @@ pub enum NativeCommandPolicyError {
 pub enum NativeCommandHostError {
     #[error("native command tools require Linux bubblewrap confinement")]
     Unsupported,
+}
+
+struct ProbeAuthority;
+
+#[async_trait]
+impl NativeExecutionAuthority for ProbeAuthority {
+    async fn revalidate(&self, _effect: NativeSideEffect) -> VyaneResult<()> {
+        Ok(())
+    }
 }
 
 pub fn command_tool_definition() -> ToolDefinition {
@@ -176,12 +193,17 @@ pub async fn validate_command_host(
     policy
         .validate()
         .map_err(|_| NativeCommandHostError::Unsupported)?;
-    if !std::path::Path::new(BWRAP).is_file() {
+    if [BWRAP, PRLIMIT, KEYCTL]
+        .iter()
+        .any(|path| !std::path::Path::new(path).is_file())
+    {
         return Err(NativeCommandHostError::Unsupported);
     }
-    let args = sandbox_args("/usr/bin/true", &[]);
-    let result = run_capture_with_pinned_limit(
-        BWRAP,
+    let args =
+        launcher_args("/usr/bin/true", &[], 5).map_err(|_| NativeCommandHostError::Unsupported)?;
+    let probe_authority = ProbeAuthority;
+    let result = run_capture_with_pinned_limit_authorized(
+        PRLIMIT,
         &args,
         Some(pinned.canonical_path()),
         Some(pinned),
@@ -192,6 +214,12 @@ pub async fn validate_command_host(
             None,
         ),
         1024,
+        &probe_authority,
+        NativeSideEffect::ToolOperation {
+            turn: 0,
+            ordinal: 0,
+        },
+        &command_seccomp_filter(),
     )
     .await
     .map_err(|_| NativeCommandHostError::Unsupported)?;
@@ -249,9 +277,16 @@ impl NativeTool for RunCommandTool {
         // Registry dispatch already checked the call. This second check is
         // owned by the command tool and sits directly before the spawn path.
         authority.revalidate(effect).await?;
-        let args = sandbox_args(&request.program, &request.args);
-        let result = run_capture_with_pinned_limit(
-            BWRAP,
+        let args = match launcher_args(&request.program, &request.args, request.timeout_seconds) {
+            Ok(args) => args,
+            Err(()) => {
+                return Ok(Err(ToolError::new(
+                    "run_command could not establish the process ceiling",
+                )));
+            }
+        };
+        let result = run_capture_with_pinned_limit_authorized(
+            PRLIMIT,
             &args,
             Some(pinned.canonical_path()),
             Some(pinned),
@@ -262,6 +297,9 @@ impl NativeTool for RunCommandTool {
                 None,
             ),
             CAPTURE_BYTES_PER_STREAM,
+            authority,
+            effect,
+            &command_seccomp_filter(),
         )
         .await?;
         Ok(Ok(format_command_result(result)))
@@ -367,6 +405,8 @@ fn sandbox_args(program: &str, args: &[String]) -> Vec<String> {
         "--unshare-cgroup-try".into(),
         "--unshare-net".into(),
         "--new-session".into(),
+        "--seccomp".into(),
+        SECCOMP_FILTER_FD.into(),
         "--proc".into(),
         "/proc".into(),
         "--dev".into(),
@@ -430,6 +470,132 @@ fn command_environment() -> BTreeMap<String, String> {
         ("PATH".into(), "/usr/bin:/bin".into()),
         ("TMPDIR".into(), "/tmp".into()),
     ])
+}
+
+fn launcher_args(program: &str, args: &[String], cpu_seconds: u64) -> Result<Vec<String>, ()> {
+    let process_count = current_uid_thread_count()?
+        .checked_add(COMMAND_PROCESS_HEADROOM)
+        .filter(|count| *count <= COMMAND_PROCESS_LIMIT_MAX)
+        .ok_or(())?;
+    let mut launcher = vec![
+        format!("--as={COMMAND_ADDRESS_SPACE_BYTES}"),
+        format!("--nproc={process_count}"),
+        format!("--cpu={}", cpu_seconds.max(1)),
+        format!("--nofile={COMMAND_OPEN_FILES}"),
+        format!("--fsize={COMMAND_FILE_SIZE_BYTES}"),
+        "--core=0".into(),
+        "--".into(),
+        KEYCTL.into(),
+        "session".into(),
+        "-".into(),
+        BWRAP.into(),
+    ];
+    launcher.extend(sandbox_args(program, args));
+    Ok(launcher)
+}
+
+#[cfg(target_os = "linux")]
+fn current_uid_thread_count() -> Result<u64, ()> {
+    let uid = rustix::process::getuid().as_raw();
+    let mut total = 0u64;
+    for entry in std::fs::read_dir("/proc").map_err(|_| ())? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let owner = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Uid:"))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u32>().ok());
+        if owner != Some(uid) {
+            continue;
+        }
+        let threads = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Threads:"))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .ok_or(())?;
+        total = total.checked_add(threads).ok_or(())?;
+    }
+    (total > 0).then_some(total).ok_or(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_uid_thread_count() -> Result<u64, ()> {
+    Err(())
+}
+
+#[cfg(target_os = "linux")]
+fn command_seccomp_filter() -> Vec<u8> {
+    const BPF_LD_W_ABS: u16 = 0x20;
+    const BPF_JMP_JEQ_K: u16 = 0x15;
+    const BPF_JMP_JSET_K: u16 = 0x45;
+    const BPF_RET_K: u16 = 0x06;
+    const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+    const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+    const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+    const SECCOMP_DATA_NR: u32 = 0;
+    const SECCOMP_DATA_ARCH: u32 = 4;
+    const SECCOMP_DATA_ARG0: u32 = 16;
+    #[cfg(target_arch = "x86_64")]
+    const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
+    #[cfg(target_arch = "aarch64")]
+    const AUDIT_ARCH_NATIVE: u32 = 0xc000_00b7;
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    const AUDIT_ARCH_NATIVE: u32 = 0;
+
+    let mut program = Vec::new();
+    let mut instruction = |code: u16, jt: u8, jf: u8, k: u32| {
+        program.extend_from_slice(&code.to_ne_bytes());
+        program.push(jt);
+        program.push(jf);
+        program.extend_from_slice(&k.to_ne_bytes());
+    };
+
+    instruction(BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARCH);
+    instruction(BPF_JMP_JEQ_K, 1, 0, AUDIT_ARCH_NATIVE);
+    instruction(BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
+    instruction(BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_NR);
+    #[cfg(target_arch = "x86_64")]
+    {
+        instruction(BPF_JMP_JSET_K, 0, 1, 0x4000_0000);
+        instruction(BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
+    }
+    for syscall in [
+        libc::SYS_keyctl,
+        libc::SYS_add_key,
+        libc::SYS_request_key,
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
+    ] {
+        instruction(BPF_JMP_JEQ_K, 0, 1, syscall as u32);
+        instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | libc::EPERM as u32);
+    }
+    for syscall in [libc::SYS_socket, libc::SYS_socketpair] {
+        instruction(BPF_JMP_JEQ_K, 0, 3, syscall as u32);
+        instruction(BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG0);
+        instruction(BPF_JMP_JEQ_K, 0, 1, libc::AF_UNIX as u32);
+        instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | libc::EPERM as u32);
+    }
+    instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW);
+    program
+}
+
+#[cfg(not(target_os = "linux"))]
+fn command_seccomp_filter() -> Vec<u8> {
+    Vec::new()
 }
 
 fn format_command_result(result: crate::spawn::RunResult) -> String {
