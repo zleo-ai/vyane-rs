@@ -352,7 +352,17 @@ fn bounded_edit_rejects_oversized_replace_all_before_splicing() {
     let request = edit_all("aaaa", "a", "0123456789");
 
     assert_eq!(
-        compute_edit_bounded(&request, 32),
+        compute_edit_bounded(&request, 32, 10),
         Err(EditError::OutputTooLarge { limit: 32 })
+    );
+}
+
+#[test]
+fn bounded_edit_stops_before_accumulating_excessive_matches() {
+    let request = edit_all("aaaaaaaaaa", "a", "b");
+
+    assert_eq!(
+        compute_edit_bounded(&request, 32, 4),
+        Err(EditError::TooManyMatches { limit: 4 })
     );
 }

@@ -199,6 +199,12 @@ pub enum EditError {
         /// Maximum complete output size accepted by the caller.
         limit: usize,
     },
+    /// The winning match pass exceeded a caller-supplied match budget.
+    #[error("edit exceeds the match limit of {limit}")]
+    TooManyMatches {
+        /// Maximum number of candidate matches accepted by the caller.
+        limit: usize,
+    },
 }
 
 /// Resolve one search/replace edit into new content, or a structured error.
@@ -242,20 +248,22 @@ pub enum EditError {
 /// assert_eq!(ambiguous, Err(EditError::NotUnique { count: 2 }));
 /// ```
 pub fn compute_edit(request: &EditRequest<'_>) -> Result<EditOutcome, EditError> {
-    compute_edit_inner(request, None)
+    compute_edit_inner(request, None, None)
 }
 
 /// Resolve one edit while refusing an oversized result before allocating it.
 pub fn compute_edit_bounded(
     request: &EditRequest<'_>,
     max_output_bytes: usize,
+    max_matches: usize,
 ) -> Result<EditOutcome, EditError> {
-    compute_edit_inner(request, Some(max_output_bytes))
+    compute_edit_inner(request, Some(max_output_bytes), Some(max_matches))
 }
 
 fn compute_edit_inner(
     request: &EditRequest<'_>,
     max_output_bytes: Option<usize>,
+    max_matches: Option<usize>,
 ) -> Result<EditOutcome, EditError> {
     let EditRequest {
         content,
@@ -288,7 +296,9 @@ fn compute_edit_inner(
         return Err(EditError::NoOpEdit);
     }
 
-    match locate(content, old_string) {
+    match locate_with_limit(content, old_string, max_matches)
+        .map_err(|limit| EditError::TooManyMatches { limit })?
+    {
         MatchSearch::NoMatch => Err(EditError::NoMatch),
         MatchSearch::Ambiguous => Err(EditError::Ambiguous),
         MatchSearch::Found { pass, spans } => {
@@ -355,18 +365,30 @@ fn replacement_output_len(
 /// assert_eq!(locate("\u{2014}", "-"), MatchSearch::Ambiguous);
 /// ```
 pub fn locate(content: &str, old_string: &str) -> MatchSearch {
+    match locate_with_limit(content, old_string, None) {
+        Ok(search) => search,
+        Err(_) => unreachable!("the public locate path has no match limit"),
+    }
+}
+
+fn locate_with_limit(
+    content: &str,
+    old_string: &str,
+    max_matches: Option<usize>,
+) -> Result<MatchSearch, usize> {
     if old_string.is_empty() {
-        return MatchSearch::NoMatch;
+        return Ok(MatchSearch::NoMatch);
     }
 
     for pass in LADDER {
-        match try_pass(pass, content, old_string) {
-            PassResult::Found(spans) => return MatchSearch::Found { pass, spans },
-            PassResult::Ambiguous => return MatchSearch::Ambiguous,
+        match try_pass(pass, content, old_string, max_matches) {
+            PassResult::Found(spans) => return Ok(MatchSearch::Found { pass, spans }),
+            PassResult::Ambiguous => return Ok(MatchSearch::Ambiguous),
+            PassResult::TooMany { limit } => return Err(limit),
             PassResult::NoCandidates => {}
         }
     }
-    MatchSearch::NoMatch
+    Ok(MatchSearch::NoMatch)
 }
 
 /// The four ladder rungs in fixed, decreasing-confidence order.
@@ -384,13 +406,20 @@ enum PassResult {
     /// The rung produced raw candidates but all were rejected by the safety net,
     /// or validated spans overlapped. Fail closed; do not fall through.
     Ambiguous,
+    /// The caller-supplied match budget was exceeded while scanning.
+    TooMany { limit: usize },
     /// The rung produced no raw candidate at all; fall through to the next rung.
     NoCandidates,
 }
 
 /// Run one rung's five steps: normalize, scan, remap, roundtrip-validate, then
 /// classify the surviving spans.
-fn try_pass(pass: MatchPass, content: &str, old_string: &str) -> PassResult {
+fn try_pass(
+    pass: MatchPass,
+    content: &str,
+    old_string: &str,
+    max_matches: Option<usize>,
+) -> PassResult {
     let (normalized_text, offset_map) = normalize(pass, content);
     let (normalized_pattern, _) = normalize(pass, old_string);
 
@@ -401,7 +430,11 @@ fn try_pass(pass: MatchPass, content: &str, old_string: &str) -> PassResult {
         return PassResult::NoCandidates;
     }
 
-    let raw_starts = non_overlapping_matches(&normalized_text, &normalized_pattern);
+    let raw_starts =
+        match non_overlapping_matches(&normalized_text, &normalized_pattern, max_matches) {
+            Ok(starts) => starts,
+            Err(limit) => return PassResult::TooMany { limit },
+        };
     if raw_starts.is_empty() {
         return PassResult::NoCandidates;
     }
@@ -473,15 +506,24 @@ fn splice(
 /// Collect the start offsets of every non-overlapping occurrence of `pattern`
 /// in `text`, advancing past each hit by the pattern length. `pattern` must be
 /// non-empty (the caller guards this), which guarantees termination.
-fn non_overlapping_matches(text: &str, pattern: &str) -> Vec<usize> {
+fn non_overlapping_matches(
+    text: &str,
+    pattern: &str,
+    max_matches: Option<usize>,
+) -> Result<Vec<usize>, usize> {
     let mut starts = Vec::new();
     let mut cursor = 0;
     while let Some(relative) = text[cursor..].find(pattern) {
+        if let Some(limit) = max_matches
+            && starts.len() == limit
+        {
+            return Err(limit);
+        }
         let start = cursor + relative;
         starts.push(start);
         cursor = start + pattern.len();
     }
-    starts
+    Ok(starts)
 }
 
 /// Whether any two ascending spans overlap. Because spans are sorted by start,

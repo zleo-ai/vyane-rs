@@ -60,6 +60,38 @@ struct ReplacingParentAuthority {
     replaced: Mutex<bool>,
 }
 
+struct ReplacingStageAuthority {
+    parent: std::path::PathBuf,
+    replacement: std::path::PathBuf,
+    replaced: Mutex<bool>,
+}
+
+#[async_trait]
+impl NativeExecutionAuthority for ReplacingStageAuthority {
+    async fn revalidate(&self, _effect: NativeSideEffect) -> vyane_core::Result<()> {
+        let mut replaced = self.replaced.lock().expect("replacement lock");
+        if !*replaced {
+            let temporary = std::fs::read_dir(&self.parent)
+                .expect("parent entries")
+                .filter_map(Result::ok)
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".vyane-write-")
+                })
+                .map(|entry| entry.path());
+            if let Some(temporary) = temporary {
+                std::fs::remove_file(&temporary).expect("remove staged link");
+                std::os::unix::fs::symlink(&self.replacement, &temporary)
+                    .expect("replace staged link");
+                *replaced = true;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl NativeExecutionAuthority for ReplacingParentAuthority {
     async fn revalidate(&self, _effect: NativeSideEffect) -> vyane_core::Result<()> {
@@ -835,6 +867,135 @@ async fn write_and_edit_reject_parent_replacement_before_publication() {
                 .starts_with(".vyane-write-")
         }));
     }
+}
+
+#[tokio::test]
+async fn write_and_edit_bind_publication_to_the_staged_inode() {
+    let root = tempdir().expect("root");
+    let registry = workspace_tool_registry_with_policy(
+        NativeReadPolicy::workspace(),
+        Some(NativeWritePolicy::workspace()),
+    )
+    .expect("registry");
+    let policy = workspace_permission_policy(true).expect("policy");
+    let replacement = root.path().join("replacement.txt");
+    std::fs::write(&replacement, "attacker\n").expect("replacement");
+
+    let write_parent = root.path().join("write-parent");
+    std::fs::create_dir(&write_parent).expect("write parent");
+    let write = registry
+        .execute_authorized(
+            call(
+                "write_file",
+                args(&[
+                    ("path", json!("write-parent/created.txt")),
+                    ("content", json!("created\n")),
+                ]),
+            ),
+            &context(root.path()),
+            &policy,
+            &ReplacingStageAuthority {
+                parent: write_parent.clone(),
+                replacement: replacement.clone(),
+                replaced: Mutex::new(false),
+            },
+            10,
+            5,
+        )
+        .await
+        .expect("write result");
+    assert_eq!(write.status, ToolInvocationStatus::ToolError);
+    assert!(!write_parent.join("created.txt").exists());
+
+    let edit_parent = root.path().join("edit-parent");
+    std::fs::create_dir(&edit_parent).expect("edit parent");
+    std::fs::write(edit_parent.join("note.txt"), "old\n").expect("source");
+    let edit = registry
+        .execute_authorized(
+            call(
+                "edit_file",
+                args(&[
+                    ("path", json!("edit-parent/note.txt")),
+                    ("old_string", json!("old")),
+                    ("new_string", json!("new")),
+                ]),
+            ),
+            &context(root.path()),
+            &policy,
+            &ReplacingStageAuthority {
+                parent: edit_parent.clone(),
+                replacement: replacement.clone(),
+                replaced: Mutex::new(false),
+            },
+            10,
+            6,
+        )
+        .await
+        .expect("edit result");
+    assert_eq!(edit.status, ToolInvocationStatus::ToolError);
+    assert_eq!(
+        std::fs::read_to_string(edit_parent.join("note.txt")).expect("source"),
+        "old\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&replacement).expect("replacement"),
+        "attacker\n"
+    );
+    for directory in [&write_parent, &edit_parent] {
+        assert!(std::fs::read_dir(directory).expect("entries").all(|entry| {
+            !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".vyane-write-")
+        }));
+    }
+}
+
+#[tokio::test]
+async fn edit_rejects_extended_security_metadata_it_cannot_preserve() {
+    let root = tempdir().expect("root");
+    let path = root.path().join("note.txt");
+    std::fs::write(&path, "old\n").expect("source");
+    let source = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("source descriptor");
+    rustix::fs::fsetxattr(
+        &source,
+        "user.vyane-test",
+        b"security-marker",
+        rustix::fs::XattrFlags::CREATE,
+    )
+    .expect("set xattr");
+    let registry = workspace_tool_registry_with_policy(
+        NativeReadPolicy::workspace(),
+        Some(NativeWritePolicy::workspace()),
+    )
+    .expect("registry");
+
+    let edit = registry
+        .execute_authorized(
+            call(
+                "edit_file",
+                args(&[
+                    ("path", json!("note.txt")),
+                    ("old_string", json!("old")),
+                    ("new_string", json!("new")),
+                ]),
+            ),
+            &context(root.path()),
+            &workspace_permission_policy(true).expect("policy"),
+            &RecordingAuthority::default(),
+            10,
+            7,
+        )
+        .await
+        .expect("edit result");
+
+    assert_eq!(edit.status, ToolInvocationStatus::ToolError);
+    assert_eq!(std::fs::read_to_string(&path).expect("source"), "old\n");
 }
 
 #[tokio::test]

@@ -276,13 +276,18 @@ New files are staged under the exact opened parent, their complete content is
 synced, and they are then published with `RENAME_NOREPLACE`. Existing-file
 edits compose the pure guarded text
 edit with a source identity/timestamp snapshot and a final byte-for-byte
-reread. Replacement size is checked with overflow-safe arithmetic before the
-complete output is allocated. The parent path is reopened from the pinned root
-and its device/inode identity is compared immediately before publication.
-Edits also require the staged inode to retain the source uid/gid before final
-mode bits, including set-ID bits, are restored. Drift, ambiguity, cancellation,
-ownership mismatch, parent replacement, or authority revocation before the
-last publication check removes the stage and leaves the target unchanged.
+reread. Replacement size and match count are bounded before the complete
+output and replacement-span set are allocated, and the pure computation runs
+on the tracked blocking pool. The parent path is reopened from the pinned root
+and its device/inode identity is compared immediately before publication. A
+randomly named stage retains its open inode and the name is checked against
+that inode immediately before rename. Edits require the staged inode to retain
+the source uid/gid before final mode bits, including set-ID bits, are restored.
+Files carrying extended attributes, including POSIX ACL or security labels,
+are refused because this implementation cannot preserve them safely. Drift,
+ambiguity, cancellation, ownership or security-metadata mismatch, parent or
+stage replacement, or authority revocation before the last publication check
+removes the stage and leaves the target unchanged.
 The final same-directory rename is atomic. Linux has no
 rename-if-target-inode-is-unchanged primitive, so this contract does not claim
 kernel compare-and-swap against an uncooperative external writer in the

@@ -14,8 +14,6 @@ use std::io::Write as _;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Component, Path};
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
@@ -37,6 +35,7 @@ use super::{
 
 const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
+const MAX_EDIT_MATCHES: usize = 10_000;
 const MAX_SEARCH_FILES: usize = 10_000;
 const MAX_SEARCH_ENTRIES: usize = 20_000;
 const MAX_SEARCH_DEPTH: usize = 32;
@@ -48,8 +47,6 @@ const MAX_EXCLUDED_PATTERNS: usize = 128;
 const MAX_EXCLUDED_PATTERN_BYTES: usize = 4096;
 const MAX_EXCLUDED_TOTAL_BYTES: usize = 64 * 1024;
 const SEARCH_OUTPUT_LIMIT_MARKER: &str = "\n... [search output limit reached]";
-#[cfg(target_os = "linux")]
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Configurable read boundary inside an already admitted workspace.
 ///
@@ -1015,6 +1012,33 @@ impl FileSnapshot {
 }
 
 #[cfg(target_os = "linux")]
+fn ensure_no_extended_attributes(file: &File) -> Result<(), ToolError> {
+    let mut probe = [0u8; 1];
+    match rustix::fs::flistxattr(file, &mut probe) {
+        Ok(0) => Ok(()),
+        Ok(_) | Err(rustix::io::Errno::RANGE) => Err(ToolError::new(
+            "workspace file security metadata cannot be preserved",
+        )),
+        Err(_) => Err(ToolError::new(
+            "could not inspect workspace file security metadata",
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn ensure_no_extended_attributes_async(
+    file: &File,
+    context: &ToolContext,
+) -> Result<(), ToolError> {
+    let file = file
+        .try_clone()
+        .map_err(|_| ToolError::new("could not duplicate workspace file"))?;
+    tracked_blocking(context, move || ensure_no_extended_attributes(&file))
+        .await
+        .map_err(|_| ToolError::new("could not inspect workspace file security metadata"))?
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FilePreservation {
     mode: u32,
@@ -1050,7 +1074,9 @@ impl DirectorySnapshot {
 #[cfg(target_os = "linux")]
 struct StagedFile {
     parent: File,
+    file: File,
     name: OsString,
+    require_no_xattrs: bool,
     published: bool,
 }
 
@@ -1059,6 +1085,7 @@ impl StagedFile {
     fn publish_new(mut self, target: &OsString) -> Result<(), ToolError> {
         use rustix::fs::{RenameFlags, renameat_with};
 
+        self.validate_named_inode()?;
         match renameat_with(
             &self.parent,
             &self.name,
@@ -1076,9 +1103,46 @@ impl StagedFile {
     }
 
     fn publish_replacement(mut self, target: &OsString) -> Result<(), ToolError> {
+        self.validate_named_inode()?;
         rustix::fs::renameat(&self.parent, &self.name, &self.parent, target)
             .map_err(|_| ToolError::new("could not publish workspace edit"))?;
         self.published = true;
+        Ok(())
+    }
+
+    fn validate_named_inode(&self) -> Result<(), ToolError> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        use rustix::fs::{Mode, OFlags, openat2};
+
+        let descriptor = openat2(
+            &self.parent,
+            &self.name,
+            OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            confined_resolution(),
+        )
+        .map_err(|_| ToolError::new("staged workspace file changed before publication"))?;
+        let named = File::from(descriptor);
+        let held_metadata = self
+            .file
+            .metadata()
+            .map_err(|_| ToolError::new("could not inspect staged workspace file"))?;
+        let named_metadata = named
+            .metadata()
+            .map_err(|_| ToolError::new("could not inspect staged workspace file"))?;
+        if !held_metadata.is_file()
+            || !named_metadata.is_file()
+            || held_metadata.dev() != named_metadata.dev()
+            || held_metadata.ino() != named_metadata.ino()
+        {
+            return Err(ToolError::new(
+                "staged workspace file changed before publication",
+            ));
+        }
+        if self.require_no_xattrs {
+            ensure_no_extended_attributes(&self.file)?;
+        }
         Ok(())
     }
 }
@@ -1181,20 +1245,34 @@ async fn edit_existing_file(
             Ok(source) => source,
             Err(error) => return Ok(Err(error)),
         };
-    let outcome = match compute_edit_bounded(
-        &EditRequest {
-            content: &original,
-            old_string,
-            new_string,
-            replace_all,
-        },
-        MAX_WRITE_BYTES,
-    ) {
-        Ok(outcome) => outcome,
-        Err(EditError::OutputTooLarge { .. }) => {
+    let edit_content = original.clone();
+    let old_string = old_string.to_owned();
+    let new_string = new_string.to_owned();
+    let outcome = match tracked_blocking(context, move || {
+        compute_edit_bounded(
+            &EditRequest {
+                content: &edit_content,
+                old_string: &old_string,
+                new_string: &new_string,
+                replace_all,
+            },
+            MAX_WRITE_BYTES,
+            MAX_EDIT_MATCHES,
+        )
+    })
+    .await
+    {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(EditError::OutputTooLarge { .. })) => {
             return Ok(Err(ToolError::new("edited file exceeds the write limit")));
         }
-        Err(error) => return Ok(Err(ToolError::new(error.to_string()))),
+        Ok(Err(EditError::TooManyMatches { .. })) => {
+            return Ok(Err(ToolError::new(
+                "edit exceeds the workspace match limit",
+            )));
+        }
+        Ok(Err(error)) => return Ok(Err(ToolError::new(error.to_string()))),
+        Err(_) => return Ok(Err(ToolError::new("could not compute workspace edit"))),
     };
 
     authority.revalidate(effect).await?;
@@ -1328,6 +1406,9 @@ async fn read_regular_from_parent(
             )));
         }
     };
+    if let Err(error) = ensure_no_extended_attributes_async(&readable, context).await {
+        return Ok(Err(error));
+    }
     let content = match read_utf8_bounded(readable, context).await {
         Ok(content) => content,
         Err(error) => return Ok(Err(error)),
@@ -1371,11 +1452,7 @@ fn stage_content_blocking(
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
     for _ in 0..16 {
-        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let name = OsString::from(format!(
-            ".vyane-write-{}-{sequence}.tmp",
-            std::process::id()
-        ));
+        let name = OsString::from(format!(".vyane-write-{}.tmp", uuid::Uuid::now_v7()));
         if &name == target {
             continue;
         }
@@ -1390,16 +1467,22 @@ fn stage_content_blocking(
             Err(rustix::io::Errno::EXIST) => continue,
             Err(_) => return Err(ToolError::new("could not stage workspace file")),
         };
-        let mut file = File::from(descriptor);
-        let staged = StagedFile {
+        let file = File::from(descriptor);
+        let mut staged = StagedFile {
             parent,
+            file,
             name,
+            require_no_xattrs: preservation.is_some(),
             published: false,
         };
-        file.write_all(content)
+        staged
+            .file
+            .write_all(content)
             .map_err(|_| ToolError::new("could not stage workspace file"))?;
         if let Some(preservation) = preservation {
-            let metadata = file
+            ensure_no_extended_attributes(&staged.file)?;
+            let metadata = staged
+                .file
                 .metadata()
                 .map_err(|_| ToolError::new("could not inspect staged workspace file"))?;
             if metadata.uid() != preservation.uid || metadata.gid() != preservation.gid {
@@ -1407,10 +1490,14 @@ fn stage_content_blocking(
                     "could not preserve workspace file ownership",
                 ));
             }
-            file.set_permissions(std::fs::Permissions::from_mode(preservation.mode))
+            staged
+                .file
+                .set_permissions(std::fs::Permissions::from_mode(preservation.mode))
                 .map_err(|_| ToolError::new("could not stage workspace file"))?;
         }
-        file.sync_all()
+        staged
+            .file
+            .sync_all()
             .map_err(|_| ToolError::new("could not stage workspace file"))?;
         return Ok(staged);
     }
