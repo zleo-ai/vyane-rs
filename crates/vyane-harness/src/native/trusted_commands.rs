@@ -39,6 +39,10 @@ const DISPLAY_CHARS_PER_STREAM: usize = 14_000;
 const COMMAND_ADDRESS_SPACE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const COMMAND_PROCESS_HEADROOM: u64 = 64;
 const COMMAND_PROCESS_LIMIT_MAX: u64 = 4096;
+#[cfg(target_os = "linux")]
+const CAP_SYS_ADMIN_BIT: u64 = 21;
+#[cfg(target_os = "linux")]
+const CAP_SYS_RESOURCE_BIT: u64 = 24;
 const COMMAND_OPEN_FILES: u64 = 256;
 const COMMAND_FILE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
@@ -555,6 +559,15 @@ fn launcher_args(program: &str, args: &[String], cpu_seconds: u64) -> Result<Vec
 #[cfg(target_os = "linux")]
 fn current_uid_thread_count() -> Result<u64, ()> {
     let uid = rustix::process::getuid().as_raw();
+    let self_status = std::fs::read_to_string("/proc/self/status").map_err(|_| ())?;
+    let effective_capabilities = self_status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+        .ok_or(())?;
+    if !nproc_limit_is_enforced(uid, effective_capabilities) {
+        return Err(());
+    }
     let mut total = 0u64;
     for entry in std::fs::read_dir("/proc").map_err(|_| ())? {
         let Ok(entry) = entry else {
@@ -587,6 +600,12 @@ fn current_uid_thread_count() -> Result<u64, ()> {
         total = total.checked_add(threads).ok_or(())?;
     }
     (total > 0).then_some(total).ok_or(())
+}
+
+#[cfg(target_os = "linux")]
+fn nproc_limit_is_enforced(uid: u32, effective_capabilities: u64) -> bool {
+    let exempt_capabilities = (1u64 << CAP_SYS_ADMIN_BIT) | (1u64 << CAP_SYS_RESOURCE_BIT);
+    uid != 0 && effective_capabilities & exempt_capabilities == 0
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -705,6 +724,15 @@ mod tests {
         assert!(policy.permits("git", &["status".into(), "--short".into()]));
         assert!(!policy.permits("git", &["diff".into()]));
         assert!(!policy.permits("git-status", &[]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_ceiling_rejects_rlimit_nproc_exempt_identities() {
+        assert!(!nproc_limit_is_enforced(0, 0));
+        assert!(!nproc_limit_is_enforced(1000, 1 << CAP_SYS_ADMIN_BIT));
+        assert!(!nproc_limit_is_enforced(1000, 1 << CAP_SYS_RESOURCE_BIT));
+        assert!(nproc_limit_is_enforced(1000, 0));
     }
 
     #[test]

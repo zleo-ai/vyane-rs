@@ -311,8 +311,10 @@ namespaces, and delegates timeout/cancellation/descendant cleanup to the
 existing process-group driver. A fresh anonymous session keyring, a seccomp
 floor denying key-management, io_uring and all socket creation, a size-capped
 private tmpfs, and hard address-space, process/thread, CPU, file-descriptor and
-file-size limits close remaining host resource and IPC paths. Live authority
-is checked before every physical spawn attempt. Submission probes that exact
+file-size limits close remaining host resource and IPC paths. Identities exempt
+from `RLIMIT_NPROC` are rejected rather than silently losing the process
+ceiling. Live authority is checked before every physical spawn attempt.
+Submission probes that exact
 profile and every allowlisted executable inside the sandbox view before a
 model request. Both writable root scratch and `/tmp` are aggregate-size
 capped, `/dev` is reduced to fixed basic devices without `/dev/shm`, and the
