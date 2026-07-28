@@ -532,16 +532,7 @@ impl DaemonAgentHost {
                 return Err(AgentApiError::unavailable());
             }
         };
-        if !matches!(
-            (spool_create, workdir_install),
-            (
-                NativeAgentSpoolCreate::Created,
-                NativeWorkdirInstall::Created
-            ) | (
-                NativeAgentSpoolCreate::ExistingExact,
-                NativeWorkdirInstall::ExistingExact
-            )
-        ) {
+        if !native_admission_pair_is_consistent(spool_create, workdir_install) {
             if spool_create == NativeAgentSpoolCreate::Created {
                 let _ = self.native_spool.remove_exact(&input);
             }
@@ -992,6 +983,22 @@ const fn exact_retry_backend(backend: ExecutionBackend) -> bool {
     matches!(backend, ExecutionBackend::CliHarnessProcess)
 }
 
+const fn native_admission_pair_is_consistent(
+    spool: NativeAgentSpoolCreate,
+    workdir: NativeWorkdirInstall,
+) -> bool {
+    matches!(
+        (spool, workdir),
+        (
+            NativeAgentSpoolCreate::Created,
+            NativeWorkdirInstall::Created
+        ) | (
+            NativeAgentSpoolCreate::ExistingExact,
+            NativeWorkdirInstall::Created | NativeWorkdirInstall::ExistingExact
+        )
+    )
+}
+
 fn worker_id(run_id: &str) -> String {
     format!("worker-{}", opaque_digest(WORKER_DOMAIN, run_id))
 }
@@ -1045,8 +1052,9 @@ mod tests {
 
     use super::{
         AgentRunSubmitRequest, SubmissionGate, cancel_operation_id, exact_retry_backend,
-        freeze_requested_workdir,
+        freeze_requested_workdir, native_admission_pair_is_consistent,
     };
+    use crate::native_agent_spool::{NativeAgentSpoolCreate, NativeWorkdirInstall};
     use vyane_agent::ExecutionBackend;
     use vyane_core::Sandbox;
 
@@ -1190,5 +1198,25 @@ mod tests {
         ] {
             assert!(!exact_retry_backend(backend));
         }
+    }
+
+    #[test]
+    fn exact_orphaned_native_spool_can_receive_a_restarted_live_handle() {
+        assert!(native_admission_pair_is_consistent(
+            NativeAgentSpoolCreate::ExistingExact,
+            NativeWorkdirInstall::Created,
+        ));
+        assert!(native_admission_pair_is_consistent(
+            NativeAgentSpoolCreate::ExistingExact,
+            NativeWorkdirInstall::ExistingExact,
+        ));
+        assert!(native_admission_pair_is_consistent(
+            NativeAgentSpoolCreate::Created,
+            NativeWorkdirInstall::Created,
+        ));
+        assert!(!native_admission_pair_is_consistent(
+            NativeAgentSpoolCreate::Created,
+            NativeWorkdirInstall::ExistingExact,
+        ));
     }
 }
