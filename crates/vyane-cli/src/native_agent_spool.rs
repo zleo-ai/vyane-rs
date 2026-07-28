@@ -4,14 +4,16 @@
 //! names are derived from bound identities, so caller-controlled identifiers
 //! never become filesystem components.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use vyane_core::{Effort, WorkdirIdentity};
+use vyane_core::{Effort, PinnedWorkdir, WorkdirIdentity};
 use vyane_harness::native::NativeReadPolicy;
 
 const SCHEMA: u32 = 3;
@@ -24,6 +26,7 @@ const MAX_TARGET_PART_BYTES: usize = 512;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_MODEL_TURNS: u32 = 32;
+const MAX_WORKDIR_HANDOFFS: usize = 1024;
 
 const OWNER_PATH_DOMAIN: &[u8] = b"vyane.native-input.owner-path.v1\0";
 const RUN_PATH_DOMAIN: &[u8] = b"vyane.native-input.run-path.v1\0";
@@ -67,6 +70,12 @@ impl std::error::Error for NativeAgentSpoolError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeAgentSpoolCreate {
+    Created,
+    ExistingExact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeWorkdirInstall {
     Created,
     ExistingExact,
 }
@@ -264,6 +273,28 @@ pub(crate) struct NativeAgentInputSpool {
     root: PathBuf,
     owner: String,
     owner_root: PathBuf,
+    workdirs: Arc<Mutex<BTreeMap<String, NativeWorkdirHandoff>>>,
+}
+
+struct NativeWorkdirHandoff {
+    worker_id: String,
+    policy_digest: String,
+    canonical_path: PathBuf,
+    identity: WorkdirIdentity,
+    pinned: PinnedWorkdir,
+}
+
+impl NativeWorkdirHandoff {
+    fn matches_input(&self, input: &NativeAgentInput) -> bool {
+        self.worker_id == input.worker_id
+            && self.policy_digest == input.policy_sha256
+            && self.canonical_path == input.policy.canonical_workdir
+            && self.identity == input.policy.workdir_identity
+    }
+
+    fn matches_pending(&self, worker_id: &str, policy_digest: &str) -> bool {
+        self.worker_id == worker_id && self.policy_digest == policy_digest
+    }
 }
 
 impl std::fmt::Debug for NativeAgentInputSpool {
@@ -294,7 +325,76 @@ impl NativeAgentInputSpool {
             root,
             owner,
             owner_root,
+            workdirs: Arc::new(Mutex::new(BTreeMap::new())),
         })
+    }
+
+    pub(crate) fn install_workdir(
+        &self,
+        input: &NativeAgentInput,
+        pinned: &PinnedWorkdir,
+    ) -> Result<NativeWorkdirInstall, NativeAgentSpoolError> {
+        input.validate()?;
+        if input.owner != self.owner
+            || pinned.canonical_path() != input.policy.canonical_workdir
+            || pinned.identity() != &input.policy.workdir_identity
+        {
+            return Err(NativeAgentSpoolError::BindingMismatch);
+        }
+        let mut workdirs = self
+            .workdirs
+            .lock()
+            .map_err(|_| NativeAgentSpoolError::Io)?;
+        if let Some(existing) = workdirs.get(&input.run_id) {
+            return if existing.matches_input(input) {
+                Ok(NativeWorkdirInstall::ExistingExact)
+            } else {
+                Err(NativeAgentSpoolError::ConflictingInput)
+            };
+        }
+        if workdirs.len() >= MAX_WORKDIR_HANDOFFS {
+            return Err(NativeAgentSpoolError::Io);
+        }
+        workdirs.insert(
+            input.run_id.clone(),
+            NativeWorkdirHandoff {
+                worker_id: input.worker_id.clone(),
+                policy_digest: input.policy_sha256.clone(),
+                canonical_path: input.policy.canonical_workdir.clone(),
+                identity: input.policy.workdir_identity.clone(),
+                pinned: pinned.clone(),
+            },
+        );
+        Ok(NativeWorkdirInstall::Created)
+    }
+
+    pub(crate) fn exact_workdir(&self, input: &NativeAgentInput) -> Option<PinnedWorkdir> {
+        let workdirs = self.workdirs.lock().ok()?;
+        let handoff = workdirs.get(&input.run_id)?;
+        handoff.matches_input(input).then(|| handoff.pinned.clone())
+    }
+
+    pub(crate) fn remove_workdir_exact(&self, input: &NativeAgentInput) -> bool {
+        self.remove_workdir_pending(&input.run_id, &input.worker_id, &input.policy_sha256)
+    }
+
+    pub(crate) fn remove_workdir_pending(
+        &self,
+        run_id: &str,
+        worker_id: &str,
+        policy_digest: &str,
+    ) -> bool {
+        let Ok(mut workdirs) = self.workdirs.lock() else {
+            return false;
+        };
+        match workdirs.get(run_id) {
+            Some(handoff) if handoff.matches_pending(worker_id, policy_digest) => {
+                workdirs.remove(run_id);
+                true
+            }
+            None => true,
+            Some(_) => false,
+        }
     }
 
     pub(crate) fn create(
@@ -692,6 +792,45 @@ mod tests {
         let spool =
             NativeAgentInputSpool::open(directory.path().join("spool"), "owner-marker").unwrap();
         (directory, spool)
+    }
+
+    #[test]
+    fn workdir_handoff_keeps_the_exact_admitted_handle_until_cleanup() {
+        let (directory, spool) = fixture();
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let pinned = PinnedWorkdir::open(&workspace).unwrap();
+        let mut policy = policy();
+        policy.canonical_workdir = pinned.canonical_path().to_path_buf();
+        policy.workdir_identity = pinned.identity().clone();
+        let value = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            policy,
+        )
+        .unwrap();
+
+        assert_eq!(
+            spool.install_workdir(&value, &pinned).unwrap(),
+            NativeWorkdirInstall::Created
+        );
+        assert_eq!(
+            spool.install_workdir(&value, &pinned).unwrap(),
+            NativeWorkdirInstall::ExistingExact
+        );
+        let moved = directory.path().join("moved-workspace");
+        fs::rename(&workspace, &moved).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        drop(pinned);
+
+        let handed_off = spool.exact_workdir(&value).unwrap();
+        let metadata = handed_off.handle().metadata().unwrap();
+        assert_eq!(metadata.dev(), value.policy.workdir_identity.device);
+        assert_eq!(metadata.ino(), value.policy.workdir_identity.inode);
+        assert!(spool.remove_workdir_exact(&value));
+        assert!(spool.exact_workdir(&value).is_none());
     }
 
     #[test]

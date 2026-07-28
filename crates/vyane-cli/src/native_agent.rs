@@ -143,6 +143,11 @@ impl FreshNativeAgentOperation {
             Err(NativeAgentSpoolError::NotFound) => true,
             Ok(_) | Err(_) => false,
         };
+        let _ = self.spool.remove_workdir_pending(
+            &pending.run_id,
+            &pending.worker_id,
+            &pending.policy_digest,
+        );
         // Durable confirmation consumes the exact recovery tombstone even when
         // private-file cleanup is unavailable, so there is no safe retry path.
         // Release the bounded in-memory slot; uncertain spool content remains
@@ -176,6 +181,9 @@ impl FreshNativeAgentOperation {
 
     fn remove_quiesced(&self, controller: &ControllerRef, input: &NativeAgentInput) -> bool {
         if self.spool.remove_exact(input).is_err() {
+            return false;
+        }
+        if !self.spool.remove_workdir_exact(input) {
             return false;
         }
         self.forget_pending(controller);
@@ -308,7 +316,7 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         let Some(bound) = self.exact_target(&input) else {
             return AgentExecutorOutcome::Unknown;
         };
-        let Ok(workdir) = PinnedWorkdir::open(&input.policy.canonical_workdir) else {
+        let Some(workdir) = self.spool.exact_workdir(&input) else {
             return AgentExecutorOutcome::Unknown;
         };
         if workdir.canonical_path() != input.policy.canonical_workdir
@@ -422,6 +430,9 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             .messages
             .stage_completion_with_cleanup(prepared, message, move || {
                 if cleanup_spool.remove_exact(&cleanup_input).is_err() {
+                    return false;
+                }
+                if !cleanup_spool.remove_workdir_exact(&cleanup_input) {
                     return false;
                 }
                 forget_pending(&cleanup_pending, &cleanup_controller);
@@ -591,7 +602,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::native_agent_spool::{NativeAgentPolicy, NativeAgentSpoolError};
+    use crate::native_agent_spool::{
+        NativeAgentPolicy, NativeAgentSpoolCreate, NativeAgentSpoolError, NativeWorkdirInstall,
+    };
 
     const OWNER: &str = "local";
     const PROFILE: &str = "native-test";
@@ -685,6 +698,21 @@ mod tests {
             policy(service, workdir),
         )
         .unwrap()
+    }
+
+    fn create_input(
+        spool: &NativeAgentInputSpool,
+        input: &NativeAgentInput,
+        workdir: &PinnedWorkdir,
+    ) {
+        assert_eq!(
+            spool.create(input).unwrap(),
+            NativeAgentSpoolCreate::Created
+        );
+        assert_eq!(
+            spool.install_workdir(input, workdir).unwrap(),
+            NativeWorkdirInstall::Created
+        );
     }
 
     fn create_run(store: &SqliteAgentStore, input: &NativeAgentInput, timeout_seconds: u64) {
@@ -798,7 +826,7 @@ mod tests {
             frozen_policy,
         )
         .unwrap();
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
         let sqlite_store =
             Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());
@@ -931,7 +959,12 @@ mod tests {
             request.params.extra.get("parallel_tool_calls"),
             Some(&serde_json::Value::Bool(false))
         );
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
+        let moved_workdir = root.path().join("admitted-workspace");
+        std::fs::rename(&workdir_path, &moved_workdir).unwrap();
+        std::fs::create_dir(&workdir_path).unwrap();
+        std::fs::write(workdir_path.join("note.txt"), "replacement evidence\n").unwrap();
+        drop(workdir);
 
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
         let sqlite_store =
@@ -982,6 +1015,21 @@ mod tests {
             spool.read(RUN_ID, WORKER_ID),
             Err(NativeAgentSpoolError::NotFound)
         ));
+        let requests = server.received_requests().await.unwrap();
+        let model_bodies = requests
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body))
+            .collect::<Vec<_>>();
+        assert!(
+            model_bodies
+                .iter()
+                .any(|body| body.contains("workspace evidence"))
+        );
+        assert!(
+            !model_bodies
+                .iter()
+                .any(|body| body.contains("replacement evidence"))
+        );
 
         let publisher = components
             .completion_publisher(
@@ -1030,7 +1078,7 @@ mod tests {
         let spool_root = root.path().join("native-input");
         let spool = NativeAgentInputSpool::open(&spool_root, OWNER).unwrap();
         let input = input(&service, &workdir);
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
         std::fs::write(
             only_input_path(&spool_root),
             br#"{"prompt":"TEST_MALFORMED_BODY_CANARY""#,
@@ -1099,7 +1147,7 @@ mod tests {
             frozen_policy,
         )
         .unwrap();
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
         let store = Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());
         create_run(store.as_ref(), &input, 1);
@@ -1150,7 +1198,7 @@ mod tests {
         let (service, paths) = service(&root, &server);
         let spool = NativeAgentInputSpool::open(root.path().join("native-input"), OWNER).unwrap();
         let input = input(&service, &workdir);
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
         let store = Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());
         create_run(store.as_ref(), &input, 30);
@@ -1209,7 +1257,7 @@ mod tests {
         let (service, paths) = service(&root, &server);
         let spool = NativeAgentInputSpool::open(root.path().join("native-input"), OWNER).unwrap();
         let input = input(&service, &workdir);
-        spool.create(&input).unwrap();
+        create_input(&spool, &input, &workdir);
         let messages = MessageComponents::open(&paths, OWNER).unwrap();
         std::fs::remove_file(paths.message_db_path()).unwrap();
         let store = Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());

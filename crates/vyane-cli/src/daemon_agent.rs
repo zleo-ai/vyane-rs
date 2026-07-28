@@ -41,7 +41,9 @@ use crate::daemon::DaemonHttpState;
 use crate::native_agent::{
     FreshNativeAgentOperation, NativeSubmissionDetails, native_input_for_submission,
 };
-use crate::native_agent_spool::{NativeAgentInput, NativeAgentInputSpool, NativeAgentSpoolCreate};
+use crate::native_agent_spool::{
+    NativeAgentInput, NativeAgentInputSpool, NativeAgentSpoolCreate, NativeWorkdirInstall,
+};
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
 use vyane_harness::native::NativeReadPolicy;
@@ -124,6 +126,7 @@ pub(crate) struct DaemonAgentHost {
     native_controller: Arc<dyn AgentControllerAdapter>,
     submissions: Arc<SubmissionGate>,
     cancel_gate: Arc<Mutex<()>>,
+    native_submit_gate: Arc<Mutex<()>>,
     cancel_owner: Arc<str>,
 }
 
@@ -305,6 +308,7 @@ impl DaemonAgentHost {
                 native_controller,
                 submissions: Arc::new(SubmissionGate::new()),
                 cancel_gate: Arc::new(Mutex::new(())),
+                native_submit_gate: Arc::new(Mutex::new(())),
                 cancel_owner: Arc::from(format!("agent-cancel-{instance_key}")),
             },
             supervisor,
@@ -462,6 +466,7 @@ impl DaemonAgentHost {
         request: AgentRunSubmitRequest,
         timeout_seconds: u64,
     ) -> Result<AgentRunView, AgentApiError> {
+        let _native_submit_guard = self.native_submit_gate.lock().await;
         if request.sandbox != AgentSpoolSandbox::ReadOnly {
             return Err(AgentApiError::bad_request());
         }
@@ -500,7 +505,16 @@ impl DaemonAgentHost {
         .map_err(|_| AgentApiError::bad_request())?;
         if let Some(existing) = self.find_record(run_id.clone()).await? {
             return if exact_native_retry(&existing, &input) {
-                self.view(existing).await
+                if existing.state.is_terminal() {
+                    if !self.cleanup_terminal_native_input(&existing) {
+                        return Err(AgentApiError::unavailable());
+                    }
+                    self.view(existing).await
+                } else if self.native_spool.exact_workdir(&input).is_some() {
+                    self.view(existing).await
+                } else {
+                    Err(AgentApiError::unavailable())
+                }
             } else {
                 Err(AgentApiError::conflict())
             };
@@ -509,6 +523,33 @@ impl DaemonAgentHost {
             .native_spool
             .create(&input)
             .map_err(|_| AgentApiError::unavailable())?;
+        let workdir_install = match self.native_spool.install_workdir(&input, &workdir) {
+            Ok(install) => install,
+            Err(_) => {
+                if spool_create == NativeAgentSpoolCreate::Created {
+                    let _ = self.native_spool.remove_exact(&input);
+                }
+                return Err(AgentApiError::unavailable());
+            }
+        };
+        if !matches!(
+            (spool_create, workdir_install),
+            (
+                NativeAgentSpoolCreate::Created,
+                NativeWorkdirInstall::Created
+            ) | (
+                NativeAgentSpoolCreate::ExistingExact,
+                NativeWorkdirInstall::ExistingExact
+            )
+        ) {
+            if spool_create == NativeAgentSpoolCreate::Created {
+                let _ = self.native_spool.remove_exact(&input);
+            }
+            if workdir_install == NativeWorkdirInstall::Created {
+                let _ = self.native_spool.remove_workdir_exact(&input);
+            }
+            return Err(AgentApiError::unavailable());
+        }
         let run = NewAgentRun {
             id: run_id.clone(),
             worker_id: worker_id.clone(),
@@ -544,11 +585,15 @@ impl DaemonAgentHost {
                         self.native_spool
                             .remove_exact(&input)
                             .map_err(|_| AgentApiError::unavailable())?;
+                        if !self.native_spool.remove_workdir_exact(&input) {
+                            return Err(AgentApiError::unavailable());
+                        }
                     }
                     self.view(existing).await
                 } else {
                     if spool_create == NativeAgentSpoolCreate::Created {
                         let _ = self.native_spool.remove_exact(&input);
+                        let _ = self.native_spool.remove_workdir_exact(&input);
                     }
                     if matches!(create_error, AgentStoreError::AlreadyExists { .. }) {
                         Err(AgentApiError::conflict())
@@ -602,6 +647,9 @@ impl DaemonAgentHost {
         let _cancel_guard = self.cancel_gate.lock().await;
         let record = self.get_record(run_id.clone()).await?;
         if record.state.is_terminal() {
+            if !self.cleanup_terminal_native_input(&record) {
+                return Err(AgentApiError::unavailable());
+            }
             return self.view(record).await;
         }
         if record.state == RunState::Cancelling {
@@ -691,7 +739,30 @@ impl DaemonAgentHost {
             Some(root) => root,
             None => self.get_record(run_id).await?,
         };
+        if !self.cleanup_terminal_native_input(&root) {
+            return Err(AgentApiError::unavailable());
+        }
         self.view(root).await
+    }
+
+    fn cleanup_terminal_native_input(&self, record: &AgentRunRecord) -> bool {
+        if record.execution_backend != ExecutionBackend::NativeInProcess
+            || !record.state.is_terminal()
+        {
+            return true;
+        }
+        match self.native_spool.read(&record.id, &record.worker_id) {
+            Ok(input) if exact_native_retry(record, &input) => {
+                if self.native_spool.remove_exact(&input).is_err() {
+                    return false;
+                }
+                self.native_spool.remove_workdir_exact(&input)
+            }
+            Err(crate::native_agent_spool::NativeAgentSpoolError::NotFound) => self
+                .native_spool
+                .remove_workdir_pending(&record.id, &record.worker_id, &record.policy_digest),
+            Ok(_) | Err(_) => false,
+        }
     }
 
     async fn get_record(&self, run_id: String) -> Result<AgentRunRecord, AgentApiError> {

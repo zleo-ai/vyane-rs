@@ -212,6 +212,8 @@ impl ToolContext {
     pub async fn wait_for_blocking_quiescence(&self) {
         loop {
             let changed = self.blocking_activity.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             if self.blocking_activity.active.load(Ordering::Acquire) == 0 {
                 return;
             }

@@ -224,6 +224,7 @@ impl CompiledReadPolicy {
                 || raw.len() > MAX_EXCLUDED_PATTERN_BYTES
                 || total_bytes > MAX_EXCLUDED_TOTAL_BYTES
                 || raw.contains('\0')
+                || raw.contains('\\')
                 || pattern.starts_with('/')
                 || pattern.ends_with('/')
                 || pattern.contains("//")
