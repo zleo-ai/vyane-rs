@@ -54,6 +54,35 @@ struct MutatingAuthority {
     content: &'static str,
 }
 
+struct ReplacingParentAuthority {
+    original: std::path::PathBuf,
+    moved: std::path::PathBuf,
+    replaced: Mutex<bool>,
+}
+
+#[async_trait]
+impl NativeExecutionAuthority for ReplacingParentAuthority {
+    async fn revalidate(&self, _effect: NativeSideEffect) -> vyane_core::Result<()> {
+        let mut replaced = self.replaced.lock().expect("replacement lock");
+        if !*replaced
+            && std::fs::read_dir(&self.original)
+                .expect("parent entries")
+                .any(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".vyane-write-")
+                })
+        {
+            std::fs::rename(&self.original, &self.moved).expect("move staged parent");
+            std::fs::create_dir(&self.original).expect("replacement parent");
+            *replaced = true;
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl NativeExecutionAuthority for MutatingAuthority {
     async fn revalidate(&self, effect: NativeSideEffect) -> vyane_core::Result<()> {
@@ -641,13 +670,14 @@ async fn write_file_atomically_creates_but_never_overwrites() {
 
 #[tokio::test]
 async fn edit_file_composes_guarded_text_edit_and_preserves_mode() {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
     let root = tempdir().expect("root");
     let path = root.path().join("script.sh");
     std::fs::write(&path, "echo old\n").expect("seed");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o7750))
         .expect("executable with special bits");
+    let original_metadata = std::fs::metadata(&path).expect("original metadata");
     let registry = workspace_tool_registry_with_policy(
         NativeReadPolicy::workspace(),
         Some(NativeWritePolicy::workspace()),
@@ -678,14 +708,10 @@ async fn edit_file_composes_guarded_text_edit_and_preserves_mode() {
         std::fs::read_to_string(&path).expect("edited"),
         "echo new\n"
     );
-    assert_eq!(
-        std::fs::metadata(&path)
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o7777,
-        0o7750
-    );
+    let edited_metadata = std::fs::metadata(&path).expect("edited metadata");
+    assert_eq!(edited_metadata.permissions().mode() & 0o7777, 0o7750);
+    assert_eq!(edited_metadata.uid(), original_metadata.uid());
+    assert_eq!(edited_metadata.gid(), original_metadata.gid());
 }
 
 #[tokio::test]
@@ -728,6 +754,87 @@ async fn write_file_does_not_require_directory_read_permission() {
         std::fs::read_to_string(directory.join("created.txt")).expect("created"),
         "created\n"
     );
+}
+
+#[tokio::test]
+async fn write_and_edit_reject_parent_replacement_before_publication() {
+    let root = tempdir().expect("root");
+    let registry = workspace_tool_registry_with_policy(
+        NativeReadPolicy::workspace(),
+        Some(NativeWritePolicy::workspace()),
+    )
+    .expect("registry");
+    let policy = workspace_permission_policy(true).expect("policy");
+
+    let write_parent = root.path().join("write-parent");
+    let moved_write_parent = root.path().join("moved-write-parent");
+    std::fs::create_dir(&write_parent).expect("write parent");
+    let write = registry
+        .execute_authorized(
+            call(
+                "write_file",
+                args(&[
+                    ("path", json!("write-parent/created.txt")),
+                    ("content", json!("created\n")),
+                ]),
+            ),
+            &context(root.path()),
+            &policy,
+            &ReplacingParentAuthority {
+                original: write_parent.clone(),
+                moved: moved_write_parent.clone(),
+                replaced: Mutex::new(false),
+            },
+            10,
+            3,
+        )
+        .await
+        .expect("write result");
+    assert_eq!(write.status, ToolInvocationStatus::ToolError);
+    assert!(!write_parent.join("created.txt").exists());
+    assert!(!moved_write_parent.join("created.txt").exists());
+
+    let edit_parent = root.path().join("edit-parent");
+    let moved_edit_parent = root.path().join("moved-edit-parent");
+    std::fs::create_dir(&edit_parent).expect("edit parent");
+    std::fs::write(edit_parent.join("note.txt"), "old\n").expect("source");
+    let edit = registry
+        .execute_authorized(
+            call(
+                "edit_file",
+                args(&[
+                    ("path", json!("edit-parent/note.txt")),
+                    ("old_string", json!("old")),
+                    ("new_string", json!("new")),
+                ]),
+            ),
+            &context(root.path()),
+            &policy,
+            &ReplacingParentAuthority {
+                original: edit_parent.clone(),
+                moved: moved_edit_parent.clone(),
+                replaced: Mutex::new(false),
+            },
+            10,
+            4,
+        )
+        .await
+        .expect("edit result");
+    assert_eq!(edit.status, ToolInvocationStatus::ToolError);
+    assert!(!edit_parent.join("note.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(moved_edit_parent.join("note.txt")).expect("unchanged source"),
+        "old\n"
+    );
+    for directory in [&moved_write_parent, &moved_edit_parent] {
+        assert!(std::fs::read_dir(directory).expect("entries").all(|entry| {
+            !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".vyane-write-")
+        }));
+    }
 }
 
 #[tokio::test]

@@ -29,7 +29,7 @@ use vyane_core::{
 };
 
 #[cfg(target_os = "linux")]
-use super::{EditRequest, compute_edit};
+use super::{EditError, EditRequest, compute_edit_bounded};
 use super::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, PermissionEffect, PermissionPolicy, PermissionRule,
     PermissionRuleError, ToolContext, ToolError, ToolRegistry, ToolRegistryError,
@@ -972,6 +972,8 @@ struct FileSnapshot {
     inode: u64,
     size: u64,
     mode: u32,
+    uid: u32,
+    gid: u32,
     modified_seconds: i64,
     modified_nanoseconds: i64,
     changed_seconds: i64,
@@ -994,10 +996,53 @@ impl FileSnapshot {
             inode: metadata.ino(),
             size: metadata.size(),
             mode: metadata.mode() & 0o7777,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
             modified_seconds: metadata.mtime(),
             modified_nanoseconds: metadata.mtime_nsec(),
             changed_seconds: metadata.ctime(),
             changed_nanoseconds: metadata.ctime_nsec(),
+        })
+    }
+
+    fn preservation(self) -> FilePreservation {
+        FilePreservation {
+            mode: self.mode,
+            uid: self.uid,
+            gid: self.gid,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FilePreservation {
+    mode: u32,
+    uid: u32,
+    gid: u32,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectorySnapshot {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl DirectorySnapshot {
+    fn from_file(file: &File) -> Result<Self, ToolError> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = file
+            .metadata()
+            .map_err(|_| ToolError::new("could not inspect workspace directory"))?;
+        if !metadata.is_dir() {
+            return Err(ToolError::new("workspace parent is not a directory"));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
         })
     }
 }
@@ -1064,6 +1109,10 @@ async fn write_new_file(
             Ok(parent) => parent,
             Err(error) => return Ok(Err(error)),
         };
+    let parent_snapshot = match directory_snapshot(&parent, context).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(Err(error)),
+    };
     authority.revalidate(effect).await?;
     let staged = match stage_content(parent, name, content.to_vec(), None, context).await {
         Ok(staged) => staged,
@@ -1071,6 +1120,12 @@ async fn write_new_file(
     };
     if context.cancellation_token().is_cancelled() {
         return Ok(Err(ToolError::new("file write cancelled")));
+    }
+    match reopen_unchanged_parent(pinned, parents, parent_snapshot, context, authority, effect)
+        .await?
+    {
+        Ok(_) => {}
+        Err(error) => return Ok(Err(error)),
     }
     authority.revalidate(effect).await?;
     if context.cancellation_token().is_cancelled() {
@@ -1117,19 +1172,28 @@ async fn edit_existing_file(
             Ok(parent) => parent,
             Err(error) => return Ok(Err(error)),
         };
+    let parent_snapshot = match directory_snapshot(&parent, context).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(Err(error)),
+    };
     let (original, original_snapshot) =
         match read_regular_from_parent(&parent, name, context, authority, effect).await? {
             Ok(source) => source,
             Err(error) => return Ok(Err(error)),
         };
-    let outcome = match compute_edit(&EditRequest {
-        content: &original,
-        old_string,
-        new_string,
-        replace_all,
-    }) {
-        Ok(outcome) if outcome.new_content.len() <= MAX_WRITE_BYTES => outcome,
-        Ok(_) => return Ok(Err(ToolError::new("edited file exceeds the write limit"))),
+    let outcome = match compute_edit_bounded(
+        &EditRequest {
+            content: &original,
+            old_string,
+            new_string,
+            replace_all,
+        },
+        MAX_WRITE_BYTES,
+    ) {
+        Ok(outcome) => outcome,
+        Err(EditError::OutputTooLarge { .. }) => {
+            return Ok(Err(ToolError::new("edited file exceeds the write limit")));
+        }
         Err(error) => return Ok(Err(ToolError::new(error.to_string()))),
     };
 
@@ -1146,7 +1210,7 @@ async fn edit_existing_file(
         staging_parent,
         name,
         outcome.new_content.as_bytes().to_vec(),
-        Some(original_snapshot.mode),
+        Some(original_snapshot.preservation()),
         context,
     )
     .await
@@ -1158,14 +1222,22 @@ async fn edit_existing_file(
         return Ok(Err(ToolError::new("file edit cancelled")));
     }
 
-    let current = match read_regular_from_parent(&parent, name, context, authority, effect).await? {
-        Ok(current) => current,
-        Err(_) => {
-            return Ok(Err(ToolError::new(
-                "workspace file changed before edit publication",
-            )));
-        }
-    };
+    let current_parent =
+        match reopen_unchanged_parent(pinned, parents, parent_snapshot, context, authority, effect)
+            .await?
+        {
+            Ok(parent) => parent,
+            Err(error) => return Ok(Err(error)),
+        };
+    let current =
+        match read_regular_from_parent(&current_parent, name, context, authority, effect).await? {
+            Ok(current) => current,
+            Err(_) => {
+                return Ok(Err(ToolError::new(
+                    "workspace file changed before edit publication",
+                )));
+            }
+        };
     if current.1 != original_snapshot || current.0 != original {
         return Ok(Err(ToolError::new(
             "workspace file changed before edit publication",
@@ -1277,12 +1349,12 @@ async fn stage_content(
     parent: File,
     target: &OsString,
     content: Vec<u8>,
-    preserved_mode: Option<u32>,
+    preservation: Option<FilePreservation>,
     context: &ToolContext,
 ) -> Result<StagedFile, ToolError> {
     let target = target.clone();
     tracked_blocking(context, move || {
-        stage_content_blocking(parent, &target, &content, preserved_mode)
+        stage_content_blocking(parent, &target, &content, preservation)
     })
     .await
     .map_err(|_| ToolError::new("could not stage workspace file"))?
@@ -1293,10 +1365,10 @@ fn stage_content_blocking(
     parent: File,
     target: &OsString,
     content: &[u8],
-    preserved_mode: Option<u32>,
+    preservation: Option<FilePreservation>,
 ) -> Result<StagedFile, ToolError> {
     use rustix::fs::{Mode, OFlags, openat2};
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
     for _ in 0..16 {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -1311,7 +1383,7 @@ fn stage_content_blocking(
             &parent,
             &name,
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::from_bits_retain(preserved_mode.unwrap_or(0o666)),
+            Mode::from_bits_retain(if preservation.is_some() { 0o600 } else { 0o666 }),
             confined_resolution(),
         ) {
             Ok(descriptor) => descriptor,
@@ -1326,8 +1398,16 @@ fn stage_content_blocking(
         };
         file.write_all(content)
             .map_err(|_| ToolError::new("could not stage workspace file"))?;
-        if let Some(mode) = preserved_mode {
-            file.set_permissions(std::fs::Permissions::from_mode(mode))
+        if let Some(preservation) = preservation {
+            let metadata = file
+                .metadata()
+                .map_err(|_| ToolError::new("could not inspect staged workspace file"))?;
+            if metadata.uid() != preservation.uid || metadata.gid() != preservation.gid {
+                return Err(ToolError::new(
+                    "could not preserve workspace file ownership",
+                ));
+            }
+            file.set_permissions(std::fs::Permissions::from_mode(preservation.mode))
                 .map_err(|_| ToolError::new("could not stage workspace file"))?;
         }
         file.sync_all()
@@ -1337,6 +1417,45 @@ fn stage_content_blocking(
     Err(ToolError::new(
         "could not allocate a temporary workspace file",
     ))
+}
+
+#[cfg(target_os = "linux")]
+async fn reopen_unchanged_parent(
+    pinned: &PinnedWorkdir,
+    components: &[OsString],
+    expected: DirectorySnapshot,
+    context: &ToolContext,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+) -> VyaneResult<Result<File, ToolError>> {
+    let parent =
+        match open_directory_components(pinned, components, context, authority, effect).await? {
+            Ok(parent) => parent,
+            Err(_) => {
+                return Ok(Err(ToolError::new(
+                    "workspace parent changed before publication",
+                )));
+            }
+        };
+    match directory_snapshot(&parent, context).await {
+        Ok(observed) if observed == expected => Ok(Ok(parent)),
+        Ok(_) | Err(_) => Ok(Err(ToolError::new(
+            "workspace parent changed before publication",
+        ))),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn directory_snapshot(
+    directory: &File,
+    context: &ToolContext,
+) -> Result<DirectorySnapshot, ToolError> {
+    let directory = directory
+        .try_clone()
+        .map_err(|_| ToolError::new("could not duplicate workspace directory"))?;
+    tracked_blocking(context, move || DirectorySnapshot::from_file(&directory))
+        .await
+        .map_err(|_| ToolError::new("could not inspect workspace directory"))?
 }
 
 #[cfg(target_os = "linux")]
@@ -1708,10 +1827,14 @@ fn read_utf8_bounded_blocking(file: &mut File) -> Result<String, ToolError> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
-        CompiledPathPolicy, MAX_PATH_COMPONENTS, MAX_TOOL_OUTPUT_CHARS, NativeReadPolicy,
-        SEARCH_OUTPUT_LIMIT_MARKER, append_search_match, checked_components, directory_entries,
+        CompiledPathPolicy, FilePreservation, MAX_PATH_COMPONENTS, MAX_TOOL_OUTPUT_CHARS,
+        NativeReadPolicy, SEARCH_OUTPUT_LIMIT_MARKER, append_search_match, checked_components,
+        directory_entries, stage_content_blocking,
     };
     use crate::native::ToolContext;
+    use std::ffi::OsString;
+    use std::fs::File;
+    use std::os::unix::fs::MetadataExt as _;
 
     #[tokio::test]
     async fn directory_enumeration_enforces_the_raw_entry_budget() {
@@ -1777,6 +1900,36 @@ mod tests {
                 .expect_err("over-deep path")
                 .to_string(),
             "path exceeds the component limit"
+        );
+    }
+
+    #[test]
+    fn staged_edit_rejects_ownership_drift_before_restoring_special_bits() {
+        let root = tempfile::tempdir().expect("root");
+        let parent = File::open(root.path()).expect("parent");
+        let metadata = parent.metadata().expect("metadata");
+        let preservation = FilePreservation {
+            mode: 0o4755,
+            uid: metadata.uid().wrapping_add(1),
+            gid: metadata.gid(),
+        };
+
+        let result = stage_content_blocking(
+            parent,
+            &OsString::from("target"),
+            b"replacement",
+            Some(preservation),
+        );
+
+        assert!(result.is_err());
+        assert!(
+            std::fs::read_dir(root.path())
+                .expect("entries")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".vyane-write-"))
         );
     }
 }

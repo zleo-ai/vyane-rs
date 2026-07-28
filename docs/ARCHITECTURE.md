@@ -276,7 +276,12 @@ New files are staged under the exact opened parent, their complete content is
 synced, and they are then published with `RENAME_NOREPLACE`. Existing-file
 edits compose the pure guarded text
 edit with a source identity/timestamp snapshot and a final byte-for-byte
-reread. Drift, ambiguity, cancellation, or authority revocation before the
+reread. Replacement size is checked with overflow-safe arithmetic before the
+complete output is allocated. The parent path is reopened from the pinned root
+and its device/inode identity is compared immediately before publication.
+Edits also require the staged inode to retain the source uid/gid before final
+mode bits, including set-ID bits, are restored. Drift, ambiguity, cancellation,
+ownership mismatch, parent replacement, or authority revocation before the
 last publication check removes the stage and leaves the target unchanged.
 The final same-directory rename is atomic. Linux has no
 rename-if-target-inode-is-unchanged primitive, so this contract does not claim

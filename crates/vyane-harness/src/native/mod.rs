@@ -23,7 +23,8 @@ pub use permissions::{
     PermissionRuleError, protected_paths_policy, risky_operations_policy,
 };
 pub use text_edit::{
-    EditError, EditOutcome, EditRequest, MatchPass, MatchSearch, ReplacedSpan, compute_edit, locate,
+    EditError, EditOutcome, EditRequest, MatchPass, MatchSearch, ReplacedSpan, compute_edit,
+    compute_edit_bounded, locate,
 };
 pub use tools::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, ToolCall, ToolCallLimits, ToolContext, ToolContextError,

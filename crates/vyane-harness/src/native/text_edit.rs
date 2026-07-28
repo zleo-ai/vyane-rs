@@ -193,6 +193,12 @@ pub enum EditError {
     /// nothing.
     #[error("old_string and new_string are identical; edit would change nothing")]
     NoOpEdit,
+    /// The complete replacement would exceed a caller-supplied output bound.
+    #[error("edited content exceeds the output limit of {limit} bytes")]
+    OutputTooLarge {
+        /// Maximum complete output size accepted by the caller.
+        limit: usize,
+    },
 }
 
 /// Resolve one search/replace edit into new content, or a structured error.
@@ -236,6 +242,21 @@ pub enum EditError {
 /// assert_eq!(ambiguous, Err(EditError::NotUnique { count: 2 }));
 /// ```
 pub fn compute_edit(request: &EditRequest<'_>) -> Result<EditOutcome, EditError> {
+    compute_edit_inner(request, None)
+}
+
+/// Resolve one edit while refusing an oversized result before allocating it.
+pub fn compute_edit_bounded(
+    request: &EditRequest<'_>,
+    max_output_bytes: usize,
+) -> Result<EditOutcome, EditError> {
+    compute_edit_inner(request, Some(max_output_bytes))
+}
+
+fn compute_edit_inner(
+    request: &EditRequest<'_>,
+    max_output_bytes: Option<usize>,
+) -> Result<EditOutcome, EditError> {
     let EditRequest {
         content,
         old_string,
@@ -247,6 +268,7 @@ pub fn compute_edit(request: &EditRequest<'_>) -> Result<EditOutcome, EditError>
     // content. Guarded first so an empty pattern never reaches the matcher.
     if old_string.is_empty() {
         if content.is_empty() {
+            enforce_output_limit(new_string.len(), max_output_bytes)?;
             return Ok(EditOutcome {
                 new_content: new_string.to_string(),
                 replacements: 1,
@@ -275,9 +297,38 @@ pub fn compute_edit(request: &EditRequest<'_>) -> Result<EditOutcome, EditError>
             if !replace_all && spans.len() > 1 {
                 return Err(EditError::NotUnique { count: spans.len() });
             }
-            Ok(splice(content, &spans, new_string, pass))
+            let output_len = replacement_output_len(content.len(), &spans, new_string.len())
+                .ok_or(EditError::OutputTooLarge {
+                    limit: max_output_bytes.unwrap_or(usize::MAX),
+                })?;
+            enforce_output_limit(output_len, max_output_bytes)?;
+            Ok(splice(content, &spans, new_string, pass, output_len))
         }
     }
+}
+
+fn enforce_output_limit(
+    output_len: usize,
+    max_output_bytes: Option<usize>,
+) -> Result<(), EditError> {
+    if let Some(limit) = max_output_bytes
+        && output_len > limit
+    {
+        return Err(EditError::OutputTooLarge { limit });
+    }
+    Ok(())
+}
+
+fn replacement_output_len(
+    content_len: usize,
+    spans: &[Range<usize>],
+    replacement_len: usize,
+) -> Option<usize> {
+    let removed = spans
+        .iter()
+        .try_fold(0usize, |total, span| total.checked_add(span.len()))?;
+    let inserted = replacement_len.checked_mul(spans.len())?;
+    content_len.checked_sub(removed)?.checked_add(inserted)
 }
 
 /// Run the strictness ladder and report the winning pass with every
@@ -389,8 +440,14 @@ fn try_pass(pass: MatchPass, content: &str, old_string: &str) -> PassResult {
 /// Spans arrive ascending and non-overlapping from [`locate`]. Every span
 /// boundary is an offset-map value, so it always lands on a UTF-8 character
 /// boundary and the result is valid UTF-8 by construction.
-fn splice(content: &str, spans: &[Range<usize>], new_string: &str, pass: MatchPass) -> EditOutcome {
-    let mut new_content = String::with_capacity(content.len());
+fn splice(
+    content: &str,
+    spans: &[Range<usize>],
+    new_string: &str,
+    pass: MatchPass,
+    output_len: usize,
+) -> EditOutcome {
+    let mut new_content = String::with_capacity(output_len);
     let mut replaced = Vec::with_capacity(spans.len());
     let mut cursor = 0;
     for span in spans {
