@@ -12,7 +12,7 @@ use vyane_core::{
 use vyane_harness::native::{
     NativeReadPolicy, PermissionEffect, PermissionPolicy, ToolCall, ToolContext,
     ToolInvocationStatus, read_only_permission_policy, read_only_tool_definitions,
-    read_only_tool_registry, read_only_tool_registry_with_policy,
+    read_only_tool_registry, read_only_tool_registry_with_policy, validate_read_only_host,
 };
 
 #[derive(Default)]
@@ -48,6 +48,13 @@ impl NativeExecutionAuthority for RecordingAuthority {
 
 fn context(root: &std::path::Path) -> ToolContext {
     ToolContext::from_pinned_workdir(PinnedWorkdir::open(root).expect("pin workdir"))
+}
+
+#[test]
+fn admitted_host_supports_the_required_openat2_confinement() {
+    let root = tempdir().expect("root");
+    let pinned = PinnedWorkdir::open(root.path()).expect("pin workdir");
+    validate_read_only_host(&pinned).expect("openat2 confinement");
 }
 
 fn call(name: &str, arguments: BTreeMap<String, serde_json::Value>) -> ToolCall {
@@ -403,6 +410,7 @@ fn malformed_or_unbounded_exclusions_are_rejected() {
         "/absolute",
         "private/",
         "private//nested",
+        "private/./nested",
         r"private\",
         "[",
     ] {

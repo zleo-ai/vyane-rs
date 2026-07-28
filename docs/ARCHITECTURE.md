@@ -259,10 +259,15 @@ are never enumerated, and the bounded regular-file set is globally path-sorted
 before search accumulation capped at the model-facing output budget. Blocking
 filesystem opens, metadata reads, enumeration and content reads run on Tokio's
 blocking pool so the async timeout/cancellation path remains pollable. Native
-OpenAI-compatible requests force `parallel_tool_calls=false` because the driver
-serializes one call per turn. Read, write, command, command-network and
-web-search permissions remain separate axes rather than one expanding "full"
-boolean.
+admission first probes the exact `openat2` flags against the pinned root.
+Blocking closures carry shared activity guards: dropping a join future does not
+erase active work, and the native operation waits for the activity count to
+reach zero before it can return a quiesced settlement. If the service hard
+deadline drops the operation first, it does not settle or delete the recovery
+input. Native OpenAI-compatible requests force `parallel_tool_calls=false`
+because the driver serializes one call per turn. Read, write, command,
+command-network and web-search permissions remain separate axes rather than one
+expanding "full" boolean.
 This remains narrower than a general `Harness`: it provides no
 write/edit, command/network, child-process host sandbox, session/domain
 authority, checkpoint/session-commit consumer, approval resume, or native

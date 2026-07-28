@@ -76,6 +76,44 @@ pub enum NativeReadPolicyError {
     InvalidPattern,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NativeReadHostError {
+    #[error("native read tools require Linux openat2 confinement")]
+    Unsupported,
+}
+
+/// Prove that the admitted workdir supports the exact `openat2` confinement
+/// used by the production read tools. Native submission calls this before any
+/// model request so an unsupported kernel or seccomp profile fails closed.
+#[cfg(target_os = "linux")]
+pub fn validate_read_only_host(pinned: &PinnedWorkdir) -> Result<(), NativeReadHostError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    use rustix::fs::{Mode, OFlags, openat2};
+
+    let fd = openat2(
+        pinned.handle(),
+        ".",
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        confined_resolution(),
+    )
+    .map_err(|_| NativeReadHostError::Unsupported)?;
+    let directory = File::from(fd);
+    let metadata = directory
+        .metadata()
+        .map_err(|_| NativeReadHostError::Unsupported)?;
+    if !metadata.is_dir() || metadata.dev() != pinned.identity().device {
+        return Err(NativeReadHostError::Unsupported);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn validate_read_only_host(_pinned: &PinnedWorkdir) -> Result<(), NativeReadHostError> {
+    Err(NativeReadHostError::Unsupported)
+}
+
 /// Deterministic definitions advertised by the production read-only native lane.
 pub fn read_only_tool_definitions() -> Vec<ToolDefinition> {
     vec![
@@ -189,6 +227,9 @@ impl CompiledReadPolicy {
                 || pattern.starts_with('/')
                 || pattern.ends_with('/')
                 || pattern.contains("//")
+                || pattern
+                    .split('/')
+                    .any(|component| component == "." || component == "..")
                 || Path::new(&pattern)
                     .components()
                     .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
@@ -276,11 +317,12 @@ impl NativeTool for ReadFileTool {
             }
             Err(error) => return Ok(Err(error)),
         };
-        let file = match open_regular_components(pinned, &components, authority, effect).await? {
-            Ok(file) => file,
-            Err(error) => return Ok(Err(error)),
-        };
-        Ok(read_utf8_bounded(file).await)
+        let file =
+            match open_regular_components(pinned, &components, context, authority, effect).await? {
+                Ok(file) => file,
+                Err(error) => return Ok(Err(error)),
+            };
+        Ok(read_utf8_bounded(file, context).await)
     }
 }
 
@@ -359,15 +401,17 @@ impl NativeTool for SearchFilesTool {
             if context.cancellation_token().is_cancelled() {
                 return Ok(Err(ToolError::new("search cancelled")));
             }
-            let dir = match open_directory_components(pinned, &directory, authority, effect).await?
-            {
-                Ok(dir) => dir,
-                Err(error) => return Ok(Err(error)),
-            };
+            let dir =
+                match open_directory_components(pinned, &directory, context, authority, effect)
+                    .await?
+                {
+                    Ok(dir) => dir,
+                    Err(error) => return Ok(Err(error)),
+                };
             authority.revalidate(effect).await?;
             let remaining_entries = MAX_SEARCH_ENTRIES - visited_entries;
             let (mut entries, observed_entries) =
-                match directory_entries(dir, remaining_entries).await {
+                match directory_entries(dir, remaining_entries, context).await {
                     Ok(entries) => entries,
                     Err(error) => return Ok(Err(error)),
                 };
@@ -380,7 +424,7 @@ impl NativeTool for SearchFilesTool {
                 if !self.policy.allows(&relative) {
                     continue;
                 }
-                match open_entry(pinned, &relative, authority, effect).await? {
+                match open_entry(pinned, &relative, context, authority, effect).await? {
                     Ok(OpenedEntry::Directory) if depth < MAX_SEARCH_DEPTH => {
                         child_directories.push(relative);
                     }
@@ -413,11 +457,13 @@ impl NativeTool for SearchFilesTool {
             if context.cancellation_token().is_cancelled() {
                 return Ok(Err(ToolError::new("search cancelled")));
             }
-            let file = match open_regular_components(pinned, &relative, authority, effect).await? {
+            let file = match open_regular_components(pinned, &relative, context, authority, effect)
+                .await?
+            {
                 Ok(file) => file,
                 Err(_) => continue,
             };
-            let text = match read_utf8_bounded(file).await {
+            let text = match read_utf8_bounded(file, context).await {
                 Ok(text) => text,
                 Err(_) => continue,
             };
@@ -565,11 +611,12 @@ fn checked_components(path: &str, allow_root: bool) -> Result<Vec<OsString>, Too
 async fn open_regular_components(
     pinned: &PinnedWorkdir,
     components: &[OsString],
+    context: &ToolContext,
     authority: &dyn NativeExecutionAuthority,
     effect: NativeSideEffect,
 ) -> VyaneResult<Result<File, ToolError>> {
     Ok(
-        match open_entry(pinned, components, authority, effect).await? {
+        match open_entry(pinned, components, context, authority, effect).await? {
             Ok(OpenedEntry::Regular(file)) => Ok(file),
             Ok(OpenedEntry::Directory | OpenedEntry::Other) => {
                 Err(ToolError::new("requested path is not a regular file"))
@@ -583,6 +630,7 @@ async fn open_regular_components(
 async fn open_regular_components(
     _pinned: &PinnedWorkdir,
     _components: &[OsString],
+    _context: &ToolContext,
     _authority: &dyn NativeExecutionAuthority,
     _effect: NativeSideEffect,
 ) -> VyaneResult<Result<File, ToolError>> {
@@ -605,6 +653,7 @@ enum OpenedEntry {
 async fn open_entry(
     pinned: &PinnedWorkdir,
     components: &[OsString],
+    context: &ToolContext,
     authority: &dyn NativeExecutionAuthority,
     effect: NativeSideEffect,
 ) -> VyaneResult<Result<OpenedEntry, ToolError>> {
@@ -612,32 +661,34 @@ async fn open_entry(
         Some(parts) => parts,
         None => return Ok(Err(ToolError::new("file path must not be empty"))),
     };
-    let directory = match open_directory_components(pinned, parents, authority, effect).await? {
-        Ok(directory) => directory,
-        Err(error) => return Ok(Err(error)),
-    };
+    let directory =
+        match open_directory_components(pinned, parents, context, authority, effect).await? {
+            Ok(directory) => directory,
+            Err(error) => return Ok(Err(error)),
+        };
     authority.revalidate(effect).await?;
     let name = name.clone();
     let expected_device = pinned.identity().device;
-    let inspected =
-        match tokio::task::spawn_blocking(move || inspect_entry(directory, &name, expected_device))
-            .await
-        {
-            Ok(Ok(inspected)) => inspected,
-            Ok(Err(error)) => return Ok(Err(error)),
-            Err(_) => {
-                return Ok(Err(ToolError::new(
-                    "could not inspect requested workspace entry",
-                )));
-            }
-        };
+    let inspected = match tracked_blocking(context, move || {
+        inspect_entry(directory, &name, expected_device)
+    })
+    .await
+    {
+        Ok(Ok(inspected)) => inspected,
+        Ok(Err(error)) => return Ok(Err(error)),
+        Err(_) => {
+            return Ok(Err(ToolError::new(
+                "could not inspect requested workspace entry",
+            )));
+        }
+    };
     Ok(Ok(match inspected {
         InspectedEntry::Regular(file) => {
             // O_PATH cannot read file content. Revalidate at the actual read-open
             // boundary, then reopen this exact stable object through procfs rather
             // than resolving the model-provided pathname again.
             authority.revalidate(effect).await?;
-            let readable = match tokio::task::spawn_blocking(move || reopen_for_read(&file)).await {
+            let readable = match tracked_blocking(context, move || reopen_for_read(&file)).await {
                 Ok(Ok(readable)) => readable,
                 Ok(Err(())) | Err(_) => {
                     return Ok(Err(ToolError::new(
@@ -707,6 +758,7 @@ fn reopen_for_read(file: &File) -> Result<File, ()> {
 async fn open_entry(
     _pinned: &PinnedWorkdir,
     _components: &[OsString],
+    _context: &ToolContext,
     _authority: &dyn NativeExecutionAuthority,
     _effect: NativeSideEffect,
 ) -> VyaneResult<Result<OpenedEntry, ToolError>> {
@@ -719,6 +771,7 @@ async fn open_entry(
 async fn open_directory_components(
     pinned: &PinnedWorkdir,
     components: &[OsString],
+    context: &ToolContext,
     authority: &dyn NativeExecutionAuthority,
     effect: NativeSideEffect,
 ) -> VyaneResult<Result<File, ToolError>> {
@@ -734,7 +787,7 @@ async fn open_directory_components(
         authority.revalidate(effect).await?;
         let component = component.clone();
         let expected_device = pinned.identity().device;
-        directory = match tokio::task::spawn_blocking(move || {
+        directory = match tracked_blocking(context, move || {
             open_directory_component(directory, &component, expected_device)
         })
         .await
@@ -795,6 +848,7 @@ fn confined_resolution() -> rustix::fs::ResolveFlags {
 async fn open_directory_components(
     _pinned: &PinnedWorkdir,
     _components: &[OsString],
+    _context: &ToolContext,
     _authority: &dyn NativeExecutionAuthority,
     _effect: NativeSideEffect,
 ) -> VyaneResult<Result<File, ToolError>> {
@@ -812,10 +866,13 @@ async fn open_directory_components(
 async fn directory_entries(
     directory: File,
     remaining: usize,
+    context: &ToolContext,
 ) -> Result<(Vec<OsString>, usize), ToolError> {
-    tokio::task::spawn_blocking(move || directory_entries_blocking(&directory, remaining))
-        .await
-        .map_err(|_| ToolError::new("could not enumerate requested workspace directory"))?
+    tracked_blocking(context, move || {
+        directory_entries_blocking(&directory, remaining)
+    })
+    .await
+    .map_err(|_| ToolError::new("could not enumerate requested workspace directory"))?
 }
 
 #[cfg(target_os = "linux")]
@@ -853,6 +910,7 @@ fn directory_entries_blocking(
 async fn directory_entries(
     _directory: File,
     _remaining: usize,
+    _context: &ToolContext,
 ) -> Result<(Vec<OsString>, usize), ToolError> {
     Err(ToolError::new(
         "trusted filesystem tools are supported only on Linux",
@@ -873,8 +931,24 @@ fn display_components(components: &[OsString]) -> String {
         .join("/")
 }
 
-async fn read_utf8_bounded(mut file: File) -> Result<String, ToolError> {
-    tokio::task::spawn_blocking(move || read_utf8_bounded_blocking(&mut file))
+async fn tracked_blocking<T, F>(
+    context: &ToolContext,
+    operation: F,
+) -> Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let activity = context.begin_blocking_activity();
+    tokio::task::spawn_blocking(move || {
+        let _activity = activity;
+        operation()
+    })
+    .await
+}
+
+async fn read_utf8_bounded(mut file: File, context: &ToolContext) -> Result<String, ToolError> {
+    tracked_blocking(context, move || read_utf8_bounded_blocking(&mut file))
         .await
         .map_err(|_| ToolError::new("could not read requested workspace file"))?
 }
@@ -898,6 +972,7 @@ mod tests {
         CompiledReadPolicy, MAX_TOOL_OUTPUT_CHARS, NativeReadPolicy, SEARCH_OUTPUT_LIMIT_MARKER,
         append_search_match, directory_entries,
     };
+    use crate::native::ToolContext;
 
     #[tokio::test]
     async fn directory_enumeration_enforces_the_raw_entry_budget() {
@@ -905,8 +980,9 @@ mod tests {
         std::fs::write(root.path().join("one"), "one").expect("one");
         std::fs::write(root.path().join("two"), "two").expect("two");
         let directory = std::fs::File::open(root.path()).expect("directory");
+        let context = ToolContext::new(root.path()).expect("context");
 
-        let error = directory_entries(directory, 1)
+        let error = directory_entries(directory, 1, &context)
             .await
             .expect_err("entry budget");
         assert_eq!(

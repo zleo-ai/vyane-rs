@@ -18,6 +18,7 @@ use vyane_core::{
 use vyane_harness::native::{
     NativeReadPolicy, NativeTurnDriver, NativeTurnLimits, NativeTurnStop, ToolContext,
     read_only_permission_policy, read_only_tool_definitions, read_only_tool_registry_with_policy,
+    validate_read_only_host,
 };
 use vyane_message::{
     EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
@@ -233,6 +234,7 @@ pub(crate) fn native_input_for_submission(
     });
     let routing_digest = endpoint_routing_digest(&endpoint.base_url)
         .map_err(|_| NativeAgentSpoolError::BindingMismatch)?;
+    validate_read_only_host(workdir).map_err(|_| NativeAgentSpoolError::UnsupportedHost)?;
     NativeAgentInput::fresh(
         owner,
         run_id,
@@ -311,6 +313,7 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         };
         if workdir.canonical_path() != input.policy.canonical_workdir
             || workdir.identity() != &input.policy.workdir_identity
+            || validate_read_only_host(&workdir).is_err()
         {
             return AgentExecutorOutcome::Unknown;
         }
@@ -359,6 +362,7 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             driver.run(request, &tool_context, &native_authority),
         )
         .await;
+        tool_context.wait_for_blocking_quiescence().await;
         drop(native_authority);
         drop(workdir);
 

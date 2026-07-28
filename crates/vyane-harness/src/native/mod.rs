@@ -30,8 +30,9 @@ pub use tools::{
     ToolError, ToolInvocation, ToolInvocationStatus, ToolRegistry, ToolRegistryError,
 };
 pub use trusted_files::{
-    NativeReadPolicy, NativeReadPolicyError, read_only_permission_policy,
+    NativeReadHostError, NativeReadPolicy, NativeReadPolicyError, read_only_permission_policy,
     read_only_tool_definitions, read_only_tool_registry, read_only_tool_registry_with_policy,
+    validate_read_only_host,
 };
 pub use turn_driver::{
     DEFAULT_NATIVE_MODEL_TURNS, MAX_NATIVE_MODEL_TURNS, NativeAssistantReply, NativeTurnDriver,

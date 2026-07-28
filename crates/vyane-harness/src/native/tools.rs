@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ use futures::FutureExt as _;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
+use tokio::sync::Notify;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use vyane_core::{
@@ -106,6 +108,25 @@ pub struct ToolContext {
     cancellation: CancellationToken,
     timeout: Option<Duration>,
     deadline: Option<Instant>,
+    blocking_activity: Arc<BlockingActivity>,
+}
+
+#[derive(Debug, Default)]
+struct BlockingActivity {
+    active: AtomicUsize,
+    changed: Notify,
+}
+
+pub(crate) struct BlockingActivityGuard {
+    activity: Arc<BlockingActivity>,
+}
+
+impl Drop for BlockingActivityGuard {
+    fn drop(&mut self) {
+        if self.activity.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.activity.changed.notify_waiters();
+        }
+    }
 }
 
 impl ToolContext {
@@ -127,6 +148,7 @@ impl ToolContext {
             cancellation: CancellationToken::new(),
             timeout: None,
             deadline: None,
+            blocking_activity: Arc::new(BlockingActivity::default()),
         })
     }
 
@@ -146,6 +168,7 @@ impl ToolContext {
             cancellation: CancellationToken::new(),
             timeout: None,
             deadline: None,
+            blocking_activity: Arc::new(BlockingActivity::default()),
         }
     }
 
@@ -173,6 +196,27 @@ impl ToolContext {
 
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation
+    }
+
+    pub(crate) fn begin_blocking_activity(&self) -> BlockingActivityGuard {
+        self.blocking_activity.active.fetch_add(1, Ordering::AcqRel);
+        BlockingActivityGuard {
+            activity: Arc::clone(&self.blocking_activity),
+        }
+    }
+
+    /// Wait until every blocking operation started through this context has
+    /// actually returned. Dropping a Tokio `spawn_blocking` join future does
+    /// not stop its closure, so native controllers must call this before
+    /// reporting a quiesced settlement.
+    pub async fn wait_for_blocking_quiescence(&self) {
+        loop {
+            let changed = self.blocking_activity.changed.notified();
+            if self.blocking_activity.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            changed.await;
+        }
     }
 
     fn effective_deadline(&self) -> Option<Instant> {
@@ -1568,6 +1612,33 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn blocking_quiescence_survives_a_dropped_join_handle() {
+        let context = context();
+        let activity = context.begin_blocking_activity();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let handle = tokio::task::spawn_blocking(move || {
+            let _activity = activity;
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv();
+        });
+        entered_rx.await.unwrap();
+        drop(handle);
+
+        let quiescence = context.wait_for_blocking_quiescence();
+        tokio::pin!(quiescence);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut quiescence)
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), quiescence)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
