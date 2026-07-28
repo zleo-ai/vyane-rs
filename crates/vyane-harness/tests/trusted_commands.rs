@@ -257,7 +257,10 @@ async fn command_process_has_hard_resource_ceilings() {
         "print(resource.getrlimit(resource.RLIMIT_FSIZE)); ",
         "print(resource.getrlimit(resource.RLIMIT_CORE)); ",
         "tmp=os.statvfs('/tmp'); ",
-        "assert tmp.f_blocks * tmp.f_frsize <= 67108864"
+        "assert tmp.f_blocks * tmp.f_frsize <= 67108864; ",
+        "root=os.statvfs('/'); ",
+        "assert root.f_blocks * root.f_frsize <= 16777216; ",
+        "assert not os.path.exists('/dev/shm')"
     );
     let output = execute(
         root.path(),

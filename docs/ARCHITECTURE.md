@@ -314,7 +314,10 @@ private tmpfs, and hard address-space, process/thread, CPU, file-descriptor and
 file-size limits close remaining host resource and IPC paths. Live authority
 is checked before every physical spawn attempt. Submission probes that exact
 profile and every allowlisted executable inside the sandbox view before a
-model request.
+model request. Both writable root scratch and `/tmp` are aggregate-size
+capped, `/dev` is reduced to fixed basic devices without `/dev/shm`, and the
+seccomp floor also denies anonymous memory-file and System V/POSIX IPC
+allocation.
 Command-side workspace writes, unconfigured shell access, extra runtime roots
 and all child network remain disabled. Because this first process
 sandbox mounts the complete workspace read-only, submissions combining command
