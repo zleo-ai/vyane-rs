@@ -224,9 +224,10 @@ impl NativeTurnDriver {
     /// Run one owned typed conversation to a terminal, non-replayable stop.
     ///
     /// Failover-eligible errors returned before any possible tool side effect
-    /// retain their ordinary classification; cancellation and timeout become
-    /// typed terminal stops. Once an allowed, known tool may have been polled,
-    /// later model errors are collapsed into
+    /// retain their ordinary classification, including a target-level model
+    /// timeout; cancellation becomes a typed terminal stop. Tool deadlines
+    /// also remain typed stops. Once an allowed, known tool may have been
+    /// polled, later model errors are collapsed into
     /// [`NativeTurnStop::AbortedAfterToolActivity`].
     pub async fn run(
         &self,
@@ -416,7 +417,6 @@ impl RunState {
         }
         match error.kind {
             ErrorKind::Cancelled => Ok(self.finish(NativeTurnStop::Cancelled)),
-            ErrorKind::Timeout => Ok(self.finish(NativeTurnStop::TimedOut)),
             _ => Err(error),
         }
     }

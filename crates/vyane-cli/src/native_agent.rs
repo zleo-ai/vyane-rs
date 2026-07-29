@@ -1,8 +1,9 @@
 //! Dark, fresh-only native AgentRun operation.
 //!
 //! The operation resolves all body-bearing input from the private spool only
-//! after the durable run is active.  It supports exactly one direct OpenAI
-//! Chat target, confined read/search tools, no sessions, and no restart replay.
+//! after the durable run is active. It supports a bounded, frozen chain of
+//! direct OpenAI Chat targets, confined tools, no sessions, and no restart
+//! replay.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -176,13 +177,21 @@ impl FreshNativeAgentOperation {
         .then_some(input)
     }
 
-    fn exact_target(&self, input: &NativeAgentInput) -> Option<vyane_core::BoundTarget> {
+    fn exact_targets(&self, input: &NativeAgentInput) -> Option<Vec<vyane_core::BoundTarget>> {
         let resolved = self.service.resolve(&input.policy.target_selector).ok()?;
-        if resolved.selector != input.policy.target_selector || resolved.chain.len() != 1 {
+        let snapshots = std::iter::once(&input.policy.target)
+            .chain(input.policy.failover_targets.iter())
+            .collect::<Vec<_>>();
+        if resolved.selector != input.policy.target_selector
+            || resolved.chain.len() != snapshots.len()
+            || !snapshots
+                .iter()
+                .zip(&resolved.chain)
+                .all(|(snapshot, bound)| target_matches(snapshot, bound))
+        {
             return None;
         }
-        let bound = resolved.chain.into_iter().next()?;
-        target_matches(&input.policy.target, &bound).then_some(bound)
+        Some(resolved.chain)
     }
 
     fn exact_search_target(&self, input: &NativeAgentInput) -> Option<vyane_core::BoundTarget> {
@@ -224,8 +233,8 @@ impl FreshNativeAgentOperation {
 }
 
 /// Freeze one public native submission into the private, fresh-only input
-/// shape. This deliberately accepts only a single direct OpenAI Chat target;
-/// callers must provide an already pinned workdir and its identity.
+/// shape. Every target is a direct OpenAI Chat endpoint and the ordered chain
+/// is covered by the immutable policy digest.
 pub(crate) fn native_input_for_submission(
     owner: &str,
     run_id: &str,
@@ -235,7 +244,7 @@ pub(crate) fn native_input_for_submission(
     let NativeSubmissionDetails {
         prompt,
         selector,
-        bound,
+        chain,
         workdir,
         filesystem_read,
         filesystem_write,
@@ -247,14 +256,25 @@ pub(crate) fn native_input_for_submission(
         system,
         timeout_seconds,
     } = details;
-    if bound.target.protocol != Protocol::OpenaiChat
-        || bound.target.harness.is_some()
-        || bound.transport != AdapterTransport::DirectHttp
-        || bound.endpoint.is_none()
+    if chain.is_empty()
+        || chain.len() > crate::native_agent_spool::MAX_NATIVE_TARGETS
+        || chain.iter().any(|bound| {
+            bound.target.protocol != Protocol::OpenaiChat
+                || bound.target.harness.is_some()
+                || bound.transport != AdapterTransport::DirectHttp
+                || bound.endpoint.is_none()
+        })
     {
         return Err(NativeAgentSpoolError::BindingMismatch);
     }
-    let target = target_snapshot(bound, NativeProtocolSnapshot::OpenaiChat)?;
+    let mut targets = chain
+        .iter()
+        .map(|bound| target_snapshot(bound, NativeProtocolSnapshot::OpenaiChat));
+    let target = targets
+        .next()
+        .transpose()?
+        .ok_or(NativeAgentSpoolError::BindingMismatch)?;
+    let failover_targets = targets.collect::<Result<Vec<_>, _>>()?;
     let web_search = web_search
         .map(|search| {
             if search.bound.target.protocol != Protocol::OpenaiResponses
@@ -284,6 +304,7 @@ pub(crate) fn native_input_for_submission(
         NativeAgentPolicy {
             target_selector: selector.to_owned(),
             target,
+            failover_targets,
             canonical_workdir: workdir.canonical_path().to_path_buf(),
             workdir_identity: workdir.identity().clone(),
             filesystem_read,
@@ -303,7 +324,7 @@ pub(crate) fn native_input_for_submission(
 pub(crate) struct NativeSubmissionDetails<'a> {
     pub(crate) prompt: String,
     pub(crate) selector: &'a str,
-    pub(crate) bound: &'a vyane_core::BoundTarget,
+    pub(crate) chain: &'a [vyane_core::BoundTarget],
     pub(crate) workdir: &'a PinnedWorkdir,
     pub(crate) filesystem_read: NativeReadPolicy,
     pub(crate) filesystem_write: Option<NativeWritePolicy>,
@@ -381,7 +402,7 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         let Some(input) = self.exact_input(&identity) else {
             return AgentExecutorOutcome::Unknown;
         };
-        let Some(bound) = self.exact_target(&input) else {
+        let Some(bounds) = self.exact_targets(&input) else {
             return AgentExecutorOutcome::Unknown;
         };
         let search_bound = match input.policy.web_search.as_ref() {
@@ -413,9 +434,6 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         let Ok(native_authority) = authority.bind_fresh_native_scope(scope).await else {
             return AgentExecutorOutcome::Unknown;
         };
-        let Ok(client) = authorized_native_client(&bound) else {
-            return AgentExecutorOutcome::Unknown;
-        };
         let search_client = match search_bound.as_ref() {
             Some(bound) => match authorized_web_search_client(bound) {
                 Ok(client) => Some(client),
@@ -441,7 +459,6 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             .with_cancellation_token(context.cancellation().clone())
             .with_timeout(Duration::from_secs(input.policy.timeout_seconds))
             .with_deadline(context.deadline());
-        let request = native_request(&input, &bound);
         let write_enabled = input.policy.filesystem_write.is_some();
         let Ok(mut registry) = workspace_tool_registry_with_policy(
             input.policy.filesystem_read.clone(),
@@ -508,13 +525,39 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                 return AgentExecutorOutcome::Unknown;
             }
         }
-        let driver = NativeTurnDriver::with_limits(client, registry, permission_policy, limits);
-        let turn = tokio::time::timeout_at(
-            context.deadline(),
-            driver.run(request, &tool_context, &native_authority),
-        )
-        .await;
-        tool_context.wait_for_blocking_quiescence().await;
+        let mut turn = None;
+        for (index, bound) in bounds.iter().enumerate() {
+            let Ok(client) = authorized_native_client(bound) else {
+                return AgentExecutorOutcome::Unknown;
+            };
+            let driver = NativeTurnDriver::with_limits(
+                client,
+                registry.clone(),
+                permission_policy.clone(),
+                limits,
+            );
+            let attempt = tokio::time::timeout_at(
+                context.deadline(),
+                driver.run(
+                    native_request(&input, bound),
+                    &tool_context,
+                    &native_authority,
+                ),
+            )
+            .await;
+            tool_context.wait_for_blocking_quiescence().await;
+            if matches!(
+                &attempt,
+                Ok(Err(error)) if error.failover_eligible() && index + 1 < bounds.len()
+            ) {
+                continue;
+            }
+            turn = Some(attempt);
+            break;
+        }
+        let Some(turn) = turn else {
+            return AgentExecutorOutcome::Unknown;
+        };
         drop(native_authority);
         drop(workdir);
 
@@ -748,7 +791,7 @@ mod tests {
     use vyane_agent::{
         AgentStore, ExecutionBackend, NewAgentRun, NewWorker, RunMode, RunState, SqliteAgentStore,
     };
-    use vyane_config::{ProfilePatch, ResolvedConfig};
+    use vyane_config::{ProfilePatch, RawFailoverElement, ResolvedConfig};
     use vyane_core::{AuthStyle, CancellationToken, ModelId, PinnedWorkdir};
     use vyane_provider::{Provider, ProviderRegistry};
     use vyane_service::{
@@ -818,26 +861,85 @@ mod tests {
         (service.scope(OwnerContext::single_user_local()), paths)
     }
 
+    fn failover_service(
+        root: &TempDir,
+        primary: &MockServer,
+        secondary: &MockServer,
+    ) -> (OwnerScopedService, StoragePaths) {
+        let mut providers = ProviderRegistry::new();
+        for (name, server, key) in [
+            ("primary-provider", primary, "VYANE_NATIVE_PRIMARY_KEY"),
+            (
+                "secondary-provider",
+                secondary,
+                "VYANE_NATIVE_SECONDARY_KEY",
+            ),
+        ] {
+            providers.insert(
+                name,
+                Provider {
+                    base_url: server.uri(),
+                    api_key_env: Some(key.into()),
+                    auth_style: AuthStyle::Bearer,
+                    protocol: Protocol::OpenaiChat,
+                    default_model: Some(ModelId::new("mock-model")),
+                    extra: serde_json::Map::new(),
+                    env_inject: BTreeMap::new(),
+                },
+            );
+        }
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            PROFILE.into(),
+            ProfilePatch {
+                provider: Some("primary-provider".into()),
+                protocol: Some(Protocol::OpenaiChat),
+                harness: None,
+                model: Some(ModelId::new("mock-model")),
+                failover: Some(vec![RawFailoverElement::ProviderModel {
+                    provider: "secondary-provider".into(),
+                    model: ModelId::new("mock-model"),
+                }]),
+                ..ProfilePatch::default()
+            },
+        );
+        let paths = StoragePaths::from_data_dir(root.path().join("data"));
+        let service = VyaneService::from_loaded_with_paths(
+            LoadedConfig {
+                config: ResolvedConfig {
+                    providers,
+                    profiles,
+                    native_permission_ceilings: Vec::new(),
+                },
+                files: Vec::new(),
+                secrets: BTreeMap::from([
+                    (
+                        "VYANE_NATIVE_PRIMARY_KEY".into(),
+                        "primary-test-credential".into(),
+                    ),
+                    (
+                        "VYANE_NATIVE_SECONDARY_KEY".into(),
+                        "secondary-test-credential".into(),
+                    ),
+                ]),
+            },
+            paths.clone(),
+        )
+        .unwrap();
+        (service.scope(OwnerContext::single_user_local()), paths)
+    }
+
     fn policy(service: &OwnerScopedService, workdir: &PinnedWorkdir) -> NativeAgentPolicy {
-        let bound = service.resolve(PROFILE).unwrap().chain.remove(0);
+        let mut chain = service.resolve(PROFILE).unwrap().chain;
+        let target = target_snapshot(&chain.remove(0), NativeProtocolSnapshot::OpenaiChat).unwrap();
+        let failover_targets = chain
+            .iter()
+            .map(|bound| target_snapshot(bound, NativeProtocolSnapshot::OpenaiChat).unwrap())
+            .collect();
         NativeAgentPolicy {
             target_selector: PROFILE.into(),
-            target: NativeTargetSnapshot {
-                provider: bound.target.provider.as_str().into(),
-                protocol: NativeProtocolSnapshot::OpenaiChat,
-                model: bound.target.model.as_str().into(),
-                auth_style: bound
-                    .endpoint
-                    .as_ref()
-                    .and_then(|endpoint| endpoint.auth.as_ref())
-                    .map(|auth| match auth.style {
-                        AuthStyle::Bearer => NativeAuthStyleSnapshot::Bearer,
-                        AuthStyle::XApiKey => NativeAuthStyleSnapshot::XApiKey,
-                    }),
-                routing_digest: endpoint_routing_digest(&bound.endpoint.as_ref().unwrap().base_url)
-                    .unwrap(),
-                params: params_snapshot(&bound.params),
-            },
+            target,
+            failover_targets,
             canonical_workdir: workdir.canonical_path().to_path_buf(),
             workdir_identity: workdir.identity().clone(),
             filesystem_read: NativeReadPolicy::workspace(),
@@ -957,6 +1059,80 @@ mod tests {
             .unwrap()
     }
 
+    async fn execute_resident_input(
+        service: OwnerScopedService,
+        paths: &StoragePaths,
+        spool: &NativeAgentInputSpool,
+        input: &NativeAgentInput,
+        workdir: &PinnedWorkdir,
+    ) -> (vyane_service::AgentExecutionReport, Arc<SqliteAgentStore>) {
+        create_input(spool, input, workdir);
+        let messages = MessageComponents::open(paths, OWNER).unwrap();
+        let sqlite_store =
+            Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());
+        create_run(sqlite_store.as_ref(), input, input.policy.timeout_seconds);
+        let store: Arc<dyn AgentStore> = sqlite_store.clone();
+        let operation = Arc::new(FreshNativeAgentOperation::new(
+            OWNER,
+            service,
+            spool.clone(),
+            messages.clone(),
+        ));
+        let components = InProcessAgentComponents::new_with_completion_sinks(
+            OWNER,
+            store,
+            operation,
+            vec![messages.completion_sink()],
+        )
+        .unwrap();
+        (
+            execute_once(components, CancellationToken::new()).await,
+            sqlite_store,
+        )
+    }
+
+    #[tokio::test]
+    async fn native_submission_freezes_the_complete_resolved_chain() {
+        let _assembly = assembly_test_lock().lock().await;
+        let primary = MockServer::start().await;
+        let secondary = MockServer::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let workdir_path = root.path().join("workspace");
+        std::fs::create_dir(&workdir_path).unwrap();
+        let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
+        let (service, _paths) = failover_service(&root, &primary, &secondary);
+        let resolved = service.resolve(PROFILE).unwrap();
+
+        let input = native_input_for_submission(
+            OWNER,
+            RUN_ID,
+            WORKER_ID,
+            NativeSubmissionDetails {
+                prompt: "Return the test answer.".into(),
+                selector: PROFILE,
+                chain: &resolved.chain,
+                workdir: &workdir,
+                filesystem_read: NativeReadPolicy::workspace(),
+                filesystem_write: None,
+                command_execution: None,
+                command_network: None,
+                web_search: None,
+                web_fetch: None,
+                tool_permission_layers: Vec::new(),
+                system: None,
+                timeout_seconds: 30,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(input.policy.target.provider, "primary-provider");
+        assert_eq!(input.policy.failover_targets.len(), 1);
+        assert_eq!(
+            input.policy.failover_targets[0].provider,
+            "secondary-provider"
+        );
+    }
+
     #[derive(Clone, Copy)]
     enum PreWireCase {
         PromptDigest,
@@ -1045,6 +1221,150 @@ mod tests {
         }
         assert!(spool.read(RUN_ID, WORKER_ID).is_ok());
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resident_native_run_fails_over_before_tool_activity() {
+        let _assembly = assembly_test_lock().lock().await;
+        let primary = MockServer::start().await;
+        let secondary = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&primary)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": "mock-model",
+                "choices": [{
+                    "message": {"role": "assistant", "content": "failover answer"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&secondary)
+            .await;
+
+        let root = tempfile::tempdir().unwrap();
+        let workdir_path = root.path().join("workspace");
+        std::fs::create_dir(&workdir_path).unwrap();
+        let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
+        let (service, paths) = failover_service(&root, &primary, &secondary);
+        let spool = NativeAgentInputSpool::open(root.path().join("native-input"), OWNER).unwrap();
+        let input = input(&service, &workdir);
+        assert_eq!(input.policy.failover_targets.len(), 1);
+
+        let (report, store) =
+            execute_resident_input(service, &paths, &spool, &input, &workdir).await;
+        assert_eq!(report.items, vec![AgentExecutionItemStatus::Settled]);
+        assert_eq!(
+            store.get_run(OWNER, RUN_ID).unwrap().unwrap().state,
+            RunState::Succeeded
+        );
+        assert!(
+            !primary.received_requests().await.unwrap().is_empty(),
+            "the primary target must be attempted"
+        );
+        assert_eq!(secondary.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resident_native_run_rejects_frozen_chain_drift_before_wire() {
+        let _assembly = assembly_test_lock().lock().await;
+        let primary = MockServer::start().await;
+        let secondary = MockServer::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let workdir_path = root.path().join("workspace");
+        std::fs::create_dir(&workdir_path).unwrap();
+        let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
+        let (service, paths) = failover_service(&root, &primary, &secondary);
+        let spool = NativeAgentInputSpool::open(root.path().join("native-input"), OWNER).unwrap();
+        let mut frozen_policy = policy(&service, &workdir);
+        frozen_policy.failover_targets[0].routing_digest = "f".repeat(64);
+        let input = NativeAgentInput::fresh(
+            OWNER,
+            RUN_ID,
+            WORKER_ID,
+            "Return the test answer.",
+            frozen_policy,
+        )
+        .unwrap();
+
+        let (report, _store) =
+            execute_resident_input(service, &paths, &spool, &input, &workdir).await;
+        assert_eq!(
+            report.items,
+            vec![AgentExecutionItemStatus::ControllerUnknown]
+        );
+        assert!(primary.received_requests().await.unwrap().is_empty());
+        assert!(secondary.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resident_native_run_never_fails_over_after_tool_activity() {
+        let _assembly = assembly_test_lock().lock().await;
+        let primary = MockServer::start().await;
+        let secondary = MockServer::start().await;
+        let response_index = Arc::new(AtomicUsize::new(0));
+        let response_index_for_mock = Arc::clone(&response_index);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                if response_index_for_mock.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "model": "mock-model",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [{
+                                    "id": "read-call-before-error",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": "{\"path\":\"note.txt\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }]
+                    }))
+                } else {
+                    ResponseTemplate::new(500)
+                }
+            })
+            .mount(&primary)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": "mock-model",
+                "choices": [{
+                    "message": {"role": "assistant", "content": "must not run"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&secondary)
+            .await;
+
+        let root = tempfile::tempdir().unwrap();
+        let workdir_path = root.path().join("workspace");
+        std::fs::create_dir(&workdir_path).unwrap();
+        std::fs::write(workdir_path.join("note.txt"), "tool evidence\n").unwrap();
+        let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
+        let (service, paths) = failover_service(&root, &primary, &secondary);
+        let spool = NativeAgentInputSpool::open(root.path().join("native-input"), OWNER).unwrap();
+        let input = input(&service, &workdir);
+
+        let (report, store) =
+            execute_resident_input(service, &paths, &spool, &input, &workdir).await;
+        assert_eq!(report.items, vec![AgentExecutionItemStatus::Settled]);
+        assert_eq!(
+            store.get_run(OWNER, RUN_ID).unwrap().unwrap().state,
+            RunState::Failed
+        );
+        assert!(primary.received_requests().await.unwrap().len() >= 2);
+        assert!(secondary.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
