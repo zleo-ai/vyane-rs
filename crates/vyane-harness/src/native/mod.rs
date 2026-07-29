@@ -37,9 +37,10 @@ pub use tools::{
 pub use trusted_commands::{
     NativeCommandHostError, NativeCommandMountSet, NativeCommandPolicy, NativeCommandPolicyError,
     NativeCommandRule, RegisterCommandToolError, command_permission_policy,
-    command_tool_definition, command_tool_registry, prepare_command_mounts, register_command_tool,
-    register_command_tool_with_network, validate_command_host, validate_command_host_with_mounts,
-    validate_command_network_host, validate_command_network_host_with_mounts,
+    command_tool_definition, command_tool_registry, prepare_command_mounts,
+    prepare_command_mounts_async, register_command_tool, register_command_tool_with_network,
+    validate_command_host, validate_command_host_with_mounts, validate_command_network_host,
+    validate_command_network_host_with_mounts,
 };
 pub use trusted_files::{
     NativeFilesystemPolicyError, NativeReadHostError, NativeReadPolicy, NativeReadPolicyError,

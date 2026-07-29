@@ -298,7 +298,7 @@ pub async fn validate_command_network_host(
     command_policy: &NativeCommandPolicy,
     policy: &NativeCommandNetworkPolicy,
 ) -> Result<(), NativeCommandHostError> {
-    let mounts = prepare_command_mounts(pinned, command_policy)?;
+    let mounts = prepare_command_mounts_async(pinned, command_policy).await?;
     validate_command_network_host_with_mounts(pinned, command_policy, policy, &mounts).await
 }
 
@@ -315,8 +315,8 @@ pub async fn validate_command_network_host_with_mounts(
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     validate_network_route_host(policy).map_err(|_| NativeCommandHostError::Unsupported)?;
     let probe_arguments = command_probe_arguments(command_policy);
-    let writable_mounts = mounts
-        .handles_for_spawn(command_policy)
+    let writable_mounts = mount_handles_for_probe(mounts, command_policy)
+        .await
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     let args = launcher_args(
         "/bin/sh",
@@ -479,7 +479,7 @@ pub async fn validate_command_host(
     pinned: &PinnedWorkdir,
     policy: &NativeCommandPolicy,
 ) -> Result<(), NativeCommandHostError> {
-    let mounts = prepare_command_mounts(pinned, policy)?;
+    let mounts = prepare_command_mounts_async(pinned, policy).await?;
     validate_command_host_with_mounts(pinned, policy, &mounts).await
 }
 
@@ -491,8 +491,8 @@ pub async fn validate_command_host_with_mounts(
 ) -> Result<(), NativeCommandHostError> {
     validate_command_host_requirements(policy)?;
     let probe_arguments = command_probe_arguments(policy);
-    let writable_mounts = mounts
-        .handles_for_spawn(policy)
+    let writable_mounts = mount_handles_for_probe(mounts, policy)
+        .await
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     let args = launcher_args(
         "/bin/sh",
@@ -636,7 +636,7 @@ impl NativeTool for RunCommandTool {
         authority.revalidate(effect).await?;
         #[cfg(target_os = "linux")]
         let writable_mounts = match context.command_mounts() {
-            Some(mounts) => mounts.handles_for_spawn(&self.policy)?,
+            Some(mounts) => mount_handles_for_tool(context, mounts, &self.policy).await?,
             None if self.policy.writable_roots.is_empty() => Vec::new(),
             None => {
                 return Ok(Err(ToolError::new(
@@ -927,8 +927,28 @@ pub fn prepare_command_mounts(
     Ok(mounts)
 }
 
+#[cfg(target_os = "linux")]
+pub async fn prepare_command_mounts_async(
+    pinned: &PinnedWorkdir,
+    policy: &NativeCommandPolicy,
+) -> Result<NativeCommandMountSet, NativeCommandHostError> {
+    let pinned = pinned.clone();
+    let policy = policy.clone();
+    tokio::task::spawn_blocking(move || prepare_command_mounts(&pinned, &policy))
+        .await
+        .map_err(|_| NativeCommandHostError::Unsupported)?
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn prepare_command_mounts(
+    _pinned: &PinnedWorkdir,
+    _policy: &NativeCommandPolicy,
+) -> Result<NativeCommandMountSet, NativeCommandHostError> {
+    Err(NativeCommandHostError::Unsupported)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn prepare_command_mounts_async(
     _pinned: &PinnedWorkdir,
     _policy: &NativeCommandPolicy,
 ) -> Result<NativeCommandMountSet, NativeCommandHostError> {
@@ -975,6 +995,47 @@ impl NativeCommandMountSet {
         }
         Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn mount_handles_for_probe(
+    mounts: &NativeCommandMountSet,
+    policy: &NativeCommandPolicy,
+) -> VyaneResult<Vec<NativeMountHandle>> {
+    let mounts = mounts.clone();
+    let policy = policy.clone();
+    tokio::task::spawn_blocking(move || mounts.handles_for_spawn(&policy))
+        .await
+        .map_err(|source| {
+            VyaneError::with_source(
+                ErrorKind::Io,
+                "native command writable-root audit task failed",
+                source,
+            )
+        })?
+}
+
+#[cfg(target_os = "linux")]
+async fn mount_handles_for_tool(
+    context: &ToolContext,
+    mounts: &NativeCommandMountSet,
+    policy: &NativeCommandPolicy,
+) -> VyaneResult<Vec<NativeMountHandle>> {
+    let activity = context.begin_blocking_activity();
+    let mounts = mounts.clone();
+    let policy = policy.clone();
+    tokio::task::spawn_blocking(move || {
+        let _activity = activity;
+        mounts.handles_for_spawn(&policy)
+    })
+    .await
+    .map_err(|source| {
+        VyaneError::with_source(
+            ErrorKind::Io,
+            "native command writable-root audit task failed",
+            source,
+        )
+    })?
 }
 
 #[cfg(target_os = "linux")]
