@@ -15,10 +15,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use vyane_core::{Effort, PinnedWorkdir, WorkdirIdentity};
 use vyane_harness::native::{
-    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWritePolicy,
+    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWebSearchPolicy,
+    NativeWritePolicy,
 };
 
-const SCHEMA: u32 = 6;
+const SCHEMA: u32 = 7;
+const COMMAND_NETWORK_SCHEMA: u32 = 6;
 const COMMAND_EXECUTION_SCHEMA: u32 = 5;
 const FILESYSTEM_WRITE_SCHEMA: u32 = 4;
 const READ_ONLY_SCHEMA: u32 = 3;
@@ -90,6 +92,7 @@ pub(crate) enum NativeWorkdirInstall {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum NativeProtocolSnapshot {
     OpenaiChat,
+    OpenaiResponses,
 }
 
 /// Secret-free wire authentication shape frozen with the approved route.
@@ -177,9 +180,19 @@ pub(crate) struct NativeAgentPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) command_network: Option<NativeCommandNetworkPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) web_search: Option<NativeWebSearchSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_model_turns: u32,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeWebSearchSnapshot {
+    pub(crate) target_selector: String,
+    pub(crate) target: NativeTargetSnapshot,
+    pub(crate) policy: NativeWebSearchPolicy,
 }
 
 impl std::fmt::Debug for NativeAgentPolicy {
@@ -214,6 +227,13 @@ impl std::fmt::Debug for NativeAgentPolicy {
                     .command_network
                     .as_ref()
                     .map(|policy| policy.allow.len()),
+            )
+            .field(
+                "web_search_domains",
+                &self
+                    .web_search
+                    .as_ref()
+                    .map(|search| search.policy.allow_domains.as_ref().map_or(0, Vec::len)),
             )
             .field("system", &self.system.as_ref().map(|_| "[REDACTED]"))
             .field("timeout_seconds", &self.timeout_seconds)
@@ -275,11 +295,17 @@ impl NativeAgentInput {
 
     fn validate(&self) -> Result<(), NativeAgentSpoolError> {
         let supported_schema = self.schema == SCHEMA
-            || (self.schema == COMMAND_EXECUTION_SCHEMA && self.policy.command_network.is_none())
-            || (self.schema == FILESYSTEM_WRITE_SCHEMA && self.policy.command_execution.is_none())
+            || (self.schema == COMMAND_NETWORK_SCHEMA && self.policy.web_search.is_none())
+            || (self.schema == COMMAND_EXECUTION_SCHEMA
+                && self.policy.command_network.is_none()
+                && self.policy.web_search.is_none())
+            || (self.schema == FILESYSTEM_WRITE_SCHEMA
+                && self.policy.command_execution.is_none()
+                && self.policy.web_search.is_none())
             || (self.schema == READ_ONLY_SCHEMA
                 && self.policy.filesystem_write.is_none()
-                && self.policy.command_execution.is_none());
+                && self.policy.command_execution.is_none()
+                && self.policy.web_search.is_none());
         if !supported_schema
             || !valid_text(&self.owner, MAX_ID_BYTES)
             || !valid_text(&self.run_id, MAX_ID_BYTES)
@@ -584,6 +610,7 @@ impl NativeAgentInputSpool {
 
 fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolError> {
     if !valid_text(&policy.target_selector, MAX_SELECTOR_BYTES)
+        || policy.target.protocol != NativeProtocolSnapshot::OpenaiChat
         || !valid_text(&policy.target.provider, MAX_TARGET_PART_BYTES)
         || !valid_text(&policy.target.model, MAX_TARGET_PART_BYTES)
         || !valid_digest(&policy.target.routing_digest)
@@ -623,6 +650,21 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
         network_policy
             .validate()
             .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
+    }
+    if let Some(search) = &policy.web_search {
+        if !valid_text(&search.target_selector, MAX_SELECTOR_BYTES)
+            || search.target.protocol != NativeProtocolSnapshot::OpenaiResponses
+            || !valid_text(&search.target.provider, MAX_TARGET_PART_BYTES)
+            || !valid_text(&search.target.model, MAX_TARGET_PART_BYTES)
+            || !valid_digest(&search.target.routing_digest)
+        {
+            return Err(NativeAgentSpoolError::InvalidInput);
+        }
+        search
+            .policy
+            .validate()
+            .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
+        validate_params(&search.target.params)?;
     }
     if !policy.canonical_workdir.is_absolute() {
         return Err(NativeAgentSpoolError::InvalidInput);
@@ -832,6 +874,7 @@ mod tests {
             filesystem_write: None,
             command_execution: None,
             command_network: None,
+            web_search: None,
             system: Some("system-body-marker".into()),
             timeout_seconds: 120,
             max_model_turns: 8,
@@ -1404,6 +1447,24 @@ mod tests {
             max_connections: 2,
             max_bytes: 1024,
             connect_timeout_seconds: 1,
+        });
+        variants.push(value);
+        let mut value = base.clone();
+        value.web_search = Some(NativeWebSearchSnapshot {
+            target_selector: "search".into(),
+            target: NativeTargetSnapshot {
+                provider: "search-provider".into(),
+                protocol: NativeProtocolSnapshot::OpenaiResponses,
+                model: "search-model".into(),
+                auth_style: Some(NativeAuthStyleSnapshot::Bearer),
+                routing_digest: "d".repeat(64),
+                params: NativeGenParamsSnapshot::default(),
+            },
+            policy: NativeWebSearchPolicy {
+                allow_domains: Some(vec!["docs.rs".into()]),
+                max_searches: 2,
+                search_context_size: vyane_core::WebSearchContextSize::Low,
+            },
         });
         variants.push(value);
         let mut value = base.clone();

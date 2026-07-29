@@ -1188,6 +1188,13 @@ pub(crate) mod anthropic {
 
 pub(crate) mod openai_responses {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use vyane_core::{WebSearchOutcome, WebSearchRequest as CoreWebSearchRequest, WebSearchSource};
+
+    const MAX_WEB_SOURCES: usize = 256;
+    const MAX_SOURCE_URL_BYTES: usize = 8192;
+    const MAX_SOURCE_TITLE_BYTES: usize = 4096;
 
     #[derive(Debug, Clone, Serialize)]
     pub(crate) struct Request {
@@ -1224,6 +1231,7 @@ pub(crate) mod openai_responses {
         pub(crate) kind: Option<String>,
         #[serde(default)]
         pub(crate) content: Vec<OutputContent>,
+        pub(crate) action: Option<WebSearchAction>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -1231,6 +1239,27 @@ pub(crate) mod openai_responses {
         #[serde(rename = "type")]
         pub(crate) kind: Option<String>,
         pub(crate) text: Option<String>,
+        #[serde(default)]
+        pub(crate) annotations: Vec<Annotation>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub(crate) struct Annotation {
+        #[serde(rename = "type")]
+        pub(crate) kind: Option<String>,
+        pub(crate) url: Option<String>,
+        pub(crate) title: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub(crate) struct WebSearchAction {
+        #[serde(default)]
+        pub(crate) sources: Vec<WebSearchActionSource>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub(crate) struct WebSearchActionSource {
+        pub(crate) url: Option<String>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -1250,6 +1279,115 @@ pub(crate) mod openai_responses {
     pub(crate) struct TokenDetails {
         pub(crate) cached_tokens: Option<u64>,
         pub(crate) reasoning_tokens: Option<u64>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub(crate) struct HostedWebSearchRequest {
+        model: String,
+        input: String,
+        store: bool,
+        tools: Vec<HostedWebSearchTool>,
+        tool_choice: &'static str,
+        max_tool_calls: u32,
+        include: Vec<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        temperature: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        top_p: Option<f32>,
+        #[serde(flatten)]
+        extra: Map<String, Value>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct HostedWebSearchTool {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filters: Option<HostedWebSearchFilters>,
+        search_context_size: &'static str,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct HostedWebSearchFilters {
+        allowed_domains: Vec<String>,
+    }
+
+    impl TryFrom<&CoreWebSearchRequest> for HostedWebSearchRequest {
+        type Error = VyaneError;
+
+        fn try_from(req: &CoreWebSearchRequest) -> Result<Self> {
+            const RESERVED: &[&str] = &[
+                "model",
+                "input",
+                "tools",
+                "tool_choice",
+                "max_tool_calls",
+                "include",
+                "stream",
+                "store",
+                "temperature",
+                "top_p",
+                "max_output_tokens",
+                "reasoning",
+            ];
+            if RESERVED
+                .iter()
+                .any(|field| req.params.extra.contains_key(*field))
+            {
+                return Err(VyaneError::new(
+                    ErrorKind::Config,
+                    "hosted web-search params.extra contains a reserved field",
+                ));
+            }
+            if req.query.trim().is_empty()
+                || req.query.len() > 16 * 1024
+                || req.max_searches == 0
+                || req.max_searches > 16
+                || req.allowed_domains.as_ref().is_some_and(|domains| {
+                    domains.is_empty()
+                        || domains.len() > 128
+                        || domains
+                            .iter()
+                            .any(|domain| domain.is_empty() || domain.len() > 253)
+                })
+            {
+                return Err(VyaneError::new(
+                    ErrorKind::Config,
+                    "hosted web-search request is invalid",
+                ));
+            }
+            let mut extra = req.params.extra.clone();
+            if let Some(max) = req.params.max_output_tokens {
+                extra
+                    .entry("max_output_tokens".to_string())
+                    .or_insert(json!(max));
+            }
+            if let Some(effort) = req.params.effort {
+                extra
+                    .entry("reasoning".to_string())
+                    .or_insert(json!({ "effort": effort.as_str() }));
+            }
+
+            Ok(Self {
+                model: req.model.as_str().to_string(),
+                input: req.query.clone(),
+                store: false,
+                tools: vec![HostedWebSearchTool {
+                    kind: "web_search",
+                    filters: req
+                        .allowed_domains
+                        .clone()
+                        .map(|allowed_domains| HostedWebSearchFilters { allowed_domains }),
+                    search_context_size: req.context_size.as_str(),
+                }],
+                tool_choice: "required",
+                max_tool_calls: req.max_searches,
+                include: vec!["web_search_call.action.sources"],
+                temperature: req.params.temperature,
+                top_p: req.params.top_p,
+                extra,
+            })
+        }
     }
 
     impl From<&ChatRequest> for Request {
@@ -1316,6 +1454,96 @@ pub(crate) mod openai_responses {
                 finish_reason,
             })
         }
+    }
+
+    impl TryFrom<Response> for WebSearchOutcome {
+        type Error = VyaneError;
+
+        fn try_from(response: Response) -> Result<Self> {
+            let mut text_parts = Vec::new();
+            let mut sources = BTreeMap::<String, Option<String>>::new();
+            for item in &response.output {
+                if item.kind.as_deref() == Some("web_search_call") {
+                    if let Some(action) = &item.action {
+                        for source in &action.sources {
+                            if let Some(url) = &source.url {
+                                insert_source(&mut sources, url, None)?;
+                            }
+                        }
+                    }
+                }
+                if item.kind.as_deref().unwrap_or("message") != "message" {
+                    continue;
+                }
+                for content in &item.content {
+                    if matches!(
+                        content.kind.as_deref(),
+                        Some("output_text") | Some("text") | None
+                    ) {
+                        if let Some(text) = &content.text {
+                            text_parts.push(text.clone());
+                        }
+                    }
+                    for annotation in &content.annotations {
+                        if annotation.kind.as_deref() == Some("url_citation") {
+                            if let Some(url) = &annotation.url {
+                                insert_source(&mut sources, url, annotation.title.clone())?;
+                            }
+                        }
+                    }
+                }
+            }
+            let text = response.output_text.unwrap_or_else(|| text_parts.join(""));
+            if text.len() > vyane_core::ToolChatLimits::CONTENT_BYTES {
+                return Err(VyaneError::new(
+                    ErrorKind::Protocol,
+                    "hosted web-search response text exceeded the limit",
+                ));
+            }
+            let sources = sources
+                .into_iter()
+                .map(|(url, title)| WebSearchSource { url, title })
+                .collect();
+            Ok(WebSearchOutcome {
+                text,
+                sources,
+                usage: response.usage.map(usage_from_response),
+                model_echo: response.model,
+            })
+        }
+    }
+
+    fn insert_source(
+        sources: &mut BTreeMap<String, Option<String>>,
+        url: &str,
+        title: Option<String>,
+    ) -> Result<()> {
+        if url.is_empty() || url.len() > MAX_SOURCE_URL_BYTES {
+            return Err(VyaneError::new(
+                ErrorKind::Protocol,
+                "hosted web-search returned an invalid source URL",
+            ));
+        }
+        if title
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_SOURCE_TITLE_BYTES)
+        {
+            return Err(VyaneError::new(
+                ErrorKind::Protocol,
+                "hosted web-search returned an oversized source title",
+            ));
+        }
+        if !sources.contains_key(url) && sources.len() >= MAX_WEB_SOURCES {
+            return Err(VyaneError::new(
+                ErrorKind::Protocol,
+                "hosted web-search returned too many sources",
+            ));
+        }
+        let entry = sources.entry(url.to_string()).or_insert(None);
+        if entry.is_none() {
+            *entry = title;
+        }
+        Ok(())
     }
 
     pub(crate) fn usage_from_response(usage: UsageResponse) -> Usage {

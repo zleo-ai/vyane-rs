@@ -1,6 +1,10 @@
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use vyane_core::{ChatClient, ChatOutcome, ChatRequest, Endpoint, Protocol, Result, StreamEvent};
+use vyane_core::{
+    AuthorizedWebSearchClient, ChatClient, ChatOutcome, ChatRequest, Endpoint,
+    NativeExecutionAuthority, NativeSideEffect, Protocol, Result, StreamEvent, WebSearchOutcome,
+    WebSearchRequest,
+};
 
 use crate::http::{ClientOptions, HttpClient};
 use crate::sse::{StreamProtocol, response_to_stream};
@@ -48,5 +52,27 @@ impl ChatClient for OpenAiResponsesClient {
             response,
             StreamProtocol::OpenAiResponses,
         ))
+    }
+}
+
+#[async_trait]
+impl AuthorizedWebSearchClient for OpenAiResponsesClient {
+    fn protocol(&self) -> Protocol {
+        Protocol::OpenaiResponses
+    }
+
+    async fn search_authorized(
+        &self,
+        req: WebSearchRequest,
+        authority: &dyn NativeExecutionAuthority,
+        effect: NativeSideEffect,
+        cancel: &vyane_core::CancellationToken,
+    ) -> Result<WebSearchOutcome> {
+        let body = wire::openai_responses::HostedWebSearchRequest::try_from(&req)?;
+        let response: wire::openai_responses::Response = self
+            .http
+            .post_json_authorized_effect(PATH, body, |request| request, authority, effect, cancel)
+            .await?;
+        response.try_into()
     }
 }

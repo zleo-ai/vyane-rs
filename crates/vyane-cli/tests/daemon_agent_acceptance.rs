@@ -74,6 +74,44 @@ fn write_native_config(directory: &TempDir, endpoint: &str) -> PathBuf {
     path
 }
 
+fn write_native_search_config(
+    directory: &TempDir,
+    main_endpoint: &str,
+    search_endpoint: &str,
+) -> PathBuf {
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            r#"
+            [providers.native_http]
+            base_url = "{main_endpoint}"
+            auth_style = "bearer"
+            protocol = "openai_chat"
+            default_model = "native-test-model"
+
+            [providers.search_http]
+            base_url = "{search_endpoint}"
+            auth_style = "bearer"
+            protocol = "openai_responses"
+            default_model = "search-test-model"
+
+            [profiles.native]
+            provider = "native_http"
+            protocol = "openai_chat"
+            model = "native-test-model"
+
+            [profiles.search]
+            provider = "search_http"
+            protocol = "openai_responses"
+            model = "search-test-model"
+            "#
+        ),
+    )
+    .unwrap();
+    path
+}
+
 fn write_mixed_config(directory: &TempDir, endpoint: &str) -> PathBuf {
     let path = directory.path().join("config.toml");
     fs::write(
@@ -276,6 +314,33 @@ async fn submit_native_command(data_dir: &Path, run_id: &str, workdir: &Path) ->
                         { "program": "cat", "args_prefix": ["evidence.txt"] }
                     ],
                     "max_seconds": 5
+                }
+            },
+            "timeout_seconds": 10
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn submit_native_search(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
+    let (base, token) = control(data_dir);
+    reqwest::Client::new()
+        .post(format!("{base}/v1/agent-runs"))
+        .bearer_auth(token)
+        .json(&json!({
+            "run_id": run_id,
+            "task": "find the current public reference",
+            "target": "native",
+            "sandbox": "read_only",
+            "workdir": workdir,
+            "execution_backend": "native_in_process",
+            "native_permissions": {
+                "web_search": {
+                    "target": "search",
+                    "allow_domains": ["example.com"],
+                    "max_searches": 2,
+                    "search_context_size": "low"
                 }
             },
             "timeout_seconds": 10
@@ -646,6 +711,139 @@ async fn native_command_permission_reaches_the_real_resident_sandbox() {
     assert!(
         tool_output.contains("resident command evidence"),
         "{tool_output}"
+    );
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn native_web_search_uses_the_separate_frozen_responses_target() {
+    let main_server = MockServer::start().await;
+    let response_index = Arc::new(AtomicUsize::new(0));
+    let response_index_for_mock = Arc::clone(&response_index);
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |_: &wiremock::Request| {
+            if response_index_for_mock.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "search-call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "web_search",
+                                    "arguments": concat!(
+                                        "{\"query\":\"current public reference\",",
+                                        "\"allowed_domains\":[\"docs.example.com\"]}"
+                                    )
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "search observed cited public evidence"
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&main_server)
+        .await;
+
+    let search_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "search-test-model",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "search",
+                        "sources": [{
+                            "type": "url",
+                            "url": "https://docs.example.com/reference"
+                        }]
+                    }
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Hosted search evidence.",
+                        "annotations": [{
+                            "type": "url_citation",
+                            "url": "https://docs.example.com/reference",
+                            "title": "Public Reference"
+                        }]
+                    }]
+                }
+            ]
+        })))
+        .expect(1)
+        .mount(&search_server)
+        .await;
+
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_search_config(&config_dir, &main_server.uri(), &search_server.uri());
+    let workdir = data_dir.path().join("native-search-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    let run_id = "0197f524-7a00-7000-8000-000000000119";
+
+    let response = submit_native_search(data_dir.path(), run_id, &workdir).await;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(20)).await;
+    assert_eq!(done["state"], "succeeded");
+    assert_eq!(done["completion_status"], "committed");
+
+    let main_requests = main_server.received_requests().await.unwrap();
+    let first: Value = serde_json::from_slice(&main_requests[0].body).unwrap();
+    let advertised = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        advertised,
+        ["read_file", "search_files", "web_search"]
+            .into_iter()
+            .collect()
+    );
+    let second: Value = serde_json::from_slice(&main_requests[1].body).unwrap();
+    let tool_output = second["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+        .expect("tool output");
+    assert!(tool_output.contains("Hosted search evidence."));
+    assert!(tool_output.contains("https://docs.example.com/reference"));
+
+    let search_requests = search_server.received_requests().await.unwrap();
+    let search: Value = serde_json::from_slice(&search_requests[0].body).unwrap();
+    assert_eq!(search["model"], "search-test-model");
+    assert_eq!(search["max_tool_calls"], 2);
+    assert_eq!(search["tools"][0]["search_context_size"], "low");
+    assert_eq!(
+        search["tools"][0]["filters"]["allowed_domains"],
+        json!(["docs.example.com"])
     );
     assert!(daemon.stop().status.success());
 }
