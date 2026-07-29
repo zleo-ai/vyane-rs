@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+use futures::future::join_all;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
@@ -1519,9 +1520,84 @@ async fn restart_settles_expired_native_controller_without_replaying_private_inp
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let mut second = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    let status_path = format!("/v1/agent-runs/{run_id}");
+    let concurrent_statuses =
+        join_all((0..16).map(|_| get_json(data_dir.path(), &status_path))).await;
+    for (status, body) in concurrent_statuses {
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(body["state"], "timed_out");
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(second.stop().status.success());
+}
+
+#[tokio::test]
+async fn graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(30))
+                .set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "late answer"},
+                        "finish_reason": "stop"
+                    }]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-graceful-stop-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let run_id = "0197f524-7a00-7000-8000-000000000130";
+    let mut first = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    assert_eq!(
+        submit_native(data_dir.path(), run_id, &workdir)
+            .await
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    let wire_deadline = Instant::now() + Duration::from_secs(10);
+    while server.received_requests().await.unwrap().is_empty() {
+        assert!(
+            Instant::now() < wire_deadline,
+            "native request never reached the model wire"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let stop_started = Instant::now();
+    assert!(first.stop().status.success());
+    assert!(
+        stop_started.elapsed() < Duration::from_secs(15),
+        "graceful daemon stop did not cooperatively cancel the active native wire"
+    );
+    let native_spool_root = data_dir.path().join("native-agent-inputs");
+    assert_eq!(
+        regular_files_below(&native_spool_root).len(),
+        1,
+        "uncertain graceful shutdown must retain the exact private native input"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let mut second = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
     let done = terminal(data_dir.path(), run_id, Duration::from_secs(15)).await;
     assert_eq!(done["state"], "timed_out");
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(
+        regular_files_below(&native_spool_root).is_empty(),
+        "terminal recovery must remove the exact private native input"
+    );
+    let (output_status, _) =
+        get_json(data_dir.path(), &format!("/v1/agent-runs/{run_id}/output")).await;
+    assert_eq!(output_status, reqwest::StatusCode::NOT_FOUND);
     assert!(second.stop().status.success());
 }
 

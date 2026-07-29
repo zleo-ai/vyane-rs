@@ -143,6 +143,7 @@ pub(crate) struct DaemonAgentHost {
     submissions: Arc<SubmissionGate>,
     cancel_gate: Arc<Mutex<()>>,
     native_submit_gate: Arc<Mutex<()>>,
+    native_cleanup_gate: Arc<Mutex<()>>,
     cancel_owner: Arc<str>,
 }
 
@@ -325,6 +326,7 @@ impl DaemonAgentHost {
                 submissions: Arc::new(SubmissionGate::new()),
                 cancel_gate: Arc::new(Mutex::new(())),
                 native_submit_gate: Arc::new(Mutex::new(())),
+                native_cleanup_gate: Arc::new(Mutex::new(())),
                 cancel_owner: Arc::from(format!("agent-cancel-{instance_key}")),
             },
             supervisor,
@@ -570,7 +572,7 @@ impl DaemonAgentHost {
         if let Some(existing) = self.find_record(run_id.clone()).await? {
             return if exact_native_retry(&existing, &input) {
                 if existing.state.is_terminal() {
-                    if !self.cleanup_terminal_native_input(&existing) {
+                    if !self.cleanup_terminal_native_input(&existing).await {
                         return Err(AgentApiError::unavailable());
                     }
                     self.view(existing).await
@@ -732,7 +734,7 @@ impl DaemonAgentHost {
         let _cancel_guard = self.cancel_gate.lock().await;
         let record = self.get_record(run_id.clone()).await?;
         if record.state.is_terminal() {
-            if !self.cleanup_terminal_native_input(&record) {
+            if !self.cleanup_terminal_native_input(&record).await {
                 return Err(AgentApiError::unavailable());
             }
             return self.view(record).await;
@@ -824,18 +826,19 @@ impl DaemonAgentHost {
             Some(root) => root,
             None => self.get_record(run_id).await?,
         };
-        if !self.cleanup_terminal_native_input(&root) {
+        if !self.cleanup_terminal_native_input(&root).await {
             return Err(AgentApiError::unavailable());
         }
         self.view(root).await
     }
 
-    fn cleanup_terminal_native_input(&self, record: &AgentRunRecord) -> bool {
+    async fn cleanup_terminal_native_input(&self, record: &AgentRunRecord) -> bool {
         if record.execution_backend != ExecutionBackend::NativeInProcess
             || !record.state.is_terminal()
         {
             return true;
         }
+        let _cleanup_guard = self.native_cleanup_gate.lock().await;
         match self.native_spool.read(&record.id, &record.worker_id) {
             Ok(input) if exact_native_retry(record, &input) => {
                 if self.native_spool.remove_exact(&input).is_err() {
@@ -873,6 +876,9 @@ impl DaemonAgentHost {
         // retry or an earlier interrupted cleanup whenever the run is next
         // observed, without sweeping unverifiable spool files.
         if record.state.is_terminal() {
+            if !self.cleanup_terminal_native_input(&record).await {
+                return Err(AgentApiError::unavailable());
+            }
             self.spool
                 .remove(&record.id, &record.worker_id)
                 .map_err(|_| AgentApiError::unavailable())?;
