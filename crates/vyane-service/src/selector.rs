@@ -94,6 +94,7 @@ fn provider_model_config(config: &ResolvedConfig, provider: &str, model: &str) -
     Ok(RawRoot {
         providers: BTreeMap::new(),
         profiles,
+        native_permissions: None,
     })
 }
 
@@ -105,6 +106,7 @@ fn resolve_temp_profile(
     let mut layers = ConfigLayers {
         providers: loaded.config.providers.clone(),
         profiles: loaded.config.profiles.clone(),
+        native_permission_ceilings: loaded.config.native_permission_ceilings.clone(),
     };
     layers.merge(&root)?;
     let config: ResolvedConfig = layers.into();

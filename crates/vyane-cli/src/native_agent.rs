@@ -793,6 +793,7 @@ mod tests {
                 config: ResolvedConfig {
                     providers,
                     profiles,
+                    native_permission_ceilings: Vec::new(),
                 },
                 files: Vec::new(),
                 secrets: BTreeMap::from([(

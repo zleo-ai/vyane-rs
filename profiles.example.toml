@@ -126,6 +126,22 @@ stage    = "review"
 #          "fast-chat", applying the route effort and recording routing labels.
 
 # ---------------------------------------------------------------------------
+# native permission ceiling (optional) — this config section never grants a
+# native tool. It only limits an explicit AgentRun `native_permissions`
+# request. User, project, and managed ceilings all apply; exclusions combine
+# and allowlists/limits can only narrow.
+#
+# [native_permissions.filesystem_read]
+# exclude = [".env*", ".git", "private/**"]
+#
+# [native_permissions.web_fetch]
+# allow_domains = ["docs.rs"]
+# max_fetches = 2
+# max_response_bytes = 262144
+# max_redirects = 2
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # failover — an ordered chain tried left to right. Each element is resolved
 # independently and fully: either a profile name, or a "provider/model" pair.
 # A model id is only ever paired with the provider written next to it, so a

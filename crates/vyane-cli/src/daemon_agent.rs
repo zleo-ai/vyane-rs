@@ -26,8 +26,8 @@ use vyane_core::{CancellationToken, PinnedWorkdir, Sandbox};
 use vyane_service::{
     AgentControllerAdapter, AgentExecutionOptions, AgentRecoveryOptions, AgentRunExecutor,
     AgentRunRecoveryDriver, AgentSupervisorOptions, ControllerRecoveryContext,
-    InProcessAgentComponents, MessageComponents, OwnerContext, ResidentAgentBackend,
-    ResidentAgentHost, VyaneService,
+    InProcessAgentComponents, MessageComponents, NativePermissionSet, OwnerContext,
+    ResidentAgentBackend, ResidentAgentHost, VyaneService,
 };
 
 use crate::agent_host::ProcessAgentRunExecutor;
@@ -46,10 +46,7 @@ use crate::native_agent_spool::{
 };
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
-use vyane_harness::native::{
-    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWebFetchPolicy,
-    NativeWebSearchPolicy, NativeWritePolicy, validate_command_host, validate_command_network_host,
-};
+use vyane_harness::native::{validate_command_host, validate_command_network_host};
 
 const INPUT_DIR: &str = "agent-inputs";
 const NATIVE_INPUT_DIR: &str = "native-agent-inputs";
@@ -81,75 +78,26 @@ pub(crate) struct AgentRunSubmitRequest {
     /// Native-only, per-submission policy. Omission means the admitted
     /// workspace is broadly readable; exclusions may only narrow it.
     #[serde(default)]
-    pub(crate) native_permissions: NativePermissionRequest,
+    pub(crate) native_permissions: NativePermissionSet,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct NativePermissionRequest {
-    #[serde(default)]
-    pub(crate) filesystem_read: NativeReadPolicy,
-    /// Omission keeps the native lane read-only even when the outer sandbox
-    /// permits writes.
-    #[serde(default)]
-    pub(crate) filesystem_write: Option<NativeWritePolicy>,
-    /// Omission keeps native subprocess execution disabled.
-    #[serde(default)]
-    pub(crate) command_execution: Option<NativeCommandPolicy>,
-    /// Omission preserves the isolated, networkless command profile.
-    #[serde(default)]
-    pub(crate) command_network: Option<NativeCommandNetworkPolicy>,
-    /// Omission keeps the dedicated hosted web-search tool disabled.
-    #[serde(default)]
-    pub(crate) web_search: Option<NativeWebSearchRequest>,
-    /// Omission keeps direct public-page retrieval disabled.
-    #[serde(default)]
-    pub(crate) web_fetch: Option<NativeWebFetchPolicy>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct NativeWebSearchRequest {
-    pub(crate) target: String,
-    #[serde(flatten)]
-    pub(crate) policy: NativeWebSearchPolicy,
-}
-
-impl NativePermissionRequest {
-    fn validate(&self, sandbox: AgentSpoolSandbox) -> std::result::Result<(), ()> {
-        if sandbox == AgentSpoolSandbox::ReadOnly && self.filesystem_write.is_some() {
-            return Err(());
-        }
-        self.filesystem_read.validate().map_err(|_| ())?;
-        if let Some(policy) = &self.filesystem_write {
-            policy.validate().map_err(|_| ())?;
-        }
-        if let Some(policy) = &self.command_execution {
-            if !self.filesystem_read.exclude.is_empty() {
-                return Err(());
-            }
-            policy.validate().map_err(|_| ())?;
-        }
-        if let Some(policy) = &self.command_network {
-            if self.command_execution.is_none() {
-                return Err(());
-            }
-            policy.validate().map_err(|_| ())?;
-        }
-        if let Some(request) = &self.web_search {
-            if request.target.is_empty() || request.policy.validate().is_err() {
-                return Err(());
-            }
-        }
-        if self
-            .web_fetch
-            .as_ref()
-            .is_some_and(|policy| policy.validate().is_err())
-        {
-            return Err(());
-        }
-        Ok(())
+fn spool_sandbox(sandbox: AgentSpoolSandbox) -> Sandbox {
+    match sandbox {
+        AgentSpoolSandbox::ReadOnly => Sandbox::ReadOnly,
+        AgentSpoolSandbox::Write => Sandbox::Write,
+        AgentSpoolSandbox::Full => Sandbox::Full,
     }
+}
+
+fn apply_native_permission_ceilings(
+    permissions: &mut NativePermissionSet,
+    ceilings: &[vyane_config::NativePermissionCeiling],
+) -> std::result::Result<(), ()> {
+    for raw_ceiling in ceilings {
+        let ceiling = NativePermissionSet::try_from(raw_ceiling).map_err(|_| ())?;
+        permissions.restrict_by(&ceiling).map_err(|_| ())?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -416,7 +364,7 @@ impl DaemonAgentHost {
         ) {
             return self.submit_native_admitted(request, timeout_seconds).await;
         }
-        if request.native_permissions != NativePermissionRequest::default() {
+        if request.native_permissions != NativePermissionSet::default() {
             return Err(AgentApiError::bad_request());
         }
         let sandbox = match request.sandbox {
@@ -527,13 +475,18 @@ impl DaemonAgentHost {
 
     async fn submit_native_admitted(
         &self,
-        request: AgentRunSubmitRequest,
+        mut request: AgentRunSubmitRequest,
         timeout_seconds: u64,
     ) -> Result<AgentRunView, AgentApiError> {
         let _native_submit_guard = self.native_submit_gate.lock().await;
+        apply_native_permission_ceilings(
+            &mut request.native_permissions,
+            &self.service.config().config.native_permission_ceilings,
+        )
+        .map_err(|_| AgentApiError::bad_request())?;
         request
             .native_permissions
-            .validate(request.sandbox)
+            .validate_for_sandbox(spool_sandbox(request.sandbox))
             .map_err(|_| AgentApiError::bad_request())?;
         let workdir = request
             .workdir
@@ -573,7 +526,7 @@ impl DaemonAgentHost {
         {
             return Err(AgentApiError::bad_request());
         }
-        let NativePermissionRequest {
+        let NativePermissionSet {
             filesystem_read,
             filesystem_write,
             command_execution,
@@ -1160,8 +1113,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        AgentRunSubmitRequest, SubmissionGate, cancel_operation_id, exact_retry_backend,
-        freeze_requested_workdir, native_admission_pair_is_consistent,
+        AgentRunSubmitRequest, SubmissionGate, apply_native_permission_ceilings,
+        cancel_operation_id, exact_retry_backend, freeze_requested_workdir,
+        native_admission_pair_is_consistent, spool_sandbox,
     };
     use crate::native_agent_spool::{NativeAgentSpoolCreate, NativeWorkdirInstall};
     use vyane_agent::ExecutionBackend;
@@ -1306,7 +1260,7 @@ mod tests {
         assert!(
             request
                 .native_permissions
-                .validate(request.sandbox)
+                .validate_for_sandbox(spool_sandbox(request.sandbox))
                 .is_err()
         );
     }
@@ -1329,7 +1283,85 @@ mod tests {
         assert!(
             request
                 .native_permissions
-                .validate(request.sandbox)
+                .validate_for_sandbox(spool_sandbox(request.sandbox))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn configured_native_ceilings_accumulate_and_reject_widening() {
+        let mut request: AgentRunSubmitRequest = serde_json::from_value(serde_json::json!({
+            "run_id": "019fa927-f343-7940-8c4f-1a3e79258335",
+            "task": "fetch bounded docs",
+            "target": "native",
+            "native_permissions": {
+                "web_fetch": {
+                    "allow_domains": ["docs.example.com"],
+                    "max_fetches": 1,
+                    "max_response_bytes": 4096,
+                    "max_redirects": 1
+                }
+            }
+        }))
+        .expect("request shape");
+        let user: vyane_config::RawRoot = toml::from_str(
+            r#"
+            [native_permissions.filesystem_read]
+            exclude = [".env*"]
+
+            [native_permissions.web_fetch]
+            allow_domains = ["example.com"]
+            max_fetches = 2
+            max_response_bytes = 8192
+            max_redirects = 2
+            "#,
+        )
+        .expect("user ceiling");
+        let project: vyane_config::RawRoot = toml::from_str(
+            r#"
+            [native_permissions.filesystem_read]
+            exclude = ["private/**"]
+
+            [native_permissions.web_fetch]
+            allow_domains = ["docs.example.com"]
+            max_fetches = 1
+            max_response_bytes = 4096
+            max_redirects = 1
+            "#,
+        )
+        .expect("project ceiling");
+        let user_ceiling = user.native_permissions.expect("user ceiling is present");
+        let project_ceiling = project
+            .native_permissions
+            .expect("project ceiling is present");
+        apply_native_permission_ceilings(
+            &mut request.native_permissions,
+            &[user_ceiling, project_ceiling],
+        )
+        .expect("request is inside both ceilings");
+        assert_eq!(
+            request.native_permissions.filesystem_read.exclude,
+            [".env*", "private/**"]
+        );
+
+        request
+            .native_permissions
+            .web_fetch
+            .as_mut()
+            .expect("request includes web fetch")
+            .allow_domains = vec!["github.com".into()];
+        let widening: vyane_config::RawRoot = toml::from_str(
+            r#"
+            [native_permissions.web_fetch]
+            allow_domains = ["example.com"]
+            "#,
+        )
+        .expect("widening ceiling shape");
+        let widening_ceiling = widening
+            .native_permissions
+            .expect("widening ceiling is present");
+        assert!(
+            apply_native_permission_ceilings(&mut request.native_permissions, &[widening_ceiling],)
                 .is_err()
         );
     }

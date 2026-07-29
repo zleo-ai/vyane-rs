@@ -658,6 +658,7 @@ fn hermetic_routing_config() -> ResolvedConfig {
                 ..Default::default()
             },
         )]),
+        native_permission_ceilings: Vec::new(),
     }
 }
 

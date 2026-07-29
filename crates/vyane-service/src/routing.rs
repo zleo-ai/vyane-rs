@@ -712,6 +712,7 @@ mod tests {
         ResolvedConfig {
             providers: Default::default(),
             profiles,
+            native_permission_ceilings: Vec::new(),
         }
     }
 
@@ -824,6 +825,7 @@ mod tests {
         let config = ResolvedConfig {
             providers: Default::default(),
             profiles,
+            native_permission_ceilings: Vec::new(),
         };
         let params = RouteParams {
             task: "check the code".into(),
@@ -920,6 +922,7 @@ mod tests {
         let config = ResolvedConfig {
             providers: Default::default(),
             profiles,
+            native_permission_ceilings: Vec::new(),
         };
 
         let result = route_task(
@@ -963,6 +966,7 @@ mod tests {
         let config = ResolvedConfig {
             providers: Default::default(),
             profiles,
+            native_permission_ceilings: Vec::new(),
         };
 
         let result = route_task(
@@ -1007,6 +1011,7 @@ mod tests {
             config: ResolvedConfig {
                 providers: Default::default(),
                 profiles,
+                native_permission_ceilings: Vec::new(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
@@ -1041,6 +1046,7 @@ mod tests {
             config: ResolvedConfig {
                 providers: Default::default(),
                 profiles,
+                native_permission_ceilings: Vec::new(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
@@ -1083,6 +1089,7 @@ mod tests {
             config: ResolvedConfig {
                 providers: Default::default(),
                 profiles,
+                native_permission_ceilings: Vec::new(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
