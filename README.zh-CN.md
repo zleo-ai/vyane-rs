@@ -388,8 +388,9 @@ endpoint（包括 `/health`）都要求每次启动新生成的 256-bit bearer t
 owner-only daemon descriptor 分文件保存。控制 API 包括 `POST /v1/workflows`、
 `GET /v1/workflows/:id` 和 `POST /v1/workflows/:id/cancel`。Linux 上另有
 `POST /v1/agent-runs`、`GET /v1/agent-runs/:id`、`GET /v1/agent-runs/:id/output` 与
-`POST /v1/agent-runs/:id/cancel`，承载 [WP-61](docs/plan/WP-61.md) 的 fresh sessionless
-Process host。所有 route 均不启用宽松 CORS。
+`POST /v1/agent-runs/:id/cancel`，承载 [WP-61](docs/plan/WP-61.md) 与
+[WP-66](docs/plan/WP-66.md) 的 fresh/sessionless Process 和 Native lane。所有 route
+均不启用宽松 CORS。
 这用于防止意外的浏览器和跨进程访问，不是抵御同一 OS 用户下恶意代码的 sandbox。
 
 客户端会先认证记录中的精确 daemon，再读取本地 workflow source。它把 workflow
