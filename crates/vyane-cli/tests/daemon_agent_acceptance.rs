@@ -14,7 +14,7 @@ use futures::future::join_all;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const VYANE_BIN: &str = env!("CARGO_BIN_EXE_vyane");
 const SUCCESS_RUN: &str = "0197f524-7a00-7000-8000-000000000101";
@@ -339,19 +339,16 @@ fn control(data_dir: &Path) -> (String, String) {
 }
 
 async fn submit(data_dir: &Path, run_id: &str, timeout: u64) -> reqwest::Response {
-    let (base, token) = control(data_dir);
-    http_client()
-        .post(format!("{base}/v1/agent-runs"))
-        .bearer_auth(token)
-        .json(&json!({
+    submit_agent_run(
+        data_dir,
+        json!({
             "run_id": run_id,
             "task": "return a bounded answer",
             "target": "builder",
             "timeout_seconds": timeout
-        }))
-        .send()
-        .await
-        .unwrap()
+        }),
+    )
+    .await
 }
 
 async fn submit_native(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
@@ -364,11 +361,9 @@ async fn submit_native_with_timeout(
     workdir: &Path,
     timeout_seconds: u64,
 ) -> reqwest::Response {
-    let (base, token) = control(data_dir);
-    http_client()
-        .post(format!("{base}/v1/agent-runs"))
-        .bearer_auth(token)
-        .json(&json!({
+    submit_agent_run(
+        data_dir,
+        json!({
             "run_id": run_id,
             "task": "return native answer",
             "target": "native",
@@ -376,18 +371,15 @@ async fn submit_native_with_timeout(
             "workdir": workdir,
             "execution_backend": "native_in_process",
             "timeout_seconds": timeout_seconds
-        }))
-        .send()
-        .await
-        .unwrap()
+        }),
+    )
+    .await
 }
 
 async fn submit_native_write(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
-    let (base, token) = control(data_dir);
-    http_client()
-        .post(format!("{base}/v1/agent-runs"))
-        .bearer_auth(token)
-        .json(&json!({
+    submit_agent_run(
+        data_dir,
+        json!({
             "run_id": run_id,
             "task": "create the requested workspace file",
             "target": "native",
@@ -398,18 +390,15 @@ async fn submit_native_write(data_dir: &Path, run_id: &str, workdir: &Path) -> r
                 "filesystem_write": {}
             },
             "timeout_seconds": 5
-        }))
-        .send()
-        .await
-        .unwrap()
+        }),
+    )
+    .await
 }
 
 async fn submit_native_command(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
-    let (base, token) = control(data_dir);
-    http_client()
-        .post(format!("{base}/v1/agent-runs"))
-        .bearer_auth(token)
-        .json(&json!({
+    submit_agent_run(
+        data_dir,
+        json!({
             "run_id": run_id,
             "task": "inspect the workspace through the bounded command tool",
             "target": "native",
@@ -425,10 +414,9 @@ async fn submit_native_command(data_dir: &Path, run_id: &str, workdir: &Path) ->
                 }
             },
             "timeout_seconds": 10
-        }))
-        .send()
-        .await
-        .unwrap()
+        }),
+    )
+    .await
 }
 
 async fn submit_native_writable_command(
@@ -436,11 +424,9 @@ async fn submit_native_writable_command(
     run_id: &str,
     workdir: &Path,
 ) -> reqwest::Response {
-    let (base, token) = control(data_dir);
-    http_client()
-        .post(format!("{base}/v1/agent-runs"))
-        .bearer_auth(token)
-        .json(&json!({
+    submit_agent_run(
+        data_dir,
+        json!({
             "run_id": run_id,
             "task": "create evidence inside the bounded writable command root",
             "target": "native",
@@ -457,18 +443,15 @@ async fn submit_native_writable_command(
                 }
             },
             "timeout_seconds": 10
-        }))
-        .send()
-        .await
-        .unwrap()
+        }),
+    )
+    .await
 }
 
 async fn submit_native_search(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
-    let (base, token) = control(data_dir);
-    http_client()
-        .post(format!("{base}/v1/agent-runs"))
-        .bearer_auth(token)
-        .json(&json!({
+    submit_agent_run(
+        data_dir,
+        json!({
             "run_id": run_id,
             "task": "find the current public reference",
             "target": "native",
@@ -484,10 +467,66 @@ async fn submit_native_search(data_dir: &Path, run_id: &str, workdir: &Path) -> 
                 }
             },
             "timeout_seconds": 10
-        }))
-        .send()
-        .await
-        .unwrap()
+        }),
+    )
+    .await
+}
+
+async fn submit_agent_run(data_dir: &Path, request: Value) -> reqwest::Response {
+    let (base, token) = control(data_dir);
+    send_agent_run_with_retry(
+        &http_client(),
+        &format!("{base}/v1/agent-runs"),
+        &token,
+        &request,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "AgentRun submission did not return a response: {error}; log: {}",
+            fs::read_to_string(data_dir.join("daemon.log")).unwrap_or_default()
+        )
+    })
+}
+
+async fn send_agent_run_with_retry(
+    client: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+    request: &Value,
+    attempt_timeout: Duration,
+    total_budget: Duration,
+) -> Result<reqwest::Response, String> {
+    let deadline = Instant::now() + total_budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("total retry budget expired".into());
+        }
+        let attempt = tokio::time::timeout(
+            remaining.min(attempt_timeout),
+            client
+                .post(endpoint)
+                .bearer_auth(token)
+                .json(request)
+                .send(),
+        )
+        .await;
+        match attempt {
+            Ok(Ok(response)) => return Ok(response),
+            Ok(Err(error)) if error.is_timeout() || error.is_connect() => {}
+            Ok(Err(error)) => return Err(error.to_string()),
+            Err(_) => {}
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("total retry budget expired".into());
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
+    }
 }
 
 async fn get_json(data_dir: &Path, suffix: &str) -> (reqwest::StatusCode, Value) {
@@ -605,6 +644,49 @@ async fn terminal_polling_never_crosses_total_budget() {
         .expect("polling crossed its total budget")
         .expect_err("polling should fail when its total budget expires");
     assert!(failure.is_panic());
+}
+
+#[derive(Clone)]
+struct DelayFirstSubmission {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Respond for DelayFirstSubmission {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let response = ResponseTemplate::new(202).set_body_json(json!({"state": "queued"}));
+        if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+            response.set_delay(Duration::from_millis(250))
+        } else {
+            response
+        }
+    }
+}
+
+#[tokio::test]
+async fn submission_retries_an_ambiguous_timeout_within_one_total_budget() {
+    let server = MockServer::start().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/v1/agent-runs"))
+        .respond_with(DelayFirstSubmission {
+            calls: Arc::clone(&calls),
+        })
+        .mount(&server)
+        .await;
+
+    let response = send_agent_run_with_retry(
+        &http_client(),
+        &format!("{}/v1/agent-runs", server.uri()),
+        "test-token",
+        &json!({"run_id": SUCCESS_RUN}),
+        Duration::from_millis(50),
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    assert!(calls.load(Ordering::Acquire) >= 2);
 }
 
 fn regular_files_below(root: &Path) -> Vec<PathBuf> {
@@ -1131,7 +1213,14 @@ async fn native_writable_command_root_reaches_the_real_resident_sandbox() {
     let run_id = "0197f524-7a00-7000-8000-000000000122";
 
     let response = submit_native_writable_command(data_dir.path(), run_id, &workdir).await;
-    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    if response.status() != reqwest::StatusCode::ACCEPTED {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        panic!(
+            "writable command submission failed with {status}: {body}; log: {}",
+            fs::read_to_string(data_dir.path().join("daemon.log")).unwrap_or_default()
+        );
+    }
     let done = terminal(data_dir.path(), run_id, Duration::from_secs(20)).await;
     assert_eq!(done["state"], "succeeded");
     assert_eq!(done["completion_status"], "committed");
@@ -1565,7 +1654,10 @@ async fn restart_recovers_exact_controller_without_replay() {
     first.kill();
     tokio::time::sleep(Duration::from_secs(3)).await;
     let mut second = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
-    let done = terminal(data_dir.path(), RESTART_RUN, Duration::from_secs(15)).await;
+    // One recovery pass permits 20 seconds for exact controller observation
+    // plus a 5-second settlement margin. Keep the fixture's polling budget
+    // above that production bound instead of assuming the orphan exits early.
+    let done = terminal(data_dir.path(), RESTART_RUN, Duration::from_secs(30)).await;
     assert_ne!(done["state"], "succeeded");
     assert_eq!(fs::read(&invocation).unwrap(), b"x");
     assert!(second.stop().status.success());
