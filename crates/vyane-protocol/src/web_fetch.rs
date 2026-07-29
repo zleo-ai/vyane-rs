@@ -8,7 +8,7 @@ use futures::StreamExt as _;
 use reqwest::{StatusCode, Url};
 use vyane_core::{
     AuthorizedWebFetchClient, CancellationToken, ErrorKind, NativeExecutionAuthority,
-    NativeSideEffect, Result, VyaneError, WebFetchOutcome, WebFetchRequest, WebFetchRoute,
+    NativeSideEffect, Result, VyaneError, WebFetchOutcome, WebFetchRequest,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -56,9 +56,17 @@ impl AuthorizedWebFetchClient for WebFetchClient {
             let port = url
                 .port_or_known_default()
                 .ok_or_else(|| invalid_url("web fetch URL has no port"))?;
+            let lookup = tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                tokio::net::lookup_host((host.as_str(), port)),
+            );
             let addrs = tokio::select! {
                 () = cancel.cancelled() => return Err(cancelled()),
-                result = tokio::net::lookup_host((host.as_str(), port)) => result
+                result = lookup => result
+                    .map_err(|_| VyaneError::new(
+                        ErrorKind::Timeout,
+                        "web fetch DNS lookup timed out",
+                    ))?
                     .map_err(|error| VyaneError::with_source(
                         ErrorKind::Transport,
                         "web fetch DNS lookup failed",
@@ -66,17 +74,13 @@ impl AuthorizedWebFetchClient for WebFetchClient {
                     ))?
                     .collect::<Vec<_>>(),
             };
-            if addrs.is_empty()
-                || addrs
-                    .iter()
-                    .any(|addr| !route_accepts_ip(req.route, addr.ip()))
-            {
+            if addrs.is_empty() || addrs.iter().any(|addr| !is_public_ip(addr.ip())) {
                 return Err(VyaneError::new(
                     ErrorKind::Auth,
                     "web fetch resolved outside the public Internet",
                 ));
             }
-            let client = build_client(&host, &addrs, req.route)?;
+            let client = build_client(&host, &addrs)?;
             authority.revalidate(effect).await?;
             let response = tokio::select! {
                 () = cancel.cancelled() => return Err(cancelled()),
@@ -224,51 +228,18 @@ fn valid_policy_domain(domain: &str) -> bool {
     })
 }
 
-fn build_client(host: &str, addrs: &[SocketAddr], route: WebFetchRoute) -> Result<reqwest::Client> {
-    let builder = reqwest::Client::builder()
+fn build_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never());
-    let builder = match route {
-        WebFetchRoute::Direct => builder.no_proxy().resolve_to_addrs(host, addrs),
-        WebFetchRoute::EnvironmentProxy => {
-            let proxy = environment_https_proxy()?;
-            builder.proxy(proxy)
-        }
-    };
-    builder.build().map_err(|error| {
-        VyaneError::with_source(ErrorKind::Config, "failed to build web fetch client", error)
-    })
-}
-
-fn environment_https_proxy() -> Result<reqwest::Proxy> {
-    let raw = std::env::var("HTTPS_PROXY")
-        .or_else(|_| std::env::var("https_proxy"))
-        .map_err(|_| {
-            VyaneError::new(
-                ErrorKind::Config,
-                "web fetch environment-proxy route requires HTTPS_PROXY",
-            )
-        })?;
-    let url = Url::parse(&raw).map_err(|_| {
-        VyaneError::new(
-            ErrorKind::Config,
-            "web fetch HTTPS_PROXY configuration is invalid",
-        )
-    })?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err(VyaneError::new(
-            ErrorKind::Config,
-            "web fetch HTTPS_PROXY configuration is invalid",
-        ));
-    }
-    reqwest::Proxy::all(url.as_str()).map_err(|_| {
-        VyaneError::new(
-            ErrorKind::Config,
-            "web fetch HTTPS_PROXY configuration is invalid",
-        )
-    })
+        .retry(reqwest::retry::never())
+        .resolve_to_addrs(host, addrs)
+        .build()
+        .map_err(|error| {
+            VyaneError::with_source(ErrorKind::Config, "failed to build web fetch client", error)
+        })
 }
 
 fn validate_fetch_url(input: &str) -> Result<Url> {
@@ -341,17 +312,6 @@ fn is_public_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn route_accepts_ip(route: WebFetchRoute, ip: IpAddr) -> bool {
-    is_public_ip(ip)
-        || (route == WebFetchRoute::EnvironmentProxy
-            && matches!(ip, IpAddr::V4(ip) if is_fake_ipv4(ip)))
-}
-
-fn is_fake_ipv4(ip: Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
-}
-
 fn is_public_ipv4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     !(ip.is_unspecified()
@@ -373,21 +333,13 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
         return is_public_ipv4(ipv4);
     }
     let segments = ip.segments();
-    !(ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_multicast()
-        || (segments[0] & 0xfe00) == 0xfc00
-        || (segments[0] & 0xffc0) == 0xfe80
-        || (segments[0] & 0xffc0) == 0xfec0
-        || (segments[0] == 0x0064 && segments[1] == 0xff9b)
-        || (segments[0] == 0x2001 && segments[1] == 0x0000)
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
-        || (segments[0] == 0x2001 && segments[1] == 0x0002)
-        || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0010)
-        || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020)
-        || segments[0] == 0x2002
-        || (segments[0] & 0xfff0) == 0x3ff0
-        || (segments[0] == 0x0100 && segments[1..].iter().all(|part| *part == 0)))
+    // Currently allocated public global unicast is inside 2000::/3. Start
+    // closed, then remove special-purpose ranges within that allocation.
+    (segments[0] & 0xe000) == 0x2000
+        && !(segments[0] == 0x2001 && segments[1] < 0x0200)
+        && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+        && segments[0] != 0x2002
+        && (segments[0] & 0xfff0) != 0x3ff0
 }
 
 fn invalid_url(message: &'static str) -> VyaneError {
@@ -438,22 +390,23 @@ mod tests {
             "fe80::1",
             "2001:db8::1",
             "64:ff9b::127.0.0.1",
+            "64:ff9b:1::1",
             "2001::1",
             "2002:7f00:1::",
+            "3fff::1",
+            "4000::1",
             "::ffff:127.0.0.1",
         ] {
             assert!(!is_public_ip(invalid.parse().unwrap()), "{invalid}");
         }
-        for valid in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+        for valid in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "2001:4860:4860::8888",
+            "2606:4700:4700::1111",
+        ] {
             assert!(is_public_ip(valid.parse().unwrap()), "{valid}");
         }
-        let fake_ip = "198.18.1.10".parse().unwrap();
-        assert!(!route_accepts_ip(WebFetchRoute::Direct, fake_ip));
-        assert!(route_accepts_ip(WebFetchRoute::EnvironmentProxy, fake_ip));
-        assert!(!route_accepts_ip(
-            WebFetchRoute::EnvironmentProxy,
-            "10.0.0.1".parse().unwrap()
-        ));
     }
 
     #[test]
@@ -475,7 +428,6 @@ mod tests {
         let base = WebFetchRequest {
             url: "https://docs.rs".into(),
             allowed_domains: vec!["docs.rs".into()],
-            route: WebFetchRoute::Direct,
             max_response_bytes: 4096,
             max_redirects: 2,
         };

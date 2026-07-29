@@ -1298,7 +1298,6 @@ mod tests {
         let mut fetch_policy = policy();
         fetch_policy.web_fetch = Some(NativeWebFetchPolicy {
             allow_domains: vec!["docs.rs".into()],
-            route: vyane_core::WebFetchRoute::Direct,
             max_fetches: 2,
             max_response_bytes: 4096,
             max_redirects: 1,
@@ -1526,7 +1525,6 @@ mod tests {
         let mut value = base.clone();
         value.web_fetch = Some(NativeWebFetchPolicy {
             allow_domains: vec!["docs.rs".into()],
-            route: vyane_core::WebFetchRoute::Direct,
             max_fetches: 2,
             max_response_bytes: 4096,
             max_redirects: 1,

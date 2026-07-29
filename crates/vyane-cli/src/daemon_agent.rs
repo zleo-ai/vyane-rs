@@ -1220,7 +1220,6 @@ mod tests {
             },
             "web_fetch": {
                 "allow_domains": ["docs.rs"],
-                "route": "environment_proxy",
                 "max_fetches": 3,
                 "max_response_bytes": 65536,
                 "max_redirects": 2
@@ -1277,10 +1276,6 @@ mod tests {
             .web_fetch
             .expect("explicit web-fetch policy");
         assert_eq!(fetch.allow_domains, ["docs.rs"]);
-        assert!(matches!(
-            fetch.route,
-            vyane_core::WebFetchRoute::EnvironmentProxy
-        ));
         assert_eq!(fetch.max_fetches, 3);
         assert_eq!(fetch.max_response_bytes, 65536);
         assert_eq!(fetch.max_redirects, 2);

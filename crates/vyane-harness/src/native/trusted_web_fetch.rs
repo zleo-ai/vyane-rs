@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use url::Url;
 use vyane_core::{
     AuthorizedWebFetchClient, NativeExecutionAuthority, NativeSideEffect, Result as VyaneResult,
-    ToolDefinition, WebFetchRequest, WebFetchRoute,
+    ToolDefinition, WebFetchRequest,
 };
 
 use super::{
@@ -28,8 +28,6 @@ const MAX_URL_BYTES: usize = 8 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct NativeWebFetchPolicy {
     pub allow_domains: Vec<String>,
-    #[serde(default)]
-    pub route: WebFetchRoute,
     #[serde(default = "default_max_fetches")]
     pub max_fetches: u32,
     #[serde(default = "default_max_response_bytes")]
@@ -199,7 +197,6 @@ impl NativeTool for WebFetchTool {
                 WebFetchRequest {
                     url,
                     allowed_domains: self.policy.allow_domains.clone(),
-                    route: self.policy.route,
                     max_response_bytes: self.policy.max_response_bytes,
                     max_redirects: self.policy.max_redirects,
                 },
@@ -276,7 +273,6 @@ mod tests {
     fn policy() -> NativeWebFetchPolicy {
         NativeWebFetchPolicy {
             allow_domains: vec!["example.com".into()],
-            route: WebFetchRoute::Direct,
             max_fetches: 2,
             max_response_bytes: 4096,
             max_redirects: 1,

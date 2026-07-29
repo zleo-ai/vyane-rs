@@ -63,7 +63,7 @@ pub use traits::{
     Harness, HarnessExecutionContext, HarnessJob, HarnessOutcome, HarnessStreamEvent, Ledger,
     SessionExecutionLease, SessionStore,
 };
-pub use web_fetch::{WebFetchOutcome, WebFetchRequest, WebFetchRoute};
+pub use web_fetch::{WebFetchOutcome, WebFetchRequest};
 pub use web_search::{WebSearchContextSize, WebSearchOutcome, WebSearchRequest, WebSearchSource};
 pub use workdir::{PinnedWorkdir, WorkdirIdentity};
 

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use vyane_core::{
     AuthorizedWebFetchClient, CancellationToken, NativeExecutionAuthority, NativeSideEffect,
-    Result, WebFetchOutcome, WebFetchRequest, WebFetchRoute,
+    Result, WebFetchOutcome, WebFetchRequest,
 };
 use vyane_harness::native::{
     NativeWebFetchPolicy, PermissionPolicy, ToolCall, ToolContext, ToolInvocationStatus,
@@ -48,7 +48,6 @@ impl NativeExecutionAuthority for RecordingAuthority {
 fn policy() -> NativeWebFetchPolicy {
     NativeWebFetchPolicy {
         allow_domains: vec!["example.com".into()],
-        route: WebFetchRoute::Direct,
         max_fetches: 2,
         max_response_bytes: 4096,
         max_redirects: 2,
@@ -102,7 +101,6 @@ async fn admitted_fetch_forwards_closed_bounds_and_marks_content_untrusted() {
     assert!(result.output.contains("<p>reference</p>"));
     let requests = client.requests.lock().unwrap();
     assert_eq!(requests[0].allowed_domains, ["example.com"]);
-    assert_eq!(requests[0].route, WebFetchRoute::Direct);
     assert_eq!(requests[0].max_response_bytes, 4096);
     assert_eq!(requests[0].max_redirects, 2);
     assert_eq!(
