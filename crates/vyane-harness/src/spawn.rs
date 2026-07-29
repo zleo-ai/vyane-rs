@@ -3057,10 +3057,21 @@ mod tests {
 
     #[tokio::test]
     async fn reaped_sentinel_never_authorizes_numeric_group_kill() {
+        struct ResidualGroupCleanup(Option<i32>);
+
+        impl Drop for ResidualGroupCleanup {
+            fn drop(&mut self) {
+                if let Some(pgid) = self.0.take() {
+                    signal_group(pgid, SIGKILL);
+                }
+            }
+        }
+
         let dir = tempfile::TempDir::new().unwrap();
         let ready = dir.path().join("residual-ready");
         let script = format!(
-            "( trap '' TERM; while :; do /bin/sleep 1; done ) & trap 'exit 0' TERM; printf ready > '{}'; while :; do wait; done",
+            "( trap '' TERM HUP; printf ready > '{}'; while :; do /bin/sleep 1; done ) & trap 'exit 0' TERM; while [ ! -s '{}' ]; do /bin/sleep 0.01; done; while :; do wait; done",
+            ready.display(),
             ready.display()
         );
         let mut command = Command::new("/bin/sh");
@@ -3073,6 +3084,7 @@ mod tests {
         install_process_group(&mut command, None, None, None, None, None, Vec::new()).unwrap();
         let mut child = command.spawn().unwrap();
         let pgid = child.id().unwrap() as i32;
+        let mut residual_cleanup = ResidualGroupCleanup(Some(pgid));
         let mut guard = ProcessGroupDropGuard::new(child.id(), None);
         for _ in 0..200 {
             if ready.exists() {
@@ -3100,6 +3112,7 @@ mod tests {
             wait_for_group_exit(pgid, Duration::from_secs(2)).await,
             "test cleanup could not empty the residual group"
         );
+        residual_cleanup.0 = None;
     }
 
     #[tokio::test]

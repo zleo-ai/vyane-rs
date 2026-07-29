@@ -29,6 +29,16 @@ fn vyane() -> Command {
     Command::new(VYANE_BIN)
 }
 
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        // Cancellation may legitimately use the daemon's ten-second
+        // controller-control window before returning its bounded response.
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap()
+}
+
 fn write_config(directory: &TempDir) -> PathBuf {
     let path = directory.path().join("config.toml");
     fs::write(
@@ -253,6 +263,14 @@ impl DaemonGuard {
         let output = stop_daemon(&self.data_dir).unwrap();
         if output.status.success() {
             self.running = false;
+        } else {
+            eprintln!(
+                "daemon stop failed: status={}; stdout={}; stderr={}; log={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+                fs::read_to_string(self.data_dir.join("daemon.log")).unwrap_or_default()
+            );
         }
         output
     }
@@ -300,7 +318,7 @@ fn control(data_dir: &Path) -> (String, String) {
 
 async fn submit(data_dir: &Path, run_id: &str, timeout: u64) -> reqwest::Response {
     let (base, token) = control(data_dir);
-    reqwest::Client::new()
+    http_client()
         .post(format!("{base}/v1/agent-runs"))
         .bearer_auth(token)
         .json(&json!({
@@ -325,7 +343,7 @@ async fn submit_native_with_timeout(
     timeout_seconds: u64,
 ) -> reqwest::Response {
     let (base, token) = control(data_dir);
-    reqwest::Client::new()
+    http_client()
         .post(format!("{base}/v1/agent-runs"))
         .bearer_auth(token)
         .json(&json!({
@@ -344,7 +362,7 @@ async fn submit_native_with_timeout(
 
 async fn submit_native_write(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
     let (base, token) = control(data_dir);
-    reqwest::Client::new()
+    http_client()
         .post(format!("{base}/v1/agent-runs"))
         .bearer_auth(token)
         .json(&json!({
@@ -366,7 +384,7 @@ async fn submit_native_write(data_dir: &Path, run_id: &str, workdir: &Path) -> r
 
 async fn submit_native_command(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
     let (base, token) = control(data_dir);
-    reqwest::Client::new()
+    http_client()
         .post(format!("{base}/v1/agent-runs"))
         .bearer_auth(token)
         .json(&json!({
@@ -397,7 +415,7 @@ async fn submit_native_writable_command(
     workdir: &Path,
 ) -> reqwest::Response {
     let (base, token) = control(data_dir);
-    reqwest::Client::new()
+    http_client()
         .post(format!("{base}/v1/agent-runs"))
         .bearer_auth(token)
         .json(&json!({
@@ -425,7 +443,7 @@ async fn submit_native_writable_command(
 
 async fn submit_native_search(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
     let (base, token) = control(data_dir);
-    reqwest::Client::new()
+    http_client()
         .post(format!("{base}/v1/agent-runs"))
         .bearer_auth(token)
         .json(&json!({
@@ -452,7 +470,7 @@ async fn submit_native_search(data_dir: &Path, run_id: &str, workdir: &Path) -> 
 
 async fn get_json(data_dir: &Path, suffix: &str) -> (reqwest::StatusCode, Value) {
     let (base, token) = control(data_dir);
-    let response = reqwest::Client::new()
+    let response = http_client()
         .get(format!("{base}{suffix}"))
         .bearer_auth(token)
         .send()
@@ -465,7 +483,7 @@ async fn get_json(data_dir: &Path, suffix: &str) -> (reqwest::StatusCode, Value)
 
 async fn post_json(data_dir: &Path, suffix: &str) -> (reqwest::StatusCode, Value) {
     let (base, token) = control(data_dir);
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post(format!("{base}{suffix}"))
         .bearer_auth(token)
         .send()
@@ -624,7 +642,7 @@ async fn native_agent_submit_uses_the_shared_resident_lane() {
     assert_eq!(retry.status(), reqwest::StatusCode::ACCEPTED);
     assert_eq!(retry.json::<Value>().await.unwrap()["state"], "succeeded");
     let (base, token) = control(data_dir.path());
-    let drifted = reqwest::Client::new()
+    let drifted = http_client()
         .post(format!("{base}/v1/agent-runs"))
         .bearer_auth(token)
         .json(&json!({
@@ -785,7 +803,7 @@ async fn native_write_permission_reaches_the_real_resident_tool_lane() {
     let run_id = "0197f524-7a00-7000-8000-000000000116";
 
     let (base, token) = control(data_dir.path());
-    let mismatched = reqwest::Client::new()
+    let mismatched = http_client()
         .post(format!("{base}/v1/agent-runs"))
         .bearer_auth(token)
         .json(&json!({
@@ -1274,7 +1292,7 @@ async fn read_only_explicit_workdir_is_the_fake_harness_cwd() {
     let config = write_config(&config_dir);
     let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
     let (base, token) = control(data_dir.path());
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post(format!("{base}/v1/agent-runs"))
         .bearer_auth(token)
         .json(&json!({
@@ -1601,7 +1619,7 @@ async fn submit_rejects_caller_owned_identity_fields() {
     let config = write_config(&config_dir);
     let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
     let (base, token) = control(data_dir.path());
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post(format!("{base}/v1/agent-runs"))
         .bearer_auth(token)
         .json(&json!({
