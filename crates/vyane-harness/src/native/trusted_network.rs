@@ -402,7 +402,7 @@ async fn connect_via_environment_proxy(
                 break;
             }
             Ok(Err(_)) => {}
-            Err(_) => break,
+            Err(_) => {}
         }
     }
     let Some(mut stream) = stream else {
@@ -734,6 +734,7 @@ fn validate_host_pattern(host: &str) -> Result<(), NativeCommandNetworkPolicyErr
     if plain.is_empty()
         || plain.len() > MAX_HOST_BYTES
         || plain.parse::<IpAddr>().is_ok()
+        || legacy_ipv4_literal(plain)
         || plain.ends_with('.')
         || plain.split('.').count() < 2
         || plain.split('.').any(|label| {
@@ -749,6 +750,20 @@ fn validate_host_pattern(host: &str) -> Result<(), NativeCommandNetworkPolicyErr
         return Err(NativeCommandNetworkPolicyError::InvalidHost);
     }
     Ok(())
+}
+
+fn legacy_ipv4_literal(host: &str) -> bool {
+    let parts = host.split('.').collect::<Vec<_>>();
+    (2..=4).contains(&parts.len())
+        && parts.iter().all(|part| {
+            if let Some(hex) = part.strip_prefix("0x") {
+                !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            } else if part.len() > 1 && part.starts_with('0') {
+                part.bytes().all(|byte| matches!(byte, b'0'..=b'7'))
+            } else {
+                !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+            }
+        })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -892,6 +907,9 @@ mod tests {
         for host in [
             "EXAMPLE.com",
             "127.0.0.1",
+            "127.1",
+            "0x7f.0.0.1",
+            "0300.0250.0001.0001",
             "*.com",
             "example.com.",
             "-x.example",
