@@ -95,6 +95,7 @@ fn provider_model_config(config: &ResolvedConfig, provider: &str, model: &str) -
         providers: BTreeMap::new(),
         profiles,
         native_permissions: None,
+        harness_permissions: None,
     })
 }
 
@@ -107,6 +108,7 @@ fn resolve_temp_profile(
         providers: loaded.config.providers.clone(),
         profiles: loaded.config.profiles.clone(),
         native_permission_ceilings: loaded.config.native_permission_ceilings.clone(),
+        harness_permission_ceilings: loaded.config.harness_permission_ceilings.clone(),
     };
     layers.merge(&root)?;
     let config: ResolvedConfig = layers.into();

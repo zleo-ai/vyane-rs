@@ -712,6 +712,7 @@ mod tests {
             providers: Default::default(),
             profiles,
             native_permission_ceilings: Vec::new(),
+            harness_permission_ceilings: Vec::new(),
         }
     }
 
@@ -825,6 +826,7 @@ mod tests {
             providers: Default::default(),
             profiles,
             native_permission_ceilings: Vec::new(),
+            harness_permission_ceilings: Vec::new(),
         };
         let params = RouteParams {
             task: "check the code".into(),
@@ -922,6 +924,7 @@ mod tests {
             providers: Default::default(),
             profiles,
             native_permission_ceilings: Vec::new(),
+            harness_permission_ceilings: Vec::new(),
         };
 
         let result = route_task(
@@ -966,6 +969,7 @@ mod tests {
             providers: Default::default(),
             profiles,
             native_permission_ceilings: Vec::new(),
+            harness_permission_ceilings: Vec::new(),
         };
 
         let result = route_task(
@@ -1011,6 +1015,7 @@ mod tests {
                 providers: Default::default(),
                 profiles,
                 native_permission_ceilings: Vec::new(),
+                harness_permission_ceilings: Vec::new(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
@@ -1046,6 +1051,7 @@ mod tests {
                 providers: Default::default(),
                 profiles,
                 native_permission_ceilings: Vec::new(),
+                harness_permission_ceilings: Vec::new(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
@@ -1089,6 +1095,7 @@ mod tests {
                 providers: Default::default(),
                 profiles,
                 native_permission_ceilings: Vec::new(),
+                harness_permission_ceilings: Vec::new(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),

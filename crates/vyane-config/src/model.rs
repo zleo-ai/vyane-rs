@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use vyane_core::{Effort, ErrorKind, ModelId, Protocol, Sandbox, VyaneError, WebSearchContextSize};
 use vyane_provider::ProviderPatch;
 
-/// One parsed config layer: `[providers.*]`, `[profiles.*]`, and an optional
-/// `[native_permissions]` ceiling.
+/// One parsed config layer: `[providers.*]`, `[profiles.*]`, and optional
+/// monotonic permission ceilings.
 ///
 /// `cost` and other v0.1-future sections (see `profiles.example.toml`) are
 /// intentionally not modeled here — parsing them is out of this work
@@ -32,6 +32,19 @@ pub struct RawRoot {
     /// can therefore narrow, but never erase, a user or managed restriction.
     #[serde(default)]
     pub native_permissions: Option<NativePermissionCeiling>,
+    /// Optional CLI-harness sandbox ceiling contributed by this exact layer.
+    #[serde(default)]
+    pub harness_permissions: Option<HarnessPermissionCeiling>,
+}
+
+/// One monotonic CLI-harness permission ceiling.
+///
+/// The request still selects its sandbox. Configuration can reject a broader
+/// request, but never upgrades a narrower one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessPermissionCeiling {
+    pub max_sandbox: Sandbox,
 }
 
 /// One complete maximum native permission set from a user, project, explicit,
@@ -523,5 +536,39 @@ mod tests {
             "#,
         );
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn harness_permission_ceiling_requires_one_closed_sandbox_value() {
+        let root: RawRoot = toml::from_str(
+            r#"
+            [harness_permissions]
+            max_sandbox = "write"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            root.harness_permissions.unwrap().max_sandbox,
+            Sandbox::Write
+        );
+
+        assert!(
+            toml::from_str::<RawRoot>(
+                r#"
+                [harness_permissions]
+                "#,
+            )
+            .is_err()
+        );
+        assert!(
+            toml::from_str::<RawRoot>(
+                r#"
+                [harness_permissions]
+                max_sandbox = "write"
+                raw_args = ["--dangerously-skip-permissions"]
+                "#,
+            )
+            .is_err()
+        );
     }
 }
