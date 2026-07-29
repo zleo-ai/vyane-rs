@@ -179,7 +179,13 @@ pub(crate) async fn run_network_broker(
         }
         let host_len = channel.read_u16().await? as usize;
         let port = channel.read_u16().await?;
-        if host_len == 0 || host_len > MAX_HOST_BYTES {
+        if host_len == 0 {
+            channel.write_u8(0).await?;
+            continue;
+        }
+        if host_len > MAX_HOST_BYTES {
+            let mut discarded = vec![0u8; host_len];
+            channel.read_exact(&mut discarded).await?;
             channel.write_u8(0).await?;
             continue;
         }
@@ -240,16 +246,32 @@ pub(crate) async fn run_network_broker(
                             if transferred > policy.max_bytes {
                                 return Ok(());
                             }
-                            stream.write_all(&bytes).await?;
+                            if stream.write_all(&bytes).await.is_err() {
+                                remote_eof = true;
+                                if let Err(error) = write_frame(&mut channel, &[]).await {
+                                    if proxy_closed(&error) {
+                                        return Ok(());
+                                    }
+                                    return Err(error.into());
+                                }
+                            }
                         }
                         None => {
                             client_eof = true;
-                            stream.shutdown().await?;
+                            if stream.shutdown().await.is_err() {
+                                remote_eof = true;
+                                if let Err(error) = write_frame(&mut channel, &[]).await {
+                                    if proxy_closed(&error) {
+                                        return Ok(());
+                                    }
+                                    return Err(error.into());
+                                }
+                            }
                         }
                     }
                 }
                 read = stream.read(&mut remote_buf), if !remote_eof => {
-                    let count = read?;
+                    let count = read.unwrap_or(0);
                     if count == 0 {
                         remote_eof = true;
                         if let Err(error) = write_frame(&mut channel, &[]).await {
@@ -801,6 +823,17 @@ fn public_v6(ip: Ipv6Addr) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    struct AlwaysValidAuthority;
+
+    #[cfg(target_os = "linux")]
+    #[async_trait::async_trait]
+    impl NativeExecutionAuthority for AlwaysValidAuthority {
+        async fn revalidate(&self, _effect: NativeSideEffect) -> VyaneResult<()> {
+            Ok(())
+        }
+    }
+
     fn policy(host: &str) -> NativeCommandNetworkPolicy {
         NativeCommandNetworkPolicy {
             allow: vec![NativeCommandNetworkRule {
@@ -978,5 +1011,49 @@ mod tests {
             .await
             .expect("drain");
         assert_eq!(transferred, 9);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn oversized_host_payload_is_consumed_before_the_next_request() {
+        use std::os::fd::OwnedFd;
+
+        let (broker, proxy) = std::os::unix::net::UnixStream::pair().expect("proxy pair");
+        let broker_fd: OwnedFd = broker.into();
+        proxy.set_nonblocking(true).expect("nonblocking proxy");
+        let mut proxy = UnixStream::from_std(proxy).expect("async proxy");
+        let broker = tokio::spawn(async move {
+            run_network_broker(
+                broker_fd,
+                &policy("example.com"),
+                &AlwaysValidAuthority,
+                NativeSideEffect::ToolOperation {
+                    turn: 0,
+                    ordinal: 0,
+                },
+            )
+            .await
+        });
+
+        proxy.write_u8(1).await.expect("request kind");
+        proxy.write_u16(254).await.expect("oversized length");
+        proxy.write_u16(443).await.expect("port");
+        proxy
+            .write_all(&vec![b'x'; 254])
+            .await
+            .expect("oversized host");
+        assert_eq!(proxy.read_u8().await.expect("rejection"), 0);
+
+        proxy.write_u8(1).await.expect("next request kind");
+        proxy.write_u16(1).await.expect("next host length");
+        proxy.write_u16(443).await.expect("next port");
+        proxy.write_all(b"x").await.expect("next host");
+        assert_eq!(proxy.read_u8().await.expect("next rejection"), 0);
+
+        drop(proxy);
+        broker
+            .await
+            .expect("broker task")
+            .expect("broker completion");
     }
 }

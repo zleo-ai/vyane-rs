@@ -122,12 +122,16 @@ while child.poll() is None:
         established = True
         client.settimeout(None)
         while not (client_eof and remote_eof):
+            if child.poll() is not None:
+                break
             watched = []
             if not client_eof:
                 watched.append(client)
             if not remote_eof:
                 watched.append(broker)
-            readable, _, _ = select.select(watched, [], [], 1)
+            readable, _, _ = select.select(watched, [], [], 0.1)
+            if child.poll() is not None:
+                break
             if broker in readable:
                 length = struct.unpack("!I", exact(broker, 4))[0]
                 if length == 0:
