@@ -22,7 +22,7 @@ use crate::{
 pub const MAX_VERIFIER_TIMEOUT: Duration = Duration::from_secs(300);
 pub const MAX_OUTPUT_TAIL_BYTES: usize = 4_000;
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
-const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
+const EXECUTABLE_BUSY_MAX_RETRIES: usize = 50;
 
 #[derive(Debug, Clone)]
 pub struct AcceptanceVerifier {

@@ -89,7 +89,7 @@ const POST_KILL_SETTLE_GRACE: Duration = Duration::from_millis(500);
 /// sentinels cannot distinguish a shell launch failure from a target that
 /// intentionally exits 126, so they deliberately do not retry the target.
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
-const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
+const EXECUTABLE_BUSY_MAX_RETRIES: usize = 50;
 /// Poll interval while waiting for a process group to disappear.
 #[cfg(unix)]
 const GROUP_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
