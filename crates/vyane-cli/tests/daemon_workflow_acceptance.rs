@@ -107,6 +107,14 @@ impl DaemonGuard {
         let output = stop_daemon(&self.data_dir).expect("run daemon stop");
         if output.status.success() {
             self.running = false;
+        } else {
+            eprintln!(
+                "daemon stop failed: status={}; stdout={}; stderr={}; log={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+                fs::read_to_string(self.data_dir.join("daemon.log")).unwrap_or_default(),
+            );
         }
         output
     }
