@@ -12,7 +12,8 @@ use vyane_harness::native::{
     NativeCommandNetworkPolicy, NativeCommandNetworkRoute, NativeCommandNetworkRule,
     NativeCommandPolicy, NativeCommandRule, PermissionPolicy, ToolCall, ToolContext,
     ToolInvocationStatus, command_permission_policy, command_tool_registry,
-    register_command_tool_with_network, validate_command_host, workspace_tool_registry_with_policy,
+    register_command_tool_with_network, validate_command_host, validate_command_network_host,
+    workspace_tool_registry_with_policy,
 };
 
 static COMMAND_TEST_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
@@ -223,6 +224,22 @@ async fn host_probe_rejects_allowlisted_program_missing_from_sandbox() {
 }
 
 #[tokio::test]
+async fn network_host_probe_runs_the_proxy_launcher_before_admission() {
+    let root = tempdir().expect("workspace");
+    let pinned = PinnedWorkdir::open(root.path()).expect("pin");
+    validate_command_network_host(&pinned, &policy(&[("python3", &["-c"])]), &network_policy())
+        .await
+        .expect("supported network command host");
+
+    let missing = policy(&[("vyane-program-that-does-not-exist", &[])]);
+    assert!(
+        validate_command_network_host(&pinned, &missing, &network_policy())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn workspace_is_read_only_and_host_etc_is_not_mounted() {
     let root = tempdir().expect("workspace");
     let write_output = execute(
@@ -331,6 +348,32 @@ async fn allowed_https_host_is_reachable_through_the_policy_broker() {
         "import urllib.request; ",
         "response=urllib.request.urlopen('https://example.com',timeout=5); ",
         "print(response.status)"
+    );
+    let output = execute_network_with_route(
+        root.path(),
+        &RecordingAuthority::default(),
+        call("python3", &["-c", source]),
+        NativeCommandNetworkRoute::EnvironmentProxy,
+    )
+    .await
+    .expect("network command");
+    assert!(output.contains("exit_code: 0"), "{output}");
+    assert!(output.contains("200"), "{output}");
+}
+
+#[tokio::test]
+#[ignore = "requires the configured host HTTPS proxy"]
+async fn rejected_tls_tunnel_does_not_poison_a_later_allowed_request() {
+    let root = tempdir().expect("workspace");
+    let source = concat!(
+        "import socket,ssl,urllib.request\n",
+        "s=socket.create_connection(('127.0.0.1',3128),2)\n",
+        "s.sendall(b'CONNECT example.com:443 HTTP/1.1\\r\\n\\r\\n')\n",
+        "assert b' 200 ' in s.recv(4096)\n",
+        "try: ssl.create_default_context().wrap_socket(s,server_hostname='wrong.example.com')\n",
+        "except Exception: s.close()\n",
+        "response=urllib.request.urlopen('https://example.com',timeout=5)\n",
+        "print(response.status)\n"
     );
     let output = execute_network_with_route(
         root.path(),

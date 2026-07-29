@@ -509,17 +509,20 @@ impl DaemonAgentHost {
             .native_permissions
             .validate(request.sandbox)
             .map_err(|_| AgentApiError::bad_request())?;
-        if let Some(policy) = &request.native_permissions.command_network {
-            validate_command_network_host(policy).map_err(|_| AgentApiError::bad_request())?;
-        }
         let workdir = request
             .workdir
             .ok_or_else(AgentApiError::bad_request)
             .and_then(|path| PinnedWorkdir::open(path).map_err(|_| AgentApiError::bad_request()))?;
         if let Some(policy) = &request.native_permissions.command_execution {
-            validate_command_host(&workdir, policy)
-                .await
-                .map_err(|_| AgentApiError::bad_request())?;
+            if let Some(network) = &request.native_permissions.command_network {
+                validate_command_network_host(&workdir, policy, network)
+                    .await
+                    .map_err(|_| AgentApiError::bad_request())?;
+            } else {
+                validate_command_host(&workdir, policy)
+                    .await
+                    .map_err(|_| AgentApiError::bad_request())?;
+            }
         }
         let scoped = self.service.scope(OwnerContext::single_user_local());
         let chain = scoped

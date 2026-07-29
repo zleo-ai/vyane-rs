@@ -23,6 +23,7 @@ use crate::spawn::{RunControl, Termination, run_capture_with_pinned_limit_author
 
 #[cfg(target_os = "linux")]
 use super::trusted_network::run_network_broker;
+#[cfg(target_os = "linux")]
 use super::trusted_network::validate_network_route_host;
 use super::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, PermissionEffect, PermissionPolicy, PermissionRule,
@@ -221,19 +222,51 @@ pub enum NativeCommandHostError {
     Unsupported,
 }
 
-pub fn validate_command_network_host(
+#[cfg(target_os = "linux")]
+pub async fn validate_command_network_host(
+    pinned: &PinnedWorkdir,
+    command_policy: &NativeCommandPolicy,
     policy: &NativeCommandNetworkPolicy,
 ) -> Result<(), NativeCommandHostError> {
-    if cfg!(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    )) && std::path::Path::new("/usr/bin/python3").is_file()
-        && validate_network_route_host(policy).is_ok()
-    {
-        Ok(())
-    } else {
-        Err(NativeCommandHostError::Unsupported)
+    validate_command_host_requirements(command_policy)?;
+    policy
+        .validate()
+        .map_err(|_| NativeCommandHostError::Unsupported)?;
+    validate_network_route_host(policy).map_err(|_| NativeCommandHostError::Unsupported)?;
+    let probe_arguments = command_probe_arguments(command_policy);
+    let args = launcher_args("/bin/sh", &probe_arguments, 5, true)
+        .map_err(|_| NativeCommandHostError::Unsupported)?;
+    let probe_authority = ProbeAuthority;
+    let result = run_networked_command(
+        &args,
+        pinned,
+        RunControl::new(
+            vyane_core::CancellationToken::new(),
+            Some(Duration::from_secs(5)),
+            None,
+        ),
+        &probe_authority,
+        NativeSideEffect::ToolOperation {
+            turn: 0,
+            ordinal: 0,
+        },
+        policy,
+    )
+    .await
+    .map_err(|_| NativeCommandHostError::Unsupported)?;
+    match result.termination {
+        Termination::Exited(0) => Ok(()),
+        _ => Err(NativeCommandHostError::Unsupported),
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn validate_command_network_host(
+    _pinned: &PinnedWorkdir,
+    _command_policy: &NativeCommandPolicy,
+    _policy: &NativeCommandNetworkPolicy,
+) -> Result<(), NativeCommandHostError> {
+    Err(NativeCommandHostError::Unsupported)
 }
 
 #[cfg(target_os = "linux")]
@@ -344,39 +377,8 @@ pub async fn validate_command_host(
     pinned: &PinnedWorkdir,
     policy: &NativeCommandPolicy,
 ) -> Result<(), NativeCommandHostError> {
-    policy
-        .validate()
-        .map_err(|_| NativeCommandHostError::Unsupported)?;
-    if !command_arch_supported() {
-        return Err(NativeCommandHostError::Unsupported);
-    }
-    if [BWRAP, PRLIMIT, KEYCTL]
-        .iter()
-        .any(|path| !std::path::Path::new(path).is_file())
-    {
-        return Err(NativeCommandHostError::Unsupported);
-    }
-    let mut probe_arguments = vec![
-        "-c".into(),
-        concat!(
-            "for vyane_program do ",
-            "{ [ -f \"/usr/bin/$vyane_program\" ] && ",
-            "[ -x \"/usr/bin/$vyane_program\" ]; } || ",
-            "{ [ -f \"/bin/$vyane_program\" ] && ",
-            "[ -x \"/bin/$vyane_program\" ]; } || exit 127; ",
-            "done"
-        )
-        .into(),
-        "vyane-command-program-probe".into(),
-    ];
-    let mut programs = policy
-        .allow
-        .iter()
-        .map(|rule| rule.program.clone())
-        .collect::<Vec<_>>();
-    programs.sort();
-    programs.dedup();
-    probe_arguments.extend(programs);
+    validate_command_host_requirements(policy)?;
+    let probe_arguments = command_probe_arguments(policy);
     let args = launcher_args("/bin/sh", &probe_arguments, 5, false)
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     let probe_authority = ProbeAuthority;
@@ -405,6 +407,51 @@ pub async fn validate_command_host(
         Termination::Exited(0) => Ok(()),
         _ => Err(NativeCommandHostError::Unsupported),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_command_host_requirements(
+    policy: &NativeCommandPolicy,
+) -> Result<(), NativeCommandHostError> {
+    policy
+        .validate()
+        .map_err(|_| NativeCommandHostError::Unsupported)?;
+    if !command_arch_supported() {
+        return Err(NativeCommandHostError::Unsupported);
+    }
+    if [BWRAP, PRLIMIT, KEYCTL]
+        .iter()
+        .any(|path| !std::path::Path::new(path).is_file())
+    {
+        return Err(NativeCommandHostError::Unsupported);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn command_probe_arguments(policy: &NativeCommandPolicy) -> Vec<String> {
+    let mut arguments = vec![
+        "-c".into(),
+        concat!(
+            "for vyane_program do ",
+            "{ [ -f \"/usr/bin/$vyane_program\" ] && ",
+            "[ -x \"/usr/bin/$vyane_program\" ]; } || ",
+            "{ [ -f \"/bin/$vyane_program\" ] && ",
+            "[ -x \"/bin/$vyane_program\" ]; } || exit 127; ",
+            "done"
+        )
+        .into(),
+        "vyane-command-program-probe".into(),
+    ];
+    let mut programs = policy
+        .allow
+        .iter()
+        .map(|rule| rule.program.clone())
+        .collect::<Vec<_>>();
+    programs.sort();
+    programs.dedup();
+    arguments.extend(programs);
+    arguments
 }
 
 #[cfg(not(target_os = "linux"))]

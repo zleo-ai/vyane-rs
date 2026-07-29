@@ -150,11 +150,6 @@ pub(crate) fn validate_network_route_host(policy: &NativeCommandNetworkPolicy) -
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn validate_network_route_host(_policy: &NativeCommandNetworkPolicy) -> Result<(), ()> {
-    Err(())
-}
-
 #[cfg(target_os = "linux")]
 pub(crate) async fn run_network_broker(
     channel: std::os::fd::OwnedFd,
@@ -224,6 +219,7 @@ pub(crate) async fn run_network_broker(
             read_https_prelude(&mut channel, &host, &mut transferred, policy.max_bytes).await?
         else {
             write_frame(&mut channel, &[]).await?;
+            drain_rejected_tunnel(&mut channel, &mut transferred, policy.max_bytes).await?;
             continue 'requests;
         };
         stream.write_all(&prelude).await?;
@@ -528,6 +524,24 @@ async fn read_frame(channel: &mut UnixStream) -> std::io::Result<Option<Vec<u8>>
 async fn write_frame(channel: &mut UnixStream, bytes: &[u8]) -> std::io::Result<()> {
     channel.write_u32(bytes.len() as u32).await?;
     channel.write_all(bytes).await
+}
+
+#[cfg(target_os = "linux")]
+async fn drain_rejected_tunnel(
+    channel: &mut UnixStream,
+    transferred: &mut u64,
+    max_bytes: u64,
+) -> std::io::Result<()> {
+    while let Some(frame) = read_frame(channel).await? {
+        *transferred = transferred.saturating_add(frame.len() as u64);
+        if *transferred > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "native network byte limit exceeded",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -936,5 +950,22 @@ mod tests {
         let final_attempt = shared_attempt_deadline(overall, 1);
         assert!(first_attempt < final_attempt);
         assert!(final_attempt <= overall);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn rejected_tunnel_drain_consumes_the_client_eof_frame() {
+        let (broker, mut proxy) = UnixStream::pair().expect("proxy pair");
+        let mut transferred = 0;
+        write_frame(&mut proxy, b"discarded")
+            .await
+            .expect("client data");
+        write_frame(&mut proxy, &[]).await.expect("client EOF");
+
+        let mut broker = broker;
+        drain_rejected_tunnel(&mut broker, &mut transferred, 1024)
+            .await
+            .expect("drain");
+        assert_eq!(transferred, 9);
     }
 }
