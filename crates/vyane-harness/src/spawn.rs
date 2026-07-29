@@ -31,6 +31,10 @@ type InheritedFd = OwnedFd;
 #[cfg(not(unix))]
 type InheritedFd = RawFd;
 #[cfg(unix)]
+pub(crate) type NativeNetworkChannel = OwnedFd;
+#[cfg(not(unix))]
+pub(crate) type NativeNetworkChannel = RawFd;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -89,6 +93,9 @@ const GROUP_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// exit code. Dash accepts redirections only for single-digit descriptors.
 #[cfg(unix)]
 const SENTINEL_STATUS_FD: RawFd = 9;
+#[cfg(unix)]
+/// Private proxy-to-broker transport inherited by the trusted sandbox wrapper.
+const NATIVE_NETWORK_FD: RawFd = 5;
 /// Stable descriptor inherited by the real CLI for its admitted directory.
 /// The lifecycle shell closes only descriptor 9, so this remains available to
 /// Codex/Claude and all descendants.
@@ -428,6 +435,13 @@ impl RunControl {
         self.spawn_authority = spawn_authority;
         self
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_child_cancellation(mut self) -> (Self, CancellationToken) {
+        let cancel = self.cancel.child_token();
+        self.cancel = cancel.clone();
+        (self, cancel)
+    }
 }
 
 /// Last-resort process-group cleanup for abrupt future drop or unwinding.
@@ -757,6 +771,7 @@ struct ControlledSpawn<'a> {
     pinned_workdir_fd: Option<InheritedFd>,
     target_env_fd: Option<InheritedFd>,
     seccomp_filter_fd: Option<InheritedFd>,
+    network_channel_fd: Option<InheritedFd>,
 }
 
 async fn spawn_controlled_harness_child(
@@ -780,6 +795,7 @@ async fn spawn_controlled_harness_child(
             control.pinned_workdir_fd,
             control.target_env_fd,
             control.seccomp_filter_fd,
+            control.network_channel_fd,
         )?;
         let child = spawn_harness_child(
             command,
@@ -807,6 +823,7 @@ async fn spawn_controlled_harness_child(
         let _ = control.reporter;
         let _ = control.pinned_workdir_fd;
         let _ = control.target_env_fd;
+        let _ = control.network_channel_fd;
         install_process_group(command, control.seccomp_filter_fd)?;
         let _ = control.native_spawn_gate;
         spawn_harness_child(
@@ -912,6 +929,7 @@ pub(crate) async fn run_capture_with_pinned_limit(
         capture_limit,
         None,
         None,
+        None,
     )
     .await
 }
@@ -939,6 +957,37 @@ pub(crate) async fn run_capture_with_pinned_limit_authorized(
         capture_limit,
         Some(NativeSpawnGate { authority, effect }),
         Some(seccomp_filter),
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "linux")]
+pub(crate) async fn run_capture_with_pinned_limit_authorized_channel(
+    program: &str,
+    args: &[String],
+    cwd: Option<&std::path::Path>,
+    pinned_workdir: Option<&PinnedWorkdir>,
+    env: &BTreeMap<String, String>,
+    control: RunControl,
+    capture_limit: usize,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+    seccomp_filter: &[u8],
+    network_channel: NativeNetworkChannel,
+) -> Result<RunResult> {
+    run_capture_with_pinned_limit_confined(
+        program,
+        args,
+        cwd,
+        pinned_workdir,
+        env,
+        control,
+        capture_limit,
+        Some(NativeSpawnGate { authority, effect }),
+        Some(seccomp_filter),
+        Some(network_channel),
     )
     .await
 }
@@ -954,6 +1003,7 @@ async fn run_capture_with_pinned_limit_confined(
     capture_limit: usize,
     native_spawn_gate: Option<NativeSpawnGate<'_>>,
     seccomp_filter: Option<&[u8]>,
+    network_channel: Option<NativeNetworkChannel>,
 ) -> Result<RunResult> {
     let RunControl {
         cancel,
@@ -1007,6 +1057,25 @@ async fn run_capture_with_pinned_limit_confined(
     let inherited_seccomp_filter_fd = inherited_seccomp_filter.map(|inherited| inherited.source);
     #[cfg(not(unix))]
     let inherited_seccomp_filter_fd = None;
+    #[cfg(unix)]
+    let inherited_network_channel_fd = network_channel
+        .map(|channel| {
+            duplicate_inherited_fd(
+                channel,
+                "failed to duplicate private native network transport",
+            )
+        })
+        .transpose()?;
+    #[cfg(not(unix))]
+    let inherited_network_channel_fd = {
+        if network_channel.is_some() {
+            return Err(VyaneError::new(
+                ErrorKind::Unsupported,
+                "native network transport requires Unix descriptor passing",
+            ));
+        }
+        None
+    };
     let mut cmd = harness_command(program, args, start_gated);
     cmd.stdin(if start_gated {
         Stdio::piped()
@@ -1048,6 +1117,7 @@ async fn run_capture_with_pinned_limit_confined(
             pinned_workdir_fd: inherited_workdir_fd,
             target_env_fd: inherited_target_env_fd,
             seccomp_filter_fd: inherited_seccomp_filter_fd,
+            network_channel_fd: inherited_network_channel_fd,
         },
     )
     .await?;
@@ -1373,6 +1443,7 @@ pub(crate) async fn run_stream_capture_with_pinned(
             pinned_workdir_fd: inherited_workdir_fd,
             target_env_fd: inherited_target_env_fd,
             seccomp_filter_fd: None,
+            network_channel_fd: None,
         },
     )
     .await?;
@@ -1635,9 +1706,10 @@ fn install_process_group(
     pinned_workdir_fd: Option<OwnedFd>,
     target_env_fd: Option<OwnedFd>,
     seccomp_filter_fd: Option<OwnedFd>,
+    network_channel_fd: Option<OwnedFd>,
 ) -> Result<()> {
     cmd.process_group(0);
-    let mut mappings = Vec::with_capacity(4);
+    let mut mappings = Vec::with_capacity(5);
     if let Some(fd) = sentinel_status_fd {
         mappings.push(FdMapping {
             parent_fd: fd,
@@ -1666,6 +1738,12 @@ fn install_process_group(
         mappings.push(FdMapping {
             parent_fd: fd,
             child_fd: SECCOMP_FILTER_FD,
+        });
+    }
+    if let Some(fd) = network_channel_fd {
+        mappings.push(FdMapping {
+            parent_fd: fd,
+            child_fd: NATIVE_NETWORK_FD,
         });
     }
     cmd.fd_mappings(mappings).map_err(|source| {
@@ -2726,6 +2804,7 @@ mod tests {
             None,
             Some(target_env.source),
             None,
+            None,
         )
         .unwrap();
         let mut child = command.spawn().unwrap();
@@ -2764,6 +2843,7 @@ mod tests {
                 pinned_workdir_fd: None,
                 target_env_fd: Some(target_env.source),
                 seccomp_filter_fd: None,
+                network_channel_fd: None,
             },
         )
         .await
@@ -2910,7 +2990,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        install_process_group(&mut command, None, None, None, None).unwrap();
+        install_process_group(&mut command, None, None, None, None, None).unwrap();
         let mut child = command.spawn().unwrap();
         let pgid = child.id().unwrap() as i32;
         let mut guard = ProcessGroupDropGuard::new(child.id(), None);
@@ -2962,7 +3042,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        install_process_group(&mut command, None, None, None, None).unwrap();
+        install_process_group(&mut command, None, None, None, None, None).unwrap();
         let mut child = command.spawn().unwrap();
         let pgid = child.id().unwrap() as i32;
         let (reporter, events) = recording_reporter();

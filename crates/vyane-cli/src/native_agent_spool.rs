@@ -14,9 +14,12 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use vyane_core::{Effort, PinnedWorkdir, WorkdirIdentity};
-use vyane_harness::native::{NativeCommandPolicy, NativeReadPolicy, NativeWritePolicy};
+use vyane_harness::native::{
+    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWritePolicy,
+};
 
-const SCHEMA: u32 = 5;
+const SCHEMA: u32 = 6;
+const COMMAND_EXECUTION_SCHEMA: u32 = 5;
 const FILESYSTEM_WRITE_SCHEMA: u32 = 4;
 const READ_ONLY_SCHEMA: u32 = 3;
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
@@ -172,6 +175,8 @@ pub(crate) struct NativeAgentPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) command_execution: Option<NativeCommandPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) command_network: Option<NativeCommandNetworkPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_model_turns: u32,
@@ -200,6 +205,13 @@ impl std::fmt::Debug for NativeAgentPolicy {
                 "command_execution_rules",
                 &self
                     .command_execution
+                    .as_ref()
+                    .map(|policy| policy.allow.len()),
+            )
+            .field(
+                "command_network_rules",
+                &self
+                    .command_network
                     .as_ref()
                     .map(|policy| policy.allow.len()),
             )
@@ -263,6 +275,7 @@ impl NativeAgentInput {
 
     fn validate(&self) -> Result<(), NativeAgentSpoolError> {
         let supported_schema = self.schema == SCHEMA
+            || (self.schema == COMMAND_EXECUTION_SCHEMA && self.policy.command_network.is_none())
             || (self.schema == FILESYSTEM_WRITE_SCHEMA && self.policy.command_execution.is_none())
             || (self.schema == READ_ONLY_SCHEMA
                 && self.policy.filesystem_write.is_none()
@@ -603,6 +616,14 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
             .validate()
             .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
     }
+    if let Some(network_policy) = &policy.command_network {
+        if policy.command_execution.is_none() {
+            return Err(NativeAgentSpoolError::InvalidInput);
+        }
+        network_policy
+            .validate()
+            .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
+    }
     if !policy.canonical_workdir.is_absolute() {
         return Err(NativeAgentSpoolError::InvalidInput);
     }
@@ -810,6 +831,7 @@ mod tests {
             filesystem_read: NativeReadPolicy::workspace(),
             filesystem_write: None,
             command_execution: None,
+            command_network: None,
             system: Some("system-body-marker".into()),
             timeout_seconds: 120,
             max_model_turns: 8,
@@ -1140,6 +1162,65 @@ mod tests {
     }
 
     #[test]
+    fn schema_five_command_input_remains_recoverable_without_network_authority() {
+        let (_directory, spool) = fixture();
+        let path = spool.input_path("run-marker").unwrap();
+        let mut command_policy = policy();
+        command_policy.command_execution = Some(NativeCommandPolicy {
+            allow: vec![vyane_harness::native::NativeCommandRule {
+                program: "cargo".into(),
+                args_prefix: vec!["fetch".into()],
+            }],
+            max_seconds: 30,
+        });
+        let mut legacy = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            command_policy,
+        )
+        .unwrap();
+        legacy.schema = COMMAND_EXECUTION_SCHEMA;
+        write_private(&path, serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(spool.read("run-marker", "worker-marker").unwrap(), legacy);
+        spool.remove_exact(&legacy).unwrap();
+
+        let mut network_policy = policy();
+        network_policy.command_execution = Some(NativeCommandPolicy {
+            allow: vec![vyane_harness::native::NativeCommandRule {
+                program: "cargo".into(),
+                args_prefix: vec!["fetch".into()],
+            }],
+            max_seconds: 30,
+        });
+        network_policy.command_network = Some(NativeCommandNetworkPolicy {
+            allow: vec![vyane_harness::native::NativeCommandNetworkRule {
+                host: "crates.io".into(),
+                ports: vec![443],
+            }],
+            route: Default::default(),
+            max_connections: 2,
+            max_bytes: 1024,
+            connect_timeout_seconds: 1,
+        });
+        let mut invalid = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            network_policy,
+        )
+        .unwrap();
+        invalid.schema = COMMAND_EXECUTION_SCHEMA;
+        write_private(&path, serde_json::to_vec(&invalid).unwrap());
+        assert_eq!(
+            spool.read("run-marker", "worker-marker"),
+            Err(NativeAgentSpoolError::CorruptInput)
+        );
+    }
+
+    #[test]
     fn symlink_hardlink_wrong_mode_and_oversize_fail_closed() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
         let (directory, spool) = fixture();
@@ -1248,6 +1329,21 @@ mod tests {
             NativeAgentInput::fresh("owner", "run", "worker", "prompt", bypass),
             Err(NativeAgentSpoolError::InvalidInput)
         );
+        let mut network_without_command = policy();
+        network_without_command.command_network = Some(NativeCommandNetworkPolicy {
+            allow: vec![vyane_harness::native::NativeCommandNetworkRule {
+                host: "crates.io".into(),
+                ports: vec![443],
+            }],
+            route: Default::default(),
+            max_connections: 1,
+            max_bytes: 1024,
+            connect_timeout_seconds: 1,
+        });
+        assert_eq!(
+            NativeAgentInput::fresh("owner", "run", "worker", "prompt", network_without_command),
+            Err(NativeAgentSpoolError::InvalidInput)
+        );
     }
 
     #[test]
@@ -1289,6 +1385,25 @@ mod tests {
                 args_prefix: vec!["status".into()],
             }],
             max_seconds: 30,
+        });
+        variants.push(value);
+        let mut value = base.clone();
+        value.command_execution = Some(NativeCommandPolicy {
+            allow: vec![vyane_harness::native::NativeCommandRule {
+                program: "cargo".into(),
+                args_prefix: vec!["fetch".into()],
+            }],
+            max_seconds: 30,
+        });
+        value.command_network = Some(NativeCommandNetworkPolicy {
+            allow: vec![vyane_harness::native::NativeCommandNetworkRule {
+                host: "crates.io".into(),
+                ports: vec![443],
+            }],
+            route: Default::default(),
+            max_connections: 2,
+            max_bytes: 1024,
+            connect_timeout_seconds: 1,
         });
         variants.push(value);
         let mut value = base.clone();

@@ -47,7 +47,8 @@ use crate::native_agent_spool::{
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
 use vyane_harness::native::{
-    NativeCommandPolicy, NativeReadPolicy, NativeWritePolicy, validate_command_host,
+    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWritePolicy,
+    validate_command_host, validate_command_network_host,
 };
 
 const INPUT_DIR: &str = "agent-inputs";
@@ -95,6 +96,34 @@ pub(crate) struct NativePermissionRequest {
     /// Omission keeps native subprocess execution disabled.
     #[serde(default)]
     pub(crate) command_execution: Option<NativeCommandPolicy>,
+    /// Omission preserves the isolated, networkless command profile.
+    #[serde(default)]
+    pub(crate) command_network: Option<NativeCommandNetworkPolicy>,
+}
+
+impl NativePermissionRequest {
+    fn validate(&self, sandbox: AgentSpoolSandbox) -> std::result::Result<(), ()> {
+        if sandbox == AgentSpoolSandbox::ReadOnly && self.filesystem_write.is_some() {
+            return Err(());
+        }
+        self.filesystem_read.validate().map_err(|_| ())?;
+        if let Some(policy) = &self.filesystem_write {
+            policy.validate().map_err(|_| ())?;
+        }
+        if let Some(policy) = &self.command_execution {
+            if !self.filesystem_read.exclude.is_empty() {
+                return Err(());
+            }
+            policy.validate().map_err(|_| ())?;
+        }
+        if let Some(policy) = &self.command_network {
+            if self.command_execution.is_none() {
+                return Err(());
+            }
+            policy.validate().map_err(|_| ())?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -476,42 +505,24 @@ impl DaemonAgentHost {
         timeout_seconds: u64,
     ) -> Result<AgentRunView, AgentApiError> {
         let _native_submit_guard = self.native_submit_gate.lock().await;
-        if request.sandbox == AgentSpoolSandbox::ReadOnly
-            && request.native_permissions.filesystem_write.is_some()
-        {
-            return Err(AgentApiError::bad_request());
-        }
         request
             .native_permissions
-            .filesystem_read
-            .validate()
+            .validate(request.sandbox)
             .map_err(|_| AgentApiError::bad_request())?;
-        if let Some(policy) = &request.native_permissions.filesystem_write {
-            policy
-                .validate()
-                .map_err(|_| AgentApiError::bad_request())?;
-        }
-        if let Some(policy) = &request.native_permissions.command_execution {
-            if !request
-                .native_permissions
-                .filesystem_read
-                .exclude
-                .is_empty()
-            {
-                return Err(AgentApiError::bad_request());
-            }
-            policy
-                .validate()
-                .map_err(|_| AgentApiError::bad_request())?;
-        }
         let workdir = request
             .workdir
             .ok_or_else(AgentApiError::bad_request)
             .and_then(|path| PinnedWorkdir::open(path).map_err(|_| AgentApiError::bad_request()))?;
         if let Some(policy) = &request.native_permissions.command_execution {
-            validate_command_host(&workdir, policy)
-                .await
-                .map_err(|_| AgentApiError::bad_request())?;
+            if let Some(network) = &request.native_permissions.command_network {
+                validate_command_network_host(&workdir, policy, network)
+                    .await
+                    .map_err(|_| AgentApiError::bad_request())?;
+            } else {
+                validate_command_host(&workdir, policy)
+                    .await
+                    .map_err(|_| AgentApiError::bad_request())?;
+            }
         }
         let scoped = self.service.scope(OwnerContext::single_user_local());
         let chain = scoped
@@ -534,6 +545,7 @@ impl DaemonAgentHost {
                 filesystem_read: request.native_permissions.filesystem_read,
                 filesystem_write: request.native_permissions.filesystem_write,
                 command_execution: request.native_permissions.command_execution,
+                command_network: request.native_permissions.command_network,
                 system: request.system,
                 timeout_seconds,
             },
@@ -1112,6 +1124,7 @@ mod tests {
         );
         assert!(default.native_permissions.filesystem_write.is_none());
         assert!(default.native_permissions.command_execution.is_none());
+        assert!(default.native_permissions.command_network.is_none());
 
         let mut configured = base;
         configured["native_permissions"] = serde_json::json!({
@@ -1126,6 +1139,15 @@ mod tests {
                     { "program": "git", "args_prefix": ["status"] }
                 ],
                 "max_seconds": 30
+            },
+            "command_network": {
+                "allow": [
+                    { "host": "crates.io", "ports": [443] }
+                ],
+                "route": "environment_proxy",
+                "max_connections": 4,
+                "max_bytes": 1048576,
+                "connect_timeout_seconds": 5
             }
         });
         let configured: AgentRunSubmitRequest =
@@ -1149,6 +1171,17 @@ mod tests {
         assert_eq!(command.allow[0].program, "git");
         assert_eq!(command.allow[0].args_prefix, ["status"]);
         assert_eq!(command.max_seconds, 30);
+        let network = configured
+            .native_permissions
+            .command_network
+            .expect("explicit command network policy");
+        assert_eq!(network.allow[0].host, "crates.io");
+        assert_eq!(network.allow[0].ports, [443]);
+        assert!(matches!(
+            network.route,
+            vyane_harness::native::NativeCommandNetworkRoute::EnvironmentProxy
+        ));
+        assert_eq!(network.max_connections, 4);
     }
 
     #[test]
@@ -1173,6 +1206,35 @@ mod tests {
                 .is_empty()
         );
         assert!(request.native_permissions.command_execution.is_some());
+        assert!(
+            request
+                .native_permissions
+                .validate(request.sandbox)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn command_network_requires_command_execution() {
+        let request: AgentRunSubmitRequest = serde_json::from_value(serde_json::json!({
+            "run_id": "019fa927-f343-7940-8c4f-1a3e79258335",
+            "task": "fetch an allowed dependency",
+            "target": "native",
+            "native_permissions": {
+                "command_network": {
+                    "allow": [{ "host": "crates.io", "ports": [443] }]
+                }
+            }
+        }))
+        .expect("request shape");
+        assert!(request.native_permissions.command_execution.is_none());
+        assert!(request.native_permissions.command_network.is_some());
+        assert!(
+            request
+                .native_permissions
+                .validate(request.sandbox)
+                .is_err()
+        );
     }
 
     #[tokio::test]
