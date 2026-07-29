@@ -17,6 +17,7 @@ mod text_edit;
 mod tools;
 mod trusted_commands;
 mod trusted_files;
+mod trusted_network;
 mod turn_driver;
 
 pub use permissions::{
@@ -33,8 +34,9 @@ pub use tools::{
 };
 pub use trusted_commands::{
     NativeCommandHostError, NativeCommandPolicy, NativeCommandPolicyError, NativeCommandRule,
-    command_permission_policy, command_tool_definition, command_tool_registry,
-    register_command_tool, validate_command_host,
+    RegisterCommandToolError, command_permission_policy, command_tool_definition,
+    command_tool_registry, register_command_tool, register_command_tool_with_network,
+    validate_command_host, validate_command_network_host,
 };
 pub use trusted_files::{
     NativeFilesystemPolicyError, NativeReadHostError, NativeReadPolicy, NativeReadPolicyError,
@@ -42,6 +44,10 @@ pub use trusted_files::{
     read_only_tool_definitions, read_only_tool_registry, read_only_tool_registry_with_policy,
     validate_read_only_host, workspace_permission_policy, workspace_tool_definitions,
     workspace_tool_registry_with_policy,
+};
+pub use trusted_network::{
+    NativeCommandNetworkPolicy, NativeCommandNetworkPolicyError, NativeCommandNetworkRoute,
+    NativeCommandNetworkRule,
 };
 pub use turn_driver::{
     DEFAULT_NATIVE_MODEL_TURNS, MAX_NATIVE_MODEL_TURNS, NativeAssistantReply, NativeTurnDriver,

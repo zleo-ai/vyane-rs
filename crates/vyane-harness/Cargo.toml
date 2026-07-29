@@ -12,6 +12,7 @@ rust-version.workspace = true
 [dependencies]
 vyane-core = { workspace = true }
 tokio = { workspace = true }
+url = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

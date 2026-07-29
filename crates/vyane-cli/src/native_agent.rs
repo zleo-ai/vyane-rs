@@ -16,10 +16,11 @@ use vyane_core::{
     ToolChatRequest, ToolChoice,
 };
 use vyane_harness::native::{
-    NativeCommandPolicy, NativeReadPolicy, NativeTurnDriver, NativeTurnLimits, NativeTurnStop,
-    NativeWritePolicy, ToolContext, command_permission_policy, command_tool_definition,
-    register_command_tool, validate_read_only_host, workspace_permission_policy,
-    workspace_tool_definitions, workspace_tool_registry_with_policy,
+    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeTurnDriver,
+    NativeTurnLimits, NativeTurnStop, NativeWritePolicy, ToolContext, command_permission_policy,
+    command_tool_definition, register_command_tool, register_command_tool_with_network,
+    validate_read_only_host, workspace_permission_policy, workspace_tool_definitions,
+    workspace_tool_registry_with_policy,
 };
 use vyane_message::{
     EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
@@ -225,6 +226,7 @@ pub(crate) fn native_input_for_submission(
         filesystem_read,
         filesystem_write,
         command_execution,
+        command_network,
         system,
         timeout_seconds,
     } = details;
@@ -266,6 +268,7 @@ pub(crate) fn native_input_for_submission(
             filesystem_read,
             filesystem_write,
             command_execution,
+            command_network,
             system,
             timeout_seconds,
             max_model_turns: 8,
@@ -281,6 +284,7 @@ pub(crate) struct NativeSubmissionDetails<'a> {
     pub(crate) filesystem_read: NativeReadPolicy,
     pub(crate) filesystem_write: Option<NativeWritePolicy>,
     pub(crate) command_execution: Option<NativeCommandPolicy>,
+    pub(crate) command_network: Option<NativeCommandNetworkPolicy>,
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
 }
@@ -370,10 +374,17 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         ) else {
             return AgentExecutorOutcome::Unknown;
         };
-        if let Some(command_policy) = input.policy.command_execution.clone()
-            && register_command_tool(&mut registry, command_policy).is_err()
-        {
-            return AgentExecutorOutcome::Unknown;
+        if let Some(command_policy) = input.policy.command_execution.clone() {
+            let registration = match input.policy.command_network.clone() {
+                Some(network) => {
+                    register_command_tool_with_network(&mut registry, command_policy, network)
+                        .map_err(|_| ())
+                }
+                None => register_command_tool(&mut registry, command_policy).map_err(|_| ()),
+            };
+            if registration.is_err() {
+                return AgentExecutorOutcome::Unknown;
+            }
         }
         let Ok(mut permission_policy) = workspace_permission_policy(write_enabled) else {
             return AgentExecutorOutcome::Unknown;
@@ -711,6 +722,7 @@ mod tests {
             filesystem_read: NativeReadPolicy::workspace(),
             filesystem_write: None,
             command_execution: None,
+            command_network: None,
             system: Some("Answer concisely.".into()),
             timeout_seconds: 30,
             max_model_turns: 8,

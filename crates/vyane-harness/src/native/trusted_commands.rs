@@ -17,12 +17,19 @@ use vyane_core::{
     ToolDefinition,
 };
 
-use crate::spawn::{RunControl, Termination, run_capture_with_pinned_limit_authorized};
+use crate::spawn::{
+    RunControl, Termination, run_capture_with_pinned_limit_authorized,
+    run_capture_with_pinned_limit_authorized_channel,
+};
 
+#[cfg(target_os = "linux")]
+use super::trusted_network::run_network_broker;
+use super::trusted_network::validate_network_route_host;
 use super::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, PermissionEffect, PermissionPolicy, PermissionRule,
     PermissionRuleError, ToolContext, ToolError, ToolRegistry,
 };
+use super::{NativeCommandNetworkPolicy, NativeCommandNetworkPolicyError};
 
 const BWRAP: &str = "/usr/bin/bwrap";
 const PRLIMIT: &str = "/usr/bin/prlimit";
@@ -51,6 +58,101 @@ const COMMAND_ROOT_TMP_BYTES: u64 = 16 * 1024 * 1024;
 const COMMAND_TMP_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const SECCOMP_FILTER_FD: &str = "7";
+#[cfg(target_os = "linux")]
+const NETWORK_PROXY_SCRIPT: &str = r#"
+import ctypes, os, select, socket, struct, subprocess, sys
+
+def exact(sock, count):
+    data = b""
+    while len(data) < count:
+        part = sock.recv(count - len(data))
+        if not part:
+            raise EOFError()
+        data += part
+    return data
+
+broker = socket.socket(fileno=5)
+if ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE) failed")
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", 3128))
+listener.listen(8)
+
+env = os.environ.copy()
+env.update({
+    "HTTP_PROXY": "http://127.0.0.1:3128",
+    "HTTPS_PROXY": "http://127.0.0.1:3128",
+    "ALL_PROXY": "http://127.0.0.1:3128",
+    "http_proxy": "http://127.0.0.1:3128",
+    "https_proxy": "http://127.0.0.1:3128",
+    "all_proxy": "http://127.0.0.1:3128",
+    "NO_PROXY": "",
+    "no_proxy": "",
+})
+child = subprocess.Popen(sys.argv[1:], env=env, close_fds=True)
+
+while child.poll() is None:
+    ready, _, _ = select.select([listener], [], [], 0.1)
+    if not ready:
+        continue
+    client, _ = listener.accept()
+    client.settimeout(5)
+    established = False
+    header = b""
+    while b"\r\n\r\n" not in header and len(header) <= 16384:
+        part = client.recv(4096)
+        if not part:
+            break
+        header += part
+    try:
+        first = header.split(b"\r\n", 1)[0].decode("ascii")
+        method, authority, _ = first.split(" ", 2)
+        host, port_text = authority.rsplit(":", 1)
+        port = int(port_text)
+        if method != "CONNECT" or not (0 < port < 65536):
+            raise ValueError()
+        host_bytes = host.lower().encode("ascii")
+        broker.sendall(b"\x01" + struct.pack("!HH", len(host_bytes), port) + host_bytes)
+        if exact(broker, 1) != b"\x01":
+            raise PermissionError()
+        client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        established = True
+        client.settimeout(None)
+        client_eof = remote_eof = False
+        while not (client_eof and remote_eof):
+            watched = []
+            if not client_eof:
+                watched.append(client)
+            if not remote_eof:
+                watched.append(broker)
+            readable, _, _ = select.select(watched, [], [], 1)
+            if broker in readable:
+                length = struct.unpack("!I", exact(broker, 4))[0]
+                if length == 0:
+                    remote_eof = True
+                    client.shutdown(socket.SHUT_WR)
+                elif length <= 65536:
+                    client.sendall(exact(broker, length))
+                else:
+                    raise ValueError()
+            if client in readable:
+                data = client.recv(65536)
+                broker.sendall(struct.pack("!I", len(data)) + data)
+                if not data:
+                    client_eof = True
+    except Exception:
+        if not established:
+            try:
+                client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            except Exception:
+                pass
+    finally:
+        client.close()
+
+listener.close()
+sys.exit(child.wait())
+"#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,6 +222,21 @@ pub enum NativeCommandHostError {
     Unsupported,
 }
 
+pub fn validate_command_network_host(
+    policy: &NativeCommandNetworkPolicy,
+) -> Result<(), NativeCommandHostError> {
+    if cfg!(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )) && std::path::Path::new("/usr/bin/python3").is_file()
+        && validate_network_route_host(policy).is_ok()
+    {
+        Ok(())
+    } else {
+        Err(NativeCommandHostError::Unsupported)
+    }
+}
+
 #[cfg(target_os = "linux")]
 struct ProbeAuthority;
 
@@ -134,9 +251,9 @@ impl NativeExecutionAuthority for ProbeAuthority {
 pub fn command_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "run_command".into(),
-        description:
-            "Run one explicitly allowlisted argv command in a read-only, networkless workspace."
-                .into(),
+        description: "Run one explicitly allowlisted argv command in a read-only workspace. \
+            Networking is absent unless the submission grants a separate HTTPS destination policy."
+            .into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -170,6 +287,7 @@ pub fn command_tool_registry(
     registry
         .register(Arc::new(RunCommandTool {
             policy: Arc::new(policy),
+            network: None,
         }))
         .map_err(|_| NativeCommandPolicyError::InvalidProgram)?;
     Ok(registry)
@@ -183,8 +301,34 @@ pub fn register_command_tool(
     registry
         .register(Arc::new(RunCommandTool {
             policy: Arc::new(policy),
+            network: None,
         }))
         .map_err(|_| NativeCommandPolicyError::InvalidProgram)
+}
+
+pub fn register_command_tool_with_network(
+    registry: &mut ToolRegistry,
+    policy: NativeCommandPolicy,
+    network: NativeCommandNetworkPolicy,
+) -> Result<(), RegisterCommandToolError> {
+    policy.validate()?;
+    network.validate()?;
+    registry
+        .register(Arc::new(RunCommandTool {
+            policy: Arc::new(policy),
+            network: Some(Arc::new(network)),
+        }))
+        .map_err(|_| RegisterCommandToolError::Registry)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RegisterCommandToolError {
+    #[error(transparent)]
+    Command(#[from] NativeCommandPolicyError),
+    #[error(transparent)]
+    Network(#[from] NativeCommandNetworkPolicyError),
+    #[error("native command tool registration failed")]
+    Registry,
 }
 
 pub fn command_permission_policy(
@@ -234,7 +378,7 @@ pub async fn validate_command_host(
     programs.sort();
     programs.dedup();
     probe_arguments.extend(programs);
-    let args = launcher_args("/bin/sh", &probe_arguments, 5)
+    let args = launcher_args("/bin/sh", &probe_arguments, 5, false)
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     let probe_authority = ProbeAuthority;
     let result = run_capture_with_pinned_limit_authorized(
@@ -254,7 +398,7 @@ pub async fn validate_command_host(
             turn: 0,
             ordinal: 0,
         },
-        &command_seccomp_filter(),
+        &command_seccomp_filter(false),
     )
     .await
     .map_err(|_| NativeCommandHostError::Unsupported)?;
@@ -274,6 +418,7 @@ pub async fn validate_command_host(
 
 struct RunCommandTool {
     policy: Arc<NativeCommandPolicy>,
+    network: Option<Arc<NativeCommandNetworkPolicy>>,
 }
 
 #[async_trait]
@@ -312,7 +457,12 @@ impl NativeTool for RunCommandTool {
         // Registry dispatch already checked the call. This second check is
         // owned by the command tool and sits directly before the spawn path.
         authority.revalidate(effect).await?;
-        let args = match launcher_args(&request.program, &request.args, request.timeout_seconds) {
+        let args = match launcher_args(
+            &request.program,
+            &request.args,
+            request.timeout_seconds,
+            self.network.is_some(),
+        ) {
             Ok(args) => args,
             Err(()) => {
                 return Ok(Err(ToolError::new(
@@ -320,23 +470,33 @@ impl NativeTool for RunCommandTool {
                 )));
             }
         };
-        let result = run_capture_with_pinned_limit_authorized(
-            PRLIMIT,
-            &args,
-            Some(pinned.canonical_path()),
-            Some(pinned),
-            &command_environment(),
+        let control = || {
             RunControl::new(
                 context.cancellation_token().clone(),
                 Some(Duration::from_secs(request.timeout_seconds)),
                 None,
-            ),
-            CAPTURE_BYTES_PER_STREAM,
-            authority,
-            effect,
-            &command_seccomp_filter(),
-        )
-        .await?;
+            )
+        };
+        let result = match self.network.as_deref() {
+            None => {
+                run_capture_with_pinned_limit_authorized(
+                    PRLIMIT,
+                    &args,
+                    Some(pinned.canonical_path()),
+                    Some(pinned),
+                    &command_environment(),
+                    control(),
+                    CAPTURE_BYTES_PER_STREAM,
+                    authority,
+                    effect,
+                    &command_seccomp_filter(false),
+                )
+                .await?
+            }
+            Some(network) => {
+                run_networked_command(&args, pinned, control(), authority, effect, network).await?
+            }
+        };
         Ok(Ok(format_command_result(result)))
     }
 }
@@ -345,6 +505,56 @@ struct CommandRequest {
     program: String,
     args: Vec<String>,
     timeout_seconds: u64,
+}
+
+#[cfg(target_os = "linux")]
+async fn run_networked_command(
+    args: &[String],
+    pinned: &PinnedWorkdir,
+    control: RunControl,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+    network: &NativeCommandNetworkPolicy,
+) -> VyaneResult<crate::spawn::RunResult> {
+    use std::os::fd::OwnedFd;
+
+    let (broker_channel, child_channel) = std::os::unix::net::UnixStream::pair()?;
+    let broker_fd: OwnedFd = broker_channel.into();
+    let child_fd: OwnedFd = child_channel.into();
+    let environment = command_environment();
+    let seccomp_filter = command_seccomp_filter(true);
+    let run = run_capture_with_pinned_limit_authorized_channel(
+        PRLIMIT,
+        args,
+        Some(pinned.canonical_path()),
+        Some(pinned),
+        &environment,
+        control,
+        CAPTURE_BYTES_PER_STREAM,
+        authority,
+        effect,
+        &seccomp_filter,
+        child_fd,
+    );
+    let broker = run_network_broker(broker_fd, network, authority, effect);
+    let (run_result, broker_result) = tokio::join!(run, broker);
+    broker_result?;
+    run_result
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn run_networked_command(
+    _args: &[String],
+    _pinned: &PinnedWorkdir,
+    _control: RunControl,
+    _authority: &dyn NativeExecutionAuthority,
+    _effect: NativeSideEffect,
+    _network: &NativeCommandNetworkPolicy,
+) -> VyaneResult<crate::spawn::RunResult> {
+    Err(vyane_core::VyaneError::new(
+        vyane_core::ErrorKind::Unsupported,
+        "native command networking requires Linux",
+    ))
 }
 
 impl CommandRequest {
@@ -430,7 +640,7 @@ fn validate_args(args: &[String]) -> Result<(), NativeCommandPolicyError> {
 }
 
 #[cfg(target_os = "linux")]
-fn sandbox_args(program: &str, args: &[String]) -> Vec<String> {
+fn sandbox_args(program: &str, args: &[String], network: bool) -> Vec<String> {
     let mut sandbox = vec![
         "--die-with-parent".into(),
         "--unshare-user".into(),
@@ -500,6 +710,32 @@ fn sandbox_args(program: &str, args: &[String]) -> Vec<String> {
             sandbox.extend(["--ro-bind".into(), path.into(), path.into()]);
         }
     }
+    if network {
+        sandbox.extend(["--dir".into(), "/etc".into()]);
+        if std::path::Path::new("/etc/ssl").is_dir() {
+            sandbox.extend(["--dir".into(), "/etc/ssl".into()]);
+        }
+        for path in [
+            "/etc/ssl/certs",
+            "/etc/ssl/cert.pem",
+            "/etc/ssl/openssl.cnf",
+        ] {
+            if std::path::Path::new(path).exists() {
+                sandbox.extend(["--ro-bind".into(), path.into(), path.into()]);
+            }
+        }
+        if std::path::Path::new("/etc/pki").is_dir() {
+            sandbox.extend(["--dir".into(), "/etc/pki".into()]);
+        }
+        if std::path::Path::new("/etc/pki/tls").is_dir() {
+            sandbox.extend(["--dir".into(), "/etc/pki/tls".into()]);
+        }
+        for path in ["/etc/pki/tls/certs", "/etc/pki/tls/cert.pem"] {
+            if std::path::Path::new(path).exists() {
+                sandbox.extend(["--ro-bind".into(), path.into(), path.into()]);
+            }
+        }
+    }
     sandbox.extend([
         "--chdir".into(),
         "/workspace".into(),
@@ -516,15 +752,24 @@ fn sandbox_args(program: &str, args: &[String]) -> Vec<String> {
         "--setenv".into(),
         "LANG".into(),
         "C.UTF-8".into(),
-        "--".into(),
-        program.into(),
     ]);
+    sandbox.push("--".into());
+    if network {
+        sandbox.extend([
+            "/usr/bin/python3".into(),
+            "-c".into(),
+            NETWORK_PROXY_SCRIPT.into(),
+            program.into(),
+        ]);
+    } else {
+        sandbox.push(program.into());
+    }
     sandbox.extend(args.iter().cloned());
     sandbox
 }
 
 #[cfg(not(target_os = "linux"))]
-fn sandbox_args(_program: &str, _args: &[String]) -> Vec<String> {
+fn sandbox_args(_program: &str, _args: &[String], _network: bool) -> Vec<String> {
     Vec::new()
 }
 
@@ -537,7 +782,12 @@ fn command_environment() -> BTreeMap<String, String> {
     ])
 }
 
-fn launcher_args(program: &str, args: &[String], cpu_seconds: u64) -> Result<Vec<String>, ()> {
+fn launcher_args(
+    program: &str,
+    args: &[String],
+    cpu_seconds: u64,
+    network: bool,
+) -> Result<Vec<String>, ()> {
     if !command_arch_supported() {
         return Err(());
     }
@@ -558,7 +808,7 @@ fn launcher_args(program: &str, args: &[String], cpu_seconds: u64) -> Result<Vec
         "-".into(),
         BWRAP.into(),
     ];
-    launcher.extend(sandbox_args(program, args));
+    launcher.extend(sandbox_args(program, args, network));
     Ok(launcher)
 }
 
@@ -627,7 +877,7 @@ fn current_uid_thread_count() -> Result<u64, ()> {
 }
 
 #[cfg(target_os = "linux")]
-fn command_seccomp_filter() -> Vec<u8> {
+fn command_seccomp_filter(network: bool) -> Vec<u8> {
     const BPF_LD_W_ABS: u16 = 0x20;
     const BPF_JMP_JEQ_K: u16 = 0x15;
     const BPF_JMP_JSET_K: u16 = 0x45;
@@ -637,6 +887,7 @@ fn command_seccomp_filter() -> Vec<u8> {
     const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
     const SECCOMP_DATA_NR: u32 = 0;
     const SECCOMP_DATA_ARCH: u32 = 4;
+    const SECCOMP_DATA_ARG0: u32 = 16;
     #[cfg(target_arch = "x86_64")]
     const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
     #[cfg(target_arch = "aarch64")]
@@ -661,7 +912,15 @@ fn command_seccomp_filter() -> Vec<u8> {
         instruction(BPF_JMP_JSET_K, 0, 1, 0x4000_0000);
         instruction(BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
     }
-    for syscall in [
+    if network {
+        instruction(BPF_JMP_JEQ_K, 0, 5, libc::SYS_socket as u32);
+        instruction(BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG0);
+        instruction(BPF_JMP_JEQ_K, 2, 0, libc::AF_INET as u32);
+        instruction(BPF_JMP_JEQ_K, 1, 0, libc::AF_INET6 as u32);
+        instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | libc::EPERM as u32);
+        instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW);
+    }
+    let mut denied = vec![
         libc::SYS_keyctl,
         libc::SYS_add_key,
         libc::SYS_request_key,
@@ -673,9 +932,16 @@ fn command_seccomp_filter() -> Vec<u8> {
         libc::SYS_msgget,
         libc::SYS_semget,
         libc::SYS_mq_open,
-        libc::SYS_socket,
+        libc::SYS_ptrace,
+        libc::SYS_process_vm_readv,
+        libc::SYS_process_vm_writev,
+        libc::SYS_pidfd_getfd,
         libc::SYS_socketpair,
-    ] {
+    ];
+    if !network {
+        denied.push(libc::SYS_socket);
+    }
+    for syscall in denied {
         instruction(BPF_JMP_JEQ_K, 0, 1, syscall as u32);
         instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | libc::EPERM as u32);
     }
@@ -684,7 +950,7 @@ fn command_seccomp_filter() -> Vec<u8> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn command_seccomp_filter() -> Vec<u8> {
+fn command_seccomp_filter(_network: bool) -> Vec<u8> {
     Vec::new()
 }
 

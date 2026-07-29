@@ -9,9 +9,13 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use vyane_core::{NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir};
 use vyane_harness::native::{
+    NativeCommandNetworkPolicy, NativeCommandNetworkRoute, NativeCommandNetworkRule,
     NativeCommandPolicy, NativeCommandRule, PermissionPolicy, ToolCall, ToolContext,
-    ToolInvocationStatus, command_permission_policy, command_tool_registry, validate_command_host,
+    ToolInvocationStatus, command_permission_policy, command_tool_registry,
+    register_command_tool_with_network, validate_command_host, workspace_tool_registry_with_policy,
 };
+
+static COMMAND_TEST_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 #[derive(Default)]
 struct RecordingAuthority {
@@ -65,6 +69,10 @@ fn call(program: &str, args: &[&str]) -> ToolCall {
 }
 
 async fn execute(root: &std::path::Path, policy: NativeCommandPolicy, call: ToolCall) -> String {
+    let _permit = COMMAND_TEST_GATE
+        .acquire()
+        .await
+        .expect("command test gate");
     let registry = command_tool_registry(policy).expect("command registry");
     let permissions =
         command_permission_policy(PermissionPolicy::deny_by_default()).expect("permissions");
@@ -84,6 +92,55 @@ async fn execute(root: &std::path::Path, policy: NativeCommandPolicy, call: Tool
         .expect("authorized command");
     assert_eq!(invocation.status, ToolInvocationStatus::Executed);
     invocation.output
+}
+
+fn network_policy() -> NativeCommandNetworkPolicy {
+    NativeCommandNetworkPolicy {
+        allow: vec![NativeCommandNetworkRule {
+            host: "example.com".into(),
+            ports: vec![443],
+        }],
+        route: NativeCommandNetworkRoute::Direct,
+        max_connections: 2,
+        max_bytes: 1024 * 1024,
+        connect_timeout_seconds: 1,
+    }
+}
+
+async fn execute_network(
+    root: &std::path::Path,
+    authority: &RecordingAuthority,
+    call: ToolCall,
+) -> vyane_core::Result<String> {
+    execute_network_with_route(root, authority, call, NativeCommandNetworkRoute::Direct).await
+}
+
+async fn execute_network_with_route(
+    root: &std::path::Path,
+    authority: &RecordingAuthority,
+    call: ToolCall,
+    route: NativeCommandNetworkRoute,
+) -> vyane_core::Result<String> {
+    let _permit = COMMAND_TEST_GATE
+        .acquire()
+        .await
+        .expect("command test gate");
+    let mut network = network_policy();
+    network.route = route;
+    let mut registry =
+        workspace_tool_registry_with_policy(Default::default(), None).expect("workspace registry");
+    register_command_tool_with_network(&mut registry, policy(&[("python3", &["-c"])]), network)
+        .expect("network command registry");
+    let permissions =
+        command_permission_policy(PermissionPolicy::deny_by_default()).expect("permissions");
+    let context =
+        ToolContext::from_pinned_workdir(PinnedWorkdir::open(root).expect("pin command workspace"))
+            .with_timeout(Duration::from_secs(15));
+    let invocation = registry
+        .execute_authorized(call, &context, &permissions, authority, 1, 1)
+        .await?;
+    assert_eq!(invocation.status, ToolInvocationStatus::Executed);
+    Ok(invocation.output)
 }
 
 #[tokio::test]
@@ -209,6 +266,103 @@ async fn network_namespace_has_no_loopback_connectivity() {
 }
 
 #[tokio::test]
+async fn network_mode_exposes_only_the_policy_proxy_and_denies_unlisted_hosts() {
+    let root = tempdir().expect("workspace");
+    let source = concat!(
+        "import socket; ",
+        "s=socket.create_connection(('127.0.0.1',3128),1); ",
+        "s.sendall(b'CONNECT 127.0.0.1:443 HTTP/1.1\\r\\n\\r\\n'); ",
+        "data=s.recv(128); assert b'403 Forbidden' in data, data"
+    );
+    let output = execute_network(
+        root.path(),
+        &RecordingAuthority::default(),
+        call("python3", &["-c", source]),
+    )
+    .await
+    .expect("network command");
+    assert!(output.contains("exit_code: 0"), "{output}");
+}
+
+#[tokio::test]
+async fn network_mode_still_cannot_connect_directly_outside_the_namespace() {
+    let root = tempdir().expect("workspace");
+    let source = concat!(
+        "import socket; s=socket.socket(); s.settimeout(.2); ",
+        "ok=False\n",
+        "try: s.connect(('1.1.1.1',443))\n",
+        "except OSError: ok=True\n",
+        "assert ok"
+    );
+    let output = execute_network(
+        root.path(),
+        &RecordingAuthority::default(),
+        call("python3", &["-c", source]),
+    )
+    .await
+    .expect("network command");
+    assert!(output.contains("exit_code: 0"), "{output}");
+}
+
+#[tokio::test]
+async fn untrusted_command_cannot_reopen_the_broker_descriptor_from_the_proxy() {
+    let root = tempdir().expect("workspace");
+    let source = concat!(
+        "import os; path=f'/proc/{os.getppid()}/fd/5'; denied=False\n",
+        "try: os.open(path,os.O_RDWR)\n",
+        "except OSError: denied=True\n",
+        "assert denied"
+    );
+    let output = execute_network(
+        root.path(),
+        &RecordingAuthority::default(),
+        call("python3", &["-c", source]),
+    )
+    .await
+    .expect("network command");
+    assert!(output.contains("exit_code: 0"), "{output}");
+}
+
+#[tokio::test]
+#[ignore = "requires public DNS and Internet"]
+async fn allowed_https_host_is_reachable_through_the_policy_broker() {
+    let root = tempdir().expect("workspace");
+    let source = concat!(
+        "import urllib.request; ",
+        "response=urllib.request.urlopen('https://example.com',timeout=5); ",
+        "print(response.status)"
+    );
+    let output = execute_network_with_route(
+        root.path(),
+        &RecordingAuthority::default(),
+        call("python3", &["-c", source]),
+        NativeCommandNetworkRoute::EnvironmentProxy,
+    )
+    .await
+    .expect("network command");
+    assert!(output.contains("exit_code: 0"), "{output}");
+    assert!(output.contains("200"), "{output}");
+}
+
+#[tokio::test]
+async fn command_network_revalidates_live_authority_before_connecting() {
+    let root = tempdir().expect("workspace");
+    let authority = RecordingAuthority {
+        effects: Mutex::new(Vec::new()),
+        fail_at: Some(4),
+    };
+    let source = concat!(
+        "import socket; ",
+        "s=socket.create_connection(('127.0.0.1',3128),1); ",
+        "s.sendall(b'CONNECT example.com:443 HTTP/1.1\\r\\n\\r\\n'); ",
+        "s.recv(128)"
+    );
+    let result = execute_network(root.path(), &authority, call("python3", &["-c", source])).await;
+    assert!(result.is_err());
+    assert_eq!(authority.effects.lock().expect("effects").len(), 4);
+}
+
+#[tokio::test]
 async fn unix_sockets_and_kernel_keyring_calls_are_blocked() {
     use std::os::unix::net::UnixListener;
 
@@ -321,6 +475,31 @@ fn policy_json_is_closed_and_round_trips() {
     assert!(
         serde_json::from_value::<NativeCommandPolicy>(json!({
             "allow": [{ "program": "git" }],
+            "unknown": true
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn command_network_policy_json_is_closed_and_round_trips() {
+    let value = json!({
+        "allow": [
+            { "host": "crates.io", "ports": [443] },
+            { "host": "*.github.com", "ports": [443] }
+        ],
+        "route": "direct",
+        "max_connections": 4,
+        "max_bytes": 1048576,
+        "connect_timeout_seconds": 5
+    });
+    let policy: NativeCommandNetworkPolicy =
+        serde_json::from_value(value.clone()).expect("network policy");
+    policy.validate().expect("valid network policy");
+    assert_eq!(serde_json::to_value(policy).expect("json"), value);
+    assert!(
+        serde_json::from_value::<NativeCommandNetworkPolicy>(json!({
+            "allow": [{ "host": "crates.io", "ports": [443] }],
             "unknown": true
         }))
         .is_err()
