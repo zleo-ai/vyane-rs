@@ -10,8 +10,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use vyane_config::ResolvedConfig;
 use vyane_core::{
     AdapterTransport, BoundTarget, CancellationToken, ErrorKind, Harness, HarnessKind,
-    HarnessLifecycleEvent, HarnessLifecycleReporter, ProviderId, RunQuery, RunStatus, SessionRef,
-    TaskSpec, VyaneError,
+    HarnessLifecycleEvent, HarnessLifecycleReporter, ProviderId, RunQuery, RunStatus, Sandbox,
+    SessionRef, TaskSpec, VyaneError,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 use vyane_service::{SessionView, VyaneService, resolve_target_chain, split_targets};
@@ -2678,7 +2678,7 @@ async fn run_workflow(config_path: Option<PathBuf>, args: WorkflowRunArgs) -> Re
 
     let paths = StoragePaths::resolve()?;
     let runtime = Runtime::new(loaded.config.clone(), paths.clone())?;
-    let resolver = Arc::new(CliWorkflowResolver { loaded });
+    let resolver = Arc::new(CliWorkflowResolver::new(loaded, runtime.dispatcher.clone()));
     let mut engine = WorkflowEngine::new(
         Arc::new(runtime.dispatcher.clone()),
         resolver,
@@ -2731,7 +2731,7 @@ async fn resume_workflow(
 
     let paths = StoragePaths::resolve()?;
     let runtime = Runtime::new(loaded.config.clone(), paths.clone())?;
-    let resolver = Arc::new(CliWorkflowResolver { loaded });
+    let resolver = Arc::new(CliWorkflowResolver::new(loaded, runtime.dispatcher.clone()));
     let mut engine = WorkflowEngine::new(
         Arc::new(runtime.dispatcher.clone()),
         resolver,
@@ -2787,7 +2787,7 @@ async fn replay_workflow(
 
     let paths = StoragePaths::resolve()?;
     let runtime = Runtime::new(loaded.config.clone(), paths.clone())?;
-    let resolver = Arc::new(CliWorkflowResolver { loaded });
+    let resolver = Arc::new(CliWorkflowResolver::new(loaded, runtime.dispatcher.clone()));
     let mut engine = WorkflowEngine::new(
         Arc::new(runtime.dispatcher.clone()),
         resolver,
@@ -2873,7 +2873,7 @@ async fn run_review_command(config_path: Option<PathBuf>, args: ReviewArgs) -> R
 
     let paths = StoragePaths::resolve()?;
     let runtime = Runtime::new(loaded.config.clone(), paths.clone())?;
-    let resolver = Arc::new(CliWorkflowResolver { loaded });
+    let resolver = Arc::new(CliWorkflowResolver::new(loaded, runtime.dispatcher.clone()));
     let json = args.json;
 
     let review_args = crate::review::ReviewArgs {
@@ -3085,11 +3085,12 @@ fn workflow_error_exit(error: &WorkflowError) -> ExitCode {
 
 pub(crate) struct CliWorkflowResolver {
     loaded: LoadedConfig,
+    dispatcher: vyane_kernel::Dispatcher,
 }
 
 impl CliWorkflowResolver {
-    pub(crate) fn new(loaded: LoadedConfig) -> Self {
-        Self { loaded }
+    pub(crate) fn new(loaded: LoadedConfig, dispatcher: vyane_kernel::Dispatcher) -> Self {
+        Self { loaded, dispatcher }
     }
 }
 
@@ -3127,15 +3128,21 @@ impl TargetResolver for CliWorkflowResolver {
         &self,
         target: &str,
         route: &vyane_workflow::WorkflowRouteHints,
+        sandbox: Sandbox,
     ) -> vyane_core::Result<()> {
         if !target.eq_ignore_ascii_case("auto") {
             return Ok(());
         }
-        let mut task = TaskSpec::new("workflow route validation");
+        let mut task = TaskSpec::new("workflow route validation").with_sandbox(sandbox);
         route.apply_to_labels(&mut task.labels);
-        vyane_service::validate_auto_route_candidates(&self.loaded, &task.labels).map_err(|error| {
-            vyane_core::VyaneError::new(vyane_core::ErrorKind::Config, error.to_string())
-        })
+        let chains = vyane_service::resolve_auto_route_candidate_chains(&self.loaded, &task.labels)
+            .map_err(|error| {
+                vyane_core::VyaneError::new(vyane_core::ErrorKind::Config, error.to_string())
+            })?;
+        for chain in chains {
+            self.dispatcher.validate_harness_sandbox(&task, &chain)?;
+        }
+        Ok(())
     }
 }
 

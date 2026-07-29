@@ -915,6 +915,19 @@ impl OwnerScopedService {
         self.service.plan_dispatch(selector, task)
     }
 
+    /// Validate side-effect-free dispatch admission before an outer protocol
+    /// publishes durable task identity.
+    pub fn validate_dispatch_admission(
+        &self,
+        task: &TaskSpec,
+        chain: &[BoundTarget],
+    ) -> vyane_core::Result<()> {
+        self.service
+            .runtime
+            .dispatcher
+            .validate_harness_sandbox(task, chain)
+    }
+
     /// Build a task without reading owner authority from its payload or labels.
     pub fn task_from_dispatch(&self, params: DispatchParams) -> Result<TaskSpec> {
         self.service.task_from_dispatch(params)

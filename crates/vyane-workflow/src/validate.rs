@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use vyane_core::{BoundTarget, Result as VyaneResult, TaskSpec};
+use vyane_core::{BoundTarget, Result as VyaneResult, Sandbox, TaskSpec};
 
 use crate::error::{WorkflowError, WorkflowResult};
 use crate::model::{StepTargets, Workflow, WorkflowRouteHints};
@@ -32,8 +32,19 @@ pub trait TargetResolver: Send + Sync {
     /// Validate a selector that intentionally deferred concrete resolution.
     /// Implementations can check candidate names, policy guards, and config
     /// viability without committing to the prompt-dependent final route.
-    fn validate_deferred(&self, _target: &str, _route: &WorkflowRouteHints) -> VyaneResult<()> {
-        Ok(())
+    fn validate_deferred(
+        &self,
+        _target: &str,
+        _route: &WorkflowRouteHints,
+        sandbox: Sandbox,
+    ) -> VyaneResult<()> {
+        if sandbox == Sandbox::ReadOnly {
+            Ok(())
+        } else {
+            Err(vyane_core::VyaneError::config(
+                "deferred mutating target requires explicit execution-admission validation",
+            ))
+        }
     }
 }
 
@@ -213,7 +224,8 @@ pub fn validate_workflow(
                             step.id
                         ));
                     }
-                    Ok(None) => match resolver.validate_deferred(target, &step.route) {
+                    Ok(None) => match resolver.validate_deferred(target, &step.route, step.sandbox)
+                    {
                         Ok(()) => {
                             resolved_targets.insert(
                                 step.id.clone(),

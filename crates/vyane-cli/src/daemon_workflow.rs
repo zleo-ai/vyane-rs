@@ -133,7 +133,10 @@ impl DaemonWorkflowSupervisor {
         let store = tokio::task::spawn_blocking(move || SqliteTaskStore::open(database))
             .await
             .context("join daemon task-store opener")??;
-        let resolver = Arc::new(CliWorkflowResolver::new(service.config().clone()));
+        let resolver = Arc::new(CliWorkflowResolver::new(
+            service.config().clone(),
+            service.runtime().dispatcher.clone(),
+        ));
         Ok(Self {
             service,
             resolver,
@@ -391,7 +394,15 @@ impl DaemonWorkflowSupervisor {
 
         validate_new_execution_cwd(&execution_cwd)?;
         rebase_workdirs(&mut workflow, &execution_cwd)?;
+        // Preserve the established validation ordering and diagnostics before
+        // adding the execution-policy preflight below.
         validate_workflow(&workflow, &vars, self.resolver.as_ref())?;
+        let engine = WorkflowEngine::new(
+            Arc::new(self.service.runtime().dispatcher.clone()),
+            self.resolver.clone(),
+            self.service.storage_paths().workflows_dir.clone(),
+        );
+        engine.validate_run(&workflow, &vars)?;
         if !self.accepting.load(Ordering::Acquire) {
             bail!("daemon workflow admission is closed");
         }
@@ -509,12 +520,7 @@ impl DaemonWorkflowSupervisor {
             }
         };
 
-        let engine = WorkflowEngine::new(
-            Arc::new(self.service.runtime().dispatcher.clone()),
-            self.resolver.clone(),
-            self.service.storage_paths().workflows_dir.clone(),
-        )
-        .with_harness_lifecycle_reporter(control.reporter());
+        let engine = engine.with_harness_lifecycle_reporter(control.reporter());
 
         // The task row is already attached, but the workflow future does not
         // exist yet. Make the initial v1 journal durable before spawning it so
@@ -1924,6 +1930,44 @@ mod tests {
             .unwrap()
     }
 
+    async fn harness_ceiling_test_supervisor(data_dir: &Path) -> DaemonWorkflowSupervisor {
+        let config_path = data_dir.join("daemon-workflow-harness-ceiling.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+            [providers.test]
+            base_url = "https://api.example.test"
+            auth_style = "bearer"
+            protocol = "anthropic_messages"
+            default_model = "test-model"
+
+            [profiles.worker]
+            provider = "test"
+            protocol = "anthropic_messages"
+            harness = "claude-code"
+            model = "test-model"
+
+            [harness_permissions]
+            max_sandbox = "read-only"
+            "#,
+        )
+        .unwrap();
+        let mut layers = vyane_config::ConfigLayers::new();
+        layers.merge_file(&config_path).unwrap();
+        let service = VyaneService::from_loaded_with_paths(
+            vyane_service::LoadedConfig {
+                config: layers.into(),
+                files: Vec::new(),
+                secrets: BTreeMap::new(),
+            },
+            StoragePaths::from_data_dir(data_dir),
+        )
+        .unwrap();
+        DaemonWorkflowSupervisor::open(Arc::new(service), "daemon:harness-ceiling-test".into())
+            .await
+            .unwrap()
+    }
+
     fn bundle(name: &str) -> WorkflowSourceBundle {
         WorkflowSourceBundle {
             workflow_toml: format!(
@@ -2134,6 +2178,38 @@ effort = "{canary}"
         let error = supervisor.submit(request).await.unwrap_err().to_string();
 
         assert!(!error.contains(canary));
+        assert!(supervisor.get(run_id.as_str()).await.unwrap().is_none());
+        assert!(supervisor.live.is_empty());
+        assert!(
+            vyane_workflow::list_journals(&supervisor.service.storage_paths().workflows_dir)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn harness_ceiling_is_rejected_before_task_or_journal_creation() {
+        let directory = tempfile::tempdir().unwrap();
+        let supervisor = harness_ceiling_test_supervisor(directory.path()).await;
+        let run_id = WorkflowRunId::generate();
+        let mut source = configured_bundle("harness-ceiling");
+        source.workflow_toml = source
+            .workflow_toml
+            .replace("target = \"worker\"", "target = \"auto\"")
+            .replace("prompt = \"run\"", "prompt = \"run\"\nsandbox = \"write\"");
+        let request = WorkflowSubmitRequest {
+            run_id: run_id.clone(),
+            execution_cwd: std::fs::canonicalize(directory.path()).unwrap(),
+            bundle: source,
+            vars: BTreeMap::new(),
+        };
+
+        let error = supervisor.submit(request).await.unwrap_err();
+
+        assert!(
+            error.to_string().contains("exceeds configured maximum"),
+            "{error:#}"
+        );
         assert!(supervisor.get(run_id.as_str()).await.unwrap().is_none());
         assert!(supervisor.live.is_empty());
         assert!(

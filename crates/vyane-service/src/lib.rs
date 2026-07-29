@@ -126,8 +126,8 @@ pub use owner::{
     PrincipalAuthenticator, PrincipalOwnerResolver,
 };
 pub use routing::{
-    DispatchPlan, RouteParams, RouteResult, plan_dispatch, replay_recorded_auto_chain, route_task,
-    validate_auto_route_candidates,
+    DispatchPlan, RouteParams, RouteResult, plan_dispatch, replay_recorded_auto_chain,
+    resolve_auto_route_candidate_chains, route_task, validate_auto_route_candidates,
 };
 pub use selector::{resolve_target_chain, split_targets};
 pub use service::{

@@ -833,8 +833,8 @@ CLI-harness requests keep the common `read-only` / `write` / `full` sandbox
 vocabulary. Optional `[harness_permissions] max_sandbox` sections in every
 config layer impose independent ceilings across an entire Claude Code / Codex
 CLI failover chain; the strictest ceiling wins and an over-broad request fails
-before dispatch persistence or subprocess spawn. Vyane does not accept raw vendor
-permission flags. Operator policy should use
+before REST/workflow task identity, journal or dispatch persistence, and
+subprocess spawn. Vyane does not accept raw vendor permission flags. Operator policy should use
 `VYANE_MANAGED_PERMISSION_CONFIG`; the older
 `VYANE_MANAGED_NATIVE_CONFIG` name remains a compatibility alias. See
 [WP-93](docs/plan/WP-93.md).

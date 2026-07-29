@@ -129,9 +129,9 @@ stage    = "review"
 # CLI-harness permission ceiling (optional) — every exact user, project,
 # explicit, or managed config layer contributes an independent maximum.
 # The strictest maximum wins and never upgrades the request. It applies to
-# any Claude Code / Codex CLI leg in a failover chain before dispatch
-# persistence or subprocess spawn. Vendor-specific raw permission flags are
-# not accepted.
+# any Claude Code / Codex CLI leg in a failover chain before REST/workflow
+# task identity, journal or dispatch persistence, and subprocess spawn.
+# Vendor-specific raw permission flags are not accepted.
 #
 # [harness_permissions]
 # max_sandbox = "write" # read-only | write | full

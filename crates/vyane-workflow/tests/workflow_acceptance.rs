@@ -12,8 +12,8 @@ use tempfile::TempDir;
 use vyane_core::{
     AdapterTransport, BoundTarget, CancellationToken, ChatClient, ChatOutcome, ChatRequest,
     Endpoint, ErrorKind, GenParams, Harness, HarnessJob, HarnessKind, HarnessOutcome, Ledger,
-    ModelId, Protocol, ProviderId, Result, RunQuery, RunRecord, SessionRecord, SessionStore,
-    SessionUpdate, Target, VyaneError,
+    ModelId, Protocol, ProviderId, Result, RunQuery, RunRecord, Sandbox, SessionRecord,
+    SessionStore, SessionUpdate, Target, VyaneError,
 };
 use vyane_kernel::{Dispatcher, Executor, ExecutorFactory};
 use vyane_workflow::{
@@ -310,6 +310,20 @@ fn http_target(provider: &str, model: &str) -> BoundTarget {
     }
 }
 
+fn cli_target(provider: &str, model: &str) -> BoundTarget {
+    BoundTarget {
+        target: Target {
+            provider: ProviderId::new(provider),
+            protocol: Protocol::AnthropicMessages,
+            harness: Some(HarnessKind::ClaudeCode),
+            model: ModelId::new(model),
+        },
+        transport: AdapterTransport::CliWrap,
+        endpoint: None,
+        params: GenParams::default(),
+    }
+}
+
 fn dispatcher(factory: Arc<dyn ExecutorFactory>) -> Arc<Dispatcher> {
     Arc::new(Dispatcher::new(
         factory,
@@ -388,6 +402,48 @@ fn validation_collects_all_requested_problem_types() {
     assert!(text.contains("exactly one of `target` or `fan_out`, not both"));
     assert!(text.contains("could not be resolved"));
     assert!(text.contains("not in its transitive needs"));
+}
+
+#[test]
+fn harness_ceiling_rejects_before_workflow_journal_creation() {
+    let directory = TempDir::new().unwrap();
+    let journal_dir = directory.path().join("journals");
+    let workflow = workflow_from(
+        &directory,
+        r#"
+        [workflow]
+        name = "harness-ceiling"
+
+        [[step]]
+        id = "edit"
+        target = "cli"
+        prompt = "edit"
+        sandbox = "write"
+        "#,
+    );
+    let mut resolver = MockResolver::default();
+    resolver
+        .targets
+        .insert("cli".into(), vec![cli_target("local", "model")]);
+    let engine = WorkflowEngine::new(
+        Arc::new(
+            Dispatcher::new(
+                MockFactory::new().into_arc(),
+                Arc::new(MockLedger::default()),
+                Arc::new(MockSessions),
+            )
+            .with_harness_sandbox_ceiling(Sandbox::ReadOnly),
+        ),
+        Arc::new(resolver),
+        journal_dir.clone(),
+    );
+
+    let error = engine
+        .prepare_run_with_id(WorkflowRunId::generate(), &workflow, BTreeMap::new())
+        .unwrap_err();
+
+    assert!(error.to_string().contains("permission admission"));
+    assert!(!journal_dir.exists());
 }
 
 #[test]

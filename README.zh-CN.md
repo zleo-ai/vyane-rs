@@ -136,7 +136,8 @@ driver outcome 不可序列化且 `Debug` 已脱敏。显式 fresh/sessionless r
 它仍窄于通用 `Harness`；checkpoint/session-commit consumer、approval resume 与 native resume 仍缺。
 Claude Code / Codex CLI 外部 harness 继续使用统一的 `read-only` / `write` / `full`
 语义；每个配置层可用 `[harness_permissions] max_sandbox` 贡献独立上限，整条 CLI-harness
-failover chain 取最严格值，超限请求在调度任务/运行记录持久化或 spawn 前失败。配置不接受任意 vendor flags。
+failover chain 取最严格值，超限请求在 REST/workflow task identity、journal、
+调度记录持久化或 spawn 前失败。配置不接受任意 vendor flags。
 managed policy 优先使用 `VYANE_MANAGED_PERMISSION_CONFIG`，旧
 `VYANE_MANAGED_NATIVE_CONFIG` 仅作为兼容别名。精确边界见
 [WP-93](docs/plan/WP-93.md)。

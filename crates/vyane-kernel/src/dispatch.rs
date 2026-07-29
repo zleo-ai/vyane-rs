@@ -457,7 +457,14 @@ impl Dispatcher {
         self
     }
 
-    fn validate_harness_sandbox(&self, task: &TaskSpec, chain: &[BoundTarget]) -> Result<()> {
+    /// Validate the configured CLI-harness sandbox ceiling without allocating
+    /// execution identity, pinning a workdir, constructing an executor, or
+    /// writing durable state.
+    ///
+    /// Outer durable supervisors call this after resolving a chain and before
+    /// publishing task or workflow identity. [`Self::prepare`] repeats the
+    /// same check at the execution boundary.
+    pub fn validate_harness_sandbox(&self, task: &TaskSpec, chain: &[BoundTarget]) -> Result<()> {
         if chain
             .iter()
             .any(|target| target.transport == AdapterTransport::CliWrap)
