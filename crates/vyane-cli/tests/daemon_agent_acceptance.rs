@@ -258,6 +258,33 @@ async fn submit_native_write(data_dir: &Path, run_id: &str, workdir: &Path) -> r
         .unwrap()
 }
 
+async fn submit_native_command(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
+    let (base, token) = control(data_dir);
+    reqwest::Client::new()
+        .post(format!("{base}/v1/agent-runs"))
+        .bearer_auth(token)
+        .json(&json!({
+            "run_id": run_id,
+            "task": "inspect the workspace through the bounded command tool",
+            "target": "native",
+            "sandbox": "read_only",
+            "workdir": workdir,
+            "execution_backend": "native_in_process",
+            "native_permissions": {
+                "command_execution": {
+                    "allow": [
+                        { "program": "cat", "args_prefix": ["evidence.txt"] }
+                    ],
+                    "max_seconds": 5
+                }
+            },
+            "timeout_seconds": 10
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
 async fn get_json(data_dir: &Path, suffix: &str) -> (reqwest::StatusCode, Value) {
     let (base, token) = control(data_dir);
     let response = reqwest::Client::new()
@@ -530,6 +557,95 @@ async fn native_write_permission_reaches_the_real_resident_tool_lane() {
         ["edit_file", "read_file", "search_files", "write_file"]
             .into_iter()
             .collect()
+    );
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn native_command_permission_reaches_the_real_resident_sandbox() {
+    let server = MockServer::start().await;
+    let response_index = Arc::new(AtomicUsize::new(0));
+    let response_index_for_mock = Arc::clone(&response_index);
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |_: &wiremock::Request| {
+            if response_index_for_mock.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "command-call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "run_command",
+                                    "arguments": "{\"program\":\"cat\",\"args\":[\"evidence.txt\"]}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "command observed workspace evidence"
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-command-workdir");
+    fs::create_dir(&workdir).unwrap();
+    fs::write(workdir.join("evidence.txt"), "resident command evidence\n").unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    let run_id = "0197f524-7a00-7000-8000-000000000118";
+
+    let response = submit_native_command(data_dir.path(), run_id, &workdir).await;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(20)).await;
+    assert_eq!(done["state"], "succeeded");
+    assert_eq!(done["completion_status"], "committed");
+
+    let requests = server.received_requests().await.unwrap();
+    let first: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let advertised = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        advertised,
+        ["read_file", "run_command", "search_files"]
+            .into_iter()
+            .collect()
+    );
+    let second: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let tool_output = second["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+        .expect("tool output");
+    assert!(tool_output.contains("exit_code: 0"), "{tool_output}");
+    assert!(
+        tool_output.contains("resident command evidence"),
+        "{tool_output}"
     );
     assert!(daemon.stop().status.success());
 }

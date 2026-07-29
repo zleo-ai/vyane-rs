@@ -46,7 +46,7 @@ use tokio_util::sync::CancellationToken;
 use vyane_core::error::{ErrorKind, Result, VyaneError};
 use vyane_core::{
     EnvPolicy, HarnessLifecycleEvent, HarnessLifecycleReporter, HarnessSpawnAuthority,
-    PinnedWorkdir,
+    NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir,
 };
 
 /// How the child terminated, before error classification.
@@ -99,6 +99,8 @@ const PINNED_WORKDIR_FD: RawFd = 8;
 /// loader/startup variables.
 #[cfg(unix)]
 const TARGET_ENV_FD: RawFd = 6;
+#[cfg(unix)]
+const SECCOMP_FILTER_FD: RawFd = 7;
 #[cfg(target_os = "linux")]
 pub(crate) const PINNED_WORKDIR_CHILD_PATH: &str = "/proc/self/fd/8";
 // Kept defined so the adapters compile on every target. Capability admission
@@ -156,6 +158,7 @@ exit 125
 "#;
 
 type SharedOutput = Arc<Mutex<Vec<u8>>>;
+const UNBOUNDED_CAPTURE: usize = usize::MAX;
 
 #[cfg(unix)]
 type SentinelStatusReader = UnixStream;
@@ -180,6 +183,11 @@ struct InheritedWorkdir {
 
 #[cfg(unix)]
 struct InheritedTargetEnv {
+    source: OwnedFd,
+}
+
+#[cfg(unix)]
+struct InheritedSeccompFilter {
     source: OwnedFd,
 }
 
@@ -219,6 +227,38 @@ impl InheritedTargetEnv {
         let source = duplicate_inherited_fd(
             &file,
             "failed to duplicate private target environment transport",
+        )?;
+        Ok(Self { source })
+    }
+}
+
+#[cfg(unix)]
+impl InheritedSeccompFilter {
+    fn materialize(payload: &[u8]) -> Result<Self> {
+        let mut file = tempfile::tempfile().map_err(|source| {
+            VyaneError::with_source(
+                ErrorKind::Io,
+                "failed to create private seccomp filter transport",
+                source,
+            )
+        })?;
+        file.write_all(payload).map_err(|source| {
+            VyaneError::with_source(
+                ErrorKind::Io,
+                "failed to write private seccomp filter transport",
+                source,
+            )
+        })?;
+        file.rewind().map_err(|source| {
+            VyaneError::with_source(
+                ErrorKind::Io,
+                "failed to rewind private seccomp filter transport",
+                source,
+            )
+        })?;
+        let source = duplicate_inherited_fd(
+            &file,
+            "failed to duplicate private seccomp filter transport",
         )?;
         Ok(Self { source })
     }
@@ -359,6 +399,12 @@ pub(crate) struct RunControl {
     timeout: Option<Duration>,
     lifecycle_reporter: Option<HarnessLifecycleReporter>,
     spawn_authority: Option<HarnessSpawnAuthority>,
+}
+
+#[derive(Clone, Copy)]
+struct NativeSpawnGate<'a> {
+    authority: &'a dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
 }
 
 impl RunControl {
@@ -652,6 +698,7 @@ async fn spawn_harness_child(
     command: &mut Command,
     program: &str,
     spawn_authority: Option<&HarnessSpawnAuthority>,
+    native_spawn_gate: Option<&NativeSpawnGate<'_>>,
     cancel: &CancellationToken,
     deadline: Option<tokio::time::Instant>,
 ) -> Result<Child> {
@@ -667,6 +714,9 @@ async fn spawn_harness_child(
             ));
         }
         revalidate_spawn_authority(spawn_authority)?;
+        if let Some(gate) = native_spawn_gate {
+            gate.authority.revalidate(gate.effect).await?;
+        }
         if cancel.is_cancelled() {
             return Err(VyaneError::cancelled());
         }
@@ -701,10 +751,12 @@ async fn spawn_harness_child(
 struct ControlledSpawn<'a> {
     reporter: Option<&'a HarnessLifecycleReporter>,
     spawn_authority: Option<&'a HarnessSpawnAuthority>,
+    native_spawn_gate: Option<NativeSpawnGate<'a>>,
     cancel: &'a CancellationToken,
     deadline: Option<tokio::time::Instant>,
     pinned_workdir_fd: Option<InheritedFd>,
     target_env_fd: Option<InheritedFd>,
+    seccomp_filter_fd: Option<InheritedFd>,
 }
 
 async fn spawn_controlled_harness_child(
@@ -727,11 +779,13 @@ async fn spawn_controlled_harness_child(
             sentinel_status_fd,
             control.pinned_workdir_fd,
             control.target_env_fd,
+            control.seccomp_filter_fd,
         )?;
         let child = spawn_harness_child(
             command,
             program,
             control.spawn_authority,
+            control.native_spawn_gate.as_ref(),
             control.cancel,
             control.deadline,
         )
@@ -750,14 +804,16 @@ async fn spawn_controlled_harness_child(
 
     #[cfg(not(unix))]
     {
-        install_process_group(command)?;
         let _ = control.reporter;
         let _ = control.pinned_workdir_fd;
         let _ = control.target_env_fd;
+        install_process_group(command, control.seccomp_filter_fd)?;
+        let _ = control.native_spawn_gate;
         spawn_harness_child(
             command,
             program,
             control.spawn_authority,
+            None,
             control.cancel,
             control.deadline,
         )
@@ -822,6 +878,83 @@ pub(crate) async fn run_capture_with_pinned(
     env: &BTreeMap<String, String>,
     control: RunControl,
 ) -> Result<RunResult> {
+    run_capture_with_pinned_limit(
+        program,
+        args,
+        cwd,
+        pinned_workdir,
+        env,
+        control,
+        UNBOUNDED_CAPTURE,
+    )
+    .await
+}
+
+/// Native-tool capture variant that keeps draining both pipes after their
+/// retained prefixes reach `capture_limit`. This bounds resident memory
+/// without changing child exit behavior through an early pipe close.
+pub(crate) async fn run_capture_with_pinned_limit(
+    program: &str,
+    args: &[String],
+    cwd: Option<&std::path::Path>,
+    pinned_workdir: Option<&PinnedWorkdir>,
+    env: &BTreeMap<String, String>,
+    control: RunControl,
+    capture_limit: usize,
+) -> Result<RunResult> {
+    run_capture_with_pinned_limit_confined(
+        program,
+        args,
+        cwd,
+        pinned_workdir,
+        env,
+        control,
+        capture_limit,
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_capture_with_pinned_limit_authorized(
+    program: &str,
+    args: &[String],
+    cwd: Option<&std::path::Path>,
+    pinned_workdir: Option<&PinnedWorkdir>,
+    env: &BTreeMap<String, String>,
+    control: RunControl,
+    capture_limit: usize,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+    seccomp_filter: &[u8],
+) -> Result<RunResult> {
+    run_capture_with_pinned_limit_confined(
+        program,
+        args,
+        cwd,
+        pinned_workdir,
+        env,
+        control,
+        capture_limit,
+        Some(NativeSpawnGate { authority, effect }),
+        Some(seccomp_filter),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_capture_with_pinned_limit_confined(
+    program: &str,
+    args: &[String],
+    cwd: Option<&std::path::Path>,
+    pinned_workdir: Option<&PinnedWorkdir>,
+    env: &BTreeMap<String, String>,
+    control: RunControl,
+    capture_limit: usize,
+    native_spawn_gate: Option<NativeSpawnGate<'_>>,
+    seccomp_filter: Option<&[u8]>,
+) -> Result<RunResult> {
     let RunControl {
         cancel,
         timeout,
@@ -866,6 +999,14 @@ pub(crate) async fn run_capture_with_pinned(
     let inherited_target_env_fd = inherited_target_env.map(|inherited| inherited.source);
     #[cfg(not(unix))]
     let inherited_target_env_fd = None;
+    #[cfg(unix)]
+    let inherited_seccomp_filter = seccomp_filter
+        .map(InheritedSeccompFilter::materialize)
+        .transpose()?;
+    #[cfg(unix)]
+    let inherited_seccomp_filter_fd = inherited_seccomp_filter.map(|inherited| inherited.source);
+    #[cfg(not(unix))]
+    let inherited_seccomp_filter_fd = None;
     let mut cmd = harness_command(program, args, start_gated);
     cmd.stdin(if start_gated {
         Stdio::piped()
@@ -901,10 +1042,12 @@ pub(crate) async fn run_capture_with_pinned(
         ControlledSpawn {
             reporter: lifecycle_reporter.as_ref(),
             spawn_authority: spawn_authority.as_ref(),
+            native_spawn_gate,
             cancel: &cancel,
             deadline: control_deadline,
             pinned_workdir_fd: inherited_workdir_fd,
             target_env_fd: inherited_target_env_fd,
+            seccomp_filter_fd: inherited_seccomp_filter_fd,
         },
     )
     .await?;
@@ -931,8 +1074,8 @@ pub(crate) async fn run_capture_with_pinned(
     // otherwise a child that fills its stdout pipe buffer blocks forever.
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
-    let drain_out = spawn_drain(child.stdout.take(), Arc::clone(&stdout_buf));
-    let drain_err = spawn_drain(child.stderr.take(), Arc::clone(&stderr_buf));
+    let drain_out = spawn_drain(child.stdout.take(), Arc::clone(&stdout_buf), capture_limit);
+    let drain_err = spawn_drain(child.stderr.take(), Arc::clone(&stderr_buf), capture_limit);
 
     // Race: normal exit vs. cancellation vs. timeout. `tokio::select!` polls the
     // wait while background tasks drain pipes so pipe backpressure can't
@@ -1044,7 +1187,7 @@ pub(crate) async fn run_capture_with_pinned(
     })
 }
 
-fn spawn_drain<R>(reader: Option<R>, output: SharedOutput) -> JoinHandle<()>
+fn spawn_drain<R>(reader: Option<R>, output: SharedOutput, capture_limit: usize) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -1054,7 +1197,11 @@ where
         loop {
             match reader.read(&mut chunk).await {
                 Ok(0) => break,
-                Ok(n) => output.lock().await.extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    let mut retained = output.lock().await;
+                    let remaining = capture_limit.saturating_sub(retained.len());
+                    retained.extend_from_slice(&chunk[..n.min(remaining)]);
+                }
                 Err(_) => break,
             }
         }
@@ -1220,10 +1367,12 @@ pub(crate) async fn run_stream_capture_with_pinned(
         ControlledSpawn {
             reporter: lifecycle_reporter.as_ref(),
             spawn_authority: spawn_authority.as_ref(),
+            native_spawn_gate: None,
             cancel: &cancel,
             deadline: control_deadline,
             pinned_workdir_fd: inherited_workdir_fd,
             target_env_fd: inherited_target_env_fd,
+            seccomp_filter_fd: None,
         },
     )
     .await?;
@@ -1247,7 +1396,11 @@ pub(crate) async fn run_stream_capture_with_pinned(
     let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
     let drain_out = spawn_line_drain(child.stdout.take(), Arc::clone(&stdout_buf), on_line);
-    let drain_err = spawn_drain(child.stderr.take(), Arc::clone(&stderr_buf));
+    let drain_err = spawn_drain(
+        child.stderr.take(),
+        Arc::clone(&stderr_buf),
+        UNBOUNDED_CAPTURE,
+    );
 
     // Same race: normal exit vs. cancellation vs. timeout.
     let sentinel_controlled = sentinel_status.is_some();
@@ -1481,9 +1634,10 @@ fn install_process_group(
     sentinel_status_fd: Option<OwnedFd>,
     pinned_workdir_fd: Option<OwnedFd>,
     target_env_fd: Option<OwnedFd>,
+    seccomp_filter_fd: Option<OwnedFd>,
 ) -> Result<()> {
     cmd.process_group(0);
-    let mut mappings = Vec::with_capacity(3);
+    let mut mappings = Vec::with_capacity(4);
     if let Some(fd) = sentinel_status_fd {
         mappings.push(FdMapping {
             parent_fd: fd,
@@ -1508,6 +1662,12 @@ fn install_process_group(
             child_fd: TARGET_ENV_FD,
         });
     }
+    if let Some(fd) = seccomp_filter_fd {
+        mappings.push(FdMapping {
+            parent_fd: fd,
+            child_fd: SECCOMP_FILTER_FD,
+        });
+    }
     cmd.fd_mappings(mappings).map_err(|source| {
         VyaneError::with_source(
             ErrorKind::Config,
@@ -1519,7 +1679,10 @@ fn install_process_group(
 }
 
 #[cfg(not(unix))]
-fn install_process_group(_cmd: &mut Command) -> Result<()> {
+fn install_process_group(
+    _cmd: &mut Command,
+    _seccomp_filter_fd: Option<InheritedFd>,
+) -> Result<()> {
     // Non-Unix: no process-group setup. Group-kill semantics degrade to a direct child kill.
     // v0.1 targets Unix; this stub keeps the crate compiling elsewhere.
     Ok(())
@@ -2204,6 +2367,72 @@ mod tests {
         assert!(events.lock().unwrap().is_empty());
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn native_authority_is_rechecked_before_an_executable_busy_retry() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        struct RetryAuthority {
+            calls: AtomicUsize,
+            busy_executable: StdMutex<Option<std::fs::File>>,
+        }
+
+        #[async_trait::async_trait]
+        impl NativeExecutionAuthority for RetryAuthority {
+            async fn revalidate(&self, _effect: NativeSideEffect) -> Result<()> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if call == 2 {
+                    drop(self.busy_executable.lock().expect("busy executable").take());
+                    return Err(VyaneError::new(
+                        ErrorKind::Auth,
+                        "native authority revoked before retry",
+                    ));
+                }
+                Ok(())
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("busy-target");
+        let marker = temp.path().join("must-not-exist");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let busy = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&executable)
+            .unwrap();
+        let authority = RetryAuthority {
+            calls: AtomicUsize::new(0),
+            busy_executable: StdMutex::new(Some(busy)),
+        };
+
+        let error = run_capture_with_pinned_limit_authorized(
+            executable.to_str().unwrap(),
+            &[],
+            None,
+            None,
+            &BTreeMap::new(),
+            RunControl::new(CancellationToken::new(), Some(Duration::from_secs(5)), None),
+            1024,
+            &authority,
+            NativeSideEffect::ToolOperation {
+                turn: 1,
+                ordinal: 1,
+            },
+            &[],
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Auth);
+        assert_eq!(authority.calls.load(Ordering::SeqCst), 2);
+        assert!(!marker.exists());
+    }
+
     #[tokio::test]
     async fn cancellation_during_pre_spawn_authorization_creates_no_child() {
         let temp = tempfile::tempdir().unwrap();
@@ -2496,6 +2725,7 @@ mod tests {
             Some(child.into()),
             None,
             Some(target_env.source),
+            None,
         )
         .unwrap();
         let mut child = command.spawn().unwrap();
@@ -2528,10 +2758,12 @@ mod tests {
             ControlledSpawn {
                 reporter: Some(&reporter),
                 spawn_authority: None,
+                native_spawn_gate: None,
                 cancel: &cancel,
                 deadline: None,
                 pinned_workdir_fd: None,
                 target_env_fd: Some(target_env.source),
+                seccomp_filter_fd: None,
             },
         )
         .await
@@ -2678,7 +2910,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        install_process_group(&mut command, None, None, None).unwrap();
+        install_process_group(&mut command, None, None, None, None).unwrap();
         let mut child = command.spawn().unwrap();
         let pgid = child.id().unwrap() as i32;
         let mut guard = ProcessGroupDropGuard::new(child.id(), None);
@@ -2730,7 +2962,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        install_process_group(&mut command, None, None, None).unwrap();
+        install_process_group(&mut command, None, None, None, None).unwrap();
         let mut child = command.spawn().unwrap();
         let pgid = child.id().unwrap() as i32;
         let (reporter, events) = recording_reporter();

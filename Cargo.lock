@@ -2499,6 +2499,7 @@ dependencies = [
  "command-fds",
  "futures",
  "globset",
+ "libc",
  "regex",
  "rustix",
  "serde",

@@ -16,9 +16,10 @@ use vyane_core::{
     ToolChatRequest, ToolChoice,
 };
 use vyane_harness::native::{
-    NativeReadPolicy, NativeTurnDriver, NativeTurnLimits, NativeTurnStop, NativeWritePolicy,
-    ToolContext, validate_read_only_host, workspace_permission_policy, workspace_tool_definitions,
-    workspace_tool_registry_with_policy,
+    NativeCommandPolicy, NativeReadPolicy, NativeTurnDriver, NativeTurnLimits, NativeTurnStop,
+    NativeWritePolicy, ToolContext, command_permission_policy, command_tool_definition,
+    register_command_tool, validate_read_only_host, workspace_permission_policy,
+    workspace_tool_definitions, workspace_tool_registry_with_policy,
 };
 use vyane_message::{
     EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
@@ -223,6 +224,7 @@ pub(crate) fn native_input_for_submission(
         workdir,
         filesystem_read,
         filesystem_write,
+        command_execution,
         system,
         timeout_seconds,
     } = details;
@@ -263,6 +265,7 @@ pub(crate) fn native_input_for_submission(
             workdir_identity: workdir.identity().clone(),
             filesystem_read,
             filesystem_write,
+            command_execution,
             system,
             timeout_seconds,
             max_model_turns: 8,
@@ -277,6 +280,7 @@ pub(crate) struct NativeSubmissionDetails<'a> {
     pub(crate) workdir: &'a PinnedWorkdir,
     pub(crate) filesystem_read: NativeReadPolicy,
     pub(crate) filesystem_write: Option<NativeWritePolicy>,
+    pub(crate) command_execution: Option<NativeCommandPolicy>,
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
 }
@@ -360,15 +364,26 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             .with_deadline(context.deadline());
         let request = native_request(&input, &bound);
         let write_enabled = input.policy.filesystem_write.is_some();
-        let Ok(registry) = workspace_tool_registry_with_policy(
+        let Ok(mut registry) = workspace_tool_registry_with_policy(
             input.policy.filesystem_read.clone(),
             input.policy.filesystem_write.clone(),
         ) else {
             return AgentExecutorOutcome::Unknown;
         };
-        let Ok(permission_policy) = workspace_permission_policy(write_enabled) else {
+        if let Some(command_policy) = input.policy.command_execution.clone()
+            && register_command_tool(&mut registry, command_policy).is_err()
+        {
+            return AgentExecutorOutcome::Unknown;
+        }
+        let Ok(mut permission_policy) = workspace_permission_policy(write_enabled) else {
             return AgentExecutorOutcome::Unknown;
         };
+        if input.policy.command_execution.is_some() {
+            let Ok(with_command) = command_permission_policy(permission_policy) else {
+                return AgentExecutorOutcome::Unknown;
+            };
+            permission_policy = with_command;
+        }
         let driver = NativeTurnDriver::with_limits(client, registry, permission_policy, limits);
         let turn = tokio::time::timeout_at(
             context.deadline(),
@@ -522,7 +537,13 @@ fn native_request(input: &NativeAgentInput, bound: &vyane_core::BoundTarget) -> 
     ToolChatRequest {
         model: bound.target.model.clone(),
         messages,
-        tools: workspace_tool_definitions(input.policy.filesystem_write.is_some()),
+        tools: {
+            let mut tools = workspace_tool_definitions(input.policy.filesystem_write.is_some());
+            if input.policy.command_execution.is_some() {
+                tools.push(command_tool_definition());
+            }
+            tools
+        },
         tool_choice: ToolChoice::Auto,
         params,
     }
@@ -689,6 +710,7 @@ mod tests {
             workdir_identity: workdir.identity().clone(),
             filesystem_read: NativeReadPolicy::workspace(),
             filesystem_write: None,
+            command_execution: None,
             system: Some("Answer concisely.".into()),
             timeout_seconds: 30,
             max_model_turns: 8,

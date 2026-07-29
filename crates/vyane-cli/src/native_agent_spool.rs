@@ -14,9 +14,10 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use vyane_core::{Effort, PinnedWorkdir, WorkdirIdentity};
-use vyane_harness::native::{NativeReadPolicy, NativeWritePolicy};
+use vyane_harness::native::{NativeCommandPolicy, NativeReadPolicy, NativeWritePolicy};
 
-const SCHEMA: u32 = 4;
+const SCHEMA: u32 = 5;
+const FILESYSTEM_WRITE_SCHEMA: u32 = 4;
 const READ_ONLY_SCHEMA: u32 = 3;
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 768 * 1024;
@@ -169,6 +170,8 @@ pub(crate) struct NativeAgentPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) filesystem_write: Option<NativeWritePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) command_execution: Option<NativeCommandPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_model_turns: u32,
@@ -192,6 +195,13 @@ impl std::fmt::Debug for NativeAgentPolicy {
                     .filesystem_write
                     .as_ref()
                     .map(|policy| policy.exclude.len()),
+            )
+            .field(
+                "command_execution_rules",
+                &self
+                    .command_execution
+                    .as_ref()
+                    .map(|policy| policy.allow.len()),
             )
             .field("system", &self.system.as_ref().map(|_| "[REDACTED]"))
             .field("timeout_seconds", &self.timeout_seconds)
@@ -253,7 +263,10 @@ impl NativeAgentInput {
 
     fn validate(&self) -> Result<(), NativeAgentSpoolError> {
         let supported_schema = self.schema == SCHEMA
-            || (self.schema == READ_ONLY_SCHEMA && self.policy.filesystem_write.is_none());
+            || (self.schema == FILESYSTEM_WRITE_SCHEMA && self.policy.command_execution.is_none())
+            || (self.schema == READ_ONLY_SCHEMA
+                && self.policy.filesystem_write.is_none()
+                && self.policy.command_execution.is_none());
         if !supported_schema
             || !valid_text(&self.owner, MAX_ID_BYTES)
             || !valid_text(&self.run_id, MAX_ID_BYTES)
@@ -582,6 +595,14 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
             .validate()
             .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
     }
+    if let Some(command_policy) = &policy.command_execution {
+        if !policy.filesystem_read.exclude.is_empty() {
+            return Err(NativeAgentSpoolError::InvalidInput);
+        }
+        command_policy
+            .validate()
+            .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
+    }
     if !policy.canonical_workdir.is_absolute() {
         return Err(NativeAgentSpoolError::InvalidInput);
     }
@@ -788,6 +809,7 @@ mod tests {
             },
             filesystem_read: NativeReadPolicy::workspace(),
             filesystem_write: None,
+            command_execution: None,
             system: Some("system-body-marker".into()),
             timeout_seconds: 120,
             max_model_turns: 8,
@@ -1075,6 +1097,49 @@ mod tests {
     }
 
     #[test]
+    fn schema_four_write_input_remains_recoverable_without_command_authority() {
+        let (_directory, spool) = fixture();
+        let path = spool.input_path("run-marker").unwrap();
+        let mut write_policy = policy();
+        write_policy.filesystem_write = Some(NativeWritePolicy::workspace());
+        let mut legacy = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            write_policy,
+        )
+        .unwrap();
+        legacy.schema = FILESYSTEM_WRITE_SCHEMA;
+        write_private(&path, serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(spool.read("run-marker", "worker-marker").unwrap(), legacy);
+        spool.remove_exact(&legacy).unwrap();
+
+        let mut command_policy = policy();
+        command_policy.command_execution = Some(NativeCommandPolicy {
+            allow: vec![vyane_harness::native::NativeCommandRule {
+                program: "git".into(),
+                args_prefix: vec!["status".into()],
+            }],
+            max_seconds: 30,
+        });
+        let mut invalid = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            command_policy,
+        )
+        .unwrap();
+        invalid.schema = FILESYSTEM_WRITE_SCHEMA;
+        write_private(&path, serde_json::to_vec(&invalid).unwrap());
+        assert_eq!(
+            spool.read("run-marker", "worker-marker"),
+            Err(NativeAgentSpoolError::CorruptInput)
+        );
+    }
+
+    #[test]
     fn symlink_hardlink_wrong_mode_and_oversize_fail_closed() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
         let (directory, spool) = fixture();
@@ -1169,6 +1234,20 @@ mod tests {
             ),
             Err(NativeAgentSpoolError::InvalidInput)
         ));
+
+        let mut bypass = policy();
+        bypass.filesystem_read.exclude.push(".env*".into());
+        bypass.command_execution = Some(NativeCommandPolicy {
+            allow: vec![vyane_harness::native::NativeCommandRule {
+                program: "cat".into(),
+                args_prefix: Vec::new(),
+            }],
+            max_seconds: 30,
+        });
+        assert_eq!(
+            NativeAgentInput::fresh("owner", "run", "worker", "prompt", bypass),
+            Err(NativeAgentSpoolError::InvalidInput)
+        );
     }
 
     #[test]
@@ -1202,6 +1281,15 @@ mod tests {
         variants.push(value);
         let mut value = base.clone();
         value.filesystem_write = Some(NativeWritePolicy::excluding(vec!["generated/**".into()]));
+        variants.push(value);
+        let mut value = base.clone();
+        value.command_execution = Some(NativeCommandPolicy {
+            allow: vec![vyane_harness::native::NativeCommandRule {
+                program: "git".into(),
+                args_prefix: vec!["status".into()],
+            }],
+            max_seconds: 30,
+        });
         variants.push(value);
         let mut value = base.clone();
         value.system = None;
