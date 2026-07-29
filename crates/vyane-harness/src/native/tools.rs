@@ -106,6 +106,7 @@ impl ToolCallValidationError {
 pub struct ToolContext {
     workdir: PathBuf,
     pinned_workdir: Option<PinnedWorkdir>,
+    #[cfg(target_os = "linux")]
     command_mounts: Option<NativeCommandMountSet>,
     cancellation: CancellationToken,
     timeout: Option<Duration>,
@@ -147,6 +148,7 @@ impl ToolContext {
         Ok(Self {
             workdir,
             pinned_workdir: None,
+            #[cfg(target_os = "linux")]
             command_mounts: None,
             cancellation: CancellationToken::new(),
             timeout: None,
@@ -168,6 +170,7 @@ impl ToolContext {
         Self {
             workdir: pinned_workdir.canonical_path().to_path_buf(),
             pinned_workdir: Some(pinned_workdir),
+            #[cfg(target_os = "linux")]
             command_mounts: None,
             cancellation: CancellationToken::new(),
             timeout: None,
@@ -181,8 +184,15 @@ impl ToolContext {
     }
 
     #[must_use]
+    #[cfg(target_os = "linux")]
     pub fn with_command_mounts(mut self, command_mounts: NativeCommandMountSet) -> Self {
         self.command_mounts = Some(command_mounts);
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(target_os = "linux"))]
+    pub fn with_command_mounts(self, _command_mounts: NativeCommandMountSet) -> Self {
         self
     }
 
