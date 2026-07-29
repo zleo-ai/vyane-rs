@@ -92,6 +92,7 @@ impl NativeCommandNetworkPolicy {
         Ok(())
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn permits(&self, host: &str, port: u16) -> bool {
         self.allow.iter().any(|rule| {
             rule.ports.contains(&port)

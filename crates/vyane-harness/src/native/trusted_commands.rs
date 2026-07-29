@@ -17,10 +17,9 @@ use vyane_core::{
     ToolDefinition,
 };
 
-use crate::spawn::{
-    RunControl, Termination, run_capture_with_pinned_limit_authorized,
-    run_capture_with_pinned_limit_authorized_channel,
-};
+#[cfg(target_os = "linux")]
+use crate::spawn::run_capture_with_pinned_limit_authorized_channel;
+use crate::spawn::{RunControl, Termination, run_capture_with_pinned_limit_authorized};
 
 #[cfg(target_os = "linux")]
 use super::trusted_network::run_network_broker;
