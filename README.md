@@ -95,21 +95,21 @@ reference implementation.
 | config & profiles | `vyane-config` | [x] |
 | OpenAI-Chat + Responses + Anthropic-Messages clients | `vyane-protocol` | [x] baseline clients; [~] bounded typed tool turns and the per-wire authorized path currently cover non-streaming OpenAI Chat only |
 | Claude Code + Codex CLI harnesses, including stdout event streaming | `vyane-harness` | [x] additive scoped execution carries the Linux pinned workdir and an optional live spawn authority; the Process AgentRun host constructs that authority for fresh sessionless CLI runs, and gated capture/streaming revalidate before wrapper spawn and real-target release. This remains adapter-delegated rather than a host sandbox |
-| native permission/tool execution seam (not yet a general `Harness` implementation) | `vyane-harness` + `vyane-service` | [~] the resident fresh/sessionless native AgentRun lane combines atomic scope validation, per-wire model authorization, the bounded serial turn driver and durable completion. [WP-83](docs/plan/WP-83.md) adds descriptor-relative read/search/write/edit built-ins bound to the admitted `PinnedWorkdir`. [WP-84](docs/plan/WP-84.md) adds an independently configured structured command tool under a Linux read-only Bubblewrap profile; [WP-85](docs/plan/WP-85.md) optionally grants that command a bounded HTTPS destination policy without sharing the host network. [WP-86](docs/plan/WP-86.md) adds a separate hosted `web_search` tool with a frozen Responses target, domain narrowing, source validation and per-attempt live authority. [WP-87](docs/plan/WP-87.md) adds a separately configured `web_fetch` tool with HTTPS/domain, public-address, redirect, content and byte limits. [WP-88](docs/plan/WP-88.md) composes independent user, project, explicit and operator-managed permission ceilings without letting config grant a tool. [WP-90](docs/plan/WP-90.md) adds explicit descriptor-bound command writable roots while keeping the rest of the workspace read-only. Session authority, checkpoint/session commit, approval resume, failover/replay and native resume remain open |
+| native permission/tool execution seam (not yet a general `Harness` implementation) | `vyane-harness` + `vyane-service` | [~] the resident fresh/sessionless native AgentRun lane combines atomic scope validation, per-wire model authorization, the bounded serial turn driver and durable completion. [WP-83](docs/plan/WP-83.md) adds descriptor-relative read/search/write/edit built-ins bound to the admitted `PinnedWorkdir`. [WP-84](docs/plan/WP-84.md) adds an independently configured structured command tool under a Linux read-only Bubblewrap profile; [WP-85](docs/plan/WP-85.md) optionally grants that command a bounded HTTPS destination policy without sharing the host network. [WP-86](docs/plan/WP-86.md) adds a separate hosted `web_search` tool with a frozen Responses target, domain narrowing, source validation and per-attempt live authority. [WP-87](docs/plan/WP-87.md) adds a separately configured `web_fetch` tool with HTTPS/domain, public-address, redirect, content and byte limits. [WP-88](docs/plan/WP-88.md) composes independent user, project, explicit and operator-managed permission ceilings without letting config grant a tool. [WP-90](docs/plan/WP-90.md) adds explicit descriptor-bound command writable roots while keeping the rest of the workspace read-only. [WP-91](docs/plan/WP-91.md) freezes layered per-tool allow/ask/deny decisions, and [WP-92](docs/plan/WP-92.md) adds bounded failover across frozen direct OpenAI Chat targets before any tool side effect. Session authority, checkpoint/session commit, approval resume, automatic replay and native resume remain open |
 | dispatch / broadcast / failover kernel | `vyane-kernel` | [x] early execution id, whole-chain trusted capability admission, one-shot prepared dispatch and original-ordinal failover evidence |
 | append-only run ledger + owner-isolated session records | `vyane-ledger` | [x] direct-HTTP transcript continuation plus strict revisioned V2 snapshots, store-level CAS `Reset` / `ForkFresh` / `Commit`, and an exact local-filesystem execution-period lease; CLI/service control is limited to owner-local list/inspect/reset-native, with no public fork, REST mutation, distributed lease protocol, or production native resume |
 | replayable owner-scoped event store | `vyane-ledger` | [~] storage/cursors, bounded message and AgentRun lifecycle projection, and owner-bound resident broker/projector assembly in the daemon now exist; delivery lanes, dispatch/workflow producers, subscription, retention and a unified timeline remain |
 | durable, secret-free task metadata | `vyane-task` | [x] schema v2 keys snapshots, events and CAS by `(owner,id)` with transactional v1 migration; built-in frontends still select explicit `local` |
-| durable owner-scoped AgentRun queue, worker topology and recovery truth | `vyane-agent` | [~] exact leases/deadlines, active permits, bounded tree cancel, body-free completion receipts/outbox, and resident execution/recovery/publication are production-assembled for a narrow Linux `Process` path with an authenticated loopback submit/status/output/cancel API. `Remote`, native production execution, sessions/resume, distinct principals, live pause/resume, and automatic replay remain absent |
+| durable owner-scoped AgentRun queue, worker topology and recovery truth | `vyane-agent` | [~] exact leases/deadlines, active permits, bounded tree cancel, body-free completion receipts/outbox, and resident execution/recovery/publication are production-assembled for narrow Linux `Process` and fresh/sessionless Native lanes with an authenticated loopback submit/status/output/cancel API. `Remote`, native sessions/resume, distinct principals, live pause/resume, and automatic replay remain absent |
 | owner-scoped transactional message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO, delayed/idempotent delivery, fenced leases, TTL, ack/nack, body-free outbox, external-receipt reconciliation, hidden staged completion publication, bounded mailbox pages, and exact mailbox claim exist |
 | owner-scoped goal lifecycle and progress truth | `vyane-goal` | [~] one SQLite transaction updates the current snapshot and appends an immutable event; WP-68 through WP-75 add bounded verification/evidence, pursuit/checkpoint/daemon composition and explicit approval-gated continuity through reviewed takeover handback. WP-76 adds exact typed quota-reset ingestion whose dependency release is arrival-order independent. WP-77 extends the same durable decision and one-shot dispatch boundary to a ready primary continuation. WP-78 adds observation-identified and sequenced review-check pass/fail evidence plus an approval-gated repair handback; stale replay cannot reopen the gate, repeated failures reopen repair, and resume recursively binds the latest repair/review/takeover evidence. WP-79 adds a read-only, revision-bound operator next-action projection over the current goal and approval evidence. WP-80 exposes only that projection through an opt-in, owner-frozen, bearer-authenticated loopback REST GET with an atomic redacted snapshot. WP-81 adds a separate owner-frozen/source-bound mutation port and one-shot bounded typed watcher poller; it records only existing continuity signals. WP-82 adds a purpose-authenticated, one-shot bounded runner that can invoke separately configured queue and approved-execution ports with an exact projection fence; it has no decision port, so every approval decision remains manual. Concrete ports, daemon scheduling, runtime-native resume and a general authenticated goal service remain future layers |
 | bounded platform-neutral upstream quota snapshots | `vyane-quota` | [~] closed card/window/balance and error schemas, validated connector identity, stable sorted snapshots, bounded concurrency, whole-operation timeout, failure isolation, redirect-closed HTTP and a body cap; no concrete provider connector, credential loader, durable history, polling daemon, CLI snapshot surface or automatic action |
 | bounded replay-safe delivery broker + body-free EventLog projectors | `vyane-broker` | [~] fake-adapter contracts, message/AgentRun lifecycle projection with stable source event IDs, and the explicit non-`Clone` `ResidentBrokerSupervisor` are assembled into the resident daemon with an intentionally empty delivery lane set; worker/message glue and remote A2A/Channels adapters remain absent |
 | declarative workflow engine (DAG + journal/resume/replay) | `vyane-workflow` | [x] exact-plan replay creates a new run and reuses a journal-recorded all-success prefix |
-| resident workflow and Process AgentRun daemon (authenticated local control) | `vyane-cli` | [x] workflow control plus fresh sessionless CLI-harness AgentRun submit/status/output/cancel on Linux; no automatic replay or live pause/resume |
+| resident workflow plus Process and Native AgentRun daemon (authenticated local control) | `vyane-cli` | [x] workflow control plus Linux CLI-harness Process and fresh/sessionless Native AgentRun submit/status/output/cancel; no native session resume, automatic replay or live pause/resume |
 | detached background runs (`--detach` + `task` commands) | `vyane-cli` | [x] |
 | CLI (check / dispatch / broadcast / history / session / sessions / workflow / task / daemon / a2a / goal) | `vyane-cli` | [x] revision-aware session control, local `a2a send/inbox/read`, and owner-scoped `goal` lifecycle/progress commands; legacy `sessions` remains compatible |
-| shared service layer | `vyane-service` | [x] `OwnerContextFactory` authenticates and resolves a reserved-local-safe authority; `OwnerScopedService` freezes dispatch/stream/query/session/reset. AgentRun components include prepared authorized harness dispatch, paired backends, exact message-completion handback, and the generic resident supervisor used by the daemon's Linux Process host; ordinary dispatch starts none of them |
+| shared service layer | `vyane-service` | [x] `OwnerContextFactory` authenticates and resolves a reserved-local-safe authority; `OwnerScopedService` freezes dispatch/stream/query/session/reset. AgentRun components include prepared authorized harness dispatch, paired Process/Native backends, exact message-completion handback, and the generic resident host used by the daemon; ordinary dispatch starts none of them |
 | **REST API** (`vyane serve` — dispatch/broadcast/runs/sessions/health) | `vyane-cli` + `axum` | [x] per-start bearer capability, loopback Host/Origin enforcement, non-loopback bind rejection, allowlisted views, and one assembly-frozen local service scope; the bearer still is not a distinct principal or hostile same-UID/multi-user boundary |
 | **MCP server** (`vyane mcp` — nine tools) | `vyane-mcp` + `rmcp` 3.0 | [x] six base tools plus authenticated durable workflow submit/status/cancel; generic success output has a 1 MiB cap |
 | pluggable routing | `vyane-router` | [x] |
@@ -151,9 +151,9 @@ expired decisions remain pure and revocation stays outside model-facing tool
 text. `AgentRunModelToolAuthority` is now a concrete bridge for a fresh,
 sessionless scope: it owns the permit and scope, revalidates the AgentRun store
 on Tokio's blocking pool for each one-based model send or tool operation, and
-rejects session-bearing scopes, checkpoint effects, and session commits. It is
-not registered by a production factory or called by a runtime/native loop, and
-it does not combine a session lease with an exact native-session domain.
+rejects session-bearing scopes, checkpoint effects, and session commits. The
+fresh/sessionless resident Native lane now registers and calls this bridge; it
+still does not combine a session lease with an exact native-session domain.
 
 The paired in-process operation can now bind its lifetime-bound effect
 authority to one exact fresh, sessionless `NativeExecutionScope`. Binding first
@@ -161,11 +161,14 @@ atomically validates owner/run/generation/lease/deadline/controller plus exact
 target, prompt and policy digests; each subsequent one-based model send or tool
 operation repeats that full native-scope validation. Session/resume scopes,
 checkpoint/session-commit effects, raw store/permit access and cloning or
-serialization remain closed. This completes an authority composition seam, not
-a concrete native AgentRun operation or result handback. See
-[WP-52](docs/plan/WP-52.md).
+serialization remain closed. This authority composition seam now underpins the
+concrete fresh/sessionless Native operation and result handback from WP-65 and
+WP-66; it does not authorize session-aware execution. See
+[WP-52](docs/plan/WP-52.md), [WP-65](docs/plan/WP-65.md), and
+[WP-66](docs/plan/WP-66.md).
 
-`NativeTurnDriver` now supplies a separate bounded dark model/tool loop. It
+`NativeTurnDriver` supplies the resident Native lane's bounded serial
+model/tool loop. It
 defaults to eight model turns with a hard ceiling of 32, permits at most one
 tool call per turn, requires the initial advertised tool-name set to equal the
 registry-name set, validates every request/response, and preflights the complete
@@ -180,10 +183,12 @@ schemas are non-authoritative model guidance; each `NativeTool` must validate
 the actual arguments it receives.
 
 The driver's outcome is non-serializable and has redacted `Debug`. The explicit
-fresh/sessionless resident native lane now constructs it with the two
-read-only trusted filesystem built-ins; this is still narrower than a general
-`Harness`. There are still no write/edit, command/network, checkpoint/session-
-commit consumers, approval resume, or native resume. Separately,
+fresh/sessionless resident Native lane constructs it with separately authorized
+filesystem read/search/write/edit, sandboxed command, command-network,
+hosted-search and bounded-fetch tools. Layered configuration can only narrow
+explicitly requested tools, and `ask` remains a terminal approval-required stop.
+This is still narrower than a general `Harness`: checkpoint/session-commit
+consumers, approval resume and native resume remain absent. Separately,
 `AgentProjectionComponents::open` provides an
 explicit owner-bound path to the one-shot AgentRun projector while keeping the
 raw store encapsulated. Ordinary dispatch neither opens that database nor
@@ -192,9 +197,11 @@ starts projection or other resident work.
 [WP-65](docs/plan/WP-65.md) provided the original dark composition slice: a private native
 spool, exact fresh/sessionless scope, authorized OpenAI Chat client, tool-free
 `NativeTurnDriver`, and exact durable message-completion acceptance path. It is
-now production-assembled by the later native lane; WP-83 adds the read-only
-trusted filesystem slice without claiming a child-process OS sandbox,
-session/resume/checkpoint authority, failover, replay, or general parity.
+now production-assembled by the later Native lane. WP-83 through WP-88 and
+WP-90 through WP-92 add the separately authorized filesystem, command,
+network, search/fetch, layered permission and pre-side-effect failover slices
+without claiming session-aware authority, approval resume, automatic replay or
+general parity.
 
 `vyane-service::AgentRunRecoveryDriver` is another explicit fixed-owner,
 non-`Clone` one-shot seam. Construction freezes the owner, injected store,
@@ -211,10 +218,11 @@ affirmative `Gone` observation for the exact controller can reach
 tickets never cross the adapter boundary.
 
 Standing alone this one-shot driver is not a resident worker-health or execution
-loop. WP-51 first composed the paired in-process backend; WP-61 now uses the
-generic supervisor with an exact Linux `Process` adapter in the workflow daemon.
-There is still no `Remote` adapter, session-aware resume, live pause/resume, or
-automatic replay. Controller adapters must revalidate the
+loop. WP-51 first composed the paired in-process backend; WP-61 uses the generic
+supervisor with an exact Linux `Process` adapter in the workflow daemon, and
+WP-66 adds the fresh/sessionless Native lane. There is still no `Remote`
+adapter, session-aware resume, live pause/resume, or automatic replay.
+Controller adapters must revalidate the
 complete identity before every effect, return `Unavailable` without an effect
 when identity reuse cannot be excluded, and remain safe to repeat after
 timeout, drop, or settlement failure. A custom store's blocking call cannot be
@@ -268,19 +276,21 @@ exact group, records the stopped lifecycle, and the driver awaits the item
 before the completion loop's final drain. Forced drop still forfeits that
 guarantee, and a custom blocking store means drain has no fixed wall-clock
 bound. The generic
-`ResidentAgentSupervisor` now also consumes a concrete Linux Process backend in
-the daemon; the in-process operation itself remains a dark native seam. The
+`ResidentAgentSupervisor` first consumed a concrete Linux Process backend in
+the daemon; WP-66 subsequently production-assembled the fresh/sessionless
+in-process Native operation as a second lane. The
 generic handback contract is defined in [WP-53](docs/plan/WP-53.md), the
 original resident boundary is in [WP-51](docs/plan/WP-51.md), and the production
-Process scope is in [WP-61](docs/plan/WP-61.md).
+Process and Native scopes are in [WP-61](docs/plan/WP-61.md) and
+[WP-66](docs/plan/WP-66.md).
 
 `ResidentAgentHost` is the bounded multi-lane service substrate above those
 single-lane facades. It runs one exact durable-backend execution loop per lane
 while sharing one validated recovery-adapter union and one completion
 projector. Lane failures and backoff are isolated, but store ordering remains
-cross-backend. The current daemon does not assemble this into native or Remote
-production execution; it still installs only its Linux Process lane. See
-[WP-64](docs/plan/WP-64.md).
+cross-backend. The current daemon installs the Linux Process lane and the
+fresh/sessionless Native lane; `Remote` remains unassembled. See
+[WP-64](docs/plan/WP-64.md) and [WP-66](docs/plan/WP-66.md).
 
 The WP-61 host accepts authenticated loopback AgentRun requests only through
 the workflow daemon. It freezes a private create-only prompt spool together
@@ -295,16 +305,29 @@ quiesced process lifecycle and typed terminal proof; in particular, Claude
 exiting zero without a JSON `result` is a failure. Completion is staged under a
 stable key and returned only after exact message publication.
 
+The Native lane freezes a private prompt spool, direct OpenAI Chat target
+chain, policy digest, workdir identity, timeout and turn limit before durable
+creation. It re-resolves the complete chain before the first wire request,
+revalidates live authority at every model/tool effect, and may fail over only
+for the shared eligible error taxonomy before any tool side effect. Trusted
+filesystem, command, command-network, hosted-search and bounded-fetch tools
+remain separately authorized and configuration can only narrow the explicitly
+requested set. See [WP-66](docs/plan/WP-66.md) and
+[WP-83](docs/plan/WP-83.md) through [WP-88](docs/plan/WP-88.md), and
+[WP-90](docs/plan/WP-90.md) through [WP-92](docs/plan/WP-92.md).
+
 The daemon exposes `POST /v1/agent-runs`, status, output and cancel routes under
 its existing bearer and loopback restrictions. Startup performs exact stale
-controller recovery without replay. Graceful shutdown first closes admission
+backend recovery without replay. Graceful shutdown first closes admission
 and drains admitted submit/cancel initialization, then signals the AgentRun
 supervisor and awaits it concurrently with workflow-supervisor drain. An active
 Process group is cooperatively terminated and reaped before completion's final
-drain. This is not a `Remote` or native production host, does not support
-sessions, live pause/resume or automatic replay, and the local bearer still
+drain. This is not a `Remote` or session-aware native host, does not support
+native resume, live pause/resume or automatic replay, and the local bearer still
 does not represent distinct principals or hostile same-UID isolation. See
-[WP-61](docs/plan/WP-61.md).
+[WP-61](docs/plan/WP-61.md) and [WP-66](docs/plan/WP-66.md).
+The Process-lane graceful drain is acceptance-covered; WP-66's separate
+daemon-level Native graceful-shutdown race acceptance remains open.
 
 The service layer also has a principal-derived owner phase-A boundary.
 `OwnerContextFactory` freezes a trusted authenticator and resolver, keeps
@@ -595,8 +618,9 @@ descriptor. The control API is `POST /v1/workflows`, `GET /v1/workflows/:id`,
 and `POST /v1/workflows/:id/cancel`. On Linux it also exposes
 `POST /v1/agent-runs`, `GET /v1/agent-runs/:id`,
 `GET /v1/agent-runs/:id/output`, and `POST /v1/agent-runs/:id/cancel` for the
-fresh sessionless Process host described in [WP-61](docs/plan/WP-61.md). There
-is no permissive CORS layer. This
+fresh/sessionless Process and Native lanes described in
+[WP-61](docs/plan/WP-61.md) and [WP-66](docs/plan/WP-66.md). There is no
+permissive CORS layer. This
 protects against accidental browser and cross-process access, but is not a
 sandbox against hostile code running as the same OS user.
 
@@ -770,7 +794,7 @@ layer. Seventeen crates:
 | `vyane-config` | TOML config + profiles; resolves a profile (and its failover chain) to a `BoundTarget` |
 | `vyane-provider` | provider registry; endpoints, auth styles, per-provider env-injection rules |
 | `vyane-protocol` | `ChatClient` implementations for the HTTP protocols (OpenAI Chat / Responses, Anthropic Messages), a separately authorized OpenAI Chat typed-turn path, and the shared HTTP base validator and secret-free endpoint-routing digest |
-| `vyane-harness` | `Harness` implementations wrapping coding CLIs headlessly, with additive scoped execution, pinned-workdir handoff and process-group control; also owns the guarded native tool-registry boundary and unwired bounded native turn driver |
+| `vyane-harness` | `Harness` implementations wrapping coding CLIs headlessly, with additive scoped execution, pinned-workdir handoff and process-group control; also owns the guarded native tool registry, bounded turn driver, descriptor-relative filesystem tools, and sandboxed command/network tools used by the resident Native lane |
 | `vyane-kernel` | early execution identity, whole-chain capability admission, prepared streaming/dispatch, failover gating and run-record assembly |
 | `vyane-ledger` | JSONL `Ledger` + filesystem `SessionStore`, including strict revisioned native-session snapshots and atomic CAS transitions; cost estimation |
 | `vyane-task` | SQLite-backed, secret-free task lifecycle snapshots and CAS event history |
@@ -780,7 +804,7 @@ layer. Seventeen crates:
 | `vyane-broker` | bounded owner-bound delivery pumps, replay-safety admission, fenced settlement, maintenance, and body-free message/AgentRun EventLog projection |
 | `vyane-router` | target selection / routing policy (grows into pluggable routing) |
 | `vyane-workflow` | declarative DAG execution, templates, atomic journals, and resume |
-| `vyane-service` | shared construction and operation layer used by front-ends; also exports principal-derived owner scope, the unwired native fresh-sessionless bridge, explicit AgentRun projection assembly, one-shot recovery/execution drivers, paired backends, and the generic resident supervisor used by the daemon's Linux Process host |
+| `vyane-service` | shared construction and operation layer used by front-ends; also exports principal-derived owner scope, the fresh/sessionless Native authority bridge, explicit AgentRun projection assembly, one-shot recovery/execution drivers, paired Process/Native backends, and the generic multi-lane resident host used by the daemon |
 | `vyane-mcp` | six base MCP tools plus an injectable, credential-free workflow-control port; the CLI exposes nine tools over stdio |
 | `vyane-cli` | the assembler and entry point: wires the crates together behind a command-line UI |
 
