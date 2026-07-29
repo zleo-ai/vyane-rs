@@ -14,7 +14,7 @@ use crate::journal::{
     JournalStep, JournalStepStatus, JournalTargetOutput, WorkflowJournal, WorkflowReplayProvenance,
     WorkflowRunId, journal_path, read_journal, write_journal_atomic, write_journal_create_atomic,
 };
-use crate::model::{OnError, Workflow, WorkflowOutcome, WorkflowRunStatus};
+use crate::model::{OnError, Workflow, WorkflowOutcome, WorkflowRouteHints, WorkflowRunStatus};
 use crate::plan::{WorkflowPlan, WorkflowPlanStep};
 use crate::template::render_template_inner;
 use crate::validate::{ResolvedStepTargets, TargetResolver, ValidatedWorkflow, validate_plan};
@@ -174,8 +174,21 @@ impl WorkflowEngine {
         vars: &BTreeMap<String, String>,
     ) -> WorkflowResult<ValidatedWorkflow> {
         let validated = validate_plan(plan, vars, self.resolver.as_ref())?;
+        self.validate_resolved_admission(plan, &validated, |_| true)?;
+        Ok(validated)
+    }
+
+    fn validate_resolved_admission(
+        &self,
+        plan: &WorkflowPlan,
+        validated: &ValidatedWorkflow,
+        mut should_check: impl FnMut(&str) -> bool,
+    ) -> WorkflowResult<()> {
         let mut problems = Vec::new();
         for step in &plan.steps {
+            if !should_check(&step.id) {
+                continue;
+            }
             let Some(resolved) = validated.resolved_targets.get(&step.id) else {
                 continue;
             };
@@ -184,7 +197,22 @@ impl WorkflowEngine {
                 ResolvedStepTargets::Single {
                     chain: Some(chain), ..
                 } => std::slice::from_ref(chain),
-                ResolvedStepTargets::Single { chain: None, .. } => continue,
+                ResolvedStepTargets::Single {
+                    target,
+                    chain: None,
+                } => {
+                    let route = WorkflowRouteHints::from(&step.route);
+                    if let Err(error) =
+                        self.resolver
+                            .validate_deferred_admission(target, &route, step.sandbox)
+                    {
+                        problems.push(format!(
+                            "step `{}` failed deferred execution admission: {}",
+                            step.id, error.message
+                        ));
+                    }
+                    continue;
+                }
                 ResolvedStepTargets::FanOut { chains, .. } => chains.as_slice(),
             };
             for chain in chains {
@@ -197,7 +225,7 @@ impl WorkflowEngine {
             }
         }
         if problems.is_empty() {
-            Ok(validated)
+            Ok(())
         } else {
             Err(WorkflowError::validation(problems))
         }
@@ -353,9 +381,14 @@ impl WorkflowEngine {
 
         // Resolve the complete plan before publishing the new identity. Digest
         // and source failures above therefore remain free of resolver effects.
-        let validated = self.validate_plan_admission(plan, &source.vars)?;
+        let validated = validate_plan(plan, &source.vars, self.resolver.as_ref())?;
         let mut journal = WorkflowJournal::new_with_plan(new_wf_run_id, plan, source.vars.clone());
         let reused_step_ids = copy_replay_prefix(&source, plan, &validated, &mut journal)?;
+        let reused = reused_step_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        self.validate_resolved_admission(plan, &validated, |step_id| !reused.contains(step_id))?;
         let reused_steps_sha256 = replay_steps_digest(&journal, &reused_step_ids)?;
         journal.replay = Some(WorkflowReplayProvenance {
             source_wf_run_id: source.wf_run_id,
@@ -373,7 +406,13 @@ impl WorkflowEngine {
         plan: &WorkflowPlan,
         cancel: CancellationToken,
     ) -> WorkflowResult<WorkflowOutcome> {
-        let validated = self.validate_plan_admission(plan, &journal.vars)?;
+        let validated = validate_plan(plan, &journal.vars, self.resolver.as_ref())?;
+        self.validate_resolved_admission(plan, &validated, |step_id| {
+            journal
+                .steps
+                .get(step_id)
+                .is_none_or(|step| step.status != JournalStepStatus::Success)
+        })?;
         journal.status = WorkflowRunStatus::Running;
         for step in journal.steps.values_mut() {
             step.reset_for_rerun();

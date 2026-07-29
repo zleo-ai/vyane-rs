@@ -353,7 +353,9 @@ policy is frozen. WP-93 separately retains each
 leg; the strictest ceiling rejects an over-broad task before dispatch
 persistence, outer REST/workflow task identity, workflow-journal creation,
 executor construction or spawn. Synchronous REST reports this typed config
-rejection as a caller error. The managed file named by
+rejection as a caller error. Resume/replay applies the current ceiling only to
+steps that will execute; an exact successful journal prefix remains reusable.
+The managed file named by
 `VYANE_MANAGED_PERMISSION_CONFIG` accepts no provider or profile configuration;
 `VYANE_MANAGED_NATIVE_CONFIG` remains a compatibility alias.
 The lane still has no whole-workspace command profile, session/domain authority,

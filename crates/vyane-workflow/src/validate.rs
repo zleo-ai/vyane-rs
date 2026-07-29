@@ -32,7 +32,16 @@ pub trait TargetResolver: Send + Sync {
     /// Validate a selector that intentionally deferred concrete resolution.
     /// Implementations can check candidate names, policy guards, and config
     /// viability without committing to the prompt-dependent final route.
-    fn validate_deferred(
+    fn validate_deferred(&self, _target: &str, _route: &WorkflowRouteHints) -> VyaneResult<()> {
+        Ok(())
+    }
+
+    /// Validate execution admission for a deferred selector whose concrete
+    /// chain is unavailable to the workflow engine.
+    ///
+    /// Mutating requests fail closed unless the resolver explicitly proves
+    /// every candidate chain against the active execution policy.
+    fn validate_deferred_admission(
         &self,
         _target: &str,
         _route: &WorkflowRouteHints,
@@ -224,8 +233,7 @@ pub fn validate_workflow(
                             step.id
                         ));
                     }
-                    Ok(None) => match resolver.validate_deferred(target, &step.route, step.sandbox)
-                    {
+                    Ok(None) => match resolver.validate_deferred(target, &step.route) {
                         Ok(()) => {
                             resolved_targets.insert(
                                 step.id.clone(),

@@ -3128,12 +3128,27 @@ impl TargetResolver for CliWorkflowResolver {
         &self,
         target: &str,
         route: &vyane_workflow::WorkflowRouteHints,
+    ) -> vyane_core::Result<()> {
+        if !target.eq_ignore_ascii_case("auto") {
+            return Ok(());
+        }
+        let mut task = TaskSpec::new("workflow route validation");
+        route.apply_to_labels(&mut task.labels);
+        vyane_service::validate_auto_route_candidates(&self.loaded, &task.labels).map_err(|error| {
+            vyane_core::VyaneError::new(vyane_core::ErrorKind::Config, error.to_string())
+        })
+    }
+
+    fn validate_deferred_admission(
+        &self,
+        target: &str,
+        route: &vyane_workflow::WorkflowRouteHints,
         sandbox: Sandbox,
     ) -> vyane_core::Result<()> {
         if !target.eq_ignore_ascii_case("auto") {
             return Ok(());
         }
-        let mut task = TaskSpec::new("workflow route validation").with_sandbox(sandbox);
+        let mut task = TaskSpec::new("workflow permission validation").with_sandbox(sandbox);
         route.apply_to_labels(&mut task.labels);
         let chains = vyane_service::resolve_auto_route_candidate_chains(&self.loaded, &task.labels)
             .map_err(|error| {
