@@ -150,8 +150,18 @@ jobs:
           # Broker supervisor fixtures retain Tokio runtimes whose paused-time
           # progress can starve when separate test cases overlap under
           # instrumentation. Measure every broker test, but serialize that
-          # package just like the existing CLI coverage batch.
-          cargo llvm-cov --no-report --workspace --exclude vyane-broker --exclude vyane-cli
+          # package just like the existing CLI coverage batch. Preserve the
+          # service lifecycle process boundary from the main test job too.
+          cargo llvm-cov --no-report --workspace \
+            --exclude vyane-broker \
+            --exclude vyane-cli \
+            --exclude vyane-service
           cargo llvm-cov --no-report -p vyane-broker -- --test-threads=1
+          cargo llvm-cov --no-report -p vyane-service -- \
+            --test-threads=1 \
+            --skip agent_supervisor::tests::resident_supervisor_publishes_committed_completion
+          cargo llvm-cov --no-report -p vyane-service -- \
+            agent_supervisor::tests::resident_supervisor_publishes_committed_completion \
+            --exact
           cargo llvm-cov --no-report -p vyane-cli -- --test-threads=1
           cargo llvm-cov report --summary-only
