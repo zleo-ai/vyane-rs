@@ -23,8 +23,9 @@ mod trusted_web_search;
 mod turn_driver;
 
 pub use permissions::{
-    ApprovalPlan, PermissionDecision, PermissionEffect, PermissionPolicy, PermissionRule,
-    PermissionRuleError, protected_paths_policy, risky_operations_policy,
+    ApprovalPlan, MAX_NATIVE_TOOL_PERMISSION_LAYERS, NativeToolPermissionPolicy,
+    NativeToolPermissionRule, PermissionDecision, PermissionEffect, PermissionPolicy,
+    PermissionRule, PermissionRuleError, protected_paths_policy, risky_operations_policy,
 };
 pub use text_edit::{
     EditError, EditOutcome, EditRequest, MatchPass, MatchSearch, ReplacedSpan, compute_edit,

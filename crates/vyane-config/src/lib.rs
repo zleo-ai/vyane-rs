@@ -17,7 +17,8 @@ pub use layer::ConfigLayers;
 pub use model::{
     GenParamsPatch, NativeCommandNetworkPolicyConfig, NativeCommandNetworkRouteConfig,
     NativeCommandNetworkRuleConfig, NativeCommandPolicyConfig, NativeCommandRuleConfig,
-    NativePathPolicyConfig, NativePermissionCeiling, NativeWebFetchPolicyConfig,
+    NativePathPolicyConfig, NativePermissionCeiling, NativeToolPermissionEffectConfig,
+    NativeToolPermissionPolicyConfig, NativeToolPermissionRuleConfig, NativeWebFetchPolicyConfig,
     NativeWebSearchPolicyConfig, ProfilePatch, RawFailoverElement, RawRoot,
 };
 pub use resolve::ResolvedConfig;

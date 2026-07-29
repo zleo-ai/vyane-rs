@@ -16,13 +16,14 @@ use vyane_core::{
     ToolChatRequest, ToolChoice,
 };
 use vyane_harness::native::{
-    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeTurnDriver,
-    NativeTurnLimits, NativeTurnStop, NativeWebFetchPolicy, NativeWebSearchPolicy,
-    NativeWritePolicy, ToolContext, command_permission_policy, command_tool_definition,
-    register_command_tool, register_command_tool_with_network, register_web_fetch_tool,
-    register_web_search_tool, validate_read_only_host, web_fetch_permission_policy,
-    web_fetch_tool_definition, web_search_permission_policy, web_search_tool_definition,
-    workspace_permission_policy, workspace_tool_definitions, workspace_tool_registry_with_policy,
+    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeToolPermissionPolicy,
+    NativeTurnDriver, NativeTurnLimits, NativeTurnStop, NativeWebFetchPolicy,
+    NativeWebSearchPolicy, NativeWritePolicy, ToolContext, command_permission_policy,
+    command_tool_definition, register_command_tool, register_command_tool_with_network,
+    register_web_fetch_tool, register_web_search_tool, validate_read_only_host,
+    web_fetch_permission_policy, web_fetch_tool_definition, web_search_permission_policy,
+    web_search_tool_definition, workspace_permission_policy, workspace_tool_definitions,
+    workspace_tool_registry_with_policy,
 };
 use vyane_message::{
     EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
@@ -242,6 +243,7 @@ pub(crate) fn native_input_for_submission(
         command_network,
         web_search,
         web_fetch,
+        tool_permission_layers,
         system,
         timeout_seconds,
     } = details;
@@ -290,6 +292,7 @@ pub(crate) fn native_input_for_submission(
             command_network,
             web_search,
             web_fetch,
+            tool_permission_layers,
             system,
             timeout_seconds,
             max_model_turns: 8,
@@ -308,6 +311,7 @@ pub(crate) struct NativeSubmissionDetails<'a> {
     pub(crate) command_network: Option<NativeCommandNetworkPolicy>,
     pub(crate) web_search: Option<NativeWebSearchSubmission<'a>>,
     pub(crate) web_fetch: Option<NativeWebFetchPolicy>,
+    pub(crate) tool_permission_layers: Vec<NativeToolPermissionPolicy>,
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
 }
@@ -498,6 +502,11 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                 return AgentExecutorOutcome::Unknown;
             };
             permission_policy = with_fetch;
+        }
+        for layer in &input.policy.tool_permission_layers {
+            if permission_policy.push_restriction(layer).is_err() {
+                return AgentExecutorOutcome::Unknown;
+            }
         }
         let driver = NativeTurnDriver::with_limits(client, registry, permission_policy, limits);
         let turn = tokio::time::timeout_at(
@@ -837,6 +846,7 @@ mod tests {
             command_network: None,
             web_search: None,
             web_fetch: None,
+            tool_permission_layers: Vec::new(),
             system: Some("Answer concisely.".into()),
             timeout_seconds: 30,
             max_model_turns: 8,

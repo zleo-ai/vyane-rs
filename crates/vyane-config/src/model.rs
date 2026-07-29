@@ -52,6 +52,39 @@ pub struct NativePermissionCeiling {
     pub web_search: Option<NativeWebSearchPolicyConfig>,
     #[serde(default)]
     pub web_fetch: Option<NativeWebFetchPolicyConfig>,
+    /// Optional tool-decision restriction contributed by this exact layer.
+    ///
+    /// `allow` is neutral with respect to stricter layers and never registers
+    /// an otherwise absent tool.
+    #[serde(default)]
+    pub tool_policy: Option<NativeToolPermissionPolicyConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeToolPermissionEffectConfig {
+    #[default]
+    Allow,
+    Ask,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeToolPermissionRuleConfig {
+    pub tool: String,
+    pub effect: NativeToolPermissionEffectConfig,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arguments: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeToolPermissionPolicyConfig {
+    #[serde(default)]
+    pub default: NativeToolPermissionEffectConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<NativeToolPermissionRuleConfig>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -457,5 +490,38 @@ mod tests {
         let root: RawRoot = toml::from_str(toml_src).unwrap();
         assert!(root.providers.contains_key("anthropic"));
         assert!(root.profiles.contains_key("review"));
+    }
+
+    #[test]
+    fn native_tool_policy_parses_closed_allow_ask_deny_rules() {
+        let root: RawRoot = toml::from_str(
+            r#"
+            [native_permissions.tool_policy]
+            default = "allow"
+
+            [[native_permissions.tool_policy.rules]]
+            tool = "run_command"
+            effect = "ask"
+
+            [native_permissions.tool_policy.rules.arguments]
+            program = "^cargo$"
+            "#,
+        )
+        .unwrap();
+        let policy = root.native_permissions.unwrap().tool_policy.unwrap();
+        assert_eq!(policy.default, NativeToolPermissionEffectConfig::Allow);
+        assert_eq!(
+            policy.rules[0].effect,
+            NativeToolPermissionEffectConfig::Ask
+        );
+        assert_eq!(policy.rules[0].arguments["program"], "^cargo$");
+
+        let unknown = toml::from_str::<RawRoot>(
+            r#"
+            [native_permissions.tool_policy]
+            surprise = true
+            "#,
+        );
+        assert!(unknown.is_err());
     }
 }

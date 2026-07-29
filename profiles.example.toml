@@ -147,6 +147,21 @@ stage    = "review"
 # max_fetches = 2
 # max_response_bytes = 262144
 # max_redirects = 2
+#
+# Tool decisions are a separate classifier over tools already enabled above.
+# Within one layer the last matching rule wins; across request, user, project,
+# explicit, and managed layers the strictest result wins:
+# deny > ask > allow. `allow` never grants an otherwise absent tool.
+#
+# [native_permissions.tool_policy]
+# default = "allow"
+#
+# [[native_permissions.tool_policy.rules]]
+# tool = "run_command"
+# effect = "ask"
+#
+# [native_permissions.tool_policy.rules.arguments]
+# program = "^cargo$"
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
