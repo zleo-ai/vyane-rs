@@ -48,6 +48,9 @@ roadmap state.
 [WP-99](plan/WP-99.md) refreshes the locked MCP SDK and macros from `rmcp`
 3.0.0 to the compatible 3.0.1 patch while retaining the Rust 1.88 floor and
 the existing stdio tool surface.
+[WP-100](plan/WP-100.md) makes daemon terminal acceptance polling reuse one
+short-timeout client and retry transient loopback timeouts only inside the
+existing total terminal budget.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
