@@ -39,6 +39,9 @@ control-lock contention.
 [WP-96](plan/WP-96.md) makes forced-restart acceptance fixtures wait for the
 old daemon PID to disappear instead of racing the production pre-spawn
 liveness and authenticated-health gate.
+[WP-97](plan/WP-97.md) gives the standard CI test job the same serialized
+broker-supervisor fixture scheduling already used by coverage, without
+skipping tests or reducing concurrency inside each fixture.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
