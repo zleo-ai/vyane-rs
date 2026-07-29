@@ -135,7 +135,7 @@ stage    = "review"
 # exclude = [".env*", ".git", "private/**"]
 #
 # [native_permissions.command_execution]
-# writable_roots = ["crates", "Cargo.toml"]
+# writable_roots = ["crates", "generated"]
 # max_seconds = 120
 #
 # [[native_permissions.command_execution.allow]]

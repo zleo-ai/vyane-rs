@@ -443,7 +443,7 @@ impl NativeAgentInputSpool {
         if input.owner != self.owner
             || pinned.canonical_path() != input.policy.canonical_workdir
             || pinned.identity() != &input.policy.workdir_identity
-            || !command_mounts_match_policy(command_mounts.as_ref(), &input.policy)
+            || !command_mounts_match_policy(command_mounts.as_ref(), pinned, &input.policy)
         {
             return Err(NativeAgentSpoolError::BindingMismatch);
         }
@@ -754,13 +754,14 @@ fn retained_handoff_handle_count(command_mounts: Option<&NativeCommandMountSet>)
 
 fn command_mounts_match_policy(
     mounts: Option<&NativeCommandMountSet>,
+    pinned: &PinnedWorkdir,
     policy: &NativeAgentPolicy,
 ) -> bool {
     match (&policy.command_execution, mounts) {
         (None, None) => true,
         (None, Some(_)) => false,
         (Some(command), None) => command.writable_roots.is_empty(),
-        (Some(command), Some(mounts)) => mounts.matches_policy(command),
+        (Some(command), Some(mounts)) => mounts.matches_admission(pinned, command),
     }
 }
 

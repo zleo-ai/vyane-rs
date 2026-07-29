@@ -801,7 +801,9 @@ request and every ceiling list exact pre-existing `writable_roots`; see
 require `/usr/bin/bwrap --help` to advertise `--bind-fd FD DEST`; current
 Ubuntu 24.04 security updates provide that capability. Roots must be
 directories; regular files are rejected so atomic editor replacement is not
-misrepresented as supported.
+misrepresented as supported. Granting a root also grants aggregate storage
+consumption within that subtree: per-file and process/time ceilings remain,
+but WP-90 does not provide a backing-filesystem byte or inode quota.
 
 ```toml
 [providers.anthropic]

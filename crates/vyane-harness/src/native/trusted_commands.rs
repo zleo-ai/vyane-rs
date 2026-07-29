@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use vyane_core::{ErrorKind, VyaneError};
 use vyane_core::{
     NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir, Result as VyaneResult,
-    ToolDefinition,
+    ToolDefinition, WorkdirIdentity,
 };
 
 #[cfg(target_os = "linux")]
@@ -207,6 +207,7 @@ pub struct NativeCommandPolicy {
 #[derive(Clone)]
 pub struct NativeCommandMountSet {
     paths: Arc<Vec<String>>,
+    workdir_identity: WorkdirIdentity,
     #[cfg(target_os = "linux")]
     handles: Arc<Vec<std::fs::File>>,
 }
@@ -216,6 +217,7 @@ impl std::fmt::Debug for NativeCommandMountSet {
         formatter
             .debug_struct("NativeCommandMountSet")
             .field("roots", &self.paths.len())
+            .field("workdir", &"<bound>")
             .field("handles", &"<process-local>")
             .finish()
     }
@@ -315,7 +317,7 @@ pub async fn validate_command_network_host_with_mounts(
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     validate_network_route_host(policy).map_err(|_| NativeCommandHostError::Unsupported)?;
     let probe_arguments = command_probe_arguments(command_policy);
-    let writable_mounts = mount_handles_for_probe(mounts, command_policy)
+    let writable_mounts = mount_handles_for_probe(mounts, pinned, command_policy)
         .await
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     let args = launcher_args(
@@ -491,7 +493,7 @@ pub async fn validate_command_host_with_mounts(
 ) -> Result<(), NativeCommandHostError> {
     validate_command_host_requirements(policy)?;
     let probe_arguments = command_probe_arguments(policy);
-    let writable_mounts = mount_handles_for_probe(mounts, policy)
+    let writable_mounts = mount_handles_for_probe(mounts, pinned, policy)
         .await
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     let args = launcher_args(
@@ -552,19 +554,6 @@ fn validate_command_host_requirements(
 
 #[cfg(target_os = "linux")]
 fn command_probe_arguments(policy: &NativeCommandPolicy) -> Vec<String> {
-    let mut arguments = vec![
-        "-c".into(),
-        concat!(
-            "for vyane_program do ",
-            "{ [ -f \"/usr/bin/$vyane_program\" ] && ",
-            "[ -x \"/usr/bin/$vyane_program\" ]; } || ",
-            "{ [ -f \"/bin/$vyane_program\" ] && ",
-            "[ -x \"/bin/$vyane_program\" ]; } || exit 127; ",
-            "done"
-        )
-        .into(),
-        "vyane-command-program-probe".into(),
-    ];
     let mut programs = policy
         .allow
         .iter()
@@ -572,7 +561,30 @@ fn command_probe_arguments(policy: &NativeCommandPolicy) -> Vec<String> {
         .collect::<Vec<_>>();
     programs.sort();
     programs.dedup();
+    let mut arguments = vec![
+        "-c".into(),
+        concat!(
+            "vyane_program_count=$1; shift; ",
+            "while [ \"$vyane_program_count\" -gt 0 ]; do ",
+            "vyane_program=$1; shift; ",
+            "{ [ -f \"/usr/bin/$vyane_program\" ] && ",
+            "[ -x \"/usr/bin/$vyane_program\" ]; } || ",
+            "{ [ -f \"/bin/$vyane_program\" ] && ",
+            "[ -x \"/bin/$vyane_program\" ]; } || exit 127; ",
+            "vyane_program_count=$((vyane_program_count - 1)); ",
+            "done; ",
+            "for vyane_root do ",
+            "vyane_probe=\"/workspace/$vyane_root/.vyane-write-probe-$$\"; ",
+            "(umask 077 && mkdir -- \"$vyane_probe\" && rmdir -- \"$vyane_probe\") ",
+            "|| exit 126; ",
+            "done"
+        )
+        .into(),
+        "vyane-command-host-probe".into(),
+        programs.len().to_string(),
+    ];
     arguments.extend(programs);
+    arguments.extend(policy.writable_roots.iter().cloned());
     arguments
 }
 
@@ -636,7 +648,7 @@ impl NativeTool for RunCommandTool {
         authority.revalidate(effect).await?;
         #[cfg(target_os = "linux")]
         let writable_mounts = match context.command_mounts() {
-            Some(mounts) => mount_handles_for_tool(context, mounts, &self.policy).await?,
+            Some(mounts) => mount_handles_for_tool(context, mounts, pinned, &self.policy).await?,
             None if self.policy.writable_roots.is_empty() => Vec::new(),
             None => {
                 return Ok(Err(ToolError::new(
@@ -919,6 +931,7 @@ pub fn prepare_command_mounts(
         .collect::<Result<Vec<_>, _>>()?;
     let mounts = NativeCommandMountSet {
         paths: Arc::new(policy.writable_roots.clone()),
+        workdir_identity: pinned.identity().clone(),
         handles: Arc::new(handles),
     };
     mounts
@@ -960,6 +973,10 @@ impl NativeCommandMountSet {
         self.paths.as_slice() == policy.writable_roots
     }
 
+    pub fn matches_admission(&self, pinned: &PinnedWorkdir, policy: &NativeCommandPolicy) -> bool {
+        self.matches_policy(policy) && self.workdir_identity == *pinned.identity()
+    }
+
     pub fn retained_handle_count(&self) -> usize {
         self.paths.len()
     }
@@ -967,14 +984,15 @@ impl NativeCommandMountSet {
     #[cfg(target_os = "linux")]
     fn handles_for_spawn(
         &self,
+        pinned: &PinnedWorkdir,
         policy: &NativeCommandPolicy,
     ) -> VyaneResult<Vec<NativeMountHandle>> {
         use std::os::fd::OwnedFd;
 
-        if !self.matches_policy(policy) {
+        if !self.matches_admission(pinned, policy) {
             return Err(VyaneError::new(
                 ErrorKind::Config,
-                "native command writable roots do not match admitted handles",
+                "native command writable roots do not match the admitted workspace",
             ));
         }
         self.audit()?;
@@ -1004,11 +1022,13 @@ impl NativeCommandMountSet {
 #[cfg(target_os = "linux")]
 async fn mount_handles_for_probe(
     mounts: &NativeCommandMountSet,
+    pinned: &PinnedWorkdir,
     policy: &NativeCommandPolicy,
 ) -> VyaneResult<Vec<NativeMountHandle>> {
     let mounts = mounts.clone();
+    let pinned = pinned.clone();
     let policy = policy.clone();
-    tokio::task::spawn_blocking(move || mounts.handles_for_spawn(&policy))
+    tokio::task::spawn_blocking(move || mounts.handles_for_spawn(&pinned, &policy))
         .await
         .map_err(|source| {
             VyaneError::with_source(
@@ -1023,14 +1043,16 @@ async fn mount_handles_for_probe(
 async fn mount_handles_for_tool(
     context: &ToolContext,
     mounts: &NativeCommandMountSet,
+    pinned: &PinnedWorkdir,
     policy: &NativeCommandPolicy,
 ) -> VyaneResult<Vec<NativeMountHandle>> {
     let activity = context.begin_blocking_activity();
     let mounts = mounts.clone();
+    let pinned = pinned.clone();
     let policy = policy.clone();
     tokio::task::spawn_blocking(move || {
         let _activity = activity;
-        mounts.handles_for_spawn(&policy)
+        mounts.handles_for_spawn(&pinned, &policy)
     })
     .await
     .map_err(|source| {
@@ -1044,12 +1066,6 @@ async fn mount_handles_for_tool(
 
 #[cfg(target_os = "linux")]
 fn audit_writable_root(root: &std::fs::File) -> VyaneResult<()> {
-    use std::fs::File;
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::fs::MetadataExt as _;
-
-    use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
-
     let metadata = root.metadata().map_err(|source| {
         VyaneError::with_source(
             ErrorKind::Io,
@@ -1064,91 +1080,94 @@ fn audit_writable_root(root: &std::fs::File) -> VyaneResult<()> {
         ));
     }
 
-    let mut pending = vec![(
-        root.try_clone().map_err(|source| {
+    let mut entries = 0usize;
+    audit_writable_directory(root, 0, &mut entries)
+}
+
+#[cfg(target_os = "linux")]
+fn audit_writable_directory(
+    directory: &std::fs::File,
+    depth: usize,
+    entries: &mut usize,
+) -> VyaneResult<()> {
+    use std::fs::File;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+
+    if depth >= MAX_WRITABLE_ROOT_SCAN_DEPTH {
+        return Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            "native command writable root exceeds the audit depth",
+        ));
+    }
+    let proc_path = format!("/proc/self/fd/{}", directory.as_raw_fd());
+    for entry in std::fs::read_dir(proc_path).map_err(|source| {
+        VyaneError::with_source(
+            ErrorKind::Io,
+            "failed to enumerate native command writable root",
+            source,
+        )
+    })? {
+        let entry = entry.map_err(|source| {
             VyaneError::with_source(
                 ErrorKind::Io,
-                "failed to duplicate native command root for audit",
+                "failed to enumerate native command writable entry",
                 source,
             )
-        })?,
-        0usize,
-    )];
-    let mut entries = 0usize;
-    while let Some((directory, depth)) = pending.pop() {
-        if depth >= MAX_WRITABLE_ROOT_SCAN_DEPTH {
+        })?;
+        *entries = entries.checked_add(1).ok_or_else(|| {
+            VyaneError::new(
+                ErrorKind::Unsupported,
+                "native command writable root audit overflowed",
+            )
+        })?;
+        if *entries > MAX_WRITABLE_ROOT_SCAN_ENTRIES {
             return Err(VyaneError::new(
                 ErrorKind::Unsupported,
-                "native command writable root exceeds the audit depth",
+                "native command writable root exceeds the audit entry limit",
             ));
         }
-        let proc_path = format!("/proc/self/fd/{}", directory.as_raw_fd());
-        for entry in std::fs::read_dir(proc_path).map_err(|source| {
+        let fd = openat2(
+            directory,
+            entry.file_name(),
+            OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+        .map_err(|source| {
+            VyaneError::with_source(
+                ErrorKind::Unsupported,
+                "native command writable root contains an unsafe entry",
+                std::io::Error::from_raw_os_error(source.raw_os_error()),
+            )
+        })?;
+        let opened = File::from(fd);
+        let metadata = opened.metadata().map_err(|source| {
             VyaneError::with_source(
                 ErrorKind::Io,
-                "failed to enumerate native command writable root",
+                "failed to inspect native command writable entry",
                 source,
             )
-        })? {
-            let entry = entry.map_err(|source| {
-                VyaneError::with_source(
-                    ErrorKind::Io,
-                    "failed to enumerate native command writable entry",
-                    source,
-                )
-            })?;
-            entries = entries.checked_add(1).ok_or_else(|| {
-                VyaneError::new(
-                    ErrorKind::Unsupported,
-                    "native command writable root audit overflowed",
-                )
-            })?;
-            if entries > MAX_WRITABLE_ROOT_SCAN_ENTRIES {
+        })?;
+        if metadata.is_file() {
+            if metadata.nlink() != 1 {
                 return Err(VyaneError::new(
                     ErrorKind::Unsupported,
-                    "native command writable root exceeds the audit entry limit",
+                    "native command writable root contains a hard-linked file",
                 ));
             }
-            let fd = openat2(
-                &directory,
-                entry.file_name(),
-                OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-                Mode::empty(),
-                ResolveFlags::BENEATH
-                    | ResolveFlags::NO_MAGICLINKS
-                    | ResolveFlags::NO_SYMLINKS
-                    | ResolveFlags::NO_XDEV,
-            )
-            .map_err(|source| {
-                VyaneError::with_source(
-                    ErrorKind::Unsupported,
-                    "native command writable root contains an unsafe entry",
-                    std::io::Error::from_raw_os_error(source.raw_os_error()),
-                )
-            })?;
-            let opened = File::from(fd);
-            let metadata = opened.metadata().map_err(|source| {
-                VyaneError::with_source(
-                    ErrorKind::Io,
-                    "failed to inspect native command writable entry",
-                    source,
-                )
-            })?;
-            if metadata.is_file() {
-                if metadata.nlink() != 1 {
-                    return Err(VyaneError::new(
-                        ErrorKind::Unsupported,
-                        "native command writable root contains a hard-linked file",
-                    ));
-                }
-            } else if metadata.is_dir() {
-                pending.push((opened, depth + 1));
-            } else {
-                return Err(VyaneError::new(
-                    ErrorKind::Unsupported,
-                    "native command writable root contains an unsupported entry",
-                ));
-            }
+        } else if metadata.is_dir() {
+            audit_writable_directory(&opened, depth + 1, entries)?;
+        } else {
+            return Err(VyaneError::new(
+                ErrorKind::Unsupported,
+                "native command writable root contains an unsupported entry",
+            ));
         }
     }
     Ok(())

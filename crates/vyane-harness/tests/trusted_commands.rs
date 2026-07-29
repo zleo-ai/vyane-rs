@@ -12,8 +12,8 @@ use vyane_harness::native::{
     NativeCommandNetworkPolicy, NativeCommandNetworkRoute, NativeCommandNetworkRule,
     NativeCommandPolicy, NativeCommandRule, PermissionPolicy, ToolCall, ToolContext,
     ToolInvocationStatus, command_permission_policy, command_tool_registry, prepare_command_mounts,
-    register_command_tool_with_network, validate_command_host, validate_command_network_host,
-    workspace_tool_registry_with_policy,
+    register_command_tool_with_network, validate_command_host, validate_command_host_with_mounts,
+    validate_command_network_host, workspace_tool_registry_with_policy,
 };
 
 static COMMAND_TEST_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
@@ -317,6 +317,60 @@ async fn regular_file_writable_roots_are_rejected() {
     let pinned = PinnedWorkdir::open(root.path()).expect("pin command workspace");
 
     assert!(prepare_command_mounts(&pinned, &writable).is_err());
+}
+
+#[tokio::test]
+async fn writable_mounts_are_bound_to_their_admitted_workspace() {
+    let workspace_a = tempdir().expect("workspace a");
+    let workspace_b = tempdir().expect("workspace b");
+    std::fs::create_dir(workspace_a.path().join("src")).expect("root a");
+    std::fs::create_dir(workspace_b.path().join("src")).expect("root b");
+    let pinned_a = PinnedWorkdir::open(workspace_a.path()).expect("pin workspace a");
+    let pinned_b = PinnedWorkdir::open(workspace_b.path()).expect("pin workspace b");
+    let mut writable = policy(&[("touch", &[])]);
+    writable.writable_roots = vec!["src".into()];
+    let mounts = prepare_command_mounts(&pinned_a, &writable).expect("admit workspace a");
+
+    assert!(
+        validate_command_host_with_mounts(&pinned_b, &writable, &mounts)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn host_admission_requires_each_root_to_be_mutable() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempdir().expect("workspace");
+    let locked = root.path().join("locked");
+    std::fs::create_dir(&locked).expect("locked root");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).expect("lock root");
+    let pinned = PinnedWorkdir::open(root.path()).expect("pin workspace");
+    let mut writable = policy(&[("touch", &[])]);
+    writable.writable_roots = vec!["locked".into()];
+    let mounts = prepare_command_mounts(&pinned, &writable).expect("retain locked root");
+
+    assert!(
+        validate_command_host_with_mounts(&pinned, &writable, &mounts)
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn wide_writable_roots_are_audited_depth_first() {
+    let root = tempdir().expect("workspace");
+    let source = root.path().join("src");
+    std::fs::create_dir(&source).expect("writable root");
+    for index in 0..512 {
+        std::fs::create_dir(source.join(format!("child-{index}"))).expect("wide child");
+    }
+    let pinned = PinnedWorkdir::open(root.path()).expect("pin workspace");
+    let mut writable = policy(&[("touch", &[])]);
+    writable.writable_roots = vec!["src".into()];
+
+    prepare_command_mounts(&pinned, &writable).expect("bounded depth-first audit");
 }
 
 #[tokio::test]
