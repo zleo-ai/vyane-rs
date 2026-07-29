@@ -279,12 +279,16 @@ impl DaemonGuard {
     fn kill(&mut self) {
         let descriptor: Value =
             serde_json::from_slice(&fs::read(self.data_dir.join("daemon.json")).unwrap()).unwrap();
-        let pid = descriptor["pid"].as_i64().unwrap().to_string();
+        let pid = i32::try_from(descriptor["pid"].as_i64().unwrap()).unwrap();
         let status = std::process::Command::new("/bin/kill")
-            .args(["-KILL", &pid])
+            .args(["-KILL", &pid.to_string()])
             .status()
             .unwrap();
         assert!(status.success());
+        assert!(
+            wait_pid_dead(pid, Duration::from_secs(10)),
+            "killed daemon pid {pid} did not exit before restart"
+        );
         self.running = false;
     }
 }
@@ -304,6 +308,23 @@ fn stop_daemon(data_dir: &Path) -> std::io::Result<Output> {
         .args(["daemon", "stop"])
         .timeout(Duration::from_secs(90));
     command.output()
+}
+
+fn wait_pid_dead(pid: i32, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+            return true;
+        };
+        let probe = rustix::process::test_kill_process(pid);
+        if matches!(probe, Err(rustix::io::Errno::SRCH)) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn control(data_dir: &Path) -> (String, String) {
