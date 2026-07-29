@@ -186,6 +186,7 @@ impl ToolContext {
         self
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn command_mounts(&self) -> Option<&NativeCommandMountSet> {
         self.command_mounts.as_ref()
     }
