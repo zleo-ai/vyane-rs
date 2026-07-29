@@ -32,6 +32,7 @@ pub mod target;
 pub mod task;
 pub mod tool_chat;
 pub mod traits;
+pub mod web_search;
 pub mod workdir;
 
 pub use chat::{ChatMessage, ChatOutcome, ChatRequest, Role, StreamEvent};
@@ -57,9 +58,11 @@ pub use tool_chat::{
     ToolDefinition, ToolResultMessage, validate_conversation,
 };
 pub use traits::{
-    AuthorizedToolChatClient, ChatClient, Harness, HarnessExecutionContext, HarnessJob,
-    HarnessOutcome, HarnessStreamEvent, Ledger, SessionExecutionLease, SessionStore,
+    AuthorizedToolChatClient, AuthorizedWebSearchClient, ChatClient, Harness,
+    HarnessExecutionContext, HarnessJob, HarnessOutcome, HarnessStreamEvent, Ledger,
+    SessionExecutionLease, SessionStore,
 };
+pub use web_search::{WebSearchContextSize, WebSearchOutcome, WebSearchRequest, WebSearchSource};
 pub use workdir::{PinnedWorkdir, WorkdirIdentity};
 
 /// Re-exported so downstream crates use the same cancellation primitive.

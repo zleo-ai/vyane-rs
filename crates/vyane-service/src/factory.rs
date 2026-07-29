@@ -10,9 +10,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use vyane_config::ResolvedConfig;
 use vyane_core::{
-    AdapterTransport, AuthorizedToolChatClient, BoundTarget, ChatClient, EnvPolicy, ErrorKind,
-    Harness, HarnessExecutionContext, HarnessJob, HarnessKind, HarnessOutcome, HarnessStreamEvent,
-    Protocol, Result, VyaneError,
+    AdapterTransport, AuthorizedToolChatClient, AuthorizedWebSearchClient, BoundTarget, ChatClient,
+    EnvPolicy, ErrorKind, Harness, HarnessExecutionContext, HarnessJob, HarnessKind,
+    HarnessOutcome, HarnessStreamEvent, Protocol, Result, VyaneError,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 use vyane_kernel::{CapabilityManifest, Executor, ExecutorFactory, IsolationStrength};
@@ -237,6 +237,38 @@ pub fn authorized_native_client(bound: &BoundTarget) -> Result<Arc<dyn Authorize
         request_timeout: None,
     };
     Ok(Arc::new(OpenAiChatClient::with_options(endpoint, options)?))
+}
+
+/// Build the guarded hosted-search capability used by the native web tool.
+pub fn authorized_web_search_client(
+    bound: &BoundTarget,
+) -> Result<Arc<dyn AuthorizedWebSearchClient>> {
+    match (
+        bound.transport,
+        bound.target.harness.as_ref(),
+        bound.target.protocol,
+    ) {
+        (AdapterTransport::DirectHttp, None, Protocol::OpenaiResponses) => {}
+        _ => {
+            return Err(VyaneError::new(
+                ErrorKind::Unsupported,
+                "native web-search target must be direct OpenAI Responses",
+            ));
+        }
+    }
+    let endpoint = bound.endpoint.clone().ok_or_else(|| {
+        VyaneError::new(
+            ErrorKind::Config,
+            "native web-search target requires a concrete endpoint",
+        )
+    })?;
+    let options = ClientOptions {
+        retry: RetryConfig::default(),
+        request_timeout: None,
+    };
+    Ok(Arc::new(OpenAiResponsesClient::with_options(
+        endpoint, options,
+    )?))
 }
 
 fn validate_authorized_native_combo(

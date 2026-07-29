@@ -20,11 +20,13 @@ use crate::chat::{ChatOutcome, ChatRequest, StreamEvent};
 use crate::env::EnvPolicy;
 use crate::error::Result;
 use crate::native_authority::NativeExecutionAuthority;
+use crate::native_authority::NativeSideEffect;
 use crate::run::{RunQuery, RunRecord, Usage};
 use crate::session::{NativeSessionTransition, SessionRecord, SessionSnapshot, SessionUpdate};
 use crate::target::{Endpoint, HarnessKind, ModelId, Protocol, Sandbox};
 use crate::task::{GenParams, HarnessLifecycleReporter, HarnessSpawnAuthority};
 use crate::tool_chat::{ToolChatOutcome, ToolChatRequest};
+use crate::web_search::{WebSearchOutcome, WebSearchRequest};
 use crate::workdir::PinnedWorkdir;
 
 /// A client for one wire protocol against one endpoint.
@@ -86,6 +88,21 @@ pub trait AuthorizedToolChatClient: Send + Sync {
         authority: &dyn NativeExecutionAuthority,
         cancel: &CancellationToken,
     ) -> Result<ToolChatOutcome>;
+}
+
+/// A hosted web-search client whose wire attempts cannot bypass live native
+/// execution authority.
+#[async_trait]
+pub trait AuthorizedWebSearchClient: Send + Sync {
+    fn protocol(&self) -> Protocol;
+
+    async fn search_authorized(
+        &self,
+        req: WebSearchRequest,
+        authority: &dyn NativeExecutionAuthority,
+        effect: NativeSideEffect,
+        cancel: &CancellationToken,
+    ) -> Result<WebSearchOutcome>;
 }
 
 /// Everything a harness needs to execute one job.

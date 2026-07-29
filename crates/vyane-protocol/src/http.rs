@@ -139,12 +139,55 @@ impl HttpClient {
         U: DeserializeOwned,
         F: Fn(RequestBuilder) -> RequestBuilder + Copy,
     {
+        self.post_json_authorized_with(path, body, decorate, authority, cancel, |wire_attempt| {
+            NativeSideEffect::ModelSend { turn, wire_attempt }
+        })
+        .await
+    }
+
+    /// Send one trusted tool request through live execution authority.
+    ///
+    /// The same tool-operation coordinate is revalidated before every physical
+    /// attempt. The retry ordinal is transport detail and never becomes a
+    /// reusable authorization token.
+    pub(crate) async fn post_json_authorized_effect<T, U, F>(
+        &self,
+        path: &'static str,
+        body: T,
+        decorate: F,
+        authority: &dyn NativeExecutionAuthority,
+        effect: NativeSideEffect,
+        cancel: &CancellationToken,
+    ) -> Result<U>
+    where
+        T: Serialize + Clone,
+        U: DeserializeOwned,
+        F: Fn(RequestBuilder) -> RequestBuilder + Copy,
+    {
+        self.post_json_authorized_with(path, body, decorate, authority, cancel, |_| effect)
+            .await
+    }
+
+    async fn post_json_authorized_with<T, U, F, E>(
+        &self,
+        path: &'static str,
+        body: T,
+        decorate: F,
+        authority: &dyn NativeExecutionAuthority,
+        cancel: &CancellationToken,
+        effect_for_attempt: E,
+    ) -> Result<U>
+    where
+        T: Serialize + Clone,
+        U: DeserializeOwned,
+        F: Fn(RequestBuilder) -> RequestBuilder + Copy,
+        E: Fn(u32) -> NativeSideEffect,
+    {
         let mut last_error = None;
         for wire_attempt in 1..=self.options.retry.max_attempts() {
             check_cancelled(cancel)?;
             let request = self.request(path, &body, decorate)?;
-            let revalidation =
-                authority.revalidate(NativeSideEffect::ModelSend { turn, wire_attempt });
+            let revalidation = authority.revalidate(effect_for_attempt(wire_attempt));
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Err(VyaneError::cancelled()),

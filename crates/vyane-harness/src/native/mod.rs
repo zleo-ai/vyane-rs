@@ -18,6 +18,7 @@ mod tools;
 mod trusted_commands;
 mod trusted_files;
 mod trusted_network;
+mod trusted_web_search;
 mod turn_driver;
 
 pub use permissions::{
@@ -48,6 +49,11 @@ pub use trusted_files::{
 pub use trusted_network::{
     NativeCommandNetworkPolicy, NativeCommandNetworkPolicyError, NativeCommandNetworkRoute,
     NativeCommandNetworkRule,
+};
+pub use trusted_web_search::{
+    NativeWebSearchPolicy, NativeWebSearchPolicyError, RegisterWebSearchToolError,
+    register_web_search_tool, validate_search_domain, web_search_permission_policy,
+    web_search_tool_definition,
 };
 pub use turn_driver::{
     DEFAULT_NATIVE_MODEL_TURNS, MAX_NATIVE_MODEL_TURNS, NativeAssistantReply, NativeTurnDriver,

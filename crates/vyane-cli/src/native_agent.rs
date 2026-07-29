@@ -17,10 +17,11 @@ use vyane_core::{
 };
 use vyane_harness::native::{
     NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeTurnDriver,
-    NativeTurnLimits, NativeTurnStop, NativeWritePolicy, ToolContext, command_permission_policy,
-    command_tool_definition, register_command_tool, register_command_tool_with_network,
-    validate_read_only_host, workspace_permission_policy, workspace_tool_definitions,
-    workspace_tool_registry_with_policy,
+    NativeTurnLimits, NativeTurnStop, NativeWebSearchPolicy, NativeWritePolicy, ToolContext,
+    command_permission_policy, command_tool_definition, register_command_tool,
+    register_command_tool_with_network, register_web_search_tool, validate_read_only_host,
+    web_search_permission_policy, web_search_tool_definition, workspace_permission_policy,
+    workspace_tool_definitions, workspace_tool_registry_with_policy,
 };
 use vyane_message::{
     EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
@@ -30,12 +31,13 @@ use vyane_service::{
     AgentExecutionIdentity, AgentExecutionSettlement, AgentExecutorOutcome,
     InProcessAgentOperation, InProcessAgentOperationContext, InProcessEffectAuthority,
     MESSAGE_COMPLETION_PRODUCER, MessageComponents, OwnerScopedService, authorized_native_client,
-    message_run_completion,
+    authorized_web_search_client, message_run_completion,
 };
 
 use crate::native_agent_spool::{
     NativeAgentInput, NativeAgentInputSpool, NativeAgentPolicy, NativeAgentSpoolError,
     NativeAuthStyleSnapshot, NativeGenParamsSnapshot, NativeProtocolSnapshot, NativeTargetSnapshot,
+    NativeWebSearchSnapshot,
 };
 
 const OPERATION_NAME: &str = "fresh-native-chat-v1";
@@ -181,6 +183,16 @@ impl FreshNativeAgentOperation {
         target_matches(&input.policy.target, &bound).then_some(bound)
     }
 
+    fn exact_search_target(&self, input: &NativeAgentInput) -> Option<vyane_core::BoundTarget> {
+        let search = input.policy.web_search.as_ref()?;
+        let resolved = self.service.resolve(&search.target_selector).ok()?;
+        if resolved.selector != search.target_selector || resolved.chain.len() != 1 {
+            return None;
+        }
+        let bound = resolved.chain.into_iter().next()?;
+        target_matches(&search.target, &bound).then_some(bound)
+    }
+
     fn remove_quiesced(&self, controller: &ControllerRef, input: &NativeAgentInput) -> bool {
         if self.spool.remove_exact(input).is_err() {
             return false;
@@ -227,6 +239,7 @@ pub(crate) fn native_input_for_submission(
         filesystem_write,
         command_execution,
         command_network,
+        web_search,
         system,
         timeout_seconds,
     } = details;
@@ -237,16 +250,27 @@ pub(crate) fn native_input_for_submission(
     {
         return Err(NativeAgentSpoolError::BindingMismatch);
     }
-    let endpoint = bound
-        .endpoint
-        .as_ref()
-        .ok_or(NativeAgentSpoolError::BindingMismatch)?;
-    let auth_style = endpoint.auth.as_ref().map(|auth| match auth.style {
-        AuthStyle::Bearer => NativeAuthStyleSnapshot::Bearer,
-        AuthStyle::XApiKey => NativeAuthStyleSnapshot::XApiKey,
-    });
-    let routing_digest = endpoint_routing_digest(&endpoint.base_url)
-        .map_err(|_| NativeAgentSpoolError::BindingMismatch)?;
+    let target = target_snapshot(bound, NativeProtocolSnapshot::OpenaiChat)?;
+    let web_search = web_search
+        .map(|search| {
+            if search.bound.target.protocol != Protocol::OpenaiResponses
+                || search.bound.target.harness.is_some()
+                || search.bound.transport != AdapterTransport::DirectHttp
+                || search.bound.endpoint.is_none()
+            {
+                return Err(NativeAgentSpoolError::BindingMismatch);
+            }
+            search
+                .policy
+                .validate()
+                .map_err(|_| NativeAgentSpoolError::BindingMismatch)?;
+            Ok(NativeWebSearchSnapshot {
+                target_selector: search.selector.to_owned(),
+                target: target_snapshot(search.bound, NativeProtocolSnapshot::OpenaiResponses)?,
+                policy: search.policy,
+            })
+        })
+        .transpose()?;
     validate_read_only_host(workdir).map_err(|_| NativeAgentSpoolError::UnsupportedHost)?;
     NativeAgentInput::fresh(
         owner,
@@ -255,20 +279,14 @@ pub(crate) fn native_input_for_submission(
         prompt,
         NativeAgentPolicy {
             target_selector: selector.to_owned(),
-            target: NativeTargetSnapshot {
-                provider: bound.target.provider.as_str().to_owned(),
-                protocol: NativeProtocolSnapshot::OpenaiChat,
-                model: bound.target.model.as_str().to_owned(),
-                auth_style,
-                routing_digest,
-                params: params_snapshot(&bound.params),
-            },
+            target,
             canonical_workdir: workdir.canonical_path().to_path_buf(),
             workdir_identity: workdir.identity().clone(),
             filesystem_read,
             filesystem_write,
             command_execution,
             command_network,
+            web_search,
             system,
             timeout_seconds,
             max_model_turns: 8,
@@ -285,8 +303,39 @@ pub(crate) struct NativeSubmissionDetails<'a> {
     pub(crate) filesystem_write: Option<NativeWritePolicy>,
     pub(crate) command_execution: Option<NativeCommandPolicy>,
     pub(crate) command_network: Option<NativeCommandNetworkPolicy>,
+    pub(crate) web_search: Option<NativeWebSearchSubmission<'a>>,
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
+}
+
+pub(crate) struct NativeWebSearchSubmission<'a> {
+    pub(crate) selector: &'a str,
+    pub(crate) bound: &'a vyane_core::BoundTarget,
+    pub(crate) policy: NativeWebSearchPolicy,
+}
+
+fn target_snapshot(
+    bound: &vyane_core::BoundTarget,
+    protocol: NativeProtocolSnapshot,
+) -> Result<NativeTargetSnapshot, NativeAgentSpoolError> {
+    let endpoint = bound
+        .endpoint
+        .as_ref()
+        .ok_or(NativeAgentSpoolError::BindingMismatch)?;
+    let auth_style = endpoint.auth.as_ref().map(|auth| match auth.style {
+        AuthStyle::Bearer => NativeAuthStyleSnapshot::Bearer,
+        AuthStyle::XApiKey => NativeAuthStyleSnapshot::XApiKey,
+    });
+    let routing_digest = endpoint_routing_digest(&endpoint.base_url)
+        .map_err(|_| NativeAgentSpoolError::BindingMismatch)?;
+    Ok(NativeTargetSnapshot {
+        provider: bound.target.provider.as_str().to_owned(),
+        protocol,
+        model: bound.target.model.as_str().to_owned(),
+        auth_style,
+        routing_digest,
+        params: params_snapshot(&bound.params),
+    })
 }
 
 #[async_trait]
@@ -327,6 +376,13 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         let Some(bound) = self.exact_target(&input) else {
             return AgentExecutorOutcome::Unknown;
         };
+        let search_bound = match input.policy.web_search.as_ref() {
+            Some(_) => match self.exact_search_target(&input) {
+                Some(bound) => Some(bound),
+                None => return AgentExecutorOutcome::Unknown,
+            },
+            None => None,
+        };
         let Some(workdir) = self.spool.exact_workdir(&input) else {
             return AgentExecutorOutcome::Unknown;
         };
@@ -350,6 +406,13 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         };
         let Ok(client) = authorized_native_client(&bound) else {
             return AgentExecutorOutcome::Unknown;
+        };
+        let search_client = match search_bound.as_ref() {
+            Some(bound) => match authorized_web_search_client(bound) {
+                Ok(client) => Some(client),
+                Err(_) => return AgentExecutorOutcome::Unknown,
+            },
+            None => None,
         };
         let Ok(limits) = NativeTurnLimits::new(input.policy.max_model_turns) else {
             return AgentExecutorOutcome::Unknown;
@@ -386,6 +449,23 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                 return AgentExecutorOutcome::Unknown;
             }
         }
+        if let (Some(search), Some(search_bound), Some(search_client)) = (
+            input.policy.web_search.as_ref(),
+            search_bound.as_ref(),
+            search_client,
+        ) {
+            if register_web_search_tool(
+                &mut registry,
+                search.policy.clone(),
+                search_client,
+                search_bound.target.model.clone(),
+                search_bound.params.clone(),
+            )
+            .is_err()
+            {
+                return AgentExecutorOutcome::Unknown;
+            }
+        }
         let Ok(mut permission_policy) = workspace_permission_policy(write_enabled) else {
             return AgentExecutorOutcome::Unknown;
         };
@@ -394,6 +474,12 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                 return AgentExecutorOutcome::Unknown;
             };
             permission_policy = with_command;
+        }
+        if input.policy.web_search.is_some() {
+            let Ok(with_search) = web_search_permission_policy(permission_policy) else {
+                return AgentExecutorOutcome::Unknown;
+            };
+            permission_policy = with_search;
         }
         let driver = NativeTurnDriver::with_limits(client, registry, permission_policy, limits);
         let turn = tokio::time::timeout_at(
@@ -495,6 +581,7 @@ fn forget_pending(
 fn target_matches(snapshot: &NativeTargetSnapshot, bound: &vyane_core::BoundTarget) -> bool {
     let protocol = match bound.target.protocol {
         Protocol::OpenaiChat => NativeProtocolSnapshot::OpenaiChat,
+        Protocol::OpenaiResponses => NativeProtocolSnapshot::OpenaiResponses,
         _ => return false,
     };
     let routing_digest = bound
@@ -552,6 +639,9 @@ fn native_request(input: &NativeAgentInput, bound: &vyane_core::BoundTarget) -> 
             let mut tools = workspace_tool_definitions(input.policy.filesystem_write.is_some());
             if input.policy.command_execution.is_some() {
                 tools.push(command_tool_definition());
+            }
+            if input.policy.web_search.is_some() {
+                tools.push(web_search_tool_definition());
             }
             tools
         },
@@ -723,6 +813,7 @@ mod tests {
             filesystem_write: None,
             command_execution: None,
             command_network: None,
+            web_search: None,
             system: Some("Answer concisely.".into()),
             timeout_seconds: 30,
             max_model_turns: 8,

@@ -331,8 +331,9 @@ admits them.
 
 Read, write, command, command-network and web-search permissions remain
 separate axes rather than one expanding "full" boolean. This remains narrower
-than a general `Harness`: it provides no command network, writable command
-profile, session/domain authority,
+than a general `Harness`: it provides only explicitly admitted command HTTPS
+destinations and a separately configured hosted search target, with no
+writable command profile, arbitrary URL fetch, session/domain authority,
 checkpoint/session-commit consumer, approval resume, or native resume.
 
 ## Dispatch lifecycle

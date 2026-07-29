@@ -83,7 +83,9 @@ pub use diagnostics::{
     ROUTE_PREVIEW_MAX_TASK_BYTES, ROUTE_PREVIEW_MAX_VALUE_BYTES, RoutePreview, RoutePreviewParams,
     RouteSelectionBasis,
 };
-pub use factory::{AssemblerFactory, authorized_native_client, direct_http_client};
+pub use factory::{
+    AssemblerFactory, authorized_native_client, authorized_web_search_client, direct_http_client,
+};
 pub use goal::{
     GOAL_NEXT_ACTION_VIEW_SCHEMA, GoalNextActionKind, GoalNextActionView, GoalNextReasonCode,
     GoalOperatorCommand, GoalReadError, GoalReadService, GoalSignalKind,
