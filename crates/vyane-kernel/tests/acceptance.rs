@@ -366,16 +366,16 @@ impl ExecutorFactory for MockFactory {
     fn make(&self, target: &BoundTarget) -> Result<Executor> {
         self.make_calls.fetch_add(1, Ordering::SeqCst);
         let key = target.target.model.as_str();
-        if let Some((model, token)) = self.cancel_on.as_ref() {
-            if model == key {
-                // Cancel synchronously, then fail this attempt over: the next
-                // loop iteration's pre-make guard sees the cancellation.
-                token.cancel();
-                return Err(VyaneError::new(
-                    ErrorKind::SpawnFailed,
-                    format!("mock cancel-on-make for {key}"),
-                ));
-            }
+        if let Some((model, token)) = self.cancel_on.as_ref()
+            && model == key
+        {
+            // Cancel synchronously, then fail this attempt over: the next
+            // loop iteration's pre-make guard sees the cancellation.
+            token.cancel();
+            return Err(VyaneError::new(
+                ErrorKind::SpawnFailed,
+                format!("mock cancel-on-make for {key}"),
+            ));
         }
         if let Some(kind) = self.build_errors.get(key) {
             return Err(VyaneError::new(

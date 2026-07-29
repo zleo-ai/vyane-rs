@@ -44,40 +44,40 @@ pub fn route_task(
     let mut effort = effort_for_tier(tier);
 
     // Resolve a preference (stage → tag → tier → default).
-    if let Some(table) = preferences {
-        if let Some(pref) = table.resolve(&signals.stage, &tags, tier) {
-            // Check frontier guard: if the preference is frontier-tier but
-            // frontier is disallowed, skip it and fall through.
-            let is_frontier_pref = pref.tier.trim().eq_ignore_ascii_case("frontier")
-                || signals
-                    .frontier_providers
-                    .iter()
-                    .any(|p| p.eq_ignore_ascii_case(&pref.provider))
-                || signals
-                    .frontier_models
-                    .iter()
-                    .any(|m| m.eq_ignore_ascii_case(&pref.model));
-
-            let available = available_providers
+    if let Some(table) = preferences
+        && let Some(pref) = table.resolve(&signals.stage, &tags, tier)
+    {
+        // Check frontier guard: if the preference is frontier-tier but
+        // frontier is disallowed, skip it and fall through.
+        let is_frontier_pref = pref.tier.trim().eq_ignore_ascii_case("frontier")
+            || signals
+                .frontier_providers
                 .iter()
-                .any(|p| p.eq_ignore_ascii_case(&pref.provider));
+                .any(|p| p.eq_ignore_ascii_case(&pref.provider))
+            || signals
+                .frontier_models
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(&pref.model));
 
-            if (!is_frontier_pref || signals.allow_frontier) && available {
-                if !pref.effort.is_empty() {
-                    effort = parse_effort(&pref.effort);
-                }
-                return RouteDecision {
-                    selection_key: pref.selection_key.clone(),
-                    provider: pref.provider.clone(),
-                    model: pref.model.clone(),
-                    effort,
-                    tier,
-                    tag: first_matching_tag(&tags, table),
-                    intent: intent.primary.as_str().to_string(),
-                    complexity_score: score,
-                    reason: format!("preference matched (tag/stage/tier): {}", pref.provider),
-                };
+        let available = available_providers
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(&pref.provider));
+
+        if (!is_frontier_pref || signals.allow_frontier) && available {
+            if !pref.effort.is_empty() {
+                effort = parse_effort(&pref.effort);
             }
+            return RouteDecision {
+                selection_key: pref.selection_key.clone(),
+                provider: pref.provider.clone(),
+                model: pref.model.clone(),
+                effort,
+                tier,
+                tag: first_matching_tag(&tags, table),
+                intent: intent.primary.as_str().to_string(),
+                complexity_score: score,
+                reason: format!("preference matched (tag/stage/tier): {}", pref.provider),
+            };
         }
     }
 

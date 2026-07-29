@@ -206,36 +206,32 @@ async fn spawn_stubborn_detached_harness(
         let controller = fs::read(&sidecar)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-        if let (Some(status), Some(controller)) = (status, controller) {
-            if status["state"] == "running" {
-                let values = (
-                    status["controller"]["pid"].as_i64(),
-                    status["controller"]["pgid"].as_i64(),
-                    controller["pid"].as_i64(),
-                    controller["pgid"].as_i64(),
+        if let (Some(status), Some(controller)) = (status, controller)
+            && status["state"] == "running"
+        {
+            let values = (
+                status["controller"]["pid"].as_i64(),
+                status["controller"]["pgid"].as_i64(),
+                controller["pid"].as_i64(),
+                controller["pgid"].as_i64(),
+            );
+            if let (Some(worker_pid), Some(worker_pgid), Some(harness_pid), Some(harness_pgid)) =
+                values
+            {
+                let processes = DetachedHarnessProcesses {
+                    id,
+                    path,
+                    sidecar,
+                    worker_pid: worker_pid as i32,
+                    worker_pgid: worker_pgid as i32,
+                    harness_pid: harness_pid as i32,
+                    harness_pgid: harness_pgid as i32,
+                };
+                assert_ne!(
+                    processes.worker_pgid, processes.harness_pgid,
+                    "harness must own a distinct group"
                 );
-                if let (
-                    Some(worker_pid),
-                    Some(worker_pgid),
-                    Some(harness_pid),
-                    Some(harness_pgid),
-                ) = values
-                {
-                    let processes = DetachedHarnessProcesses {
-                        id,
-                        path,
-                        sidecar,
-                        worker_pid: worker_pid as i32,
-                        worker_pgid: worker_pgid as i32,
-                        harness_pid: harness_pid as i32,
-                        harness_pgid: harness_pgid as i32,
-                    };
-                    assert_ne!(
-                        processes.worker_pgid, processes.harness_pgid,
-                        "harness must own a distinct group"
-                    );
-                    return processes;
-                }
+                return processes;
             }
         }
         assert!(

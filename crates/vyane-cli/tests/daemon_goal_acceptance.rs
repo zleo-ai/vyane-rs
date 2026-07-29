@@ -244,14 +244,13 @@ fn wait_for_completion_named(data_dir: &Path, id: &str, budget: Duration) -> Val
 fn wait_for_running_checkpoint(data_dir: &Path, workdir: &Path, budget: Duration) -> Value {
     let deadline = Instant::now() + budget;
     loop {
-        if let Some(detail) = goal_detail(data_dir) {
-            if detail["goal"]["status"] == "in_progress"
-                && detail["pursuit_checkpoint"]["status"] == "running"
-                && detail["pursuit_checkpoint"]["segments_started"] == 1
-                && workdir.join("segment-started.txt").is_file()
-            {
-                return detail;
-            }
+        if let Some(detail) = goal_detail(data_dir)
+            && detail["goal"]["status"] == "in_progress"
+            && detail["pursuit_checkpoint"]["status"] == "running"
+            && detail["pursuit_checkpoint"]["segments_started"] == 1
+            && workdir.join("segment-started.txt").is_file()
+        {
+            return detail;
         }
         assert!(
             Instant::now() < deadline,

@@ -10,7 +10,7 @@
 
 use rmcp::{
     ServiceExt as _,
-    model::{CallToolRequestParam, CallToolResult},
+    model::{CallToolRequestParams, CallToolResult},
 };
 use vyane_core::{RunStatus, Sandbox};
 use vyane_mcp::{
@@ -467,9 +467,8 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
     );
 
     let route = client
-        .call_tool(CallToolRequestParam {
-            name: "vyane_route".into(),
-            arguments: Some(
+        .call_tool(
+            CallToolRequestParams::new("vyane_route").with_arguments(
                 serde_json::json!({
                     "task": TASK_CANARY,
                     "tier": "economy",
@@ -478,7 +477,7 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
                 .unwrap()
                 .clone(),
             ),
-        })
+        )
         .await?;
     assert_eq!(route.is_error, Some(false));
     let route_wire = serde_json::to_string(&route)?;
@@ -486,10 +485,7 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
     assert!(!route_wire.contains(TASK_CANARY));
 
     let check = client
-        .call_tool(CallToolRequestParam {
-            name: "vyane_check".into(),
-            arguments: Some(Default::default()),
-        })
+        .call_tool(CallToolRequestParams::new("vyane_check").with_arguments(Default::default()))
         .await?;
     assert_eq!(check.is_error, Some(false));
     let check_wire = serde_json::to_string(&check)?;
@@ -501,24 +497,20 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
     }
 
     let history = client
-        .call_tool(CallToolRequestParam {
-            name: "vyane_history".into(),
-            arguments: Some(
+        .call_tool(
+            CallToolRequestParams::new("vyane_history").with_arguments(
                 serde_json::json!({ "limit": 5 })
                     .as_object()
                     .unwrap()
                     .clone(),
             ),
-        })
+        )
         .await?;
     let history_wire = serde_json::to_string(&history)?;
     assert_eq!(result_payload(history)["items"][0]["run_id"], "wire-run");
 
     let sessions = client
-        .call_tool(CallToolRequestParam {
-            name: "vyane_sessions".into(),
-            arguments: Some(Default::default()),
-        })
+        .call_tool(CallToolRequestParams::new("vyane_sessions").with_arguments(Default::default()))
         .await?;
     let sessions_wire = serde_json::to_string(&sessions)?;
     let sessions_payload = result_payload(sessions);
@@ -566,9 +558,8 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
     }
 
     let invalid = client
-        .call_tool(CallToolRequestParam {
-            name: "vyane_route".into(),
-            arguments: Some(
+        .call_tool(
+            CallToolRequestParams::new("vyane_route").with_arguments(
                 serde_json::json!({
                     "task": TASK_CANARY,
                     "tier": SECRET_CANARY,
@@ -577,7 +568,7 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
                 .unwrap()
                 .clone(),
             ),
-        })
+        )
         .await?;
     let invalid_wire = serde_json::to_string(&invalid)?;
     assert!(!invalid_wire.contains(TASK_CANARY));
@@ -643,10 +634,7 @@ async fn diagnostics_config_row_overflow_is_a_static_wire_error() -> anyhow::Res
     let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
 
     let result = client
-        .call_tool(CallToolRequestParam {
-            name: "vyane_check".into(),
-            arguments: Some(Default::default()),
-        })
+        .call_tool(CallToolRequestParams::new("vyane_check").with_arguments(Default::default()))
         .await?;
     let wire = serde_json::to_string(&result)?;
     assert!(!wire.contains(ID_CANARY));
@@ -722,10 +710,7 @@ async fn diagnostics_invalid_endpoint_is_a_redacted_static_wire_error() -> anyho
     let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
 
     let result = client
-        .call_tool(CallToolRequestParam {
-            name: "vyane_check".into(),
-            arguments: Some(Default::default()),
-        })
+        .call_tool(CallToolRequestParams::new("vyane_check").with_arguments(Default::default()))
         .await?;
     let wire = serde_json::to_string(&result)?;
     assert!(!wire.contains(URL_CANARY));

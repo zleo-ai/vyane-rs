@@ -210,26 +210,25 @@ fn checkpoint_workdir_is_absolute(path: &std::path::Path) -> bool {
 }
 
 fn validate_optional_run_id(value: Option<&str>) -> Result<()> {
-    if let Some(value) = value {
-        if value.is_empty()
+    if let Some(value) = value
+        && (value.is_empty()
             || value.len() > 256
             || !value
                 .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err(GoalStoreError::InvalidInput(
-                "pursuit checkpoint run id is invalid".into(),
-            ));
-        }
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    {
+        return Err(GoalStoreError::InvalidInput(
+            "pursuit checkpoint run id is invalid".into(),
+        ));
     }
     Ok(())
 }
 
 fn validate_optional_checkpoint_id(field: &str, value: Option<&str>) -> Result<()> {
-    if let Some(value) = value {
-        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
-            return Err(GoalStoreError::InvalidInput(format!("{field} is invalid")));
-        }
+    if let Some(value) = value
+        && (value.is_empty() || value.len() > 256 || value.chars().any(char::is_control))
+    {
+        return Err(GoalStoreError::InvalidInput(format!("{field} is invalid")));
     }
     Ok(())
 }

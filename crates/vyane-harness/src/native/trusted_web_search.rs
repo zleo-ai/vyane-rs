@@ -275,12 +275,12 @@ impl SearchCall {
             .get("allowed_domains")
             .map(parse_requested_domains)
             .transpose()?;
-        if let Some(domains) = &requested_domains {
-            if domains.iter().any(|domain| !policy.permits_domain(domain)) {
-                return Err(ToolError::new(
-                    "web_search domains exceed the submission policy",
-                ));
-            }
+        if let Some(domains) = &requested_domains
+            && domains.iter().any(|domain| !policy.permits_domain(domain))
+        {
+            return Err(ToolError::new(
+                "web_search domains exceed the submission policy",
+            ));
         }
         let allowed_domains = requested_domains
             .clone()

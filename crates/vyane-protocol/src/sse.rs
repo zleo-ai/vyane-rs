@@ -219,10 +219,10 @@ fn parse_openai_chat(data: &str) -> Result<Vec<StreamEvent>> {
                     events.push(StreamEvent::Delta(text));
                 }
             }
-            if let Some(reasoning) = delta.reasoning_content.or(delta.reasoning) {
-                if !reasoning.is_empty() {
-                    events.push(StreamEvent::ReasoningDelta(reasoning));
-                }
+            if let Some(reasoning) = delta.reasoning_content.or(delta.reasoning)
+                && !reasoning.is_empty()
+            {
+                events.push(StreamEvent::ReasoningDelta(reasoning));
             }
         }
         if let Some(reason) = choice.finish_reason {

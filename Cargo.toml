@@ -26,7 +26,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/zleo-ai/vyane-rs"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # intra-workspace — version required for crates.io publish (path stripped on publish)
@@ -67,7 +67,7 @@ serde_json = "1"
 toml = "0.8"
 
 # mcp server
-rmcp = { version = "0.5", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.0", features = ["server", "macros", "transport-io"] }
 schemars = "1"
 
 # errors

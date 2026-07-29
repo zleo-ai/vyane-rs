@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/zleo-ai/vyane-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/zleo-ai/vyane-rs/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 &nbsp;·&nbsp; [简体中文](README.zh-CN.md)
 
 Vyane is one kernel — and one CLI over it — for dispatching, broadcasting and
@@ -111,7 +111,7 @@ reference implementation.
 | CLI (check / dispatch / broadcast / history / session / sessions / workflow / task / daemon / a2a / goal) | `vyane-cli` | [x] revision-aware session control, local `a2a send/inbox/read`, and owner-scoped `goal` lifecycle/progress commands; legacy `sessions` remains compatible |
 | shared service layer | `vyane-service` | [x] `OwnerContextFactory` authenticates and resolves a reserved-local-safe authority; `OwnerScopedService` freezes dispatch/stream/query/session/reset. AgentRun components include prepared authorized harness dispatch, paired backends, exact message-completion handback, and the generic resident supervisor used by the daemon's Linux Process host; ordinary dispatch starts none of them |
 | **REST API** (`vyane serve` — dispatch/broadcast/runs/sessions/health) | `vyane-cli` + `axum` | [x] per-start bearer capability, loopback Host/Origin enforcement, non-loopback bind rejection, allowlisted views, and one assembly-frozen local service scope; the bearer still is not a distinct principal or hostile same-UID/multi-user boundary |
-| **MCP server** (`vyane mcp` — nine tools) | `vyane-mcp` + `rmcp` | [x] six base tools plus authenticated durable workflow submit/status/cancel; generic success output has a 1 MiB cap |
+| **MCP server** (`vyane mcp` — nine tools) | `vyane-mcp` + `rmcp` 3.0 | [x] six base tools plus authenticated durable workflow submit/status/cancel; generic success output has a 1 MiB cap |
 | pluggable routing | `vyane-router` | [x] |
 | solution-review workflow (implement → fan-out review → synthesize) | `vyane-cli` (review module) | [x] not yet the original system's structured git diff/PR review product |
 

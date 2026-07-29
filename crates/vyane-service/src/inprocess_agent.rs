@@ -694,16 +694,14 @@ struct ActiveLifetimeGuard {
 
 impl Drop for ActiveLifetimeGuard {
     fn drop(&mut self) {
-        if let Some(state) = self.state.upgrade() {
-            if let Ok(mut registry) = state.registry.lock() {
-                if registry
-                    .active
-                    .get(&self.controller_id)
-                    .is_some_and(|current| Arc::ptr_eq(current, &self.active))
-                {
-                    registry.active.remove(&self.controller_id);
-                }
-            }
+        if let Some(state) = self.state.upgrade()
+            && let Ok(mut registry) = state.registry.lock()
+            && registry
+                .active
+                .get(&self.controller_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.active))
+        {
+            registry.active.remove(&self.controller_id);
         }
         self.active.exited.notify_waiters();
     }

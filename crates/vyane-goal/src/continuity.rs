@@ -744,10 +744,9 @@ pub(crate) fn with_step_status(
                 .steps
                 .iter_mut()
                 .find(|candidate| candidate.id == "review_takeover")
+                && review.status == GoalContinuityStepStatus::WaitingForTakeover
             {
-                if review.status == GoalContinuityStepStatus::WaitingForTakeover {
-                    review.status = GoalContinuityStepStatus::Ready;
-                }
+                review.status = GoalContinuityStepStatus::Ready;
             }
         } else if step_id == "review_takeover" && !next.wait_for_review_checks_before_resume {
             let quota_reset = next
@@ -804,29 +803,25 @@ pub(crate) fn with_ready_signal(
             "review-check signal is not enabled for the current continuity plan".into(),
         ));
     }
-    if signal.kind != GoalContinuitySignalKind::QuotaReset {
-        if let Some(other) = state
+    if signal.kind != GoalContinuitySignalKind::QuotaReset
+        && let Some(other) = state
             .ready_signals
             .iter()
             .find(|candidate| candidate.kind != GoalContinuitySignalKind::QuotaReset)
-        {
-            if other.review_check != signal.review_check {
-                let other = other
-                    .review_check
-                    .as_ref()
-                    .expect("validated review signal");
-                let current = signal
-                    .review_check
-                    .as_ref()
-                    .expect("validated review signal");
-                if other.repository != current.repository
-                    || other.pull_request != current.pull_request
-                {
-                    return Err(GoalStoreError::InvalidInput(
-                        "review-check signals do not describe the same pull request".into(),
-                    ));
-                }
-            }
+        && other.review_check != signal.review_check
+    {
+        let other = other
+            .review_check
+            .as_ref()
+            .expect("validated review signal");
+        let current = signal
+            .review_check
+            .as_ref()
+            .expect("validated review signal");
+        if other.repository != current.repository || other.pull_request != current.pull_request {
+            return Err(GoalStoreError::InvalidInput(
+                "review-check signals do not describe the same pull request".into(),
+            ));
         }
     }
     if let Some(review) = &signal.review_check {
@@ -852,10 +847,9 @@ pub(crate) fn with_ready_signal(
                 existing.review_check.as_ref().is_some_and(|candidate| {
                     candidate.observation_sequence == review.observation_sequence
                 })
-            }) {
-                if existing.same_evidence(signal) {
-                    return Ok((state.clone(), existing.clone(), false));
-                }
+            }) && existing.same_evidence(signal)
+            {
+                return Ok((state.clone(), existing.clone(), false));
             }
             return Err(GoalStoreError::InvalidInput(
                 "continuity review-check observation sequence was already recorded with different evidence"
@@ -915,10 +909,9 @@ pub(crate) fn with_ready_signal(
             .steps
             .iter_mut()
             .find(|step| step.id == "wait_review_checks")
+            && wait.status == GoalContinuityStepStatus::Done
         {
-            if wait.status == GoalContinuityStepStatus::Done {
-                wait.status = GoalContinuityStepStatus::WaitingForReview;
-            }
+            wait.status = GoalContinuityStepStatus::WaitingForReview;
         }
         let review_done = next.handoff_plan.steps.iter().any(|step| {
             step.id == "review_takeover" && step.status == GoalContinuityStepStatus::Done
@@ -928,14 +921,13 @@ pub(crate) fn with_ready_signal(
             .steps
             .iter_mut()
             .find(|step| step.id == "repair_failed_review")
+            && repair.status == GoalContinuityStepStatus::Done
         {
-            if repair.status == GoalContinuityStepStatus::Done {
-                repair.status = if review_done {
-                    GoalContinuityStepStatus::Ready
-                } else {
-                    GoalContinuityStepStatus::WaitingForReviewChecks
-                };
-            }
+            repair.status = if review_done {
+                GoalContinuityStepStatus::Ready
+            } else {
+                GoalContinuityStepStatus::WaitingForReviewChecks
+            };
         }
         let quota_reset = next
             .ready_signals
@@ -946,14 +938,13 @@ pub(crate) fn with_ready_signal(
             .steps
             .iter_mut()
             .find(|step| step.id == "resume_primary")
+            && resume.status == GoalContinuityStepStatus::Ready
         {
-            if resume.status == GoalContinuityStepStatus::Ready {
-                resume.status = if quota_reset {
-                    GoalContinuityStepStatus::WaitingForReview
-                } else {
-                    GoalContinuityStepStatus::WaitingForQuotaResetAndReview
-                };
-            }
+            resume.status = if quota_reset {
+                GoalContinuityStepStatus::WaitingForReview
+            } else {
+                GoalContinuityStepStatus::WaitingForQuotaResetAndReview
+            };
         }
     }
     match signal.kind {
@@ -969,21 +960,20 @@ pub(crate) fn with_ready_signal(
     if let Some(review) = &signal.review_check {
         next.review_observation_high_water = review.observation_sequence;
     }
-    if signal.kind == GoalContinuitySignalKind::QuotaReset {
-        if let Some(resume) = next
+    if signal.kind == GoalContinuitySignalKind::QuotaReset
+        && let Some(resume) = next
             .handoff_plan
             .steps
             .iter_mut()
             .find(|step| step.id == "resume_primary")
-        {
-            resume.status = match resume.status {
-                GoalContinuityStepStatus::WaitingForQuotaReset => GoalContinuityStepStatus::Ready,
-                GoalContinuityStepStatus::WaitingForQuotaResetAndReview => {
-                    GoalContinuityStepStatus::WaitingForReview
-                }
-                status => status,
-            };
-        }
+    {
+        resume.status = match resume.status {
+            GoalContinuityStepStatus::WaitingForQuotaReset => GoalContinuityStepStatus::Ready,
+            GoalContinuityStepStatus::WaitingForQuotaResetAndReview => {
+                GoalContinuityStepStatus::WaitingForReview
+            }
+            status => status,
+        };
     }
     release_ready_dependents(&mut next);
     next.handoff_plan.next_ready_step = next

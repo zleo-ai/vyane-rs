@@ -134,13 +134,13 @@ pub fn complexity_score(task: &str, signals: &ComplexitySignals, tags: &[String]
 /// - score ≤ 0.15 → economy
 /// - otherwise → mainline
 pub fn tier_for_score(score: f64, signals: &ComplexitySignals) -> RouteTier {
-    if let Some(explicit) = signals.explicit_tier.as_deref() {
-        if let Some(tier) = RouteTier::from_str_lossy(explicit) {
-            if tier == RouteTier::Frontier && !signals.allow_frontier {
-                return RouteTier::Mainline;
-            }
-            return tier;
+    if let Some(explicit) = signals.explicit_tier.as_deref()
+        && let Some(tier) = RouteTier::from_str_lossy(explicit)
+    {
+        if tier == RouteTier::Frontier && !signals.allow_frontier {
+            return RouteTier::Mainline;
         }
+        return tier;
     }
     if score >= 0.70 && signals.allow_frontier {
         RouteTier::Frontier

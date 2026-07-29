@@ -478,13 +478,13 @@ fn validate_route_preview_params(loaded: &LoadedConfig, params: &RoutePreviewPar
     }
     validate_input_value(params.stage.as_deref(), "route stage is invalid")?;
     validate_input_value(params.explicit_tier.as_deref(), "route tier is invalid")?;
-    if let Some(tier) = params.explicit_tier.as_deref() {
-        if !matches!(
+    if let Some(tier) = params.explicit_tier.as_deref()
+        && !matches!(
             tier.trim().to_ascii_lowercase().as_str(),
             "economy" | "mainline" | "frontier"
-        ) {
-            return Err(static_input_error("route tier is invalid"));
-        }
+        )
+    {
+        return Err(static_input_error("route tier is invalid"));
     }
     validate_input_list(&params.extra_tags, "route tags are invalid")?;
     validate_input_list(&params.candidate_profiles, "route candidates are invalid")?;

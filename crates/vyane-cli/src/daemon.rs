@@ -411,16 +411,15 @@ pub(crate) async fn start_daemon(
                     paths.log().display()
                 );
             }
-            if let Some((descriptor, Some(token))) = read_control_optional(&paths)? {
-                if descriptor.pid == child_pid
-                    && matches!(
-                        classify_descriptor_identity(&descriptor),
-                        DescriptorIdentity::Exact
-                    )
-                    && authenticated_health(&descriptor, &token).await.is_ok()
-                {
-                    break Ok((descriptor.addr, child_pid));
-                }
+            if let Some((descriptor, Some(token))) = read_control_optional(&paths)?
+                && descriptor.pid == child_pid
+                && matches!(
+                    classify_descriptor_identity(&descriptor),
+                    DescriptorIdentity::Exact
+                )
+                && authenticated_health(&descriptor, &token).await.is_ok()
+            {
+                break Ok((descriptor.addr, child_pid));
             }
             if tokio::time::Instant::now() >= deadline {
                 bail!(

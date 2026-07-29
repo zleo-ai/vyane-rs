@@ -172,25 +172,25 @@ impl Ledger for JsonlLedger {
 /// anything. `owner` is matched exactly (owner is a scope, not a search term);
 /// `since` is compared against `started_at` (inclusive).
 fn matches_query(record: &RunRecord, query: &RunQuery) -> bool {
-    if let Some(owner) = &query.owner {
-        if record.owner != *owner {
-            return false;
-        }
+    if let Some(owner) = &query.owner
+        && record.owner != *owner
+    {
+        return false;
     }
-    if let Some(provider) = &query.provider {
-        if record.target.provider != *provider {
-            return false;
-        }
+    if let Some(provider) = &query.provider
+        && record.target.provider != *provider
+    {
+        return false;
     }
-    if let Some(status) = query.status {
-        if record.status != status {
-            return false;
-        }
+    if let Some(status) = query.status
+        && record.status != status
+    {
+        return false;
     }
-    if let Some(since) = query.since {
-        if record.started_at < since {
-            return false;
-        }
+    if let Some(since) = query.since
+        && record.started_at < since
+    {
+        return false;
     }
     true
 }

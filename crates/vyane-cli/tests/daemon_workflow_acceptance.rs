@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
-use rmcp::model::{CallToolRequestParam, CallToolResult};
+use rmcp::model::{CallToolRequestParams, CallToolResult};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
@@ -420,10 +420,10 @@ async fn mcp_call(
     arguments: Value,
 ) -> anyhow::Result<Value> {
     let result = client
-        .call_tool(CallToolRequestParam {
-            name: name.to_owned().into(),
-            arguments: Some(arguments.as_object().expect("object arguments").clone()),
-        })
+        .call_tool(
+            CallToolRequestParams::new(name.to_owned())
+                .with_arguments(arguments.as_object().expect("object arguments").clone()),
+        )
         .await?;
     Ok(mcp_result_payload(result))
 }

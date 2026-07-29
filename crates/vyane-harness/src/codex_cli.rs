@@ -267,10 +267,10 @@ fn build_argv_scoped(
 /// `-c` config args, not env. `None` endpoint ⇒ nothing (native auth).
 pub(crate) fn endpoint_injections(endpoint: Option<&Endpoint>) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    if let Some(ep) = endpoint {
-        if let Some(auth) = &ep.auth {
-            out.push((ENV_API_KEY.into(), auth.secret.expose().to_string()));
-        }
+    if let Some(ep) = endpoint
+        && let Some(auth) = &ep.auth
+    {
+        out.push((ENV_API_KEY.into(), auth.secret.expose().to_string()));
     }
     out
 }

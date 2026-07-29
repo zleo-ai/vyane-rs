@@ -231,11 +231,11 @@ fn build_argv_scoped(job: &HarnessJob, pinned_workdir: Option<&PinnedWorkdir>) -
     }
 
     // Resume a native session.
-    if let Some(id) = &job.resume {
-        if !id.is_empty() {
-            args.push("--resume".into());
-            args.push(id.clone());
-        }
+    if let Some(id) = &job.resume
+        && !id.is_empty()
+    {
+        args.push("--resume".into());
+        args.push(id.clone());
     }
 
     args
@@ -284,11 +284,11 @@ fn build_stream_argv_scoped(
         args.push(dir.display().to_string());
     }
 
-    if let Some(id) = &job.resume {
-        if !id.is_empty() {
-            args.push("--resume".into());
-            args.push(id.clone());
-        }
+    if let Some(id) = &job.resume
+        && !id.is_empty()
+    {
+        args.push("--resume".into());
+        args.push(id.clone());
     }
 
     args

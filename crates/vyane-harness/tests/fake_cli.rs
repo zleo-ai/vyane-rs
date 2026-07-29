@@ -1156,10 +1156,10 @@ fn assert_pid_dead(path: &Path) {
 async fn wait_for_live_pid(path: &Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
-        if let Some(pid) = read_pid(path) {
-            if pid_is_running(&pid) {
-                return pid;
-            }
+        if let Some(pid) = read_pid(path)
+            && pid_is_running(&pid)
+        {
+            return pid;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

@@ -1138,10 +1138,10 @@ impl DaemonWorkflowSupervisor {
         let control = live.control.clone();
         let cleanup = tokio::spawn(async move {
             tokio::time::sleep(CANCEL_CONTROLLER_GRACE).await;
-            if live_map.get(&id).is_some_and(|entry| entry.epoch == epoch) {
-                if let Err(error) = control.cancel_all().await {
-                    tracing::warn!(task_id = %id, error = %error, "workflow controller cleanup failed after cancel grace");
-                }
+            if live_map.get(&id).is_some_and(|entry| entry.epoch == epoch)
+                && let Err(error) = control.cancel_all().await
+            {
+                tracing::warn!(task_id = %id, error = %error, "workflow controller cleanup failed after cancel grace");
             }
         });
         let mut tasks = self
@@ -1333,10 +1333,10 @@ impl DaemonWorkflowSupervisor {
         // the future; otherwise that late write could cross lock release.
         if final_pass_timed_out {
             self.wait_blocking_operations().await;
-            if let Err(error) = self.interrupt_owned_active().await {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
+            if let Err(error) = self.interrupt_owned_active().await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
             }
         }
 

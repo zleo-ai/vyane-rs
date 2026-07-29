@@ -514,19 +514,19 @@ impl ProcessGroupDropGuard {
         let Some(identity) = self.report_identity.take() else {
             return;
         };
-        if let Some(reporter) = &self.reporter {
-            if let Err(error) = reporter.report(HarnessLifecycleEvent::Stopped {
+        if let Some(reporter) = &self.reporter
+            && let Err(error) = reporter.report(HarnessLifecycleEvent::Stopped {
                 pid: identity.pid,
                 pgid: identity.pgid,
                 group_empty,
-            }) {
-                tracing::warn!(
-                    pid = identity.pid,
-                    pgid = identity.pgid,
-                    error = %error,
-                    "failed to report stopped harness process group"
-                );
-            }
+            })
+        {
+            tracing::warn!(
+                pid = identity.pid,
+                pgid = identity.pgid,
+                error = %error,
+                "failed to report stopped harness process group"
+            );
         }
     }
 }
@@ -1098,10 +1098,10 @@ async fn run_capture_with_pinned_limit_confined(
         cmd.envs(env);
     }
 
-    if pinned_workdir.is_none() {
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
+    if pinned_workdir.is_none()
+        && let Some(dir) = cwd
+    {
+        cmd.current_dir(dir);
     }
 
     let started = Instant::now();
@@ -1424,10 +1424,10 @@ pub(crate) async fn run_stream_capture_with_pinned(
         cmd.envs(env);
     }
 
-    if pinned_workdir.is_none() {
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
+    if pinned_workdir.is_none()
+        && let Some(dir) = cwd
+    {
+        cmd.current_dir(dir);
     }
 
     let started = Instant::now();

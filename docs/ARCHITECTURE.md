@@ -111,7 +111,7 @@ Two consequences:
 | `vyane-router` | `vyane-core` | target selection / routing policy |
 | `vyane-workflow` | `vyane-kernel` | declarative DAG execution, bounded source bundles, atomic journals, and explicit resume |
 | `vyane-service` | `vyane-agent`, `vyane-kernel`, `vyane-config`, `vyane-ledger`, `vyane-message`, `vyane-broker` | shared facade plus principal-derived `OwnerScopedService`, allowlisted run/session views, owner-scoped session control, explicit projection construction, the fresh-sessionless authority bridge, fixed-owner one-shot drivers, a paired in-process backend and its resident library supervisor; ordinary dispatch constructs none of the optional AgentRun components |
-| `vyane-mcp` | `vyane-service`, `vyane-workflow`, `rmcp` | six base tools plus an object-safe workflow-control port; it owns no daemon descriptor or credential |
+| `vyane-mcp` | `vyane-service`, `vyane-workflow`, `rmcp` 3.0 | six base tools plus an object-safe workflow-control port; it owns no daemon descriptor or credential |
 | `vyane-cli` | `vyane-service`, `vyane-workflow`, `vyane-task`, `vyane-goal`, `vyane-mcp`, `axum` | assembler: CLI + bearer-authenticated loopback-only REST API + authenticated local workflow daemon + nine-tool MCP launcher with a verified daemon adapter |
 
 `ChatClient::complete_turn` is an additive typed boundary. Its default fallback

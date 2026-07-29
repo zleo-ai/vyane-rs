@@ -1693,10 +1693,10 @@ fn validate_stored_task(record: &TaskRecord) -> std::result::Result<(), String> 
             "task controller and started_at must either both be set or both be null".into(),
         );
     }
-    if let Some(started_at) = record.started_at {
-        if started_at < record.created_at || started_at > record.updated_at {
-            return Err("task started_at is outside created_at..=updated_at".into());
-        }
+    if let Some(started_at) = record.started_at
+        && (started_at < record.created_at || started_at > record.updated_at)
+    {
+        return Err("task started_at is outside created_at..=updated_at".into());
     }
     if record.controller.is_some() != (record.executor_epoch > 0) {
         return Err("task controller presence does not match executor epoch ownership".into());
