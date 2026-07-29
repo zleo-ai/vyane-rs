@@ -864,7 +864,7 @@ fn validate_writable_root(root: &str) -> Result<(), NativeCommandPolicyError> {
         || root.starts_with('/')
         || root.ends_with('/')
         || root.contains("//")
-        || root == "."
+        || root.split('/').any(|component| component == ".")
         || Path::new(root).components().count() > 32
         || Path::new(root)
             .components()
@@ -1614,6 +1614,8 @@ mod tests {
             "../src",
             "/src",
             "src/",
+            "src/.",
+            "src/./generated",
             ".git",
             ".GIT",
             "src/.codex",

@@ -797,7 +797,9 @@ Native AgentRun permissions remain explicit request opt-ins. Optional
 operator-managed config files only impose independent ceilings; see
 [WP-88](docs/plan/WP-88.md). Command execution remains read-only unless its
 request and every ceiling list exact pre-existing `writable_roots`; see
-[WP-90](docs/plan/WP-90.md).
+[WP-90](docs/plan/WP-90.md). Non-empty command writable roots additionally
+require `/usr/bin/bwrap --help` to advertise `--bind-fd FD DEST`; current
+Ubuntu 24.04 security updates provide that capability.
 
 ```toml
 [providers.anthropic]

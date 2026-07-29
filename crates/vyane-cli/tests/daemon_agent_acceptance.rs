@@ -847,6 +847,15 @@ async fn native_writable_command_root_reaches_the_real_resident_sandbox() {
     assert!(workdir.join("src/resident.txt").is_file());
     assert!(!workdir.join(".git/resident.txt").exists());
     assert!(!workdir.join("resident.txt").exists());
+    std::os::unix::fs::symlink("../.git", workdir.join("src/late-control-link")).unwrap();
+    let retry = submit_native_writable_command(data_dir.path(), run_id, &workdir).await;
+    assert_eq!(retry.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(retry.json::<Value>().await.unwrap()["state"], "succeeded");
+    assert_eq!(
+        response_index.load(Ordering::SeqCst),
+        2,
+        "an exact terminal retry must return durable truth before reopening writable roots"
+    );
     assert!(daemon.stop().status.success());
 }
 

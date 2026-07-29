@@ -496,23 +496,6 @@ impl DaemonAgentHost {
             .workdir
             .ok_or_else(AgentApiError::bad_request)
             .and_then(|path| PinnedWorkdir::open(path).map_err(|_| AgentApiError::bad_request()))?;
-        let command_mounts = if let Some(policy) = &request.native_permissions.command_execution {
-            let mounts = prepare_command_mounts_async(&workdir, policy)
-                .await
-                .map_err(|_| AgentApiError::bad_request())?;
-            if let Some(network) = &request.native_permissions.command_network {
-                validate_command_network_host_with_mounts(&workdir, policy, network, &mounts)
-                    .await
-                    .map_err(|_| AgentApiError::bad_request())?;
-            } else {
-                validate_command_host_with_mounts(&workdir, policy, &mounts)
-                    .await
-                    .map_err(|_| AgentApiError::bad_request())?;
-            }
-            Some(mounts)
-        } else {
-            None
-        };
         let scoped = self.service.scope(OwnerContext::single_user_local());
         let chain = scoped
             .resolve(&request.target)
@@ -591,6 +574,23 @@ impl DaemonAgentHost {
                 Err(AgentApiError::conflict())
             };
         }
+        let command_mounts = if let Some(policy) = &input.policy.command_execution {
+            let mounts = prepare_command_mounts_async(&workdir, policy)
+                .await
+                .map_err(|_| AgentApiError::bad_request())?;
+            if let Some(network) = &input.policy.command_network {
+                validate_command_network_host_with_mounts(&workdir, policy, network, &mounts)
+                    .await
+                    .map_err(|_| AgentApiError::bad_request())?;
+            } else {
+                validate_command_host_with_mounts(&workdir, policy, &mounts)
+                    .await
+                    .map_err(|_| AgentApiError::bad_request())?;
+            }
+            Some(mounts)
+        } else {
+            None
+        };
         let spool_create = self
             .native_spool
             .create(&input)
