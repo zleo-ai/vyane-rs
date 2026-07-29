@@ -633,7 +633,7 @@ async fn definition_registry_mismatch_fails_before_model_send() {
 }
 
 #[tokio::test]
-async fn cancellation_and_timeout_stop_without_another_send() {
+async fn cancellation_stops_but_pre_tool_model_timeout_remains_failover_eligible() {
     let pre_cancel_client = Arc::new(ScriptedClient::new([ScriptStep::Outcome(text_outcome(
         "unused", None,
     ))]));
@@ -662,15 +662,16 @@ async fn cancellation_and_timeout_stop_without_another_send() {
         PermissionPolicy::allow_by_default(),
     );
     let (_directory, context) = crate::context();
-    let outcome = driver
+    let error = driver
         .run(
             request(ToolChoice::Auto),
             &context,
             &RecordingAuthority::default(),
         )
         .await
-        .expect("timeout stop");
-    assert!(matches!(outcome.stop, NativeTurnStop::TimedOut));
+        .expect_err("target-level timeout must retain its failover classification");
+    assert_eq!(error.kind, ErrorKind::Timeout);
+    assert!(error.failover_eligible());
     assert_eq!(timeout_client.send_count(), 1);
 }
 
