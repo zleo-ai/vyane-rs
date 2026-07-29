@@ -64,7 +64,7 @@ difference。运行 `python3 .github/scripts/parity-report.py --format markdown`
 | config & profiles | `vyane-config` | [x] |
 | OpenAI Chat/Responses + Anthropic Messages | `vyane-protocol` | [x] 基础 client；[~] 有界 typed tool turn 与 per-wire authorized path 目前只覆盖非流式 OpenAI Chat |
 | Claude Code + Codex CLI harnesses（含 stdout 事件流） | `vyane-harness` | [x] additive scoped execution 可同时携带 Linux pinned workdir 与 live spawn authority；Process AgentRun host 已为 fresh sessionless CLI run 构造该 authority，gated capture/streaming 会在 wrapper spawn 与真实 target release 前重验。这仍是 adapter-delegated，不是 host sandbox |
-| native permission/tool 执行接缝（尚不是通用 `Harness` 实现） | `vyane-harness` + `vyane-service` | [~] resident fresh/sessionless native AgentRun lane 已组合 scope atomic validation、per-wire model authorization、有界 turn driver 与 durable completion；WP-83 至 WP-90 已接入 descriptor-relative read/search/write/edit、Linux Bubblewrap command、独立 command HTTPS destination、hosted web search、bounded web fetch、分层配置权限上限与 descriptor-bound command writable roots。WP-91 将每层每工具的 allow/ask/deny 决定冻结进 durable policy，WP-92 增加只允许在任何 tool side effect 前推进的有界 direct OpenAI Chat target failover。session authority、checkpoint/session commit、approval resume、automatic replay 与 native resume 仍待完成 |
+| native permission/tool 执行接缝（尚不是通用 `Harness` 实现） | `vyane-harness` + `vyane-service` | [~] resident fresh/sessionless native AgentRun lane 已组合 scope atomic validation、per-wire model authorization、有界 turn driver 与 durable completion；WP-83 至 WP-88 及 WP-90 已接入 descriptor-relative read/search/write/edit、Linux Bubblewrap command、独立 command HTTPS destination、hosted web search、bounded web fetch、分层配置权限上限与 descriptor-bound command writable roots。WP-91 将每层每工具的 allow/ask/deny 决定冻结进 durable policy，WP-92 增加只允许在任何 tool side effect 前推进的有界 direct OpenAI Chat target failover。session authority、checkpoint/session commit、approval resume、automatic replay 与 native resume 仍待完成 |
 | dispatch / broadcast / failover kernel + streaming | `vyane-kernel` | [x] early execution id、整链 trusted capability admission、one-shot prepared dispatch 与 original-ordinal failover evidence |
 | append-only run ledger + owner 隔离 session record | `vyane-ledger` | [x] direct-HTTP transcript continuity、strict revisioned V2 snapshot、store-level CAS `Reset` / `ForkFresh` / `Commit` 与 exact 本地文件系统执行期 lease 已具备；CLI/service 仅提供 owner-local list/inspect/reset-native，没有公开 fork、REST mutation、分布式 lease 协议或生产 native resume |
 | 可 replay 的 owner-scoped event store | `vyane-ledger` | [~] storage/cursor、有界 message/AgentRun lifecycle 投影，以及 daemon 内 owner-bound 常驻 broker/projector assembly 已具备；delivery lane、dispatch/workflow producer、subscription、retention 与统一 timeline 尚未完成 |
@@ -208,7 +208,8 @@ policy digest、workdir identity、timeout 与 turn limit。首次 wire 前会�
 每次 model/tool effect 都重验 live authority，并且只允许在任何 tool side effect 前按共享
 eligible error taxonomy fail over。filesystem、command、command network、hosted search 与
 bounded fetch 工具分别授权，配置只能收紧显式请求。见 [WP-66](docs/plan/WP-66.md) 及
-[WP-83](docs/plan/WP-83.md) 至 [WP-92](docs/plan/WP-92.md)。
+[WP-83](docs/plan/WP-83.md) 至 [WP-88](docs/plan/WP-88.md)，以及
+[WP-90](docs/plan/WP-90.md) 至 [WP-92](docs/plan/WP-92.md)。
 
 daemon 在既有 bearer 与 loopback 限制下暴露 `POST /v1/agent-runs` 及 status、output、cancel route。
 启动先执行 exact backend recovery，绝不 replay input；graceful shutdown 先关闭 admission、
@@ -217,6 +218,8 @@ drain 已准入的 submit/cancel initializer，再 signal AgentRun supervisor，
 这不是 `Remote` 或 session-aware native host，不支持 native resume、live pause/resume 或自动 replay，
 本地 bearer 也仍不代表 distinct principal 或 hostile same-UID isolation。见
 [WP-61](docs/plan/WP-61.md) 与 [WP-66](docs/plan/WP-66.md)。
+Process lane 的 graceful drain 已有 acceptance；WP-66 单独要求的 daemon-level Native
+graceful-shutdown race acceptance 仍未收口。
 
 service 层也增加 principal-derived owner 的 phase-A boundary。`OwnerContextFactory` 冻结 trusted
 authenticator/resolver，隐藏 `AuthenticatedPrincipal` 构造，并拒绝 authenticated principal 进入保留

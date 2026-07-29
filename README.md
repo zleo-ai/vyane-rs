@@ -197,10 +197,11 @@ starts projection or other resident work.
 [WP-65](docs/plan/WP-65.md) provided the original dark composition slice: a private native
 spool, exact fresh/sessionless scope, authorized OpenAI Chat client, tool-free
 `NativeTurnDriver`, and exact durable message-completion acceptance path. It is
-now production-assembled by the later Native lane. WP-83 through WP-92 add the
-separately authorized filesystem, command, network, search/fetch, layered
-permission and pre-side-effect failover slices without claiming session-aware
-authority, approval resume, automatic replay or general parity.
+now production-assembled by the later Native lane. WP-83 through WP-88 and
+WP-90 through WP-92 add the separately authorized filesystem, command,
+network, search/fetch, layered permission and pre-side-effect failover slices
+without claiming session-aware authority, approval resume, automatic replay or
+general parity.
 
 `vyane-service::AgentRunRecoveryDriver` is another explicit fixed-owner,
 non-`Clone` one-shot seam. Construction freezes the owner, injected store,
@@ -312,7 +313,8 @@ for the shared eligible error taxonomy before any tool side effect. Trusted
 filesystem, command, command-network, hosted-search and bounded-fetch tools
 remain separately authorized and configuration can only narrow the explicitly
 requested set. See [WP-66](docs/plan/WP-66.md) and
-[WP-83](docs/plan/WP-83.md) through [WP-92](docs/plan/WP-92.md).
+[WP-83](docs/plan/WP-83.md) through [WP-88](docs/plan/WP-88.md), and
+[WP-90](docs/plan/WP-90.md) through [WP-92](docs/plan/WP-92.md).
 
 The daemon exposes `POST /v1/agent-runs`, status, output and cancel routes under
 its existing bearer and loopback restrictions. Startup performs exact stale
@@ -324,6 +326,8 @@ drain. This is not a `Remote` or session-aware native host, does not support
 native resume, live pause/resume or automatic replay, and the local bearer still
 does not represent distinct principals or hostile same-UID isolation. See
 [WP-61](docs/plan/WP-61.md) and [WP-66](docs/plan/WP-66.md).
+The Process-lane graceful drain is acceptance-covered; WP-66's separate
+daemon-level Native graceful-shutdown race acceptance remains open.
 
 The service layer also has a principal-derived owner phase-A boundary.
 `OwnerContextFactory` freezes a trusted authenticator and resolver, keeps
