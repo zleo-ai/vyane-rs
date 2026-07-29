@@ -89,7 +89,20 @@ jobs:
           cargo test --workspace --exclude vyane-broker --exclude vyane-cli --exclude vyane-service
           cargo test -p vyane-broker -- --test-threads=1
           cargo test -p vyane-service -- --test-threads=1
-          cargo test -p vyane-cli -- --test-threads=1
+          # These adjacent unit tests both exercise the opaque dispatch cleanup
+          # path. On macOS their per-test Tokio runtimes can occasionally stall
+          # at the handoff between tests even though each body has completed.
+          # Run each in its own process, then run every remaining CLI target.
+          cargo test -p vyane-cli -- \
+            --test-threads=1 \
+            --skip api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
+            --skip api::tests::dispatch_panic_is_classified_internal_and_cleans_live_token
+          cargo test -p vyane-cli --bin vyane \
+            api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
+            -- --exact
+          cargo test -p vyane-cli --bin vyane \
+            api::tests::dispatch_panic_is_classified_internal_and_cleans_live_token \
+            -- --exact
 
   coverage:
     timeout-minutes: 20
