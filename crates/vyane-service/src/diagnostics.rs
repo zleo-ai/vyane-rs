@@ -11,8 +11,8 @@ use std::fmt;
 
 use anyhow::Result;
 use serde::Serialize;
-use vyane_config::{ProfilePatch, RawFailoverElement, ResolvedConfig};
-use vyane_core::{AdapterTransport, HarnessKind};
+use vyane_config::{NativePermissionCeiling, ProfilePatch, RawFailoverElement, ResolvedConfig};
+use vyane_core::{AdapterTransport, HarnessKind, Sandbox};
 use vyane_protocol::validate_http_base_url;
 
 use crate::config::LoadedConfig;
@@ -207,6 +207,46 @@ pub struct ProfileCheck {
     pub issue: Option<ConfigIssue>,
 }
 
+/// Whether configuration narrows one Native/Canto capability axis.
+///
+/// This is an upper-bound summary, not a grant: requests must still opt into
+/// optional native tools and pass their exact parameter policies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePermissionAxisStatus {
+    UnrestrictedByConfig,
+    Bounded,
+    Disabled,
+}
+
+/// Redacted summary of the effective CLI-harness sandbox ceiling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HarnessPermissionCheck {
+    pub ceiling_layers: usize,
+    pub max_sandbox: Sandbox,
+}
+
+/// Redacted upper-bound summary for Native/Canto capability configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NativePermissionCheck {
+    pub ceiling_layers: usize,
+    pub filesystem_read: NativePermissionAxisStatus,
+    pub filesystem_write: NativePermissionAxisStatus,
+    pub command_execution: NativePermissionAxisStatus,
+    pub command_network: NativePermissionAxisStatus,
+    pub web_search: NativePermissionAxisStatus,
+    pub web_fetch: NativePermissionAxisStatus,
+    pub tool_policy_layers: usize,
+    pub tool_policy_rule_count: usize,
+}
+
+/// Redacted effective permission ceilings from all loaded config layers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PermissionCheck {
+    pub harness: HarnessPermissionCheck,
+    pub native: NativePermissionCheck,
+}
+
 /// Static-only config diagnostics. The complete row set is bounded before
 /// construction; this report is never a silently truncated readiness claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -218,6 +258,7 @@ pub struct ConfigCheckReport {
     pub profile_count: usize,
     pub providers: Vec<ProviderCheck>,
     pub profiles: Vec<ProfileCheck>,
+    pub permissions: PermissionCheck,
     pub issues: Vec<ConfigIssue>,
 }
 
@@ -262,7 +303,7 @@ pub(crate) fn route_preview(
     })
 }
 
-pub(crate) fn check_config(loaded: &LoadedConfig) -> Result<ConfigCheckReport> {
+pub fn check_config(loaded: &LoadedConfig) -> Result<ConfigCheckReport> {
     validate_config_budget(&loaded.config)?;
 
     let provider_count = loaded.config.providers.providers.len();
@@ -365,8 +406,77 @@ pub(crate) fn check_config(loaded: &LoadedConfig) -> Result<ConfigCheckReport> {
         profile_count,
         providers,
         profiles,
+        permissions: check_permissions(&loaded.config),
         issues,
     })
+}
+
+/// Summarize only the already-parsed permission ceilings.
+///
+/// Unlike the complete MCP-oriented configuration check, this cannot fail on
+/// provider/profile diagnostic budgets. The human CLI uses it so adding the
+/// permission rows does not change `vyane check` exit behavior for an
+/// otherwise loadable configuration.
+#[must_use]
+pub fn check_permissions(config: &ResolvedConfig) -> PermissionCheck {
+    let harness_max_sandbox = config
+        .harness_permission_ceilings
+        .iter()
+        .fold(Sandbox::Full, |current, ceiling| {
+            current.restrict_with(ceiling.max_sandbox)
+        });
+    let native = &config.native_permission_ceilings;
+
+    PermissionCheck {
+        harness: HarnessPermissionCheck {
+            ceiling_layers: config.harness_permission_ceilings.len(),
+            max_sandbox: harness_max_sandbox,
+        },
+        native: NativePermissionCheck {
+            ceiling_layers: native.len(),
+            filesystem_read: if native
+                .iter()
+                .any(|ceiling| !ceiling.filesystem_read.exclude.is_empty())
+            {
+                NativePermissionAxisStatus::Bounded
+            } else {
+                NativePermissionAxisStatus::UnrestrictedByConfig
+            },
+            filesystem_write: optional_native_axis(native, |ceiling| {
+                ceiling.filesystem_write.is_some()
+            }),
+            command_execution: optional_native_axis(native, |ceiling| {
+                ceiling.command_execution.is_some()
+            }),
+            command_network: optional_native_axis(native, |ceiling| {
+                ceiling.command_network.is_some()
+            }),
+            web_search: optional_native_axis(native, |ceiling| ceiling.web_search.is_some()),
+            web_fetch: optional_native_axis(native, |ceiling| ceiling.web_fetch.is_some()),
+            tool_policy_layers: native
+                .iter()
+                .filter(|ceiling| ceiling.tool_policy.is_some())
+                .count(),
+            tool_policy_rule_count: native
+                .iter()
+                .filter_map(|ceiling| ceiling.tool_policy.as_ref())
+                .map(|policy| policy.rules.len())
+                .fold(0_usize, usize::saturating_add),
+        },
+    }
+}
+
+fn optional_native_axis(
+    ceilings: &[NativePermissionCeiling],
+    present: impl Fn(&NativePermissionCeiling) -> bool,
+) -> NativePermissionAxisStatus {
+    if ceilings.is_empty() {
+        NativePermissionAxisStatus::UnrestrictedByConfig
+    } else if ceilings.iter().all(present) {
+        NativePermissionAxisStatus::Bounded
+    } else {
+        NativePermissionAxisStatus::Disabled
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -828,7 +938,87 @@ mod tests {
         assert_eq!(report.scope, "static_config_only");
         assert_eq!(report.providers[0].credential, CredentialStatus::Present);
         assert_eq!(report.profiles[0].status, ProfileCheckStatus::Resolvable);
+        assert_eq!(report.permissions.harness.ceiling_layers, 0);
+        assert_eq!(report.permissions.harness.max_sandbox, Sandbox::Full);
+        assert_eq!(
+            report.permissions.native.filesystem_write,
+            NativePermissionAxisStatus::UnrestrictedByConfig
+        );
         for canary in [PATH_CANARY, URL_CANARY, ENV_CANARY, SECRET_CANARY] {
+            assert!(!wire.contains(canary), "leaked {canary}");
+        }
+    }
+
+    #[test]
+    fn check_config_summarizes_permission_ceilings_without_raw_rules() {
+        let mut layers = ConfigLayers::new();
+        let first: RawRoot = serde_json::from_value(json!({
+            "harness_permissions": {
+                "max_sandbox": "write"
+            },
+            "native_permissions": {
+                "filesystem_read": {
+                    "exclude": ["CANARY_NATIVE_PATH"]
+                },
+                "filesystem_write": {
+                    "exclude": ["CANARY_NATIVE_WRITE_PATH"]
+                },
+                "tool_policy": {
+                    "rules": [{
+                        "tool": "CANARY_NATIVE_TOOL",
+                        "effect": "deny"
+                    }]
+                }
+            }
+        }))
+        .unwrap();
+        let second: RawRoot = serde_json::from_value(json!({
+            "harness_permissions": {
+                "max_sandbox": "read-only"
+            },
+            "native_permissions": {
+                "filesystem_read": {}
+            }
+        }))
+        .unwrap();
+        layers.merge(&first).unwrap();
+        layers.merge(&second).unwrap();
+        let loaded = LoadedConfig {
+            config: ResolvedConfig::from(layers),
+            files: Vec::new(),
+            secrets: BTreeMap::new(),
+        };
+
+        let report = check_config(&loaded).unwrap();
+        let permissions = &report.permissions;
+        let wire = serde_json::to_string(permissions).unwrap();
+
+        assert_eq!(permissions.harness.ceiling_layers, 2);
+        assert_eq!(permissions.harness.max_sandbox, Sandbox::ReadOnly);
+        assert_eq!(permissions.native.ceiling_layers, 2);
+        assert_eq!(
+            permissions.native.filesystem_read,
+            NativePermissionAxisStatus::Bounded
+        );
+        assert_eq!(
+            permissions.native.filesystem_write,
+            NativePermissionAxisStatus::Disabled
+        );
+        assert_eq!(
+            permissions.native.command_execution,
+            NativePermissionAxisStatus::Disabled
+        );
+        assert_eq!(
+            permissions.native.command_network,
+            NativePermissionAxisStatus::Disabled
+        );
+        assert_eq!(permissions.native.tool_policy_layers, 1);
+        assert_eq!(permissions.native.tool_policy_rule_count, 1);
+        for canary in [
+            "CANARY_NATIVE_PATH",
+            "CANARY_NATIVE_WRITE_PATH",
+            "CANARY_NATIVE_TOOL",
+        ] {
             assert!(!wire.contains(canary), "leaked {canary}");
         }
     }

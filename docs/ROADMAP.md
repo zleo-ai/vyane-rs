@@ -30,7 +30,9 @@ user/project/managed permission ceilings. Configuration never grants an
 optional tool and every configured ceiling can only narrow the explicit
 AgentRun request. [WP-90](plan/WP-90.md) keeps writable command execution
 separate and limits it to explicit descriptor-bound roots inside an otherwise
-read-only workspace.
+read-only workspace. [WP-94](plan/WP-94.md) adds a redacted static summary of
+the composed CLI-harness ceiling and Native/Canto capability bounds to both
+`vyane check` surfaces without turning configuration into a grant.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

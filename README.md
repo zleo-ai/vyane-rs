@@ -839,6 +839,13 @@ subprocess spawn. Vyane does not accept raw vendor permission flags. Operator po
 `VYANE_MANAGED_NATIVE_CONFIG` name remains a compatibility alias. See
 [WP-93](docs/plan/WP-93.md).
 
+`vyane check` and the MCP `vyane_check` tool report a redacted effective
+permission summary. The CLI-harness row shows the strictest configured sandbox
+ceiling. Native/Canto capability rows distinguish `unrestricted_by_config`,
+`bounded`, and `disabled`; these are configuration upper bounds, not grants,
+and never include raw paths, domains, commands, environment names, or tool
+rules. See [WP-94](docs/plan/WP-94.md).
+
 ```toml
 [providers.anthropic]
 base_url      = "https://api.anthropic.com"

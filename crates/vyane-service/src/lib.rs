@@ -79,10 +79,11 @@ pub use diagnostics::{
     ConfigCheckReport, ConfigCheckStatus, ConfigIssue, ConfigIssueCode, CredentialStatus,
     DIAGNOSTIC_MAX_CONFIG_ITEMS, DIAGNOSTIC_MAX_ENDPOINT_BYTES, DIAGNOSTIC_MAX_FAILOVER_LEGS,
     DIAGNOSTIC_MAX_METADATA_BYTES, DIAGNOSTIC_MAX_METADATA_DEPTH, DIAGNOSTIC_MAX_METADATA_ITEMS,
-    DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError, DiagnosticErrorKind, ProfileCheck,
+    DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError, DiagnosticErrorKind, HarnessPermissionCheck,
+    NativePermissionAxisStatus, NativePermissionCheck, PermissionCheck, ProfileCheck,
     ProfileCheckStatus, ProviderCheck, ROUTE_PREVIEW_MAX_LIST_ITEMS, ROUTE_PREVIEW_MAX_SIGNAL,
     ROUTE_PREVIEW_MAX_TASK_BYTES, ROUTE_PREVIEW_MAX_VALUE_BYTES, RoutePreview, RoutePreviewParams,
-    RouteSelectionBasis,
+    RouteSelectionBasis, check_config, check_permissions,
 };
 pub use factory::{
     AssemblerFactory, authorized_native_client, authorized_web_fetch_client,
