@@ -4,10 +4,12 @@
 //! loopback proxy talks to this broker over inherited descriptor 5; only the
 //! broker resolves names and opens external TCP connections.
 
+#[cfg(any(target_os = "linux", test))]
+use std::collections::HashSet;
 use std::net::IpAddr;
 #[cfg(any(target_os = "linux", test))]
 use std::net::{Ipv4Addr, Ipv6Addr};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -29,7 +31,7 @@ const MAX_CONNECT_TIMEOUT_SECONDS: u64 = 60;
 const MAX_HOST_BYTES: usize = 253;
 #[cfg(target_os = "linux")]
 const MAX_FRAME_BYTES: usize = 64 * 1024;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const MAX_TLS_CLIENT_HELLO_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,8 +206,15 @@ pub(crate) async fn run_network_broker(
         }
 
         authority.revalidate(effect).await?;
-        let stream =
-            connect_destination(&host, port, policy.connect_timeout_seconds, policy.route).await;
+        let stream = connect_destination(
+            &host,
+            port,
+            policy.connect_timeout_seconds,
+            policy.route,
+            authority,
+            effect,
+        )
+        .await?;
         let Ok(mut stream) = stream else {
             channel.write_u8(0).await?;
             continue;
@@ -277,49 +286,61 @@ async fn connect_destination(
     port: u16,
     timeout_seconds: u64,
     route: NativeCommandNetworkRoute,
-) -> std::io::Result<TcpStream> {
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+) -> VyaneResult<std::io::Result<TcpStream>> {
     match route {
-        NativeCommandNetworkRoute::Direct => connect_public(host, port, timeout_seconds).await,
+        NativeCommandNetworkRoute::Direct => {
+            connect_public(host, port, timeout_seconds, authority, effect).await
+        }
         NativeCommandNetworkRoute::EnvironmentProxy => {
-            connect_via_environment_proxy(host, port, timeout_seconds).await
+            connect_via_environment_proxy(host, port, timeout_seconds, authority, effect).await
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-async fn connect_public(host: &str, port: u16, timeout_seconds: u64) -> std::io::Result<TcpStream> {
-    let mut addresses = lookup_host((host, port)).await?.collect::<Vec<_>>();
-    addresses.sort_unstable();
-    addresses.dedup();
+async fn connect_public(
+    host: &str,
+    port: u16,
+    timeout_seconds: u64,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+) -> VyaneResult<std::io::Result<TcpStream>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    authority.revalidate(effect).await?;
+    let mut addresses = match tokio::time::timeout_at(deadline, lookup_host((host, port))).await {
+        Ok(Ok(addresses)) => addresses.collect::<Vec<_>>(),
+        Ok(Err(error)) => return Ok(Err(error)),
+        Err(_) => return Ok(Err(connect_timeout_error())),
+    };
+    deduplicate_addresses(&mut addresses);
     if addresses.is_empty()
         || addresses.len() > 32
         || addresses.iter().any(|address| !public_ip(address.ip()))
     {
-        return Err(std::io::Error::new(
+        return Ok(Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "native network destination resolved outside the public Internet",
-        ));
+        )));
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
     let mut last_error = None;
-    for address in addresses {
-        match tokio::time::timeout_at(deadline, TcpStream::connect(address)).await {
-            Ok(Ok(stream)) => return Ok(stream),
+    let address_count = addresses.len();
+    for (index, address) in addresses.into_iter().enumerate() {
+        authority.revalidate(effect).await?;
+        let attempt_deadline = shared_attempt_deadline(deadline, address_count - index);
+        match tokio::time::timeout_at(attempt_deadline, TcpStream::connect(address)).await {
+            Ok(Ok(stream)) => return Ok(Ok(stream)),
             Ok(Err(error)) => last_error = Some(error),
-            Err(_) => {
-                last_error = Some(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "native network connection timed out",
-                ));
-            }
+            Err(_) => last_error = Some(connect_timeout_error()),
         }
     }
-    Err(last_error.unwrap_or_else(|| {
+    Ok(Err(last_error.unwrap_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "no native network destination",
         )
-    }))
+    })))
 }
 
 #[cfg(target_os = "linux")]
@@ -327,24 +348,37 @@ async fn connect_via_environment_proxy(
     host: &str,
     port: u16,
     timeout_seconds: u64,
-) -> std::io::Result<TcpStream> {
-    let proxy = environment_proxy()?;
-    let proxy_host = proxy.host_str().ok_or_else(invalid_environment_proxy)?;
-    let proxy_port = proxy
-        .port_or_known_default()
-        .ok_or_else(invalid_environment_proxy)?;
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+) -> VyaneResult<std::io::Result<TcpStream>> {
+    let proxy = match environment_proxy() {
+        Ok(proxy) => proxy,
+        Err(error) => return Ok(Err(error)),
+    };
+    let Some(proxy_host) = proxy.host_str() else {
+        return Ok(Err(invalid_environment_proxy()));
+    };
+    let Some(proxy_port) = proxy.port_or_known_default() else {
+        return Ok(Err(invalid_environment_proxy()));
+    };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
-    let mut addresses = lookup_host((proxy_host, proxy_port))
-        .await?
-        .collect::<Vec<_>>();
-    addresses.sort_unstable();
-    addresses.dedup();
+    authority.revalidate(effect).await?;
+    let mut addresses =
+        match tokio::time::timeout_at(deadline, lookup_host((proxy_host, proxy_port))).await {
+            Ok(Ok(addresses)) => addresses.collect::<Vec<_>>(),
+            Ok(Err(error)) => return Ok(Err(error)),
+            Err(_) => return Ok(Err(connect_timeout_error())),
+        };
+    deduplicate_addresses(&mut addresses);
     if addresses.is_empty() || addresses.len() > 32 {
-        return Err(invalid_environment_proxy());
+        return Ok(Err(invalid_environment_proxy()));
     }
     let mut stream = None;
-    for address in addresses {
-        match tokio::time::timeout_at(deadline, TcpStream::connect(address)).await {
+    let address_count = addresses.len();
+    for (index, address) in addresses.into_iter().enumerate() {
+        authority.revalidate(effect).await?;
+        let attempt_deadline = shared_attempt_deadline(deadline, address_count - index);
+        match tokio::time::timeout_at(attempt_deadline, TcpStream::connect(address)).await {
             Ok(Ok(connected)) => {
                 stream = Some(connected);
                 break;
@@ -353,48 +387,80 @@ async fn connect_via_environment_proxy(
             Err(_) => break,
         }
     }
-    let mut stream = stream.ok_or_else(|| {
-        std::io::Error::new(
+    let Some(mut stream) = stream else {
+        return Ok(Err(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             "native network upstream proxy is unavailable",
-        )
-    })?;
-    stream
+        )));
+    };
+    authority.revalidate(effect).await?;
+    if let Err(error) = stream
         .write_all(
             format!(
                 "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\nProxy-Connection: Keep-Alive\r\n\r\n"
             )
             .as_bytes(),
         )
-        .await?;
+        .await
+    {
+        return Ok(Err(error));
+    }
     let mut response = Vec::new();
     let mut buffer = [0u8; 512];
     while response.windows(4).all(|window| window != b"\r\n\r\n") {
-        let count = tokio::time::timeout_at(deadline, stream.read(&mut buffer))
-            .await
-            .map_err(|_| {
-                std::io::Error::new(
+        let count = match tokio::time::timeout_at(deadline, stream.read(&mut buffer)).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => return Ok(Err(error)),
+            Err(_) => {
+                return Ok(Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "native network upstream proxy timed out",
-                )
-            })??;
+                )));
+            }
+        };
         if count == 0 || response.len().saturating_add(count) > 8192 {
-            return Err(invalid_environment_proxy());
+            return Ok(Err(invalid_environment_proxy()));
         }
         response.extend_from_slice(&buffer[..count]);
     }
-    let header_end = response
+    let Some(header_end) = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .map(|position| position + 4)
-        .ok_or_else(invalid_environment_proxy)?;
+    else {
+        return Ok(Err(invalid_environment_proxy()));
+    };
     if header_end != response.len() || !proxy_connect_succeeded(&response) {
-        return Err(std::io::Error::new(
+        return Ok(Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "native network upstream proxy rejected the destination",
-        ));
+        )));
     }
-    Ok(stream)
+    Ok(Ok(stream))
+}
+
+#[cfg(target_os = "linux")]
+fn connect_timeout_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "native network connection timed out",
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn deduplicate_addresses(addresses: &mut Vec<std::net::SocketAddr>) {
+    let mut seen = HashSet::new();
+    addresses.retain(|address| seen.insert(*address));
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn shared_attempt_deadline(
+    overall: tokio::time::Instant,
+    attempts_remaining: usize,
+) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    let remaining = overall.saturating_duration_since(now);
+    now + remaining / u32::try_from(attempts_remaining).unwrap_or(u32::MAX).max(1)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -483,41 +549,89 @@ async fn read_https_prelude(
             return Ok(None);
         }
         bytes.extend_from_slice(&frame);
-        if bytes.len() < 5 {
-            continue;
+        match tls_records_match_sni(&bytes, host) {
+            TlsPreludeState::Incomplete => {}
+            TlsPreludeState::Invalid => return Ok(None),
+            TlsPreludeState::Valid => return Ok(Some(bytes)),
         }
-        if bytes[0] != 22 {
-            return Ok(None);
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TlsPreludeState {
+    Incomplete,
+    Invalid,
+    Valid,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn tls_records_match_sni(bytes: &[u8], host: &str) -> TlsPreludeState {
+    let mut record_offset = 0usize;
+    let mut handshake = Vec::new();
+    loop {
+        let Some(header_end) = record_offset.checked_add(5) else {
+            return TlsPreludeState::Invalid;
+        };
+        if bytes.len() < header_end {
+            return TlsPreludeState::Incomplete;
         }
-        let record_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
-        let total = 5usize.saturating_add(record_len);
-        if total > MAX_TLS_CLIENT_HELLO_BYTES {
-            return Ok(None);
+        if bytes[record_offset] != 22 {
+            return TlsPreludeState::Invalid;
         }
-        if bytes.len() < total {
-            continue;
+        let record_len =
+            u16::from_be_bytes([bytes[record_offset + 3], bytes[record_offset + 4]]) as usize;
+        let Some(record_end) = header_end.checked_add(record_len) else {
+            return TlsPreludeState::Invalid;
+        };
+        if record_end > MAX_TLS_CLIENT_HELLO_BYTES {
+            return TlsPreludeState::Invalid;
         }
-        return Ok(tls_client_hello_sni(&bytes[..total])
-            .is_some_and(|sni| sni.eq_ignore_ascii_case(host))
-            .then_some(bytes));
+        if bytes.len() < record_end {
+            return TlsPreludeState::Incomplete;
+        }
+        handshake.extend_from_slice(&bytes[header_end..record_end]);
+        if handshake.len() >= 4 {
+            if handshake[0] != 1 {
+                return TlsPreludeState::Invalid;
+            }
+            let handshake_len = ((handshake[1] as usize) << 16)
+                | ((handshake[2] as usize) << 8)
+                | handshake[3] as usize;
+            let Some(handshake_end) = 4usize.checked_add(handshake_len) else {
+                return TlsPreludeState::Invalid;
+            };
+            if handshake_end > MAX_TLS_CLIENT_HELLO_BYTES {
+                return TlsPreludeState::Invalid;
+            }
+            if handshake.len() >= handshake_end {
+                return if tls_client_hello_sni(&handshake[..handshake_end])
+                    .is_some_and(|sni| sni.eq_ignore_ascii_case(host))
+                {
+                    TlsPreludeState::Valid
+                } else {
+                    TlsPreludeState::Invalid
+                };
+            }
+        }
+        record_offset = record_end;
+        if record_offset == bytes.len() {
+            return TlsPreludeState::Incomplete;
+        }
     }
 }
 
 #[cfg(any(target_os = "linux", test))]
 fn tls_client_hello_sni(bytes: &[u8]) -> Option<&str> {
-    if bytes.len() < 9 || bytes[0] != 22 {
-        return None;
-    }
-    let record_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
-    if 5usize.checked_add(record_len)? > bytes.len() || bytes[5] != 1 {
+    if bytes.len() < 4 || bytes[0] != 1 {
         return None;
     }
     let handshake_len =
-        ((bytes[6] as usize) << 16) | ((bytes[7] as usize) << 8) | bytes[8] as usize;
-    if 9usize.checked_add(handshake_len)? > 5 + record_len {
+        ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
+    if 4usize.checked_add(handshake_len)? > bytes.len() {
         return None;
     }
-    let mut offset = 9usize.checked_add(2 + 32)?;
+    let mut offset = 4usize.checked_add(2 + 32)?;
     let session_len = *bytes.get(offset)? as usize;
     offset = offset.checked_add(1 + session_len)?;
     let cipher_len = u16::from_be_bytes([*bytes.get(offset)?, *bytes.get(offset + 1)?]) as usize;
@@ -528,7 +642,7 @@ fn tls_client_hello_sni(bytes: &[u8]) -> Option<&str> {
         u16::from_be_bytes([*bytes.get(offset)?, *bytes.get(offset + 1)?]) as usize;
     offset = offset.checked_add(2)?;
     let extensions_end = offset.checked_add(extensions_len)?;
-    if extensions_end > 9 + handshake_len {
+    if extensions_end > 4 + handshake_len {
         return None;
     }
     while offset < extensions_end {
@@ -635,6 +749,18 @@ fn public_v6(ip: Ipv6Addr) -> bool {
         return public_v4(mapped);
     }
     let segments = ip.segments();
+    if segments[..6].iter().all(|segment| *segment == 0)
+        || (segments[0] == 0x0064
+            && segments[1] == 0xff9b
+            && segments[2..6].iter().all(|segment| *segment == 0))
+    {
+        let octets = ip.octets();
+        return public_v4(Ipv4Addr::new(
+            octets[12], octets[13], octets[14], octets[15],
+        ));
+    }
+    let local_translation_prefix =
+        segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 1;
     let special_2001 = segments[0] == 0x2001
         && (segments[1] == 0
             || segments[1] == 2
@@ -647,6 +773,7 @@ fn public_v6(ip: Ipv6Addr) -> bool {
         || segments[0] & 0xffc0 == 0xfe80
         || segments[0] & 0xffc0 == 0xfec0
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || local_translation_prefix
         || special_2001)
 }
 
@@ -739,6 +866,9 @@ mod tests {
             "fe80::1",
             "2001:db8::1",
             "::ffff:127.0.0.1",
+            "::10.0.0.1",
+            "64:ff9b::10.0.0.1",
+            "64:ff9b:1::1",
         ] {
             assert!(
                 !public_ip(address.parse().expect("test IP address")),
@@ -754,10 +884,34 @@ mod tests {
     #[test]
     fn tls_client_hello_exposes_the_exact_sni() {
         let hello = client_hello("crates.io");
-        assert_eq!(tls_client_hello_sni(&hello), Some("crates.io"));
+        assert_eq!(tls_client_hello_sni(&hello[5..]), Some("crates.io"));
+        assert_eq!(
+            tls_records_match_sni(&hello, "crates.io"),
+            TlsPreludeState::Valid
+        );
         let mut malformed = hello;
         malformed[0] = 23;
-        assert_eq!(tls_client_hello_sni(&malformed), None);
+        assert_eq!(
+            tls_records_match_sni(&malformed, "crates.io"),
+            TlsPreludeState::Invalid
+        );
+    }
+
+    #[test]
+    fn fragmented_tls_client_hello_is_assembled_before_sni_validation() {
+        let hello = client_hello("crates.io");
+        let handshake = &hello[5..];
+        let split = handshake.len() / 2;
+        let mut fragmented = vec![22, 3, 1];
+        fragmented.extend_from_slice(&(split as u16).to_be_bytes());
+        fragmented.extend_from_slice(&handshake[..split]);
+        fragmented.extend_from_slice(&[22, 3, 1]);
+        fragmented.extend_from_slice(&((handshake.len() - split) as u16).to_be_bytes());
+        fragmented.extend_from_slice(&handshake[split..]);
+        assert_eq!(
+            tls_records_match_sni(&fragmented, "crates.io"),
+            TlsPreludeState::Valid
+        );
     }
 
     #[test]
@@ -767,5 +921,20 @@ mod tests {
         ));
         assert!(!proxy_connect_succeeded(b"HTTP/1.1 403 Forbidden\r\n\r\n"));
         assert!(!proxy_connect_succeeded(b"HTTP/1.1 2000 Invalid\r\n\r\n"));
+    }
+
+    #[test]
+    fn address_deduplication_preserves_resolver_order_and_attempts_share_time() {
+        let first = "1.1.1.1:443".parse().expect("first address");
+        let second = "8.8.8.8:443".parse().expect("second address");
+        let mut addresses = vec![first, second, first];
+        deduplicate_addresses(&mut addresses);
+        assert_eq!(addresses, [first, second]);
+
+        let overall = tokio::time::Instant::now() + Duration::from_secs(10);
+        let first_attempt = shared_attempt_deadline(overall, 2);
+        let final_attempt = shared_attempt_deadline(overall, 1);
+        assert!(first_attempt < final_attempt);
+        assert!(final_attempt <= overall);
     }
 }

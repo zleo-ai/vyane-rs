@@ -345,6 +345,29 @@ async fn allowed_https_host_is_reachable_through_the_policy_broker() {
 }
 
 #[tokio::test]
+#[ignore = "requires the configured host HTTPS proxy"]
+async fn environment_proxy_connect_revalidates_authority_at_the_physical_attempt() {
+    let root = tempdir().expect("workspace");
+    let authority = RecordingAuthority {
+        effects: Mutex::new(Vec::new()),
+        fail_at: Some(6),
+    };
+    let source = concat!(
+        "import urllib.request; ",
+        "urllib.request.urlopen('https://example.com',timeout=5)"
+    );
+    let result = execute_network_with_route(
+        root.path(),
+        &authority,
+        call("python3", &["-c", source]),
+        NativeCommandNetworkRoute::EnvironmentProxy,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(authority.effects.lock().expect("effects").len(), 6);
+}
+
+#[tokio::test]
 async fn command_network_revalidates_live_authority_before_connecting() {
     let root = tempdir().expect("workspace");
     let authority = RecordingAuthority {
@@ -360,6 +383,25 @@ async fn command_network_revalidates_live_authority_before_connecting() {
     let result = execute_network(root.path(), &authority, call("python3", &["-c", source])).await;
     assert!(result.is_err());
     assert_eq!(authority.effects.lock().expect("effects").len(), 4);
+}
+
+#[tokio::test]
+async fn command_timeout_is_not_extended_by_an_idle_network_broker() {
+    let root = tempdir().expect("workspace");
+    let mut invocation = call("python3", &["-c", "import time; time.sleep(30)"]);
+    invocation
+        .arguments
+        .insert("timeout_seconds".into(), Value::from(1));
+    let started = std::time::Instant::now();
+    let output = execute_network(root.path(), &RecordingAuthority::default(), invocation)
+        .await
+        .expect("network command timeout");
+    assert!(output.contains("status: timed_out"), "{output}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "network broker extended the command timeout: {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]

@@ -435,6 +435,13 @@ impl RunControl {
         self.spawn_authority = spawn_authority;
         self
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_child_cancellation(mut self) -> (Self, CancellationToken) {
+        let cancel = self.cancel.child_token();
+        self.cancel = cancel.clone();
+        (self, cancel)
+    }
 }
 
 /// Last-resort process-group cleanup for abrupt future drop or unwinding.

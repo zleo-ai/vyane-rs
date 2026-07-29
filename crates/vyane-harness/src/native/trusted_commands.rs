@@ -522,6 +522,7 @@ async fn run_networked_command(
     let child_fd: OwnedFd = child_channel.into();
     let environment = command_environment();
     let seccomp_filter = command_seccomp_filter(true);
+    let (control, broker_failure_cancel) = control.with_child_cancellation();
     let run = run_capture_with_pinned_limit_authorized_channel(
         PRLIMIT,
         args,
@@ -536,9 +537,19 @@ async fn run_networked_command(
         child_fd,
     );
     let broker = run_network_broker(broker_fd, network, authority, effect);
-    let (run_result, broker_result) = tokio::join!(run, broker);
-    broker_result?;
-    run_result
+    tokio::pin!(run);
+    tokio::pin!(broker);
+    tokio::select! {
+        run_result = &mut run => run_result,
+        broker_result = &mut broker => match broker_result {
+            Ok(()) => run.await,
+            Err(error) => {
+                broker_failure_cancel.cancel();
+                let _ = run.await;
+                Err(error)
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
