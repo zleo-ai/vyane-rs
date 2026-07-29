@@ -3,6 +3,7 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -10,7 +11,8 @@ use thiserror::Error;
 use super::{ToolCall, ToolContext};
 
 /// Result of applying one native-harness permission policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PermissionEffect {
     Allow,
     Ask,
@@ -47,6 +49,111 @@ pub enum PermissionRuleError {
     },
     #[error("a non-overridable permission floor rule must deny")]
     FloorRuleMustDeny,
+    #[error("native tool permission policy exceeds its bounded shape")]
+    PolicyTooLarge,
+    #[error("native tool permission policy contains invalid text")]
+    InvalidPolicyText,
+}
+
+const MAX_CONFIGURED_RULES: usize = 64;
+pub const MAX_NATIVE_TOOL_PERMISSION_LAYERS: usize = 8;
+const MAX_ARGUMENT_MATCHERS_PER_RULE: usize = 16;
+const MAX_TOOL_PATTERN_BYTES: usize = 128;
+const MAX_ARGUMENT_NAME_BYTES: usize = 64;
+const MAX_ARGUMENT_PATTERN_BYTES: usize = 512;
+const MAX_POLICY_PATTERN_BYTES: usize = 16 * 1024;
+
+/// One serializable, bounded tool-decision rule.
+///
+/// Argument values are regex sources matched against the canonical string
+/// representation used by the native permission engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeToolPermissionRule {
+    pub tool: String,
+    pub effect: PermissionEffect,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arguments: BTreeMap<String, String>,
+}
+
+/// One independent ordered decision layer. A layer can only restrict the
+/// deny-by-default policy for the exact registered tool set; it never
+/// registers or grants a tool by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeToolPermissionPolicy {
+    #[serde(default = "allow_effect")]
+    pub default: PermissionEffect,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<NativeToolPermissionRule>,
+}
+
+impl Default for NativeToolPermissionPolicy {
+    fn default() -> Self {
+        Self {
+            default: PermissionEffect::Allow,
+            rules: Vec::new(),
+        }
+    }
+}
+
+const fn allow_effect() -> PermissionEffect {
+    PermissionEffect::Allow
+}
+
+impl NativeToolPermissionPolicy {
+    pub fn validate(&self) -> Result<(), PermissionRuleError> {
+        self.compile().map(|_| ())
+    }
+
+    fn compile(&self) -> Result<PermissionRuleSet, PermissionRuleError> {
+        if self.rules.len() > MAX_CONFIGURED_RULES {
+            return Err(PermissionRuleError::PolicyTooLarge);
+        }
+        let mut total_pattern_bytes = 0usize;
+        let mut rules = Vec::with_capacity(self.rules.len());
+        for source in &self.rules {
+            if !valid_policy_text(&source.tool, MAX_TOOL_PATTERN_BYTES) {
+                return Err(PermissionRuleError::InvalidPolicyText);
+            }
+            if source.arguments.len() > MAX_ARGUMENT_MATCHERS_PER_RULE {
+                return Err(PermissionRuleError::PolicyTooLarge);
+            }
+            total_pattern_bytes = total_pattern_bytes.saturating_add(source.tool.len());
+            let mut rule = PermissionRule::new(source.tool.clone(), source.effect)?;
+            for (argument, pattern) in &source.arguments {
+                if !valid_policy_text(argument, MAX_ARGUMENT_NAME_BYTES)
+                    || pattern.is_empty()
+                    || pattern.len() > MAX_ARGUMENT_PATTERN_BYTES
+                    || pattern.chars().any(char::is_control)
+                {
+                    return Err(PermissionRuleError::InvalidPolicyText);
+                }
+                total_pattern_bytes = total_pattern_bytes
+                    .saturating_add(argument.len())
+                    .saturating_add(pattern.len());
+                if total_pattern_bytes > MAX_POLICY_PATTERN_BYTES {
+                    return Err(PermissionRuleError::PolicyTooLarge);
+                }
+                rule = rule.with_argument_pattern(argument.clone(), pattern.clone())?;
+            }
+            if total_pattern_bytes > MAX_POLICY_PATTERN_BYTES {
+                return Err(PermissionRuleError::PolicyTooLarge);
+            }
+            rules.push(rule);
+        }
+        Ok(PermissionRuleSet {
+            rules,
+            default_effect: self.default,
+        })
+    }
+}
+
+fn valid_policy_text(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 #[derive(Debug, Clone)]
@@ -187,8 +294,32 @@ impl BuiltinMatcher {
 #[derive(Debug, Clone)]
 pub struct PermissionPolicy {
     rules: Vec<PermissionRule>,
+    restriction_layers: Vec<PermissionRuleSet>,
     floor_rules: Vec<PermissionRule>,
     default_effect: PermissionEffect,
+}
+
+#[derive(Debug, Clone)]
+struct PermissionRuleSet {
+    rules: Vec<PermissionRule>,
+    default_effect: PermissionEffect,
+}
+
+impl PermissionRuleSet {
+    fn decide(
+        &self,
+        call: &ToolCall,
+    ) -> (PermissionEffect, Option<usize>, Option<&PermissionRule>) {
+        match self
+            .rules
+            .iter()
+            .enumerate()
+            .rfind(|(_, rule)| rule.matches(call))
+        {
+            Some((index, rule)) => (rule.effect, Some(index), Some(rule)),
+            None => (self.default_effect, None, None),
+        }
+    }
 }
 
 impl Default for PermissionPolicy {
@@ -208,6 +339,7 @@ impl PermissionPolicy {
     pub fn new(default_effect: PermissionEffect) -> Self {
         Self {
             rules: Vec::new(),
+            restriction_layers: Vec::new(),
             floor_rules: Vec::new(),
             default_effect,
         }
@@ -235,6 +367,21 @@ impl PermissionPolicy {
         Ok(())
     }
 
+    /// Add one independently evaluated restriction layer.
+    ///
+    /// The strictest effect wins across the base registry policy and every
+    /// layer, so an `allow` here cannot override an existing `ask` or `deny`.
+    pub fn push_restriction(
+        &mut self,
+        policy: &NativeToolPermissionPolicy,
+    ) -> Result<(), PermissionRuleError> {
+        if self.restriction_layers.len() >= MAX_NATIVE_TOOL_PERMISSION_LAYERS {
+            return Err(PermissionRuleError::PolicyTooLarge);
+        }
+        self.restriction_layers.push(policy.compile()?);
+        Ok(())
+    }
+
     #[must_use]
     pub fn with_rule(mut self, rule: PermissionRule) -> Self {
         self.push_rule(rule);
@@ -242,11 +389,6 @@ impl PermissionPolicy {
     }
 
     pub fn decide(&self, call: &ToolCall, context: &ToolContext) -> PermissionDecision {
-        let matched = self
-            .rules
-            .iter()
-            .enumerate()
-            .rfind(|(_, rule)| rule.matches(call));
         let floor = self
             .floor_rules
             .iter()
@@ -254,10 +396,26 @@ impl PermissionPolicy {
             .rfind(|(_, rule)| rule.matches(call));
         let (effect, matched_rule_index, matched_rule, matched_floor) = match floor {
             Some((index, rule)) => (PermissionEffect::Deny, Some(index), Some(rule), true),
-            None => match matched {
-                Some((index, rule)) => (rule.effect, Some(index), Some(rule), false),
-                None => (self.default_effect, None, None, false),
-            },
+            None => {
+                let (mut effect, mut index, mut rule) = match self
+                    .rules
+                    .iter()
+                    .enumerate()
+                    .rfind(|(_, rule)| rule.matches(call))
+                {
+                    Some((index, rule)) => (rule.effect, Some(index), Some(rule)),
+                    None => (self.default_effect, None, None),
+                };
+                for layer in &self.restriction_layers {
+                    let (candidate_effect, candidate_index, candidate_rule) = layer.decide(call);
+                    if candidate_effect.restrictiveness() > effect.restrictiveness() {
+                        effect = candidate_effect;
+                        index = candidate_index;
+                        rule = candidate_rule;
+                    }
+                }
+                (effect, index, rule, false)
+            }
         };
         let approval = if effect == PermissionEffect::Ask {
             ApprovalPlan::new(call, context, matched_rule.map(PermissionRule::description))
@@ -269,6 +427,16 @@ impl PermissionPolicy {
             matched_rule_index,
             matched_floor,
             approval,
+        }
+    }
+}
+
+impl PermissionEffect {
+    const fn restrictiveness(self) -> u8 {
+        match self {
+            Self::Allow => 0,
+            Self::Ask => 1,
+            Self::Deny => 2,
         }
     }
 }
@@ -747,6 +915,14 @@ mod tests {
         }
     }
 
+    fn named_call(name: &str, arguments: BTreeMap<String, Value>) -> ToolCall {
+        ToolCall {
+            id: "call-configured".into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
     fn context() -> ToolContext {
         ToolContext::new(std::env::current_dir().unwrap()).unwrap()
     }
@@ -790,6 +966,152 @@ mod tests {
         let decision = policy.decide(&forced, &context());
         assert_eq!(decision.effect, PermissionEffect::Deny);
         assert_eq!(decision.matched_rule_index, Some(1));
+    }
+
+    #[test]
+    fn configured_layers_use_find_last_then_strictest_wins() {
+        let request = NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![
+                NativeToolPermissionRule {
+                    tool: "run_*".into(),
+                    effect: PermissionEffect::Ask,
+                    arguments: BTreeMap::new(),
+                },
+                NativeToolPermissionRule {
+                    tool: "run_command".into(),
+                    effect: PermissionEffect::Allow,
+                    arguments: BTreeMap::from([("program".into(), "^cargo$".into())]),
+                },
+            ],
+        };
+        let managed = NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![NativeToolPermissionRule {
+                tool: "run_command".into(),
+                effect: PermissionEffect::Deny,
+                arguments: BTreeMap::from([("program".into(), "^cargo$".into())]),
+            }],
+        };
+        let mut policy = PermissionPolicy::deny_by_default()
+            .with_rule(PermissionRule::new("run_command", PermissionEffect::Allow).unwrap());
+        policy.push_restriction(&request).unwrap();
+
+        let cargo = named_call(
+            "run_command",
+            BTreeMap::from([("program".into(), Value::String("cargo".into()))]),
+        );
+        let shell = named_call(
+            "run_command",
+            BTreeMap::from([("program".into(), Value::String("sh".into()))]),
+        );
+        assert_eq!(
+            policy.decide(&cargo, &context()).effect,
+            PermissionEffect::Allow
+        );
+        assert_eq!(
+            policy.decide(&shell, &context()).effect,
+            PermissionEffect::Ask
+        );
+
+        policy.push_restriction(&managed).unwrap();
+        assert_eq!(
+            policy.decide(&cargo, &context()).effect,
+            PermissionEffect::Deny
+        );
+        assert_eq!(
+            policy.decide(&shell, &context()).effect,
+            PermissionEffect::Ask
+        );
+    }
+
+    #[test]
+    fn configured_allow_cannot_grant_an_absent_tool() {
+        let configured = NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![NativeToolPermissionRule {
+                tool: "run_command".into(),
+                effect: PermissionEffect::Allow,
+                arguments: BTreeMap::new(),
+            }],
+        };
+        let mut policy = PermissionPolicy::deny_by_default();
+        policy.push_restriction(&configured).unwrap();
+        assert_eq!(
+            policy
+                .decide(&named_call("run_command", BTreeMap::new()), &context())
+                .effect,
+            PermissionEffect::Deny
+        );
+    }
+
+    #[test]
+    fn configured_ask_keeps_the_call_bound_approval_plan() {
+        let configured = NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![NativeToolPermissionRule {
+                tool: "write_file".into(),
+                effect: PermissionEffect::Ask,
+                arguments: BTreeMap::from([("path".into(), r"^src/".into())]),
+            }],
+        };
+        let mut policy = PermissionPolicy::deny_by_default()
+            .with_rule(PermissionRule::new("write_file", PermissionEffect::Allow).unwrap());
+        policy.push_restriction(&configured).unwrap();
+        let decision = policy.decide(
+            &named_call(
+                "write_file",
+                BTreeMap::from([("path".into(), Value::String("src/lib.rs".into()))]),
+            ),
+            &context(),
+        );
+        assert_eq!(decision.effect, PermissionEffect::Ask);
+        let approval = decision.approval.unwrap();
+        assert_eq!(approval.tool, "write_file");
+        assert_eq!(approval.tool_call_id, "call-configured");
+        assert_ne!(approval.canonical_plan_hash, approval.approval_binding_hash);
+    }
+
+    #[test]
+    fn configured_policy_rejects_oversized_or_invalid_matchers() {
+        let oversized = NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: (0..=MAX_CONFIGURED_RULES)
+                .map(|index| NativeToolPermissionRule {
+                    tool: format!("tool-{index}"),
+                    effect: PermissionEffect::Allow,
+                    arguments: BTreeMap::new(),
+                })
+                .collect(),
+        };
+        assert!(matches!(
+            oversized.validate(),
+            Err(PermissionRuleError::PolicyTooLarge)
+        ));
+
+        let invalid = NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![NativeToolPermissionRule {
+                tool: "run_command".into(),
+                effect: PermissionEffect::Ask,
+                arguments: BTreeMap::from([("program".into(), "(".into())]),
+            }],
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(PermissionRuleError::InvalidArgumentRegex { .. })
+        ));
+
+        let mut aggregate = PermissionPolicy::deny_by_default();
+        for _ in 0..MAX_NATIVE_TOOL_PERMISSION_LAYERS {
+            aggregate
+                .push_restriction(&NativeToolPermissionPolicy::default())
+                .unwrap();
+        }
+        assert!(matches!(
+            aggregate.push_restriction(&NativeToolPermissionPolicy::default()),
+            Err(PermissionRuleError::PolicyTooLarge)
+        ));
     }
 
     #[test]

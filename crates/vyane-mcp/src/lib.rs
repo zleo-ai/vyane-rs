@@ -1276,8 +1276,8 @@ fn broadcast_error_item(selector: String, error: &anyhow::Error) -> BroadcastToo
     }
 }
 
-// `Future` must be in scope for the `#[tool]` macro's async-rewriting in rmcp
-// v0.5. Kept as a private import alias so the surface API stays clean.
+// `Future` must be in scope for the `#[tool]` macro's async rewriting. Keep it
+// as a private import alias so the surface API stays clean.
 #[allow(dead_code)]
 type _FutureMustBeInScope = Box<dyn Future<Output = ()> + Send>;
 

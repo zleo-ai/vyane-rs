@@ -7,12 +7,16 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
-use vyane_config::{NativeCommandNetworkRouteConfig, NativePermissionCeiling as ConfigCeiling};
+use vyane_config::{
+    NativeCommandNetworkRouteConfig, NativePermissionCeiling as ConfigCeiling,
+    NativeToolPermissionEffectConfig,
+};
 use vyane_core::{Sandbox, WebSearchContextSize};
 use vyane_harness::native::{
-    NativeCommandNetworkPolicy, NativeCommandNetworkRoute, NativeCommandNetworkRule,
-    NativeCommandPolicy, NativeCommandRule, NativeReadPolicy, NativeWebFetchPolicy,
-    NativeWebSearchPolicy, NativeWritePolicy,
+    MAX_NATIVE_TOOL_PERMISSION_LAYERS, NativeCommandNetworkPolicy, NativeCommandNetworkRoute,
+    NativeCommandNetworkRule, NativeCommandPolicy, NativeCommandRule, NativeReadPolicy,
+    NativeToolPermissionPolicy, NativeToolPermissionRule, NativeWebFetchPolicy,
+    NativeWebSearchPolicy, NativeWritePolicy, PermissionEffect,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +34,14 @@ pub struct NativePermissionSet {
     pub web_search: Option<NativeWebSearchGrant>,
     #[serde(default)]
     pub web_fetch: Option<NativeWebFetchPolicy>,
+    /// Per-submission tool decision layer. It can only restrict tools already
+    /// registered by the capability fields above.
+    #[serde(default)]
+    pub tool_policy: Option<NativeToolPermissionPolicy>,
+    /// Independent config ceilings accumulated during admission. API callers
+    /// cannot inject these; the durable native policy freezes them explicitly.
+    #[serde(skip)]
+    pub tool_policy_ceilings: Vec<NativeToolPermissionPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +66,11 @@ pub enum NativePermissionSetError {
 
 impl NativePermissionSet {
     pub fn validate(&self) -> Result<(), NativePermissionSetError> {
+        if self.tool_policy_ceilings.len() + usize::from(self.tool_policy.is_some())
+            > MAX_NATIVE_TOOL_PERMISSION_LAYERS
+        {
+            return Err(NativePermissionSetError::InvalidPolicy);
+        }
         self.filesystem_read
             .validate()
             .map_err(|_| NativePermissionSetError::InvalidPolicy)?;
@@ -88,6 +105,16 @@ impl NativePermissionSet {
                 .map_err(|_| NativePermissionSetError::InvalidPolicy)?;
         }
         if let Some(policy) = &self.web_fetch {
+            policy
+                .validate()
+                .map_err(|_| NativePermissionSetError::InvalidPolicy)?;
+        }
+        if let Some(policy) = &self.tool_policy {
+            policy
+                .validate()
+                .map_err(|_| NativePermissionSetError::InvalidPolicy)?;
+        }
+        for policy in &self.tool_policy_ceilings {
             policy
                 .validate()
                 .map_err(|_| NativePermissionSetError::InvalidPolicy)?;
@@ -134,6 +161,9 @@ impl NativePermissionSet {
         restrict_network(&self.command_network, &ceiling.command_network)?;
         restrict_search(&mut self.web_search, &ceiling.web_search)?;
         restrict_fetch(&self.web_fetch, &ceiling.web_fetch)?;
+        if let Some(policy) = &ceiling.tool_policy {
+            self.tool_policy_ceilings.push(policy.clone());
+        }
 
         self.validate()
     }
@@ -253,9 +283,33 @@ impl TryFrom<&ConfigCeiling> for NativePermissionSet {
                 max_response_bytes: policy.max_response_bytes,
                 max_redirects: policy.max_redirects,
             }),
+            tool_policy: value
+                .tool_policy
+                .as_ref()
+                .map(|policy| NativeToolPermissionPolicy {
+                    default: permission_effect(policy.default),
+                    rules: policy
+                        .rules
+                        .iter()
+                        .map(|rule| NativeToolPermissionRule {
+                            tool: rule.tool.clone(),
+                            effect: permission_effect(rule.effect),
+                            arguments: rule.arguments.clone(),
+                        })
+                        .collect(),
+                }),
+            tool_policy_ceilings: Vec::new(),
         };
         set.validate()?;
         Ok(set)
+    }
+}
+
+const fn permission_effect(value: NativeToolPermissionEffectConfig) -> PermissionEffect {
+    match value {
+        NativeToolPermissionEffectConfig::Allow => PermissionEffect::Allow,
+        NativeToolPermissionEffectConfig::Ask => PermissionEffect::Ask,
+        NativeToolPermissionEffectConfig::Deny => PermissionEffect::Deny,
     }
 }
 
@@ -471,6 +525,8 @@ const fn context_rank(size: WebSearchContextSize) -> u8 {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use vyane_config::{NativeToolPermissionPolicyConfig, NativeToolPermissionRuleConfig};
 
     fn command(program: &str, prefix: &[&str], seconds: u64) -> NativeCommandPolicy {
         NativeCommandPolicy {
@@ -492,6 +548,44 @@ mod tests {
         };
         request.restrict_by(&ceiling).unwrap();
         assert!(request.command_execution.is_none());
+    }
+
+    #[test]
+    fn tool_decision_config_is_retained_as_an_independent_ceiling() {
+        let config = ConfigCeiling {
+            tool_policy: Some(NativeToolPermissionPolicyConfig {
+                default: NativeToolPermissionEffectConfig::Allow,
+                rules: vec![NativeToolPermissionRuleConfig {
+                    tool: "run_command".into(),
+                    effect: NativeToolPermissionEffectConfig::Deny,
+                    arguments: BTreeMap::from([("program".into(), "^sh$".into())]),
+                }],
+            }),
+            ..ConfigCeiling::default()
+        };
+        let ceiling = NativePermissionSet::try_from(&config).unwrap();
+        let mut request = NativePermissionSet {
+            tool_policy: Some(NativeToolPermissionPolicy {
+                default: PermissionEffect::Allow,
+                rules: vec![NativeToolPermissionRule {
+                    tool: "run_command".into(),
+                    effect: PermissionEffect::Ask,
+                    arguments: BTreeMap::new(),
+                }],
+            }),
+            ..NativePermissionSet::default()
+        };
+        request.restrict_by(&ceiling).unwrap();
+
+        assert_eq!(
+            request.tool_policy.as_ref().unwrap().rules[0].effect,
+            PermissionEffect::Ask
+        );
+        assert_eq!(request.tool_policy_ceilings.len(), 1);
+        assert_eq!(
+            request.tool_policy_ceilings[0].rules[0].effect,
+            PermissionEffect::Deny
+        );
     }
 
     #[test]

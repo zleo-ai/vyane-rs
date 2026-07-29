@@ -15,11 +15,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use vyane_core::{Effort, PinnedWorkdir, WorkdirIdentity};
 use vyane_harness::native::{
-    NativeCommandMountSet, NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy,
-    NativeWebFetchPolicy, NativeWebSearchPolicy, NativeWritePolicy,
+    MAX_NATIVE_TOOL_PERMISSION_LAYERS, NativeCommandMountSet, NativeCommandNetworkPolicy,
+    NativeCommandPolicy, NativeReadPolicy, NativeToolPermissionPolicy, NativeWebFetchPolicy,
+    NativeWebSearchPolicy, NativeWritePolicy,
 };
 
-const SCHEMA: u32 = 9;
+const SCHEMA: u32 = 10;
+const WRITABLE_ROOT_SCHEMA: u32 = 9;
 const WEB_FETCH_SCHEMA: u32 = 8;
 const WEB_SEARCH_SCHEMA: u32 = 7;
 const COMMAND_NETWORK_SCHEMA: u32 = 6;
@@ -186,6 +188,8 @@ pub(crate) struct NativeAgentPolicy {
     pub(crate) web_search: Option<NativeWebSearchSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) web_fetch: Option<NativeWebFetchPolicy>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) tool_permission_layers: Vec<NativeToolPermissionPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
@@ -247,6 +251,7 @@ impl std::fmt::Debug for NativeAgentPolicy {
                     .as_ref()
                     .map(|fetch| fetch.allow_domains.len()),
             )
+            .field("tool_permission_layers", &self.tool_permission_layers.len())
             .field("system", &self.system.as_ref().map(|_| "[REDACTED]"))
             .field("timeout_seconds", &self.timeout_seconds)
             .field("max_model_turns", &self.max_model_turns)
@@ -311,26 +316,28 @@ impl NativeAgentInput {
             .command_execution
             .as_ref()
             .is_none_or(|policy| policy.writable_roots.is_empty());
-        let supported_schema = self.schema == SCHEMA
-            || (no_writable_command_roots
-                && (self.schema == WEB_FETCH_SCHEMA
-                    || (self.schema == WEB_SEARCH_SCHEMA && self.policy.web_fetch.is_none())
-                    || (self.schema == COMMAND_NETWORK_SCHEMA
-                        && self.policy.web_search.is_none()
-                        && self.policy.web_fetch.is_none())
-                    || (self.schema == COMMAND_EXECUTION_SCHEMA
-                        && self.policy.command_network.is_none()
-                        && self.policy.web_search.is_none()
-                        && self.policy.web_fetch.is_none())
-                    || (self.schema == FILESYSTEM_WRITE_SCHEMA
-                        && self.policy.command_execution.is_none()
-                        && self.policy.web_search.is_none()
-                        && self.policy.web_fetch.is_none())
-                    || (self.schema == READ_ONLY_SCHEMA
-                        && self.policy.filesystem_write.is_none()
-                        && self.policy.command_execution.is_none()
-                        && self.policy.web_search.is_none()
-                        && self.policy.web_fetch.is_none())));
+        let supported_legacy_schema = self.policy.tool_permission_layers.is_empty()
+            && (self.schema == WRITABLE_ROOT_SCHEMA
+                || (no_writable_command_roots
+                    && (self.schema == WEB_FETCH_SCHEMA
+                        || (self.schema == WEB_SEARCH_SCHEMA && self.policy.web_fetch.is_none())
+                        || (self.schema == COMMAND_NETWORK_SCHEMA
+                            && self.policy.web_search.is_none()
+                            && self.policy.web_fetch.is_none())
+                        || (self.schema == COMMAND_EXECUTION_SCHEMA
+                            && self.policy.command_network.is_none()
+                            && self.policy.web_search.is_none()
+                            && self.policy.web_fetch.is_none())
+                        || (self.schema == FILESYSTEM_WRITE_SCHEMA
+                            && self.policy.command_execution.is_none()
+                            && self.policy.web_search.is_none()
+                            && self.policy.web_fetch.is_none())
+                        || (self.schema == READ_ONLY_SCHEMA
+                            && self.policy.filesystem_write.is_none()
+                            && self.policy.command_execution.is_none()
+                            && self.policy.web_search.is_none()
+                            && self.policy.web_fetch.is_none()))));
+        let supported_schema = self.schema == SCHEMA || supported_legacy_schema;
         if !supported_schema
             || !valid_text(&self.owner, MAX_ID_BYTES)
             || !valid_text(&self.run_id, MAX_ID_BYTES)
@@ -687,6 +694,7 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
         || policy.timeout_seconds > MAX_TIMEOUT_SECONDS
         || policy.max_model_turns == 0
         || policy.max_model_turns > MAX_MODEL_TURNS
+        || policy.tool_permission_layers.len() > MAX_NATIVE_TOOL_PERMISSION_LAYERS
     {
         return Err(NativeAgentSpoolError::InvalidInput);
     }
@@ -733,6 +741,11 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
     }
     if let Some(fetch) = &policy.web_fetch {
         fetch
+            .validate()
+            .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
+    }
+    for layer in &policy.tool_permission_layers {
+        layer
             .validate()
             .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
     }
@@ -934,6 +947,7 @@ fn sync_directory(path: &Path) -> Result<(), NativeAgentSpoolError> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use vyane_harness::native::{NativeToolPermissionRule, PermissionEffect};
 
     fn write_private(path: &Path, bytes: impl AsRef<[u8]>) {
         use std::os::unix::fs::PermissionsExt as _;
@@ -969,6 +983,7 @@ mod tests {
             command_network: None,
             web_search: None,
             web_fetch: None,
+            tool_permission_layers: Vec::new(),
             system: Some("system-body-marker".into()),
             timeout_seconds: 120,
             max_model_turns: 8,
@@ -1481,6 +1496,41 @@ mod tests {
     }
 
     #[test]
+    fn schema_nine_input_remains_recoverable_without_tool_decision_layers() {
+        let (_directory, spool) = fixture();
+        let path = spool.input_path("run-marker").unwrap();
+        let mut legacy = input();
+        legacy.schema = WRITABLE_ROOT_SCHEMA;
+        write_private(&path, serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(spool.read("run-marker", "worker-marker").unwrap(), legacy);
+        spool.remove_exact(&legacy).unwrap();
+
+        let mut configured = policy();
+        configured.tool_permission_layers = vec![NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![NativeToolPermissionRule {
+                tool: "read_file".into(),
+                effect: PermissionEffect::Ask,
+                arguments: BTreeMap::new(),
+            }],
+        }];
+        let mut invalid = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            configured,
+        )
+        .unwrap();
+        invalid.schema = WRITABLE_ROOT_SCHEMA;
+        write_private(&path, serde_json::to_vec(&invalid).unwrap());
+        assert_eq!(
+            spool.read("run-marker", "worker-marker"),
+            Err(NativeAgentSpoolError::CorruptInput)
+        );
+    }
+
+    #[test]
     fn symlink_hardlink_wrong_mode_and_oversize_fail_closed() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
         let (directory, spool) = fixture();
@@ -1704,6 +1754,16 @@ mod tests {
             max_response_bytes: 4096,
             max_redirects: 1,
         });
+        variants.push(value);
+        let mut value = base.clone();
+        value.tool_permission_layers = vec![NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![NativeToolPermissionRule {
+                tool: "read_file".into(),
+                effect: PermissionEffect::Ask,
+                arguments: BTreeMap::new(),
+            }],
+        }];
         variants.push(value);
         let mut value = base.clone();
         value.system = None;

@@ -15,9 +15,10 @@ use vyane_core::{
     ToolDefinition, Usage, VyaneError,
 };
 use vyane_harness::native::{
-    DEFAULT_NATIVE_MODEL_TURNS, MAX_NATIVE_MODEL_TURNS, NativeTool, NativeTurnDriver,
-    NativeTurnLimitError, NativeTurnLimits, NativeTurnOutcome, NativeTurnStop, PermissionEffect,
-    PermissionPolicy, PermissionRule, ToolContext, ToolError, ToolRegistry,
+    DEFAULT_NATIVE_MODEL_TURNS, MAX_NATIVE_MODEL_TURNS, NativeTool, NativeToolPermissionPolicy,
+    NativeToolPermissionRule, NativeTurnDriver, NativeTurnLimitError, NativeTurnLimits,
+    NativeTurnOutcome, NativeTurnStop, PermissionEffect, PermissionPolicy, PermissionRule,
+    ToolContext, ToolError, ToolRegistry,
 };
 
 assert_not_impl_any!(NativeTurnOutcome: serde::Serialize, serde::de::DeserializeOwned);
@@ -465,8 +466,18 @@ async fn ask_stops_without_tool_poll_or_replay_and_keeps_plan_out_of_debug() {
         ScriptStep::Outcome(text_outcome("must not send", None)),
     ]));
     let tool_calls = Arc::new(AtomicUsize::new(0));
-    let policy = PermissionPolicy::deny_by_default()
-        .with_rule(PermissionRule::new("echo", PermissionEffect::Ask).expect("permission rule"));
+    let mut policy = PermissionPolicy::deny_by_default()
+        .with_rule(PermissionRule::new("echo", PermissionEffect::Allow).expect("permission rule"));
+    policy
+        .push_restriction(&NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![NativeToolPermissionRule {
+                tool: "echo".into(),
+                effect: PermissionEffect::Ask,
+                arguments: BTreeMap::new(),
+            }],
+        })
+        .expect("configured permission layer");
     let driver = NativeTurnDriver::new(
         Arc::clone(&client) as Arc<dyn AuthorizedToolChatClient>,
         registry(Arc::clone(&tool_calls), "unused"),

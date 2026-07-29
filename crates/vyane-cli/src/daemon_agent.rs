@@ -526,7 +526,13 @@ impl DaemonAgentHost {
             command_network,
             web_search,
             web_fetch,
+            tool_policy,
+            tool_policy_ceilings,
         } = request.native_permissions;
+        let tool_permission_layers = tool_policy
+            .into_iter()
+            .chain(tool_policy_ceilings)
+            .collect();
         let web_search_submission = match (web_search.as_ref(), search_chain.as_ref()) {
             (Some(search), Some(chain)) => Some(crate::native_agent::NativeWebSearchSubmission {
                 selector: &search.target,
@@ -553,6 +559,7 @@ impl DaemonAgentHost {
                 command_network,
                 web_search: web_search_submission,
                 web_fetch,
+                tool_permission_layers,
                 system: request.system,
                 timeout_seconds,
             },
@@ -1164,6 +1171,7 @@ mod tests {
         assert!(default.native_permissions.command_network.is_none());
         assert!(default.native_permissions.web_search.is_none());
         assert!(default.native_permissions.web_fetch.is_none());
+        assert!(default.native_permissions.tool_policy.is_none());
 
         let mut configured = base;
         configured["native_permissions"] = serde_json::json!({
@@ -1200,6 +1208,14 @@ mod tests {
                 "max_fetches": 3,
                 "max_response_bytes": 65536,
                 "max_redirects": 2
+            },
+            "tool_policy": {
+                "default": "allow",
+                "rules": [{
+                    "tool": "run_command",
+                    "effect": "ask",
+                    "arguments": { "program": "^cargo$" }
+                }]
             }
         });
         let configured: AgentRunSubmitRequest =
@@ -1257,6 +1273,15 @@ mod tests {
         assert_eq!(fetch.max_fetches, 3);
         assert_eq!(fetch.max_response_bytes, 65536);
         assert_eq!(fetch.max_redirects, 2);
+        let tool_policy = configured
+            .native_permissions
+            .tool_policy
+            .expect("explicit tool policy");
+        assert_eq!(
+            tool_policy.rules[0].effect,
+            vyane_harness::native::PermissionEffect::Ask
+        );
+        assert_eq!(tool_policy.rules[0].arguments["program"], "^cargo$");
     }
 
     #[test]

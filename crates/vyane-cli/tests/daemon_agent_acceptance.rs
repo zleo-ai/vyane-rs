@@ -88,6 +88,26 @@ fn write_native_config_with_read_only_ceiling(directory: &TempDir, endpoint: &st
     path
 }
 
+fn write_native_config_with_write_approval(directory: &TempDir, endpoint: &str) -> PathBuf {
+    let path = write_native_config(directory, endpoint);
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str(
+        r#"
+
+        [native_permissions.filesystem_write]
+
+        [native_permissions.tool_policy]
+        default = "allow"
+
+        [[native_permissions.tool_policy.rules]]
+        tool = "write_file"
+        effect = "ask"
+        "#,
+    );
+    fs::write(&path, config).unwrap();
+    path
+}
+
 fn write_native_search_config(
     directory: &TempDir,
     main_endpoint: &str,
@@ -569,6 +589,32 @@ async fn native_agent_submit_uses_the_shared_resident_lane() {
     let retry = submit_native(data_dir.path(), run_id, &workdir).await;
     assert_eq!(retry.status(), reqwest::StatusCode::ACCEPTED);
     assert_eq!(retry.json::<Value>().await.unwrap()["state"], "succeeded");
+    let (base, token) = control(data_dir.path());
+    let drifted = reqwest::Client::new()
+        .post(format!("{base}/v1/agent-runs"))
+        .bearer_auth(token)
+        .json(&json!({
+            "run_id": run_id,
+            "task": "return native answer",
+            "target": "native",
+            "sandbox": "read_only",
+            "workdir": &workdir,
+            "execution_backend": "native_in_process",
+            "timeout_seconds": 2,
+            "native_permissions": {
+                "tool_policy": {
+                    "default": "allow",
+                    "rules": [{
+                        "tool": "read_file",
+                        "effect": "deny"
+                    }]
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(drifted.status(), reqwest::StatusCode::CONFLICT);
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
     assert!(regular_files_below(&native_spool_root).is_empty());
     assert_eq!(
@@ -691,6 +737,51 @@ async fn native_write_permission_reaches_the_real_resident_tool_lane() {
             .into_iter()
             .collect()
     );
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "native-test-model",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "write-call-approval",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": "{\"path\":\"must-not-exist.txt\",\"content\":\"denied\\n\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config_with_write_approval(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-approval-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    let run_id = "0197f524-7a00-7000-8000-000000000120";
+
+    let response = submit_native_write(data_dir.path(), run_id, &workdir).await;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(15)).await;
+    assert_eq!(done["state"], "failed");
+    assert_eq!(done["failure_code"], "policy_denied");
+    assert!(!workdir.join("must-not-exist.txt").exists());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
     assert!(daemon.stop().status.success());
 }
 
