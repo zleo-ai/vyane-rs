@@ -410,7 +410,14 @@ async fn mcp_workflow_tools_use_the_authenticated_resident_daemon() -> anyhow::R
     client.cancel().await?;
     let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await??;
     assert!(status.success(), "MCP child did not exit cleanly: {status}");
-    assert!(daemon.stop().status.success());
+    let stopped = daemon.stop();
+    assert!(
+        stopped.status.success(),
+        "daemon stop failed: status={}; stdout={}; stderr={}",
+        stopped.status,
+        String::from_utf8_lossy(&stopped.stdout),
+        String::from_utf8_lossy(&stopped.stderr)
+    );
     Ok(())
 }
 
