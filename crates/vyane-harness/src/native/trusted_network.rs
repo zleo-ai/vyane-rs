@@ -775,20 +775,26 @@ fn public_v6(ip: Ipv6Addr) -> bool {
     }
     let local_translation_prefix =
         segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 1;
+    let allocated_global_unicast = segments[0] & 0xe000 == 0x2000;
     let special_2001 = segments[0] == 0x2001
         && (segments[1] == 0
             || segments[1] == 2
             || (0x0010..=0x001f).contains(&segments[1])
             || (0x0020..=0x002f).contains(&segments[1]));
-    !(ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_multicast()
-        || segments[0] & 0xfe00 == 0xfc00
-        || segments[0] & 0xffc0 == 0xfe80
-        || segments[0] & 0xffc0 == 0xfec0
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
-        || local_translation_prefix
-        || special_2001)
+    let six_to_four = segments[0] == 0x2002;
+    let documentation_3fff = segments[0] == 0x3fff && segments[1] & 0xf000 == 0;
+    allocated_global_unicast
+        && !(ip.is_unspecified()
+            || ip.is_loopback()
+            || ip.is_multicast()
+            || segments[0] & 0xfe00 == 0xfc00
+            || segments[0] & 0xffc0 == 0xfe80
+            || segments[0] & 0xffc0 == 0xfec0
+            || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+            || local_translation_prefix
+            || special_2001
+            || six_to_four
+            || documentation_3fff)
 }
 
 #[cfg(test)]
@@ -883,6 +889,11 @@ mod tests {
             "::10.0.0.1",
             "64:ff9b::10.0.0.1",
             "64:ff9b:1::1",
+            "100::1",
+            "100:0:0:1::1",
+            "2002::1",
+            "3fff::1",
+            "5f00::1",
         ] {
             assert!(
                 !public_ip(address.parse().expect("test IP address")),

@@ -99,6 +99,8 @@ while child.poll() is None:
     client, _ = listener.accept()
     client.settimeout(5)
     established = False
+    broker_synchronized = True
+    client_eof = remote_eof = False
     header = b""
     while b"\r\n\r\n" not in header and len(header) <= 16384:
         part = client.recv(4096)
@@ -119,7 +121,6 @@ while child.poll() is None:
         client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         established = True
         client.settimeout(None)
-        client_eof = remote_eof = False
         while not (client_eof and remote_eof):
             watched = []
             if not client_eof:
@@ -147,8 +148,25 @@ while child.poll() is None:
                 client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             except Exception:
                 pass
+        else:
+            try:
+                if not client_eof:
+                    broker.sendall(struct.pack("!I", 0))
+                while not remote_eof:
+                    length = struct.unpack("!I", exact(broker, 4))[0]
+                    if length == 0:
+                        remote_eof = True
+                    elif length <= 65536:
+                        exact(broker, length)
+                    else:
+                        raise ValueError()
+            except Exception:
+                broker_synchronized = False
     finally:
         client.close()
+    if not broker_synchronized:
+        child.terminate()
+        break
 
 listener.close()
 sys.exit(child.wait())
@@ -786,6 +804,13 @@ fn sandbox_args(program: &str, args: &[String], network: bool) -> Vec<String> {
         }
         if std::path::Path::new("/etc/pki/tls").is_dir() {
             sandbox.extend(["--dir".into(), "/etc/pki/tls".into()]);
+        }
+        if std::path::Path::new("/etc/pki/ca-trust").is_dir() {
+            sandbox.extend([
+                "--ro-bind".into(),
+                "/etc/pki/ca-trust".into(),
+                "/etc/pki/ca-trust".into(),
+            ]);
         }
         for path in ["/etc/pki/tls/certs", "/etc/pki/tls/cert.pem"] {
             if std::path::Path::new(path).exists() {

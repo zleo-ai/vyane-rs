@@ -389,6 +389,35 @@ async fn rejected_tls_tunnel_does_not_poison_a_later_allowed_request() {
 
 #[tokio::test]
 #[ignore = "requires the configured host HTTPS proxy"]
+async fn reset_established_tunnel_does_not_poison_a_later_allowed_request() {
+    let root = tempdir().expect("workspace");
+    let source = concat!(
+        "import socket,ssl,struct,urllib.request\n",
+        "s=socket.create_connection(('127.0.0.1',3128),2)\n",
+        "s.sendall(b'CONNECT example.com:443 HTTP/1.1\\r\\n\\r\\n')\n",
+        "assert b' 200 ' in s.recv(4096)\n",
+        "tls=ssl.create_default_context().wrap_socket(s,server_hostname='example.com')\n",
+        "fd=tls.detach()\n",
+        "raw=socket.socket(fileno=fd)\n",
+        "raw.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))\n",
+        "raw.close()\n",
+        "response=urllib.request.urlopen('https://example.com',timeout=5)\n",
+        "print(response.status)\n"
+    );
+    let output = execute_network_with_route(
+        root.path(),
+        &RecordingAuthority::default(),
+        call("python3", &["-c", source]),
+        NativeCommandNetworkRoute::EnvironmentProxy,
+    )
+    .await
+    .expect("network command");
+    assert!(output.contains("exit_code: 0"), "{output}");
+    assert!(output.contains("200"), "{output}");
+}
+
+#[tokio::test]
+#[ignore = "requires the configured host HTTPS proxy"]
 async fn environment_proxy_connect_revalidates_authority_at_the_physical_attempt() {
     let root = tempdir().expect("workspace");
     let authority = RecordingAuthority {
