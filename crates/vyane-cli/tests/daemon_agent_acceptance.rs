@@ -533,24 +533,34 @@ async fn terminal(data_dir: &Path, run_id: &str, budget: Duration) -> Value {
         .build()
         .unwrap();
     loop {
-        let body = match get_json_with_client(
-            &client,
-            data_dir,
-            &format!("/v1/agent-runs/{run_id}"),
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "AgentRun did not become terminal before its polling budget; log: {}",
+            fs::read_to_string(data_dir.join("daemon.log")).unwrap_or_default()
+        );
+        let response = tokio::time::timeout(
+            remaining,
+            get_json_with_client(&client, data_dir, &format!("/v1/agent-runs/{run_id}")),
         )
-        .await
-        {
-            Ok((_, body)) => body,
-            Err(error) if error.is_timeout() || error.is_connect() => {
+        .await;
+        let body = match response {
+            Ok(Ok((_, body))) => body,
+            Ok(Err(error)) if error.is_timeout() || error.is_connect() => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
                 assert!(
-                    Instant::now() < deadline,
-                    "AgentRun status remained unavailable: {error}; log: {}",
+                    !remaining.is_zero(),
+                    "AgentRun status remained unavailable before its polling budget: {error}; log: {}",
                     fs::read_to_string(data_dir.join("daemon.log")).unwrap_or_default()
                 );
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
                 continue;
             }
-            Err(error) => panic!("AgentRun status response was invalid: {error}"),
+            Ok(Err(error)) => panic!("AgentRun status response was invalid: {error}"),
+            Err(_) => panic!(
+                "AgentRun status request exceeded its polling budget; log: {}",
+                fs::read_to_string(data_dir.join("daemon.log")).unwrap_or_default()
+            ),
         };
         if !matches!(
             body["state"].as_str(),
@@ -558,13 +568,43 @@ async fn terminal(data_dir: &Path, run_id: &str, budget: Duration) -> Value {
         ) {
             return body;
         }
+        let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
-            Instant::now() < deadline,
+            !remaining.is_zero(),
             "AgentRun did not become terminal: {body}; log: {}",
             fs::read_to_string(data_dir.join("daemon.log")).unwrap_or_default()
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
     }
+}
+
+#[tokio::test]
+async fn terminal_polling_never_crosses_total_budget() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(5))
+                .set_body_json(json!({"state": "running"})),
+        )
+        .mount(&server)
+        .await;
+    let data_dir = TempDir::new().unwrap();
+    fs::write(
+        data_dir.path().join("daemon.json"),
+        serde_json::to_vec(&json!({"addr": server.address().to_string()})).unwrap(),
+    )
+    .unwrap();
+    fs::write(data_dir.path().join("daemon.token"), "test-token").unwrap();
+
+    let polling = tokio::spawn(async move {
+        terminal(data_dir.path(), SUCCESS_RUN, Duration::from_millis(200)).await
+    });
+    let failure = tokio::time::timeout(Duration::from_secs(1), polling)
+        .await
+        .expect("polling crossed its total budget")
+        .expect_err("polling should fail when its total budget expires");
+    assert!(failure.is_panic());
 }
 
 fn regular_files_below(root: &Path) -> Vec<PathBuf> {
