@@ -45,6 +45,9 @@ skipping tests or reducing concurrency inside each fixture.
 [WP-98](plan/WP-98.md) reconciles the README's stale Native
 graceful-shutdown acceptance statement with WP-66 and the current tested
 roadmap state.
+[WP-99](plan/WP-99.md) refreshes the locked MCP SDK and macros from `rmcp`
+3.0.0 to the compatible 3.0.1 patch while retaining the Rust 1.88 floor and
+the existing stdio tool surface.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
