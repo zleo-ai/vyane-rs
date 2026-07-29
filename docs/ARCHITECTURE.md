@@ -324,8 +324,12 @@ allocation.
 WP-90 optionally overlays exact, pre-existing descriptor-bound writable roots
 inside the otherwise read-only workspace. The request must list those roots,
 every config ceiling must allow them, and the outer sandbox must permit writes.
-The workspace root, unlisted siblings and direct agent/repository control paths
-remain read-only. Unconfigured shell access, extra runtime roots
+Admission retains the opened root handles through execution and recursively
+re-audits them before every spawn; path replacement cannot redirect authority,
+while symlinks, nested mounts, special files and hard-linked regular files fail
+closed. Hard-link and mount-management syscalls are denied inside the command
+sandbox. The workspace root, unlisted siblings and case-insensitive matches for
+agent/repository control paths remain read-only. Unconfigured shell access, extra runtime roots
 and ungranted child network remain disabled. Because the base process
 sandbox mounts the complete workspace read-only, submissions combining command
 execution with filesystem-read exclusions fail closed rather than allowing a

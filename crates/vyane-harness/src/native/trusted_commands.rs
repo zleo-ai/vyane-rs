@@ -43,6 +43,10 @@ const DEFAULT_COMMAND_SECONDS: u64 = 60;
 const MAX_COMMAND_SECONDS: u64 = 60 * 60;
 const MAX_RULES: usize = 128;
 const MAX_WRITABLE_ROOTS: usize = 32;
+#[cfg(target_os = "linux")]
+const MAX_WRITABLE_ROOT_SCAN_ENTRIES: usize = 100_000;
+#[cfg(target_os = "linux")]
+const MAX_WRITABLE_ROOT_SCAN_DEPTH: usize = 32;
 const MAX_ARGS: usize = 128;
 const MAX_PROGRAM_BYTES: usize = 128;
 const MAX_ARG_BYTES: usize = 4096;
@@ -200,6 +204,23 @@ pub struct NativeCommandPolicy {
     pub max_seconds: u64,
 }
 
+#[derive(Clone)]
+pub struct NativeCommandMountSet {
+    paths: Arc<Vec<String>>,
+    #[cfg(target_os = "linux")]
+    handles: Arc<Vec<std::fs::File>>,
+}
+
+impl std::fmt::Debug for NativeCommandMountSet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeCommandMountSet")
+            .field("roots", &self.paths.len())
+            .field("handles", &"<process-local>")
+            .finish()
+    }
+}
+
 impl NativeCommandPolicy {
     pub fn validate(&self) -> Result<(), NativeCommandPolicyError> {
         if self.allow.is_empty() {
@@ -277,13 +298,25 @@ pub async fn validate_command_network_host(
     command_policy: &NativeCommandPolicy,
     policy: &NativeCommandNetworkPolicy,
 ) -> Result<(), NativeCommandHostError> {
+    let mounts = prepare_command_mounts(pinned, command_policy)?;
+    validate_command_network_host_with_mounts(pinned, command_policy, policy, &mounts).await
+}
+
+#[cfg(target_os = "linux")]
+pub async fn validate_command_network_host_with_mounts(
+    pinned: &PinnedWorkdir,
+    command_policy: &NativeCommandPolicy,
+    policy: &NativeCommandNetworkPolicy,
+    mounts: &NativeCommandMountSet,
+) -> Result<(), NativeCommandHostError> {
     validate_command_host_requirements(command_policy)?;
     policy
         .validate()
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     validate_network_route_host(policy).map_err(|_| NativeCommandHostError::Unsupported)?;
     let probe_arguments = command_probe_arguments(command_policy);
-    let writable_mounts = open_writable_roots(pinned, &command_policy.writable_roots)
+    let writable_mounts = mounts
+        .handles_for_spawn(command_policy)
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     let args = launcher_args(
         "/bin/sh",
@@ -323,6 +356,16 @@ pub async fn validate_command_network_host(
     _pinned: &PinnedWorkdir,
     _command_policy: &NativeCommandPolicy,
     _policy: &NativeCommandNetworkPolicy,
+) -> Result<(), NativeCommandHostError> {
+    Err(NativeCommandHostError::Unsupported)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn validate_command_network_host_with_mounts(
+    _pinned: &PinnedWorkdir,
+    _command_policy: &NativeCommandPolicy,
+    _policy: &NativeCommandNetworkPolicy,
+    _mounts: &NativeCommandMountSet,
 ) -> Result<(), NativeCommandHostError> {
     Err(NativeCommandHostError::Unsupported)
 }
@@ -436,9 +479,20 @@ pub async fn validate_command_host(
     pinned: &PinnedWorkdir,
     policy: &NativeCommandPolicy,
 ) -> Result<(), NativeCommandHostError> {
+    let mounts = prepare_command_mounts(pinned, policy)?;
+    validate_command_host_with_mounts(pinned, policy, &mounts).await
+}
+
+#[cfg(target_os = "linux")]
+pub async fn validate_command_host_with_mounts(
+    pinned: &PinnedWorkdir,
+    policy: &NativeCommandPolicy,
+    mounts: &NativeCommandMountSet,
+) -> Result<(), NativeCommandHostError> {
     validate_command_host_requirements(policy)?;
     let probe_arguments = command_probe_arguments(policy);
-    let writable_mounts = open_writable_roots(pinned, &policy.writable_roots)
+    let writable_mounts = mounts
+        .handles_for_spawn(policy)
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     let args = launcher_args(
         "/bin/sh",
@@ -530,6 +584,15 @@ pub async fn validate_command_host(
     Err(NativeCommandHostError::Unsupported)
 }
 
+#[cfg(not(target_os = "linux"))]
+pub async fn validate_command_host_with_mounts(
+    _pinned: &PinnedWorkdir,
+    _policy: &NativeCommandPolicy,
+    _mounts: &NativeCommandMountSet,
+) -> Result<(), NativeCommandHostError> {
+    Err(NativeCommandHostError::Unsupported)
+}
+
 struct RunCommandTool {
     policy: Arc<NativeCommandPolicy>,
     network: Option<Arc<NativeCommandNetworkPolicy>>,
@@ -572,7 +635,15 @@ impl NativeTool for RunCommandTool {
         // owned by the command tool and sits directly before the spawn path.
         authority.revalidate(effect).await?;
         #[cfg(target_os = "linux")]
-        let writable_mounts = open_writable_roots(pinned, &self.policy.writable_roots)?;
+        let writable_mounts = match context.command_mounts() {
+            Some(mounts) => mounts.handles_for_spawn(&self.policy)?,
+            None if self.policy.writable_roots.is_empty() => Vec::new(),
+            None => {
+                return Ok(Err(ToolError::new(
+                    "run_command requires admitted writable-root handles",
+                )));
+            }
+        };
         #[cfg(not(target_os = "linux"))]
         let writable_mounts = Vec::new();
         let args = match launcher_args(
@@ -798,9 +869,11 @@ fn validate_writable_root(root: &str) -> Result<(), NativeCommandPolicyError> {
         || Path::new(root)
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
-        || root
-            .split('/')
-            .any(|component| CONTROL_COMPONENTS.contains(&component))
+        || root.split('/').any(|component| {
+            CONTROL_COMPONENTS
+                .iter()
+                .any(|control| component.eq_ignore_ascii_case(control))
+        })
     {
         return Err(NativeCommandPolicyError::InvalidWritableRoot);
     }
@@ -808,16 +881,19 @@ fn validate_writable_root(root: &str) -> Result<(), NativeCommandPolicyError> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_writable_roots(
+pub fn prepare_command_mounts(
     pinned: &PinnedWorkdir,
-    roots: &[String],
-) -> VyaneResult<Vec<NativeMountHandle>> {
+    policy: &NativeCommandPolicy,
+) -> Result<NativeCommandMountSet, NativeCommandHostError> {
     use std::fs::File;
-    use std::os::fd::OwnedFd;
 
     use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
 
-    roots
+    policy
+        .validate()
+        .map_err(|_| NativeCommandHostError::Unsupported)?;
+    let handles = policy
+        .writable_roots
         .iter()
         .map(|root| {
             let fd = openat2(
@@ -830,30 +906,197 @@ fn open_writable_roots(
                     | ResolveFlags::NO_SYMLINKS
                     | ResolveFlags::NO_XDEV,
             )
-            .map_err(|source| {
-                VyaneError::with_source(
-                    ErrorKind::Config,
-                    "native command writable root is unavailable or unsafe",
-                    std::io::Error::from_raw_os_error(source.raw_os_error()),
-                )
-            })?;
+            .map_err(|_| NativeCommandHostError::Unsupported)?;
             let file = File::from(fd);
-            let metadata = file.metadata().map_err(|source| {
+            let metadata = file
+                .metadata()
+                .map_err(|_| NativeCommandHostError::Unsupported)?;
+            if !metadata.is_dir() && !metadata.is_file() {
+                return Err(NativeCommandHostError::Unsupported);
+            }
+            Ok(file)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mounts = NativeCommandMountSet {
+        paths: Arc::new(policy.writable_roots.clone()),
+        handles: Arc::new(handles),
+    };
+    mounts
+        .audit()
+        .map_err(|_| NativeCommandHostError::Unsupported)?;
+    Ok(mounts)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn prepare_command_mounts(
+    _pinned: &PinnedWorkdir,
+    _policy: &NativeCommandPolicy,
+) -> Result<NativeCommandMountSet, NativeCommandHostError> {
+    Err(NativeCommandHostError::Unsupported)
+}
+
+impl NativeCommandMountSet {
+    pub fn matches_policy(&self, policy: &NativeCommandPolicy) -> bool {
+        self.paths.as_slice() == policy.writable_roots
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handles_for_spawn(
+        &self,
+        policy: &NativeCommandPolicy,
+    ) -> VyaneResult<Vec<NativeMountHandle>> {
+        use std::os::fd::OwnedFd;
+
+        if !self.matches_policy(policy) {
+            return Err(VyaneError::new(
+                ErrorKind::Config,
+                "native command writable roots do not match admitted handles",
+            ));
+        }
+        self.audit()?;
+        self.handles
+            .iter()
+            .map(|handle| {
+                handle.try_clone().map(OwnedFd::from).map_err(|source| {
+                    VyaneError::with_source(
+                        ErrorKind::Io,
+                        "failed to duplicate admitted native command root",
+                        source,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn audit(&self) -> VyaneResult<()> {
+        for handle in self.handles.iter() {
+            audit_writable_root(handle)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn audit_writable_root(root: &std::fs::File) -> VyaneResult<()> {
+    use std::fs::File;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+
+    let metadata = root.metadata().map_err(|source| {
+        VyaneError::with_source(
+            ErrorKind::Io,
+            "failed to inspect admitted native command root",
+            source,
+        )
+    })?;
+    if metadata.is_file() {
+        return if metadata.nlink() == 1 {
+            Ok(())
+        } else {
+            Err(VyaneError::new(
+                ErrorKind::Unsupported,
+                "native command writable files must not have hard-link aliases",
+            ))
+        };
+    }
+    if !metadata.is_dir() {
+        return Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            "native command writable roots must be regular files or directories",
+        ));
+    }
+
+    let mut pending = vec![(
+        root.try_clone().map_err(|source| {
+            VyaneError::with_source(
+                ErrorKind::Io,
+                "failed to duplicate native command root for audit",
+                source,
+            )
+        })?,
+        0usize,
+    )];
+    let mut entries = 0usize;
+    while let Some((directory, depth)) = pending.pop() {
+        if depth >= MAX_WRITABLE_ROOT_SCAN_DEPTH {
+            return Err(VyaneError::new(
+                ErrorKind::Unsupported,
+                "native command writable root exceeds the audit depth",
+            ));
+        }
+        let proc_path = format!("/proc/self/fd/{}", directory.as_raw_fd());
+        for entry in std::fs::read_dir(proc_path).map_err(|source| {
+            VyaneError::with_source(
+                ErrorKind::Io,
+                "failed to enumerate native command writable root",
+                source,
+            )
+        })? {
+            let entry = entry.map_err(|source| {
                 VyaneError::with_source(
                     ErrorKind::Io,
-                    "failed to inspect native command writable root",
+                    "failed to enumerate native command writable entry",
                     source,
                 )
             })?;
-            if !metadata.is_dir() && !metadata.is_file() {
+            entries = entries.checked_add(1).ok_or_else(|| {
+                VyaneError::new(
+                    ErrorKind::Unsupported,
+                    "native command writable root audit overflowed",
+                )
+            })?;
+            if entries > MAX_WRITABLE_ROOT_SCAN_ENTRIES {
                 return Err(VyaneError::new(
                     ErrorKind::Unsupported,
-                    "native command writable roots must be regular files or directories",
+                    "native command writable root exceeds the audit entry limit",
                 ));
             }
-            Ok(OwnedFd::from(file))
-        })
-        .collect()
+            let fd = openat2(
+                &directory,
+                entry.file_name(),
+                OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+                ResolveFlags::BENEATH
+                    | ResolveFlags::NO_MAGICLINKS
+                    | ResolveFlags::NO_SYMLINKS
+                    | ResolveFlags::NO_XDEV,
+            )
+            .map_err(|source| {
+                VyaneError::with_source(
+                    ErrorKind::Unsupported,
+                    "native command writable root contains an unsafe entry",
+                    std::io::Error::from_raw_os_error(source.raw_os_error()),
+                )
+            })?;
+            let opened = File::from(fd);
+            let metadata = opened.metadata().map_err(|source| {
+                VyaneError::with_source(
+                    ErrorKind::Io,
+                    "failed to inspect native command writable entry",
+                    source,
+                )
+            })?;
+            if metadata.is_file() {
+                if metadata.nlink() != 1 {
+                    return Err(VyaneError::new(
+                        ErrorKind::Unsupported,
+                        "native command writable root contains a hard-linked file",
+                    ));
+                }
+            } else if metadata.is_dir() {
+                pending.push((opened, depth + 1));
+            } else {
+                return Err(VyaneError::new(
+                    ErrorKind::Unsupported,
+                    "native command writable root contains an unsupported entry",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1180,6 +1423,16 @@ fn command_seccomp_filter(network: bool) -> Vec<u8> {
         libc::SYS_process_vm_writev,
         libc::SYS_pidfd_getfd,
         libc::SYS_socketpair,
+        libc::SYS_link,
+        libc::SYS_linkat,
+        libc::SYS_mount,
+        libc::SYS_umount2,
+        libc::SYS_pivot_root,
+        libc::SYS_move_mount,
+        libc::SYS_open_tree,
+        libc::SYS_fsopen,
+        libc::SYS_fsmount,
+        libc::SYS_mount_setattr,
     ];
     if !network {
         denied.push(libc::SYS_socket);
@@ -1294,7 +1547,17 @@ mod tests {
             invalid.validate(),
             Err(NativeCommandPolicyError::InvalidTimeout)
         );
-        for root in ["", ".", "../src", "/src", "src/", ".git", "src/.codex"] {
+        for root in [
+            "",
+            ".",
+            "../src",
+            "/src",
+            "src/",
+            ".git",
+            ".GIT",
+            "src/.codex",
+            "src/.CoDeX",
+        ] {
             let mut invalid = policy();
             invalid.writable_roots = vec![root.into()];
             assert!(invalid.validate().is_err(), "{root}");

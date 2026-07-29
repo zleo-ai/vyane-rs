@@ -11,7 +11,7 @@ use vyane_core::{NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir};
 use vyane_harness::native::{
     NativeCommandNetworkPolicy, NativeCommandNetworkRoute, NativeCommandNetworkRule,
     NativeCommandPolicy, NativeCommandRule, PermissionPolicy, ToolCall, ToolContext,
-    ToolInvocationStatus, command_permission_policy, command_tool_registry,
+    ToolInvocationStatus, command_permission_policy, command_tool_registry, prepare_command_mounts,
     register_command_tool_with_network, validate_command_host, validate_command_network_host,
     workspace_tool_registry_with_policy,
 };
@@ -75,12 +75,17 @@ async fn execute(root: &std::path::Path, policy: NativeCommandPolicy, call: Tool
         .acquire()
         .await
         .expect("command test gate");
+    let pinned = PinnedWorkdir::open(root).expect("pin command workspace");
+    let mounts = (!policy.writable_roots.is_empty())
+        .then(|| prepare_command_mounts(&pinned, &policy).expect("admit command mounts"));
     let registry = command_tool_registry(policy).expect("command registry");
     let permissions =
         command_permission_policy(PermissionPolicy::deny_by_default()).expect("permissions");
-    let context =
-        ToolContext::from_pinned_workdir(PinnedWorkdir::open(root).expect("pin command workspace"))
-            .with_timeout(Duration::from_secs(15));
+    let mut context =
+        ToolContext::from_pinned_workdir(pinned).with_timeout(Duration::from_secs(15));
+    if let Some(mounts) = mounts {
+        context = context.with_command_mounts(mounts);
+    }
     let invocation = registry
         .execute_authorized(
             call,
@@ -317,6 +322,83 @@ async fn only_explicit_descriptor_bound_roots_are_writable() {
         "{metadata_denied}"
     );
     assert!(!root.path().join(".git/blocked").exists());
+}
+
+#[tokio::test]
+async fn hard_links_cannot_escape_a_writable_root() {
+    let root = tempdir().expect("workspace");
+    std::fs::create_dir(root.path().join("src")).expect("writable root");
+    std::fs::create_dir(root.path().join(".git")).expect("protected sibling");
+    std::fs::write(root.path().join(".git/config"), "protected").expect("protected file");
+    std::fs::hard_link(
+        root.path().join(".git/config"),
+        root.path().join("src/config-alias"),
+    )
+    .expect("hard-link fixture");
+    let mut writable = policy(&[("touch", &[])]);
+    writable.writable_roots = vec!["src".into()];
+    let pinned = PinnedWorkdir::open(root.path()).expect("pin command workspace");
+    assert!(prepare_command_mounts(&pinned, &writable).is_err());
+
+    std::fs::remove_file(root.path().join("src/config-alias")).expect("remove fixture alias");
+    let mut link_policy = policy(&[("ln", &[])]);
+    link_policy.writable_roots = vec!["src".into()];
+    let output = execute(
+        root.path(),
+        link_policy,
+        call("ln", &[".git/config", "src/config-alias"]),
+    )
+    .await;
+    assert!(!output.contains("exit_code: 0"), "{output}");
+    assert!(!root.path().join("src/config-alias").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(".git/config")).expect("protected file"),
+        "protected"
+    );
+}
+
+#[tokio::test]
+async fn admitted_writable_root_handle_survives_path_replacement() {
+    let _permit = COMMAND_TEST_GATE
+        .acquire()
+        .await
+        .expect("command test gate");
+    let root = tempdir().expect("workspace");
+    let admitted = root.path().join("src");
+    let moved = root.path().join("moved-src");
+    std::fs::create_dir(&admitted).expect("writable root");
+    let pinned = PinnedWorkdir::open(root.path()).expect("pin command workspace");
+    let mut writable = policy(&[("touch", &[])]);
+    writable.writable_roots = vec!["src".into()];
+    let mounts = prepare_command_mounts(&pinned, &writable).expect("admit command mounts");
+    std::fs::rename(&admitted, &moved).expect("move admitted root");
+    std::fs::create_dir(&admitted).expect("replacement root");
+
+    let registry = command_tool_registry(writable).expect("command registry");
+    let permissions =
+        command_permission_policy(PermissionPolicy::deny_by_default()).expect("permissions");
+    let context = ToolContext::from_pinned_workdir(pinned)
+        .with_command_mounts(mounts)
+        .with_timeout(Duration::from_secs(15));
+    let invocation = registry
+        .execute_authorized(
+            call("touch", &["src/retained.txt"]),
+            &context,
+            &permissions,
+            &RecordingAuthority::default(),
+            1,
+            1,
+        )
+        .await
+        .expect("authorized command");
+    assert_eq!(invocation.status, ToolInvocationStatus::Executed);
+    assert!(
+        invocation.output.contains("exit_code: 0"),
+        "{}",
+        invocation.output
+    );
+    assert!(moved.join("retained.txt").is_file());
+    assert!(!admitted.join("retained.txt").exists());
 }
 
 #[tokio::test]

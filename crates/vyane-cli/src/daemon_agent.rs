@@ -46,7 +46,10 @@ use crate::native_agent_spool::{
 };
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
-use vyane_harness::native::{validate_command_host, validate_command_network_host};
+use vyane_harness::native::{
+    prepare_command_mounts, validate_command_host_with_mounts,
+    validate_command_network_host_with_mounts,
+};
 
 const INPUT_DIR: &str = "agent-inputs";
 const NATIVE_INPUT_DIR: &str = "native-agent-inputs";
@@ -493,17 +496,22 @@ impl DaemonAgentHost {
             .workdir
             .ok_or_else(AgentApiError::bad_request)
             .and_then(|path| PinnedWorkdir::open(path).map_err(|_| AgentApiError::bad_request()))?;
-        if let Some(policy) = &request.native_permissions.command_execution {
+        let command_mounts = if let Some(policy) = &request.native_permissions.command_execution {
+            let mounts = prepare_command_mounts(&workdir, policy)
+                .map_err(|_| AgentApiError::bad_request())?;
             if let Some(network) = &request.native_permissions.command_network {
-                validate_command_network_host(&workdir, policy, network)
+                validate_command_network_host_with_mounts(&workdir, policy, network, &mounts)
                     .await
                     .map_err(|_| AgentApiError::bad_request())?;
             } else {
-                validate_command_host(&workdir, policy)
+                validate_command_host_with_mounts(&workdir, policy, &mounts)
                     .await
                     .map_err(|_| AgentApiError::bad_request())?;
             }
-        }
+            Some(mounts)
+        } else {
+            None
+        };
         let scoped = self.service.scope(OwnerContext::single_user_local());
         let chain = scoped
             .resolve(&request.target)
@@ -586,7 +594,11 @@ impl DaemonAgentHost {
             .native_spool
             .create(&input)
             .map_err(|_| AgentApiError::unavailable())?;
-        let workdir_install = match self.native_spool.install_workdir(&input, &workdir) {
+        let workdir_install = match self.native_spool.install_workdir_with_command_mounts(
+            &input,
+            &workdir,
+            command_mounts,
+        ) {
             Ok(install) => install,
             Err(_) => {
                 if spool_create == NativeAgentSpoolCreate::Created {

@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use vyane_core::{Effort, PinnedWorkdir, WorkdirIdentity};
 use vyane_harness::native::{
-    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWebFetchPolicy,
-    NativeWebSearchPolicy, NativeWritePolicy,
+    NativeCommandMountSet, NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy,
+    NativeWebFetchPolicy, NativeWebSearchPolicy, NativeWritePolicy,
 };
 
 const SCHEMA: u32 = 9;
@@ -370,6 +370,13 @@ struct NativeWorkdirHandoff {
     canonical_path: PathBuf,
     identity: WorkdirIdentity,
     pinned: PinnedWorkdir,
+    command_mounts: Option<NativeCommandMountSet>,
+}
+
+#[derive(Clone)]
+pub(crate) struct NativeExecutionHandoff {
+    pub(crate) workdir: PinnedWorkdir,
+    pub(crate) command_mounts: Option<NativeCommandMountSet>,
 }
 
 impl NativeWorkdirHandoff {
@@ -422,10 +429,20 @@ impl NativeAgentInputSpool {
         input: &NativeAgentInput,
         pinned: &PinnedWorkdir,
     ) -> Result<NativeWorkdirInstall, NativeAgentSpoolError> {
+        self.install_workdir_with_command_mounts(input, pinned, None)
+    }
+
+    pub(crate) fn install_workdir_with_command_mounts(
+        &self,
+        input: &NativeAgentInput,
+        pinned: &PinnedWorkdir,
+        command_mounts: Option<NativeCommandMountSet>,
+    ) -> Result<NativeWorkdirInstall, NativeAgentSpoolError> {
         input.validate()?;
         if input.owner != self.owner
             || pinned.canonical_path() != input.policy.canonical_workdir
             || pinned.identity() != &input.policy.workdir_identity
+            || !command_mounts_match_policy(command_mounts.as_ref(), &input.policy)
         {
             return Err(NativeAgentSpoolError::BindingMismatch);
         }
@@ -451,15 +468,28 @@ impl NativeAgentInputSpool {
                 canonical_path: input.policy.canonical_workdir.clone(),
                 identity: input.policy.workdir_identity.clone(),
                 pinned: pinned.clone(),
+                command_mounts,
             },
         );
         Ok(NativeWorkdirInstall::Created)
     }
 
     pub(crate) fn exact_workdir(&self, input: &NativeAgentInput) -> Option<PinnedWorkdir> {
+        self.exact_execution(input).map(|handoff| handoff.workdir)
+    }
+
+    pub(crate) fn exact_execution(
+        &self,
+        input: &NativeAgentInput,
+    ) -> Option<NativeExecutionHandoff> {
         let workdirs = self.workdirs.lock().ok()?;
         let handoff = workdirs.get(&input.run_id)?;
-        handoff.matches_input(input).then(|| handoff.pinned.clone())
+        handoff
+            .matches_input(input)
+            .then(|| NativeExecutionHandoff {
+                workdir: handoff.pinned.clone(),
+                command_mounts: handoff.command_mounts.clone(),
+            })
     }
 
     pub(crate) fn remove_workdir_exact(&self, input: &NativeAgentInput) -> bool {
@@ -699,6 +729,18 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
         return Err(NativeAgentSpoolError::InvalidInput);
     }
     validate_params(&policy.target.params)
+}
+
+fn command_mounts_match_policy(
+    mounts: Option<&NativeCommandMountSet>,
+    policy: &NativeAgentPolicy,
+) -> bool {
+    match (&policy.command_execution, mounts) {
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some(command), None) => command.writable_roots.is_empty(),
+        (Some(command), Some(mounts)) => mounts.matches_policy(command),
+    }
 }
 
 fn validate_params(params: &NativeGenParamsSnapshot) -> Result<(), NativeAgentSpoolError> {
