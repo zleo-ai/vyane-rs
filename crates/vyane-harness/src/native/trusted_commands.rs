@@ -12,9 +12,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(target_os = "linux")]
+use vyane_core::{ErrorKind, VyaneError};
 use vyane_core::{
-    ErrorKind, NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir, Result as VyaneResult,
-    ToolDefinition, VyaneError,
+    NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir, Result as VyaneResult,
+    ToolDefinition,
 };
 
 #[cfg(target_os = "linux")]
