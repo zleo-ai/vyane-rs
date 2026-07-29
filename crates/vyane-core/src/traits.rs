@@ -26,6 +26,7 @@ use crate::session::{NativeSessionTransition, SessionRecord, SessionSnapshot, Se
 use crate::target::{Endpoint, HarnessKind, ModelId, Protocol, Sandbox};
 use crate::task::{GenParams, HarnessLifecycleReporter, HarnessSpawnAuthority};
 use crate::tool_chat::{ToolChatOutcome, ToolChatRequest};
+use crate::web_fetch::{WebFetchOutcome, WebFetchRequest};
 use crate::web_search::{WebSearchOutcome, WebSearchRequest};
 use crate::workdir::PinnedWorkdir;
 
@@ -103,6 +104,19 @@ pub trait AuthorizedWebSearchClient: Send + Sync {
         effect: NativeSideEffect,
         cancel: &CancellationToken,
     ) -> Result<WebSearchOutcome>;
+}
+
+/// A public-web fetch client whose every physical request is guarded by live
+/// native execution authority.
+#[async_trait]
+pub trait AuthorizedWebFetchClient: Send + Sync {
+    async fn fetch_authorized(
+        &self,
+        req: WebFetchRequest,
+        authority: &dyn NativeExecutionAuthority,
+        effect: NativeSideEffect,
+        cancel: &CancellationToken,
+    ) -> Result<WebFetchOutcome>;
 }
 
 /// Everything a harness needs to execute one job.

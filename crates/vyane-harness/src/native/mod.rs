@@ -18,6 +18,7 @@ mod tools;
 mod trusted_commands;
 mod trusted_files;
 mod trusted_network;
+mod trusted_web_fetch;
 mod trusted_web_search;
 mod turn_driver;
 
@@ -49,6 +50,10 @@ pub use trusted_files::{
 pub use trusted_network::{
     NativeCommandNetworkPolicy, NativeCommandNetworkPolicyError, NativeCommandNetworkRoute,
     NativeCommandNetworkRule,
+};
+pub use trusted_web_fetch::{
+    NativeWebFetchPolicy, NativeWebFetchPolicyError, RegisterWebFetchToolError,
+    register_web_fetch_tool, web_fetch_permission_policy, web_fetch_tool_definition,
 };
 pub use trusted_web_search::{
     NativeWebSearchPolicy, NativeWebSearchPolicyError, RegisterWebSearchToolError,

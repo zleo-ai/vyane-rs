@@ -17,11 +17,12 @@ use vyane_core::{
 };
 use vyane_harness::native::{
     NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeTurnDriver,
-    NativeTurnLimits, NativeTurnStop, NativeWebSearchPolicy, NativeWritePolicy, ToolContext,
-    command_permission_policy, command_tool_definition, register_command_tool,
-    register_command_tool_with_network, register_web_search_tool, validate_read_only_host,
-    web_search_permission_policy, web_search_tool_definition, workspace_permission_policy,
-    workspace_tool_definitions, workspace_tool_registry_with_policy,
+    NativeTurnLimits, NativeTurnStop, NativeWebFetchPolicy, NativeWebSearchPolicy,
+    NativeWritePolicy, ToolContext, command_permission_policy, command_tool_definition,
+    register_command_tool, register_command_tool_with_network, register_web_fetch_tool,
+    register_web_search_tool, validate_read_only_host, web_fetch_permission_policy,
+    web_fetch_tool_definition, web_search_permission_policy, web_search_tool_definition,
+    workspace_permission_policy, workspace_tool_definitions, workspace_tool_registry_with_policy,
 };
 use vyane_message::{
     EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
@@ -31,7 +32,7 @@ use vyane_service::{
     AgentExecutionIdentity, AgentExecutionSettlement, AgentExecutorOutcome,
     InProcessAgentOperation, InProcessAgentOperationContext, InProcessEffectAuthority,
     MESSAGE_COMPLETION_PRODUCER, MessageComponents, OwnerScopedService, authorized_native_client,
-    authorized_web_search_client, message_run_completion,
+    authorized_web_fetch_client, authorized_web_search_client, message_run_completion,
 };
 
 use crate::native_agent_spool::{
@@ -240,6 +241,7 @@ pub(crate) fn native_input_for_submission(
         command_execution,
         command_network,
         web_search,
+        web_fetch,
         system,
         timeout_seconds,
     } = details;
@@ -287,6 +289,7 @@ pub(crate) fn native_input_for_submission(
             command_execution,
             command_network,
             web_search,
+            web_fetch,
             system,
             timeout_seconds,
             max_model_turns: 8,
@@ -304,6 +307,7 @@ pub(crate) struct NativeSubmissionDetails<'a> {
     pub(crate) command_execution: Option<NativeCommandPolicy>,
     pub(crate) command_network: Option<NativeCommandNetworkPolicy>,
     pub(crate) web_search: Option<NativeWebSearchSubmission<'a>>,
+    pub(crate) web_fetch: Option<NativeWebFetchPolicy>,
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
 }
@@ -466,6 +470,12 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                 return AgentExecutorOutcome::Unknown;
             }
         }
+        if let Some(fetch_policy) = input.policy.web_fetch.clone()
+            && register_web_fetch_tool(&mut registry, fetch_policy, authorized_web_fetch_client())
+                .is_err()
+        {
+            return AgentExecutorOutcome::Unknown;
+        }
         let Ok(mut permission_policy) = workspace_permission_policy(write_enabled) else {
             return AgentExecutorOutcome::Unknown;
         };
@@ -480,6 +490,12 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                 return AgentExecutorOutcome::Unknown;
             };
             permission_policy = with_search;
+        }
+        if input.policy.web_fetch.is_some() {
+            let Ok(with_fetch) = web_fetch_permission_policy(permission_policy) else {
+                return AgentExecutorOutcome::Unknown;
+            };
+            permission_policy = with_fetch;
         }
         let driver = NativeTurnDriver::with_limits(client, registry, permission_policy, limits);
         let turn = tokio::time::timeout_at(
@@ -642,6 +658,9 @@ fn native_request(input: &NativeAgentInput, bound: &vyane_core::BoundTarget) -> 
             }
             if input.policy.web_search.is_some() {
                 tools.push(web_search_tool_definition());
+            }
+            if input.policy.web_fetch.is_some() {
+                tools.push(web_fetch_tool_definition());
             }
             tools
         },
@@ -814,6 +833,7 @@ mod tests {
             command_execution: None,
             command_network: None,
             web_search: None,
+            web_fetch: None,
             system: Some("Answer concisely.".into()),
             timeout_seconds: 30,
             max_model_turns: 8,

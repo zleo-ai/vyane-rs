@@ -47,8 +47,8 @@ use crate::native_agent_spool::{
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
 use vyane_harness::native::{
-    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWebSearchPolicy,
-    NativeWritePolicy, validate_command_host, validate_command_network_host,
+    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWebFetchPolicy,
+    NativeWebSearchPolicy, NativeWritePolicy, validate_command_host, validate_command_network_host,
 };
 
 const INPUT_DIR: &str = "agent-inputs";
@@ -102,6 +102,9 @@ pub(crate) struct NativePermissionRequest {
     /// Omission keeps the dedicated hosted web-search tool disabled.
     #[serde(default)]
     pub(crate) web_search: Option<NativeWebSearchRequest>,
+    /// Omission keeps direct public-page retrieval disabled.
+    #[serde(default)]
+    pub(crate) web_fetch: Option<NativeWebFetchPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -137,6 +140,13 @@ impl NativePermissionRequest {
             if request.target.is_empty() || request.policy.validate().is_err() {
                 return Err(());
             }
+        }
+        if self
+            .web_fetch
+            .as_ref()
+            .is_some_and(|policy| policy.validate().is_err())
+        {
+            return Err(());
         }
         Ok(())
     }
@@ -569,6 +579,7 @@ impl DaemonAgentHost {
             command_execution,
             command_network,
             web_search,
+            web_fetch,
         } = request.native_permissions;
         let web_search_submission = match (web_search.as_ref(), search_chain.as_ref()) {
             (Some(search), Some(chain)) => Some(crate::native_agent::NativeWebSearchSubmission {
@@ -595,6 +606,7 @@ impl DaemonAgentHost {
                 command_execution,
                 command_network,
                 web_search: web_search_submission,
+                web_fetch,
                 system: request.system,
                 timeout_seconds,
             },
@@ -1175,6 +1187,7 @@ mod tests {
         assert!(default.native_permissions.command_execution.is_none());
         assert!(default.native_permissions.command_network.is_none());
         assert!(default.native_permissions.web_search.is_none());
+        assert!(default.native_permissions.web_fetch.is_none());
 
         let mut configured = base;
         configured["native_permissions"] = serde_json::json!({
@@ -1204,6 +1217,13 @@ mod tests {
                 "allow_domains": ["docs.rs"],
                 "max_searches": 2,
                 "search_context_size": "high"
+            },
+            "web_fetch": {
+                "allow_domains": ["docs.rs"],
+                "route": "environment_proxy",
+                "max_fetches": 3,
+                "max_response_bytes": 65536,
+                "max_redirects": 2
             }
         });
         let configured: AgentRunSubmitRequest =
@@ -1252,6 +1272,18 @@ mod tests {
             search.policy.search_context_size,
             vyane_core::WebSearchContextSize::High
         ));
+        let fetch = configured
+            .native_permissions
+            .web_fetch
+            .expect("explicit web-fetch policy");
+        assert_eq!(fetch.allow_domains, ["docs.rs"]);
+        assert!(matches!(
+            fetch.route,
+            vyane_core::WebFetchRoute::EnvironmentProxy
+        ));
+        assert_eq!(fetch.max_fetches, 3);
+        assert_eq!(fetch.max_response_bytes, 65536);
+        assert_eq!(fetch.max_redirects, 2);
     }
 
     #[test]

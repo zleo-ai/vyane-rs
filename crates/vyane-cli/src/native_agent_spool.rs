@@ -15,11 +15,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use vyane_core::{Effort, PinnedWorkdir, WorkdirIdentity};
 use vyane_harness::native::{
-    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWebSearchPolicy,
-    NativeWritePolicy,
+    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWebFetchPolicy,
+    NativeWebSearchPolicy, NativeWritePolicy,
 };
 
-const SCHEMA: u32 = 7;
+const SCHEMA: u32 = 8;
+const WEB_SEARCH_SCHEMA: u32 = 7;
 const COMMAND_NETWORK_SCHEMA: u32 = 6;
 const COMMAND_EXECUTION_SCHEMA: u32 = 5;
 const FILESYSTEM_WRITE_SCHEMA: u32 = 4;
@@ -182,6 +183,8 @@ pub(crate) struct NativeAgentPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) web_search: Option<NativeWebSearchSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) web_fetch: Option<NativeWebFetchPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) system: Option<String>,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_model_turns: u32,
@@ -234,6 +237,13 @@ impl std::fmt::Debug for NativeAgentPolicy {
                     .web_search
                     .as_ref()
                     .map(|search| search.policy.allow_domains.as_ref().map_or(0, Vec::len)),
+            )
+            .field(
+                "web_fetch_domains",
+                &self
+                    .web_fetch
+                    .as_ref()
+                    .map(|fetch| fetch.allow_domains.len()),
             )
             .field("system", &self.system.as_ref().map(|_| "[REDACTED]"))
             .field("timeout_seconds", &self.timeout_seconds)
@@ -295,17 +305,23 @@ impl NativeAgentInput {
 
     fn validate(&self) -> Result<(), NativeAgentSpoolError> {
         let supported_schema = self.schema == SCHEMA
-            || (self.schema == COMMAND_NETWORK_SCHEMA && self.policy.web_search.is_none())
+            || (self.schema == WEB_SEARCH_SCHEMA && self.policy.web_fetch.is_none())
+            || (self.schema == COMMAND_NETWORK_SCHEMA
+                && self.policy.web_search.is_none()
+                && self.policy.web_fetch.is_none())
             || (self.schema == COMMAND_EXECUTION_SCHEMA
                 && self.policy.command_network.is_none()
-                && self.policy.web_search.is_none())
+                && self.policy.web_search.is_none()
+                && self.policy.web_fetch.is_none())
             || (self.schema == FILESYSTEM_WRITE_SCHEMA
                 && self.policy.command_execution.is_none()
-                && self.policy.web_search.is_none())
+                && self.policy.web_search.is_none()
+                && self.policy.web_fetch.is_none())
             || (self.schema == READ_ONLY_SCHEMA
                 && self.policy.filesystem_write.is_none()
                 && self.policy.command_execution.is_none()
-                && self.policy.web_search.is_none());
+                && self.policy.web_search.is_none()
+                && self.policy.web_fetch.is_none());
         if !supported_schema
             || !valid_text(&self.owner, MAX_ID_BYTES)
             || !valid_text(&self.run_id, MAX_ID_BYTES)
@@ -666,6 +682,11 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
             .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
         validate_params(&search.target.params)?;
     }
+    if let Some(fetch) = &policy.web_fetch {
+        fetch
+            .validate()
+            .map_err(|_| NativeAgentSpoolError::InvalidInput)?;
+    }
     if !policy.canonical_workdir.is_absolute() {
         return Err(NativeAgentSpoolError::InvalidInput);
     }
@@ -875,6 +896,7 @@ mod tests {
             command_execution: None,
             command_network: None,
             web_search: None,
+            web_fetch: None,
             system: Some("system-body-marker".into()),
             timeout_seconds: 120,
             max_model_turns: 8,
@@ -1264,6 +1286,40 @@ mod tests {
     }
 
     #[test]
+    fn schema_seven_search_input_remains_recoverable_without_fetch_authority() {
+        let (_directory, spool) = fixture();
+        let path = spool.input_path("run-marker").unwrap();
+        let mut legacy = input();
+        legacy.schema = WEB_SEARCH_SCHEMA;
+        write_private(&path, serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(spool.read("run-marker", "worker-marker").unwrap(), legacy);
+        spool.remove_exact(&legacy).unwrap();
+
+        let mut fetch_policy = policy();
+        fetch_policy.web_fetch = Some(NativeWebFetchPolicy {
+            allow_domains: vec!["docs.rs".into()],
+            route: vyane_core::WebFetchRoute::Direct,
+            max_fetches: 2,
+            max_response_bytes: 4096,
+            max_redirects: 1,
+        });
+        let mut invalid = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            fetch_policy,
+        )
+        .unwrap();
+        invalid.schema = WEB_SEARCH_SCHEMA;
+        write_private(&path, serde_json::to_vec(&invalid).unwrap());
+        assert_eq!(
+            spool.read("run-marker", "worker-marker"),
+            Err(NativeAgentSpoolError::CorruptInput)
+        );
+    }
+
+    #[test]
     fn symlink_hardlink_wrong_mode_and_oversize_fail_closed() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
         let (directory, spool) = fixture();
@@ -1465,6 +1521,15 @@ mod tests {
                 max_searches: 2,
                 search_context_size: vyane_core::WebSearchContextSize::Low,
             },
+        });
+        variants.push(value);
+        let mut value = base.clone();
+        value.web_fetch = Some(NativeWebFetchPolicy {
+            allow_domains: vec!["docs.rs".into()],
+            route: vyane_core::WebFetchRoute::Direct,
+            max_fetches: 2,
+            max_response_bytes: 4096,
+            max_redirects: 1,
         });
         variants.push(value);
         let mut value = base.clone();
