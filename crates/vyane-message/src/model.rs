@@ -275,12 +275,12 @@ impl NewDelivery {
         }
         let available_at = self.available_at.map(normalize_timestamp).transpose()?;
         let expires_at = self.expires_at.map(normalize_timestamp).transpose()?;
-        if let (Some(available_at), Some(expires_at)) = (available_at, expires_at) {
-            if expires_at <= available_at {
-                return Err(MessageStoreError::InvalidInput(
-                    "delivery expiry must be later than availability".into(),
-                ));
-            }
+        if let (Some(available_at), Some(expires_at)) = (available_at, expires_at)
+            && expires_at <= available_at
+        {
+            return Err(MessageStoreError::InvalidInput(
+                "delivery expiry must be later than availability".into(),
+            ));
         }
         Ok(())
     }

@@ -588,15 +588,15 @@ impl FsSessionStore {
             let observed_revision = existing
                 .as_ref()
                 .map_or(0, |envelope| envelope.session_revision);
-            if let Some(expected) = expected_revision {
-                if expected != observed_revision {
-                    return Err(VyaneError::new(
-                        ErrorKind::Conflict,
-                        format!(
-                            "session revision conflict: expected {expected}, observed {observed_revision}"
-                        ),
-                    ));
-                }
+            if let Some(expected) = expected_revision
+                && expected != observed_revision
+            {
+                return Err(VyaneError::new(
+                    ErrorKind::Conflict,
+                    format!(
+                        "session revision conflict: expected {expected}, observed {observed_revision}"
+                    ),
+                ));
             }
             let session_revision = next_revision(observed_revision)?;
             let prior_native_session = existing
@@ -1610,13 +1610,13 @@ fn collect_namespace(
 }
 
 fn open_private_lock(path: &Path) -> Result<File> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if !metadata.file_type().is_file() {
-            return Err(VyaneError::config(format!(
-                "session lock entry {} is not a regular file",
-                path.display()
-            )));
-        }
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && !metadata.file_type().is_file()
+    {
+        return Err(VyaneError::config(format!(
+            "session lock entry {} is not a regular file",
+            path.display()
+        )));
     }
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);

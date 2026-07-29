@@ -51,10 +51,10 @@ impl RoutePreferenceTable {
     ) -> Option<&RouteTargetPreference> {
         // Stage → the highest-precedence signal.
         let stage_key = normalize_key(stage);
-        if !stage_key.is_empty() {
-            if let Some(pref) = self.stage_preferences.get(&stage_key) {
-                return Some(pref);
-            }
+        if !stage_key.is_empty()
+            && let Some(pref) = self.stage_preferences.get(&stage_key)
+        {
+            return Some(pref);
         }
 
         // Tags → first matching tag wins (tags are already ordered: explicit

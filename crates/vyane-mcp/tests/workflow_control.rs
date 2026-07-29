@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use rmcp::{
     ServiceExt as _,
-    model::{CallToolRequestParam, CallToolResult},
+    model::{CallToolRequestParams, CallToolResult},
 };
 use vyane_mcp::{
     VyaneMcpServer, WorkflowControl, WorkflowControlError, WorkflowControlFuture,
@@ -217,10 +217,10 @@ async fn call(
     arguments: serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
     let result = client
-        .call_tool(CallToolRequestParam {
-            name: name.to_owned().into(),
-            arguments: Some(arguments.as_object().unwrap().clone()),
-        })
+        .call_tool(
+            CallToolRequestParams::new(name.to_owned())
+                .with_arguments(arguments.as_object().unwrap().clone()),
+        )
         .await?;
     Ok(result_payload(result))
 }

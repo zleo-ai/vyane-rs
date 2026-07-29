@@ -185,27 +185,27 @@ fn parse_placeholder(raw: &str) -> Placeholder<'_> {
     if raw == "workflow.name" {
         return Placeholder::WorkflowName;
     }
-    if let Some(key) = raw.strip_prefix("vars.") {
-        if !key.is_empty() {
-            return Placeholder::Var(key);
-        }
+    if let Some(key) = raw.strip_prefix("vars.")
+        && !key.is_empty()
+    {
+        return Placeholder::Var(key);
     }
     if let Some(rest) = raw.strip_prefix("steps.") {
-        if let Some(step) = rest.strip_suffix(".outputs") {
-            if !step.is_empty() {
-                return Placeholder::StepOutput {
-                    step,
-                    fan_out: true,
-                };
-            }
+        if let Some(step) = rest.strip_suffix(".outputs")
+            && !step.is_empty()
+        {
+            return Placeholder::StepOutput {
+                step,
+                fan_out: true,
+            };
         }
-        if let Some(step) = rest.strip_suffix(".output") {
-            if !step.is_empty() {
-                return Placeholder::StepOutput {
-                    step,
-                    fan_out: false,
-                };
-            }
+        if let Some(step) = rest.strip_suffix(".output")
+            && !step.is_empty()
+        {
+            return Placeholder::StepOutput {
+                step,
+                fan_out: false,
+            };
         }
     }
     Placeholder::Unknown(raw)

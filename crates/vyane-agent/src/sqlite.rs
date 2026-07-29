@@ -2568,12 +2568,12 @@ fn validate_parent_run_exists(
     owner: &str,
     parent_run_id: Option<&str>,
 ) -> Result<()> {
-    if let Some(parent_run_id) = parent_run_id {
-        if get_run(connection, owner, parent_run_id)?.is_none() {
-            return Err(AgentStoreError::NotFound {
-                id: parent_run_id.to_string(),
-            });
-        }
+    if let Some(parent_run_id) = parent_run_id
+        && get_run(connection, owner, parent_run_id)?.is_none()
+    {
+        return Err(AgentStoreError::NotFound {
+            id: parent_run_id.to_string(),
+        });
     }
     Ok(())
 }
@@ -4158,13 +4158,13 @@ fn subtree_postorder(workers: &[WorkerRecord], root_worker_id: &str) -> Result<V
         .collect::<BTreeSet<_>>();
     let mut children = BTreeMap::<String, Vec<String>>::new();
     for worker in &topology.workers {
-        if let Some(parent) = &worker.parent_id {
-            if selected.contains(parent) {
-                children
-                    .entry(parent.clone())
-                    .or_default()
-                    .push(worker.id.clone());
-            }
+        if let Some(parent) = &worker.parent_id
+            && selected.contains(parent)
+        {
+            children
+                .entry(parent.clone())
+                .or_default()
+                .push(worker.id.clone());
         }
     }
     let by_id = topology

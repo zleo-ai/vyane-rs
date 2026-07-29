@@ -36,8 +36,8 @@ use rmcp::{
     ErrorData as McpError, ServiceExt,
     handler::server::router::tool::ToolRouter,
     model::{
-        CallToolResult, Content, Implementation, JsonObject, ProtocolVersion, ServerCapabilities,
-        ServerInfo,
+        CallToolResult, ContentBlock as Content, Implementation, JsonObject, ProtocolVersion,
+        ServerCapabilities, ServerInfo,
     },
     tool, tool_handler, tool_router,
     transport::stdio,
@@ -175,7 +175,7 @@ impl std::error::Error for WorkflowControlError {}
 
 // ---- tool parameter schemas -------------------------------------------------
 //
-// rmcp v0.5 normally derives the JSON Schema clients see from a
+// rmcp normally derives the JSON Schema clients see from a
 // `Parameters<T>` wrapper. We instead declare those same schemas explicitly
 // and receive a raw `JsonObject`, because the stock extractor includes rejected
 // string values in its protocol error. Optional fields use `#[serde(default)]`
@@ -623,7 +623,7 @@ impl VyaneMcpServer {
     /// status with `detail_omitted=true`.
     #[tool(
         description = "Dispatch a task to a configured target (profile name, provider/model, or auto). Auto routing accepts stage/tier/tags/candidates and an allow_frontier hard guard. Returns operation_status=completed with the run record and output, or a bounded run receipt with detail_omitted=true if the completed result is too large; never retry a completed receipt.",
-        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<DispatchArgs>()
+        input_schema = rmcp::handler::server::tool::schema_for_type::<DispatchArgs>()
     )]
     async fn vyane_dispatch(
         &self,
@@ -677,7 +677,7 @@ impl VyaneMcpServer {
     /// in input order.
     #[tool(
         description = "Run one task against up to 64 targets concurrently. Pass targets as a comma-separated string of profiles or provider/model pairs. Oversized completed results return index-aligned run receipts with operation_status=completed and detail_omitted=true; never retry a completed receipt.",
-        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<BroadcastArgs>()
+        input_schema = rmcp::handler::server::tool::schema_for_type::<BroadcastArgs>()
     )]
     async fn vyane_broadcast(
         &self,
@@ -750,7 +750,7 @@ impl VyaneMcpServer {
     /// Query the run ledger (most-recent-first).
     #[tool(
         description = "Query recent run records from the ledger. Returns { items: [...] }, most recent first.",
-        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<HistoryArgs>()
+        input_schema = rmcp::handler::server::tool::schema_for_type::<HistoryArgs>()
     )]
     async fn vyane_history(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
         let args: HistoryArgs = match parse_arguments(arguments) {
@@ -770,7 +770,7 @@ impl VyaneMcpServer {
     /// List saved sessions.
     #[tool(
         description = "List saved vyane sessions. Returns { items: [...] }.",
-        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<rmcp::model::EmptyObject>()
+        input_schema = rmcp::handler::server::tool::schema_for_type::<rmcp::model::EmptyObject>()
     )]
     async fn vyane_sessions(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
         if !arguments.is_empty() {
@@ -787,7 +787,7 @@ impl VyaneMcpServer {
     /// Preview deterministic routing without dispatching or echoing the task.
     #[tool(
         description = "Preview deterministic routing without dispatching. Returns an allowlisted profile/provider/model/tier/effort summary and never returns the task or raw routing hints.",
-        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<RouteArgs>()
+        input_schema = rmcp::handler::server::tool::schema_for_type::<RouteArgs>()
     )]
     async fn vyane_route(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
         let args: RouteArgs = match parse_arguments(arguments) {
@@ -815,7 +815,7 @@ impl VyaneMcpServer {
     /// network requests, probe harness binaries, or spawn child processes.
     #[tool(
         description = "Check the already-loaded configuration using static resolution only. Returns redacted readiness summaries; no paths, endpoint URLs, environment names, secrets, or raw errors.",
-        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<CheckArgs>()
+        input_schema = rmcp::handler::server::tool::schema_for_type::<CheckArgs>()
     )]
     async fn vyane_check(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
         let _: CheckArgs = match parse_arguments(arguments) {
@@ -831,7 +831,7 @@ impl VyaneMcpServer {
     /// Submit one bounded, self-contained workflow source bundle.
     #[tool(
         description = "Submit a bounded workflow source bundle using a caller-selected canonical UUIDv7. The response is a redacted lifecycle view; reuse caller_id only for an identical retry after an outcome_unknown result.",
-        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<WorkflowSubmitArgs>()
+        input_schema = rmcp::handler::server::tool::schema_for_type::<WorkflowSubmitArgs>()
     )]
     async fn vyane_workflow_submit(
         &self,
@@ -859,7 +859,7 @@ impl VyaneMcpServer {
     /// Read one workflow's redacted lifecycle view.
     #[tool(
         description = "Return the redacted lifecycle state for one canonical UUIDv7 workflow caller id.",
-        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<WorkflowIdArgs>()
+        input_schema = rmcp::handler::server::tool::schema_for_type::<WorkflowIdArgs>()
     )]
     async fn vyane_workflow_status(
         &self,
@@ -884,7 +884,7 @@ impl VyaneMcpServer {
     /// cancelling or terminal workflow is returned as a successful view.
     #[tool(
         description = "Idempotently request cancellation for one canonical UUIDv7 workflow caller id. Cancelling and terminal states are successful responses.",
-        input_schema = rmcp::handler::server::tool::cached_schema_for_type::<WorkflowIdArgs>()
+        input_schema = rmcp::handler::server::tool::schema_for_type::<WorkflowIdArgs>()
     )]
     async fn vyane_workflow_cancel(
         &self,
@@ -906,25 +906,17 @@ impl VyaneMcpServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl rmcp::ServerHandler for VyaneMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "vyane".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-            },
-            instructions: Some(
-                if self.workflow_control.is_some() {
-                    WORKFLOW_SERVER_INSTRUCTIONS
-                } else {
-                    BASE_SERVER_INSTRUCTIONS
-                }
-                .into(),
-            ),
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(Implementation::new("vyane", env!("CARGO_PKG_VERSION")))
+            .with_instructions(if self.workflow_control.is_some() {
+                WORKFLOW_SERVER_INSTRUCTIONS
+            } else {
+                BASE_SERVER_INSTRUCTIONS
+            })
     }
 }
 
@@ -1293,7 +1285,7 @@ type _FutureMustBeInScope = Box<dyn Future<Output = ()> + Send>;
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use rmcp::model::CallToolRequestParam;
+    use rmcp::model::CallToolRequestParams;
     use vyane_core::Sandbox;
     use vyane_service::StoragePaths;
 
@@ -2048,23 +2040,23 @@ mod tests {
         assert_eq!(tools.len(), 6);
         for tool in &tools {
             let expected = match tool.name.as_ref() {
-                "vyane_dispatch" => rmcp::handler::server::tool::cached_schema_for_type::<
-                    rmcp::handler::server::tool::Parameters<DispatchArgs>,
+                "vyane_dispatch" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<DispatchArgs>,
                 >(),
-                "vyane_broadcast" => rmcp::handler::server::tool::cached_schema_for_type::<
-                    rmcp::handler::server::tool::Parameters<BroadcastArgs>,
+                "vyane_broadcast" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<BroadcastArgs>,
                 >(),
-                "vyane_history" => rmcp::handler::server::tool::cached_schema_for_type::<
-                    rmcp::handler::server::tool::Parameters<HistoryArgs>,
+                "vyane_history" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<HistoryArgs>,
                 >(),
-                "vyane_sessions" => rmcp::handler::server::tool::cached_schema_for_type::<
-                    rmcp::model::EmptyObject,
+                "vyane_sessions" => {
+                    rmcp::handler::server::tool::schema_for_type::<rmcp::model::EmptyObject>()
+                }
+                "vyane_route" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<RouteArgs>,
                 >(),
-                "vyane_route" => rmcp::handler::server::tool::cached_schema_for_type::<
-                    rmcp::handler::server::tool::Parameters<RouteArgs>,
-                >(),
-                "vyane_check" => rmcp::handler::server::tool::cached_schema_for_type::<
-                    rmcp::handler::server::tool::Parameters<CheckArgs>,
+                "vyane_check" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<CheckArgs>,
                 >(),
                 other => panic!("unexpected tool {other}"),
             };
@@ -2081,18 +2073,12 @@ mod tests {
                 assert_eq!(properties["changed_files"]["maximum"], 1_000_000);
                 assert_eq!(properties["tags"]["maxItems"], 64);
                 assert_eq!(properties["candidates"]["maxItems"], 64);
-                assert_eq!(
-                    properties["tags"]["items"]["$ref"],
-                    "#/definitions/RouteValue"
-                );
+                assert_eq!(properties["tags"]["items"]["$ref"], "#/$defs/RouteValue");
                 assert_eq!(
                     properties["candidates"]["items"]["$ref"],
-                    "#/definitions/RouteValue"
+                    "#/$defs/RouteValue"
                 );
-                assert_eq!(
-                    tool.input_schema["definitions"]["RouteValue"]["maxLength"],
-                    256
-                );
+                assert_eq!(tool.input_schema["$defs"]["RouteValue"]["maxLength"], 256);
             }
             if tool.name.as_ref() == "vyane_check" {
                 assert_eq!(
@@ -2110,9 +2096,8 @@ mod tests {
         }
 
         let route_result = client
-            .call_tool(CallToolRequestParam {
-                name: "vyane_route".into(),
-                arguments: Some(
+            .call_tool(
+                CallToolRequestParams::new("vyane_route").with_arguments(
                     serde_json::json!({
                         "task": TASK_CANARY,
                         "tier": "economy",
@@ -2122,7 +2107,7 @@ mod tests {
                     .unwrap()
                     .clone(),
                 ),
-            })
+            )
             .await?;
         assert_eq!(route_result.is_error, Some(false));
         let route_wire = serde_json::to_string(&route_result)?;
@@ -2142,10 +2127,7 @@ mod tests {
         }
 
         let check_result = client
-            .call_tool(CallToolRequestParam {
-                name: "vyane_check".into(),
-                arguments: Some(JsonObject::new()),
-            })
+            .call_tool(CallToolRequestParams::new("vyane_check").with_arguments(JsonObject::new()))
             .await?;
         assert_eq!(check_result.is_error, Some(false));
         let check_wire = serde_json::to_string(&check_result)?;
@@ -2194,10 +2176,10 @@ mod tests {
         ];
         for (name, arguments) in invalid_calls {
             let result = client
-                .call_tool(CallToolRequestParam {
-                    name: name.to_string().into(),
-                    arguments: Some(arguments.as_object().expect("object").clone()),
-                })
+                .call_tool(
+                    CallToolRequestParams::new(name.to_string())
+                        .with_arguments(arguments.as_object().expect("object").clone()),
+                )
                 .await?;
             assert_eq!(result.is_error, Some(false));
             let wire = serde_json::to_string(&result)?;
@@ -2248,10 +2230,10 @@ mod tests {
         ];
         for arguments in semantic_inputs {
             let semantic_error = client
-                .call_tool(CallToolRequestParam {
-                    name: "vyane_route".into(),
-                    arguments: Some(arguments.as_object().unwrap().clone()),
-                })
+                .call_tool(
+                    CallToolRequestParams::new("vyane_route")
+                        .with_arguments(arguments.as_object().unwrap().clone()),
+                )
                 .await?;
             let semantic_wire = serde_json::to_string(&semantic_error)?;
             assert!(!semantic_wire.contains(TASK_CANARY));

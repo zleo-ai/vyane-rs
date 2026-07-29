@@ -1463,12 +1463,12 @@ pub(crate) mod openai_responses {
             let mut text_parts = Vec::new();
             let mut sources = BTreeMap::<String, Option<String>>::new();
             for item in &response.output {
-                if item.kind.as_deref() == Some("web_search_call") {
-                    if let Some(action) = &item.action {
-                        for source in &action.sources {
-                            if let Some(url) = &source.url {
-                                insert_source(&mut sources, url, None)?;
-                            }
+                if item.kind.as_deref() == Some("web_search_call")
+                    && let Some(action) = &item.action
+                {
+                    for source in &action.sources {
+                        if let Some(url) = &source.url {
+                            insert_source(&mut sources, url, None)?;
                         }
                     }
                 }
@@ -1479,16 +1479,15 @@ pub(crate) mod openai_responses {
                     if matches!(
                         content.kind.as_deref(),
                         Some("output_text") | Some("text") | None
-                    ) {
-                        if let Some(text) = &content.text {
-                            text_parts.push(text.clone());
-                        }
+                    ) && let Some(text) = &content.text
+                    {
+                        text_parts.push(text.clone());
                     }
                     for annotation in &content.annotations {
-                        if annotation.kind.as_deref() == Some("url_citation") {
-                            if let Some(url) = &annotation.url {
-                                insert_source(&mut sources, url, annotation.title.clone())?;
-                            }
+                        if annotation.kind.as_deref() == Some("url_citation")
+                            && let Some(url) = &annotation.url
+                        {
+                            insert_source(&mut sources, url, annotation.title.clone())?;
                         }
                     }
                 }

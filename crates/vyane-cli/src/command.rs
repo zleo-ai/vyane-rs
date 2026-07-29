@@ -431,10 +431,8 @@ async fn run_dispatch_streaming(
 
             if json {
                 print_run_json(record, output)?;
-            } else if !success {
-                if let Some(error) = &record.error {
-                    eprintln!("{error}");
-                }
+            } else if !success && let Some(error) = &record.error {
+                eprintln!("{error}");
             }
 
             Ok(Some(if success {
@@ -804,12 +802,12 @@ async fn worker_body(
     let output = outcome.output;
 
     // Persist the answer (if any) beside the status, then finalize status.
-    if let Some(text) = output.as_deref() {
-        if let Err(error) = paths.write_output(text) {
-            // The ledger/run outcome remains authoritative even if its optional
-            // convenience artifact cannot be written.
-            eprintln!("write {}: {error:#}", paths.output().display());
-        }
+    if let Some(text) = output.as_deref()
+        && let Err(error) = paths.write_output(text)
+    {
+        // The ledger/run outcome remains authoritative even if its optional
+        // convenience artifact cannot be written.
+        eprintln!("write {}: {error:#}", paths.output().display());
     }
 
     if durable {
@@ -3196,12 +3194,11 @@ fn add_profile_env_vars(
     let Some(profile) = config.profiles.get(profile_name) else {
         return;
     };
-    if let Some(provider_id) = profile.provider.as_deref() {
-        if let Ok(provider) = config.providers.get(provider_id) {
-            if let Some(env) = &provider.api_key_env {
-                out.insert(env.clone());
-            }
-        }
+    if let Some(provider_id) = profile.provider.as_deref()
+        && let Ok(provider) = config.providers.get(provider_id)
+        && let Some(env) = &provider.api_key_env
+    {
+        out.insert(env.clone());
     }
     if let Some(failover) = &profile.failover {
         for element in failover {
@@ -3210,10 +3207,10 @@ fn add_profile_env_vars(
                     add_profile_env_vars(config, name, out, seen);
                 }
                 vyane_config::RawFailoverElement::ProviderModel { provider, .. } => {
-                    if let Ok(provider_config) = config.providers.get(provider) {
-                        if let Some(env) = &provider_config.api_key_env {
-                            out.insert(env.clone());
-                        }
+                    if let Ok(provider_config) = config.providers.get(provider)
+                        && let Some(env) = &provider_config.api_key_env
+                    {
+                        out.insert(env.clone());
                     }
                 }
             }

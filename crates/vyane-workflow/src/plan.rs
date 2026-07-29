@@ -457,13 +457,13 @@ impl WorkflowPlan {
                     step.id
                 ));
             }
-            if let WorkflowPlanTargets::FanOut { .. } = &step.targets {
-                if !step.route.is_empty() {
-                    problems.push(format!(
-                        "workflow plan step `{}` cannot apply route hints to fan_out",
-                        step.id
-                    ));
-                }
+            if let WorkflowPlanTargets::FanOut { .. } = &step.targets
+                && !step.route.is_empty()
+            {
+                problems.push(format!(
+                    "workflow plan step `{}` cannot apply route hints to fan_out",
+                    step.id
+                ));
             }
             validate_text(
                 "workflow prompt template",

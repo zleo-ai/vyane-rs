@@ -5,7 +5,7 @@
 
 [![CI](https://github.com/zleo-ai/vyane-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/zleo-ai/vyane-rs/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可协议)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 &nbsp;·&nbsp; [English](README.md)
 
 Vyane 是一个内核——以及内核之上的一个 CLI——用来在**两类目标**之间 dispatch、
@@ -81,7 +81,7 @@ difference。运行 `python3 .github/scripts/parity-report.py --format markdown`
 | 共享服务层 | `vyane-service` | [x] `OwnerContextFactory` 完成 authentication/resolution 并拒绝 authenticated `local`；`OwnerScopedService` 冻结 dispatch/stream/query/session/reset；AgentRun components 已含 prepared authorized harness dispatch、paired backend、exact message-completion handback，以及 daemon Linux Process host 使用的通用 resident supervisor；ordinary dispatch 不启动它们 |
 | REST API | `vyane-cli` + `axum` | [x] per-start bearer、loopback Host/Origin 校验、拒绝 non-loopback bind、allowlisted view 与 assembly-frozen local service scope；bearer 尚不代表 distinct principal，也不是 hostile same-UID 或多用户隔离 |
 | 确定性路由 | `vyane-router` | [x] |
-| MCP server | `vyane-mcp` | [x] CLI 提供 9 个工具：原 6 个执行/查询/诊断工具，加经认证的持久 workflow submit/status/cancel；generic success output 上限为 1 MiB |
+| MCP server | `vyane-mcp` + `rmcp` 3.0 | [x] CLI 提供 9 个工具：原 6 个执行/查询/诊断工具，加经认证的持久 workflow submit/status/cancel；generic success output 上限为 1 MiB |
 | solution-review workflow（implement → fan-out review → synthesize） | `vyane-cli`（review module） | [x] 尚不是原仓结构化 git diff/PR review 产品 |
 
 Capability admission 刻意窄于 sandbox。`ReadOnly` 可用于 chat 或 harness target；`Write`/`Full`

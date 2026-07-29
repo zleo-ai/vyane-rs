@@ -473,13 +473,11 @@ fn append_blocking(
             if owner_created {
                 sync_directory(root)?;
             }
-            if root_created {
-                if let Some(parent) = root.parent() {
-                    if parent.as_os_str().is_empty() {
-                        sync_directory(Path::new("."))?;
-                    } else {
-                        sync_directory(parent)?;
-                    }
+            if root_created && let Some(parent) = root.parent() {
+                if parent.as_os_str().is_empty() {
+                    sync_directory(Path::new("."))?;
+                } else {
+                    sync_directory(parent)?;
                 }
             }
         }
@@ -894,13 +892,13 @@ fn sync_directory(_path: &Path) -> EventResult<()> {
 }
 
 fn open_private(path: &Path, append: bool) -> EventResult<File> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if !metadata.file_type().is_file() {
-            return Err(EventLogError::InvalidInput(format!(
-                "event storage entry {} is not a regular file",
-                path.display()
-            )));
-        }
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && !metadata.file_type().is_file()
+    {
+        return Err(EventLogError::InvalidInput(format!(
+            "event storage entry {} is not a regular file",
+            path.display()
+        )));
     }
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true).append(append);

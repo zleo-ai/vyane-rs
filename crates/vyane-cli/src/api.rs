@@ -683,10 +683,10 @@ impl TaskSupervisor {
                     )
                 }
             };
-            if let (Some(path), Some(output)) = (output_path, output) {
-                if let Err(error) = write_private_task_output(path, output).await {
-                    eprintln!("task {dispatch_id} output artifact failed: {error:#}");
-                }
+            if let (Some(path), Some(output)) = (output_path, output)
+                && let Err(error) = write_private_task_output(path, output).await
+            {
+                eprintln!("task {dispatch_id} output artifact failed: {error:#}");
             }
             supervisor
                 .settle_with_retry(&dispatch_id, epoch, settlement)
@@ -854,10 +854,10 @@ impl TaskSupervisor {
                 return Err(TaskCallError::ControlUnavailable { id: id.into() });
             }
             if record.state == TaskState::Cancelling {
-                if let Some(key) = &token_key {
-                    if let Some(token) = self.live_tokens.get(key) {
-                        token.cancel();
-                    }
+                if let Some(key) = &token_key
+                    && let Some(token) = self.live_tokens.get(key)
+                {
+                    token.cancel();
                 }
                 return Ok(Some(record));
             }
@@ -876,10 +876,10 @@ impl TaskSupervisor {
                 .await;
             match result {
                 Ok(cancelling) => {
-                    if let Some(key) = &token_key {
-                        if let Some(token) = self.live_tokens.get(key) {
-                            token.cancel();
-                        }
+                    if let Some(key) = &token_key
+                        && let Some(token) = self.live_tokens.get(key)
+                    {
+                        token.cancel();
                     }
                     return Ok(Some(cancelling));
                 }
@@ -898,10 +898,10 @@ impl TaskSupervisor {
                                         if instance_id == self.instance_id.as_ref()
                                 ) =>
                         {
-                            if let Some(key) = &token_key {
-                                if let Some(token) = self.live_tokens.get(key) {
-                                    token.cancel();
-                                }
+                            if let Some(key) = &token_key
+                                && let Some(token) = self.live_tokens.get(key)
+                            {
+                                token.cancel();
                             }
                             return Ok(Some(record));
                         }
@@ -933,10 +933,10 @@ impl TaskSupervisor {
                 }
             };
             for (id, epoch) in &owned {
-                if let Err(error) = self.request_shutdown_cancel(id, *epoch).await {
-                    if first_metadata_error.is_none() {
-                        first_metadata_error = Some(error);
-                    }
+                if let Err(error) = self.request_shutdown_cancel(id, *epoch).await
+                    && first_metadata_error.is_none()
+                {
+                    first_metadata_error = Some(error);
                 }
             }
             if first_metadata_error.is_some() {
@@ -984,10 +984,10 @@ impl TaskSupervisor {
         match self.owned_active_task_keys().await {
             Ok(remaining) => {
                 for (id, epoch) in remaining {
-                    if let Err(error) = self.interrupt_shutdown_task(&id, epoch).await {
-                        if first_metadata_error.is_none() {
-                            first_metadata_error = Some(error);
-                        }
+                    if let Err(error) = self.interrupt_shutdown_task(&id, epoch).await
+                        && first_metadata_error.is_none()
+                    {
+                        first_metadata_error = Some(error);
                     }
                 }
             }
@@ -2300,13 +2300,13 @@ async fn get_task_output(
     // Pre-owner-namespace REST artifacts were always local and used generated
     // UUID task ids. Restrict the compatibility read to that exact shape; all
     // new writes use opaque owner- and task-qualified path segments.
-    if output.is_none() {
-        if let Some(legacy) = tasks.legacy_local_output_path(&id) {
-            output = read_task_output(legacy).await.map_err(|error| {
-                eprintln!("task {id} legacy output read failed: {error:#}");
-                ApiError::internal("task output unavailable")
-            })?;
-        }
+    if output.is_none()
+        && let Some(legacy) = tasks.legacy_local_output_path(&id)
+    {
+        output = read_task_output(legacy).await.map_err(|error| {
+            eprintln!("task {id} legacy output read failed: {error:#}");
+            ApiError::internal("task output unavailable")
+        })?;
     }
     match output {
         Some(output) => Ok(Json(TaskOutput { output })),

@@ -1746,15 +1746,15 @@ mod tests {
                 limit,
             )?;
             *self.claimed.lock().unwrap() = claims.clone();
-            if matches!(self.attack, StoreAttack::ForeignClaim) {
-                if let Some(claim) = claims.first_mut() {
-                    claim.run.owner = "foreign-owner-canary".into();
-                }
+            if matches!(self.attack, StoreAttack::ForeignClaim)
+                && let Some(claim) = claims.first_mut()
+            {
+                claim.run.owner = "foreign-owner-canary".into();
             }
-            if matches!(self.attack, StoreAttack::WrongBackend) {
-                if let Some(claim) = claims.first_mut() {
-                    claim.run.execution_backend = ExecutionBackend::Remote;
-                }
+            if matches!(self.attack, StoreAttack::WrongBackend)
+                && let Some(claim) = claims.first_mut()
+            {
+                claim.run.execution_backend = ExecutionBackend::Remote;
             }
             Ok(claims)
         }
@@ -1764,17 +1764,16 @@ mod tests {
             receipt: &RunLeaseReceipt,
             controller: &ControllerRef,
         ) -> vyane_agent::Result<ClaimedRun> {
-            if matches!(self.attack, StoreAttack::SwapStart) {
-                if let Some(other) = self
+            if matches!(self.attack, StoreAttack::SwapStart)
+                && let Some(other) = self
                     .claimed
                     .lock()
                     .unwrap()
                     .iter()
                     .find(|claim| claim.receipt.run_id != receipt.run_id)
                     .cloned()
-                {
-                    return self.inner.start(owner, &other.receipt, controller);
-                }
+            {
+                return self.inner.start(owner, &other.receipt, controller);
             }
             self.inner.start(owner, receipt, controller)
         }

@@ -176,13 +176,12 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
     // RouteResult.profile for the config selector used by dispatch.
     let mut available_providers = Vec::<String>::new();
     for (_, patch) in &candidates {
-        if let Some(provider) = patch.provider.as_ref() {
-            if !available_providers
+        if let Some(provider) = patch.provider.as_ref()
+            && !available_providers
                 .iter()
                 .any(|seen| seen.eq_ignore_ascii_case(provider))
-            {
-                available_providers.push(provider.clone());
-            }
+        {
+            available_providers.push(provider.clone());
         }
     }
     if available_providers.is_empty() {
@@ -322,10 +321,10 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
     // A blocked preference can make the core router return a provider-only
     // fallback. Once the adapter chooses the concrete profile, make the model
     // and effective effort truthful to what dispatch will actually execute.
-    if decision.model.is_empty() {
-        if let Some(model) = selected_patch.model.as_ref() {
-            decision.model = model.as_str().to_string();
-        }
+    if decision.model.is_empty()
+        && let Some(model) = selected_patch.model.as_ref()
+    {
+        decision.model = model.as_str().to_string();
     }
     decision.effort = explicit_effort
         .or_else(|| {
@@ -341,13 +340,13 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
 }
 
 fn validate_route_param_values(config: &ResolvedConfig, params: &RouteParams) -> Result<()> {
-    if let Some(tier) = params.explicit_tier.as_deref() {
-        if !matches!(
+    if let Some(tier) = params.explicit_tier.as_deref()
+        && !matches!(
             tier.trim().to_ascii_lowercase().as_str(),
             "economy" | "mainline" | "frontier"
-        ) {
-            bail!("unknown routing tier `{tier}` (expected economy, mainline, or frontier)");
-        }
+        )
+    {
+        bail!("unknown routing tier `{tier}` (expected economy, mainline, or frontier)");
     }
     let unknown_candidates = params
         .candidate_profiles

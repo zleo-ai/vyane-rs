@@ -457,18 +457,16 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             input.policy.web_search.as_ref(),
             search_bound.as_ref(),
             search_client,
-        ) {
-            if register_web_search_tool(
-                &mut registry,
-                search.policy.clone(),
-                search_client,
-                search_bound.target.model.clone(),
-                search_bound.params.clone(),
-            )
-            .is_err()
-            {
-                return AgentExecutorOutcome::Unknown;
-            }
+        ) && register_web_search_tool(
+            &mut registry,
+            search.policy.clone(),
+            search_client,
+            search_bound.target.model.clone(),
+            search_bound.params.clone(),
+        )
+        .is_err()
+        {
+            return AgentExecutorOutcome::Unknown;
         }
         if let Some(fetch_policy) = input.policy.web_fetch.clone()
             && register_web_fetch_tool(&mut registry, fetch_policy, authorized_web_fetch_client())

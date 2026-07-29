@@ -816,8 +816,8 @@ impl Dispatcher {
 
         // Session continuity is likewise best-effort. Only runs that name a
         // session touch the store.
-        if let Some(sid) = session_id.as_deref() {
-            if let Err(e) = self
+        if let Some(sid) = session_id.as_deref()
+            && let Err(e) = self
                 .update_session(
                     sid,
                     &session_ctx,
@@ -826,13 +826,12 @@ impl Dispatcher {
                     transcript_delta,
                 )
                 .await
-            {
-                tracing::warn!(
-                    session_id = sid,
-                    error = %e,
-                    "session store update failed after run was recorded"
-                );
-            }
+        {
+            tracing::warn!(
+                session_id = sid,
+                error = %e,
+                "session store update failed after run was recorded"
+            );
         }
 
         Ok(DispatchOutcome { record, output })
