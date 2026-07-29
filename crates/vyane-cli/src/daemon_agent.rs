@@ -93,11 +93,12 @@ fn apply_native_permission_ceilings(
     permissions: &mut NativePermissionSet,
     ceilings: &[vyane_config::NativePermissionCeiling],
 ) -> std::result::Result<(), ()> {
-    for raw_ceiling in ceilings {
-        let ceiling = NativePermissionSet::try_from(raw_ceiling).map_err(|_| ())?;
-        permissions.restrict_by(&ceiling).map_err(|_| ())?;
-    }
-    Ok(())
+    let ceilings = ceilings
+        .iter()
+        .map(NativePermissionSet::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
+    permissions.restrict_by_all(&ceilings).map_err(|_| ())
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]

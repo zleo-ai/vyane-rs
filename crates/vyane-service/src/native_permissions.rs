@@ -131,6 +131,51 @@ impl NativePermissionSet {
 
         self.validate()
     }
+
+    /// Apply every independent ceiling while preserving the distinction
+    /// between an explicitly scoped search request and an originally
+    /// unrestricted request that configuration is allowed to narrow.
+    pub fn restrict_by_all(
+        &mut self,
+        ceilings: &[NativePermissionSet],
+    ) -> Result<(), NativePermissionSetError> {
+        let originally_unrestricted_search = self
+            .web_search
+            .as_ref()
+            .is_some_and(|search| search.policy.allow_domains.is_none());
+        let mut effective_search_domains: Option<Vec<String>> = None;
+
+        for ceiling in ceilings {
+            if originally_unrestricted_search {
+                self.web_search
+                    .as_mut()
+                    .ok_or(NativePermissionSetError::InvalidPolicy)?
+                    .policy
+                    .allow_domains = None;
+            }
+            self.restrict_by(ceiling)?;
+            if originally_unrestricted_search {
+                let imposed = self
+                    .web_search
+                    .as_ref()
+                    .ok_or(NativePermissionSetError::InvalidPolicy)?
+                    .policy
+                    .allow_domains
+                    .as_deref();
+                effective_search_domains =
+                    intersect_domain_scopes(effective_search_domains.as_deref(), imposed)?;
+            }
+        }
+
+        if originally_unrestricted_search {
+            self.web_search
+                .as_mut()
+                .ok_or(NativePermissionSetError::InvalidPolicy)?
+                .policy
+                .allow_domains = effective_search_domains;
+        }
+        self.validate()
+    }
 }
 
 impl TryFrom<&ConfigCeiling> for NativePermissionSet {
@@ -270,12 +315,11 @@ fn restrict_network(
         || request.max_bytes > ceiling.max_bytes
         || request.connect_timeout_seconds > ceiling.connect_timeout_seconds
         || request.allow.iter().any(|requested| {
-            !ceiling.allow.iter().any(|allowed| {
-                host_scope_within(&requested.host, &allowed.host)
-                    && requested
-                        .ports
-                        .iter()
-                        .all(|port| allowed.ports.contains(port))
+            requested.ports.iter().any(|port| {
+                !ceiling.allow.iter().any(|allowed| {
+                    host_scope_within(&requested.host, &allowed.host)
+                        && allowed.ports.contains(port)
+                })
             })
         })
     {
@@ -353,6 +397,35 @@ fn restrict_domains(
     }
 }
 
+fn intersect_domain_scopes(
+    left: Option<&[String]>,
+    right: Option<&[String]>,
+) -> Result<Option<Vec<String>>, NativePermissionSetError> {
+    let (Some(left), Some(right)) = (left, right) else {
+        return Ok(left.or(right).map(<[String]>::to_vec));
+    };
+    let intersection = left
+        .iter()
+        .flat_map(|left_domain| {
+            right.iter().filter_map(move |right_domain| {
+                if domain_within(left_domain, right_domain) {
+                    Some(left_domain.clone())
+                } else if domain_within(right_domain, left_domain) {
+                    Some(right_domain.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if intersection.is_empty() {
+        return Err(NativePermissionSetError::ExceedsCeiling);
+    }
+    Ok(Some(intersection))
+}
+
 fn domain_within(requested: &str, ceiling: &str) -> bool {
     requested == ceiling || requested.ends_with(&format!(".{ceiling}"))
 }
@@ -424,7 +497,7 @@ mod tests {
 
     #[test]
     fn command_network_host_ports_and_limits_must_be_inside_every_ceiling() {
-        let command = Some(command("cargo", &["fetch"], 30));
+        let command_policy = Some(command("cargo", &["fetch"], 30));
         let network =
             |host: &str, ports: Vec<u16>, max_connections: u32| NativeCommandNetworkPolicy {
                 allow: vec![NativeCommandNetworkRule {
@@ -437,19 +510,19 @@ mod tests {
                 connect_timeout_seconds: 2,
             };
         let ceiling = NativePermissionSet {
-            command_execution: command.clone(),
+            command_execution: command_policy.clone(),
             command_network: Some(network("*.example.com", vec![443, 8443], 4)),
             ..NativePermissionSet::default()
         };
         let mut narrow = NativePermissionSet {
-            command_execution: command.clone(),
+            command_execution: command_policy.clone(),
             command_network: Some(network("api.example.com", vec![443], 2)),
             ..NativePermissionSet::default()
         };
         narrow.restrict_by(&ceiling).unwrap();
 
         let mut wrong_port = NativePermissionSet {
-            command_execution: command,
+            command_execution: command_policy,
             command_network: Some(network("api.example.com", vec![80], 2)),
             ..NativePermissionSet::default()
         };
@@ -457,6 +530,33 @@ mod tests {
             wrong_port.restrict_by(&ceiling),
             Err(NativePermissionSetError::ExceedsCeiling)
         );
+
+        let split_ports_ceiling = NativePermissionSet {
+            command_execution: Some(command("cargo", &["fetch"], 30)),
+            command_network: Some(NativeCommandNetworkPolicy {
+                allow: vec![
+                    NativeCommandNetworkRule {
+                        host: "api.example.com".into(),
+                        ports: vec![443],
+                    },
+                    NativeCommandNetworkRule {
+                        host: "api.example.com".into(),
+                        ports: vec![8443],
+                    },
+                ],
+                route: NativeCommandNetworkRoute::Direct,
+                max_connections: 4,
+                max_bytes: 1024,
+                connect_timeout_seconds: 2,
+            }),
+            ..NativePermissionSet::default()
+        };
+        let mut combined_request = NativePermissionSet {
+            command_execution: Some(command("cargo", &["fetch"], 30)),
+            command_network: Some(network("api.example.com", vec![443, 8443], 2)),
+            ..NativePermissionSet::default()
+        };
+        combined_request.restrict_by(&split_ports_ceiling).unwrap();
     }
 
     #[test]
@@ -487,6 +587,53 @@ mod tests {
         assert_eq!(
             request.web_search.unwrap().policy.allow_domains,
             Some(vec!["example.com".into()])
+        );
+    }
+
+    #[test]
+    fn unrestricted_search_intersects_successive_config_domain_scopes() {
+        let search = |domains: Option<Vec<&str>>| NativeWebSearchGrant {
+            target: "search".into(),
+            policy: NativeWebSearchPolicy {
+                allow_domains: domains.map(|domains| {
+                    domains
+                        .into_iter()
+                        .map(std::string::ToString::to_string)
+                        .collect()
+                }),
+                max_searches: 2,
+                search_context_size: WebSearchContextSize::Low,
+            },
+        };
+        let mut request = NativePermissionSet {
+            web_search: Some(search(None)),
+            ..NativePermissionSet::default()
+        };
+        let broad = NativePermissionSet {
+            web_search: Some(search(Some(vec!["example.com"]))),
+            ..NativePermissionSet::default()
+        };
+        let narrow = NativePermissionSet {
+            web_search: Some(search(Some(vec!["docs.example.com"]))),
+            ..NativePermissionSet::default()
+        };
+        request.restrict_by_all(&[broad, narrow]).unwrap();
+        assert_eq!(
+            request.web_search.unwrap().policy.allow_domains,
+            Some(vec!["docs.example.com".into()])
+        );
+
+        let mut explicit_broad = NativePermissionSet {
+            web_search: Some(search(Some(vec!["example.com"]))),
+            ..NativePermissionSet::default()
+        };
+        let narrow = NativePermissionSet {
+            web_search: Some(search(Some(vec!["docs.example.com"]))),
+            ..NativePermissionSet::default()
+        };
+        assert_eq!(
+            explicit_broad.restrict_by_all(&[narrow]),
+            Err(NativePermissionSetError::ExceedsCeiling)
         );
     }
 
