@@ -46,7 +46,10 @@ use crate::native_agent_spool::{
 };
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
-use vyane_harness::native::{validate_command_host, validate_command_network_host};
+use vyane_harness::native::{
+    prepare_command_mounts_async, validate_command_host_with_mounts,
+    validate_command_network_host_with_mounts,
+};
 
 const INPUT_DIR: &str = "agent-inputs";
 const NATIVE_INPUT_DIR: &str = "native-agent-inputs";
@@ -493,17 +496,6 @@ impl DaemonAgentHost {
             .workdir
             .ok_or_else(AgentApiError::bad_request)
             .and_then(|path| PinnedWorkdir::open(path).map_err(|_| AgentApiError::bad_request()))?;
-        if let Some(policy) = &request.native_permissions.command_execution {
-            if let Some(network) = &request.native_permissions.command_network {
-                validate_command_network_host(&workdir, policy, network)
-                    .await
-                    .map_err(|_| AgentApiError::bad_request())?;
-            } else {
-                validate_command_host(&workdir, policy)
-                    .await
-                    .map_err(|_| AgentApiError::bad_request())?;
-            }
-        }
         let scoped = self.service.scope(OwnerContext::single_user_local());
         let chain = scoped
             .resolve(&request.target)
@@ -582,11 +574,32 @@ impl DaemonAgentHost {
                 Err(AgentApiError::conflict())
             };
         }
+        let command_mounts = if let Some(policy) = &input.policy.command_execution {
+            let mounts = prepare_command_mounts_async(&workdir, policy)
+                .await
+                .map_err(|_| AgentApiError::bad_request())?;
+            if let Some(network) = &input.policy.command_network {
+                validate_command_network_host_with_mounts(&workdir, policy, network, &mounts)
+                    .await
+                    .map_err(|_| AgentApiError::bad_request())?;
+            } else {
+                validate_command_host_with_mounts(&workdir, policy, &mounts)
+                    .await
+                    .map_err(|_| AgentApiError::bad_request())?;
+            }
+            Some(mounts)
+        } else {
+            None
+        };
         let spool_create = self
             .native_spool
             .create(&input)
             .map_err(|_| AgentApiError::unavailable())?;
-        let workdir_install = match self.native_spool.install_workdir(&input, &workdir) {
+        let workdir_install = match self.native_spool.install_workdir_with_command_mounts(
+            &input,
+            &workdir,
+            command_mounts,
+        ) {
             Ok(install) => install,
             Err(_) => {
                 if spool_create == NativeAgentSpoolCreate::Created {
@@ -595,7 +608,16 @@ impl DaemonAgentHost {
                 return Err(AgentApiError::unavailable());
             }
         };
-        if !native_admission_pair_is_consistent(spool_create, workdir_install) {
+        let has_writable_command_roots = input
+            .policy
+            .command_execution
+            .as_ref()
+            .is_some_and(|command| !command.writable_roots.is_empty());
+        if !native_admission_pair_is_consistent(
+            spool_create,
+            workdir_install,
+            has_writable_command_roots,
+        ) {
             if spool_create == NativeAgentSpoolCreate::Created {
                 let _ = self.native_spool.remove_exact(&input);
             }
@@ -1049,17 +1071,16 @@ const fn exact_retry_backend(backend: ExecutionBackend) -> bool {
 const fn native_admission_pair_is_consistent(
     spool: NativeAgentSpoolCreate,
     workdir: NativeWorkdirInstall,
+    has_writable_command_roots: bool,
 ) -> bool {
-    matches!(
-        (spool, workdir),
-        (
-            NativeAgentSpoolCreate::Created,
-            NativeWorkdirInstall::Created
-        ) | (
-            NativeAgentSpoolCreate::ExistingExact,
-            NativeWorkdirInstall::Created | NativeWorkdirInstall::ExistingExact
-        )
-    )
+    match (spool, workdir) {
+        (NativeAgentSpoolCreate::Created, NativeWorkdirInstall::Created)
+        | (NativeAgentSpoolCreate::ExistingExact, NativeWorkdirInstall::ExistingExact) => true,
+        (NativeAgentSpoolCreate::ExistingExact, NativeWorkdirInstall::Created) => {
+            !has_writable_command_roots
+        }
+        _ => false,
+    }
 }
 
 fn worker_id(run_id: &str) -> String {
@@ -1156,6 +1177,7 @@ mod tests {
                 "allow": [
                     { "program": "git", "args_prefix": ["status"] }
                 ],
+                "writable_roots": ["src"],
                 "max_seconds": 30
             },
             "command_network": {
@@ -1200,6 +1222,7 @@ mod tests {
             .expect("explicit command policy");
         assert_eq!(command.allow[0].program, "git");
         assert_eq!(command.allow[0].args_prefix, ["status"]);
+        assert_eq!(command.writable_roots, ["src"]);
         assert_eq!(command.max_seconds, 30);
         let network = configured
             .native_permissions
@@ -1479,22 +1502,36 @@ mod tests {
     }
 
     #[test]
-    fn exact_orphaned_native_spool_can_receive_a_restarted_live_handle() {
+    fn writable_orphaned_native_spool_cannot_receive_reopened_root_handles() {
         assert!(native_admission_pair_is_consistent(
             NativeAgentSpoolCreate::ExistingExact,
             NativeWorkdirInstall::Created,
+            false,
         ));
         assert!(native_admission_pair_is_consistent(
             NativeAgentSpoolCreate::ExistingExact,
             NativeWorkdirInstall::ExistingExact,
+            false,
+        ));
+        assert!(!native_admission_pair_is_consistent(
+            NativeAgentSpoolCreate::ExistingExact,
+            NativeWorkdirInstall::Created,
+            true,
+        ));
+        assert!(native_admission_pair_is_consistent(
+            NativeAgentSpoolCreate::ExistingExact,
+            NativeWorkdirInstall::ExistingExact,
+            true,
         ));
         assert!(native_admission_pair_is_consistent(
             NativeAgentSpoolCreate::Created,
             NativeWorkdirInstall::Created,
+            true,
         ));
         assert!(!native_admission_pair_is_consistent(
             NativeAgentSpoolCreate::Created,
             NativeWorkdirInstall::ExistingExact,
+            false,
         ));
     }
 }

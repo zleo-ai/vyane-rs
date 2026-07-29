@@ -15,11 +15,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use vyane_core::{Effort, PinnedWorkdir, WorkdirIdentity};
 use vyane_harness::native::{
-    NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeWebFetchPolicy,
-    NativeWebSearchPolicy, NativeWritePolicy,
+    NativeCommandMountSet, NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy,
+    NativeWebFetchPolicy, NativeWebSearchPolicy, NativeWritePolicy,
 };
 
-const SCHEMA: u32 = 8;
+const SCHEMA: u32 = 9;
+const WEB_FETCH_SCHEMA: u32 = 8;
 const WEB_SEARCH_SCHEMA: u32 = 7;
 const COMMAND_NETWORK_SCHEMA: u32 = 6;
 const COMMAND_EXECUTION_SCHEMA: u32 = 5;
@@ -35,6 +36,7 @@ const MAX_PATH_BYTES: usize = 4096;
 const MAX_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_MODEL_TURNS: u32 = 32;
 const MAX_WORKDIR_HANDOFFS: usize = 1024;
+const MAX_RETAINED_HANDOFF_HANDLES: usize = 256;
 
 const OWNER_PATH_DOMAIN: &[u8] = b"vyane.native-input.owner-path.v1\0";
 const RUN_PATH_DOMAIN: &[u8] = b"vyane.native-input.run-path.v1\0";
@@ -304,24 +306,31 @@ impl NativeAgentInput {
     }
 
     fn validate(&self) -> Result<(), NativeAgentSpoolError> {
+        let no_writable_command_roots = self
+            .policy
+            .command_execution
+            .as_ref()
+            .is_none_or(|policy| policy.writable_roots.is_empty());
         let supported_schema = self.schema == SCHEMA
-            || (self.schema == WEB_SEARCH_SCHEMA && self.policy.web_fetch.is_none())
-            || (self.schema == COMMAND_NETWORK_SCHEMA
-                && self.policy.web_search.is_none()
-                && self.policy.web_fetch.is_none())
-            || (self.schema == COMMAND_EXECUTION_SCHEMA
-                && self.policy.command_network.is_none()
-                && self.policy.web_search.is_none()
-                && self.policy.web_fetch.is_none())
-            || (self.schema == FILESYSTEM_WRITE_SCHEMA
-                && self.policy.command_execution.is_none()
-                && self.policy.web_search.is_none()
-                && self.policy.web_fetch.is_none())
-            || (self.schema == READ_ONLY_SCHEMA
-                && self.policy.filesystem_write.is_none()
-                && self.policy.command_execution.is_none()
-                && self.policy.web_search.is_none()
-                && self.policy.web_fetch.is_none());
+            || (no_writable_command_roots
+                && (self.schema == WEB_FETCH_SCHEMA
+                    || (self.schema == WEB_SEARCH_SCHEMA && self.policy.web_fetch.is_none())
+                    || (self.schema == COMMAND_NETWORK_SCHEMA
+                        && self.policy.web_search.is_none()
+                        && self.policy.web_fetch.is_none())
+                    || (self.schema == COMMAND_EXECUTION_SCHEMA
+                        && self.policy.command_network.is_none()
+                        && self.policy.web_search.is_none()
+                        && self.policy.web_fetch.is_none())
+                    || (self.schema == FILESYSTEM_WRITE_SCHEMA
+                        && self.policy.command_execution.is_none()
+                        && self.policy.web_search.is_none()
+                        && self.policy.web_fetch.is_none())
+                    || (self.schema == READ_ONLY_SCHEMA
+                        && self.policy.filesystem_write.is_none()
+                        && self.policy.command_execution.is_none()
+                        && self.policy.web_search.is_none()
+                        && self.policy.web_fetch.is_none())));
         if !supported_schema
             || !valid_text(&self.owner, MAX_ID_BYTES)
             || !valid_text(&self.run_id, MAX_ID_BYTES)
@@ -362,6 +371,13 @@ struct NativeWorkdirHandoff {
     canonical_path: PathBuf,
     identity: WorkdirIdentity,
     pinned: PinnedWorkdir,
+    command_mounts: Option<NativeCommandMountSet>,
+}
+
+#[derive(Clone)]
+pub(crate) struct NativeExecutionHandoff {
+    pub(crate) workdir: PinnedWorkdir,
+    pub(crate) command_mounts: Option<NativeCommandMountSet>,
 }
 
 impl NativeWorkdirHandoff {
@@ -414,10 +430,20 @@ impl NativeAgentInputSpool {
         input: &NativeAgentInput,
         pinned: &PinnedWorkdir,
     ) -> Result<NativeWorkdirInstall, NativeAgentSpoolError> {
+        self.install_workdir_with_command_mounts(input, pinned, None)
+    }
+
+    pub(crate) fn install_workdir_with_command_mounts(
+        &self,
+        input: &NativeAgentInput,
+        pinned: &PinnedWorkdir,
+        command_mounts: Option<NativeCommandMountSet>,
+    ) -> Result<NativeWorkdirInstall, NativeAgentSpoolError> {
         input.validate()?;
         if input.owner != self.owner
             || pinned.canonical_path() != input.policy.canonical_workdir
             || pinned.identity() != &input.policy.workdir_identity
+            || !command_mounts_match_policy(command_mounts.as_ref(), pinned, &input.policy)
         {
             return Err(NativeAgentSpoolError::BindingMismatch);
         }
@@ -435,6 +461,16 @@ impl NativeAgentInputSpool {
         if workdirs.len() >= MAX_WORKDIR_HANDOFFS {
             return Err(NativeAgentSpoolError::Io);
         }
+        let retained_handles = workdirs.values().try_fold(0usize, |total, handoff| {
+            total.checked_add(handoff.retained_handle_count())
+        });
+        let incoming_handles = retained_handoff_handle_count(command_mounts.as_ref());
+        if retained_handles
+            .and_then(|total| total.checked_add(incoming_handles))
+            .is_none_or(|total| total > MAX_RETAINED_HANDOFF_HANDLES)
+        {
+            return Err(NativeAgentSpoolError::Io);
+        }
         workdirs.insert(
             input.run_id.clone(),
             NativeWorkdirHandoff {
@@ -443,15 +479,28 @@ impl NativeAgentInputSpool {
                 canonical_path: input.policy.canonical_workdir.clone(),
                 identity: input.policy.workdir_identity.clone(),
                 pinned: pinned.clone(),
+                command_mounts,
             },
         );
         Ok(NativeWorkdirInstall::Created)
     }
 
     pub(crate) fn exact_workdir(&self, input: &NativeAgentInput) -> Option<PinnedWorkdir> {
+        self.exact_execution(input).map(|handoff| handoff.workdir)
+    }
+
+    pub(crate) fn exact_execution(
+        &self,
+        input: &NativeAgentInput,
+    ) -> Option<NativeExecutionHandoff> {
         let workdirs = self.workdirs.lock().ok()?;
         let handoff = workdirs.get(&input.run_id)?;
-        handoff.matches_input(input).then(|| handoff.pinned.clone())
+        handoff
+            .matches_input(input)
+            .then(|| NativeExecutionHandoff {
+                workdir: handoff.pinned.clone(),
+                command_mounts: handoff.command_mounts.clone(),
+            })
     }
 
     pub(crate) fn remove_workdir_exact(&self, input: &NativeAgentInput) -> bool {
@@ -691,6 +740,29 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
         return Err(NativeAgentSpoolError::InvalidInput);
     }
     validate_params(&policy.target.params)
+}
+
+impl NativeWorkdirHandoff {
+    fn retained_handle_count(&self) -> usize {
+        retained_handoff_handle_count(self.command_mounts.as_ref())
+    }
+}
+
+fn retained_handoff_handle_count(command_mounts: Option<&NativeCommandMountSet>) -> usize {
+    1 + command_mounts.map_or(0, NativeCommandMountSet::retained_handle_count)
+}
+
+fn command_mounts_match_policy(
+    mounts: Option<&NativeCommandMountSet>,
+    pinned: &PinnedWorkdir,
+    policy: &NativeAgentPolicy,
+) -> bool {
+    match (&policy.command_execution, mounts) {
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some(command), None) => command.writable_roots.is_empty(),
+        (Some(command), Some(mounts)) => mounts.matches_admission(pinned, command),
+    }
 }
 
 fn validate_params(params: &NativeGenParamsSnapshot) -> Result<(), NativeAgentSpoolError> {
@@ -961,6 +1033,58 @@ mod tests {
     }
 
     #[test]
+    fn workdir_handoffs_share_one_bounded_retained_handle_budget() {
+        use vyane_harness::native::{NativeCommandRule, prepare_command_mounts};
+
+        let (directory, spool) = fixture();
+        let workspace = directory.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        let pinned = PinnedWorkdir::open(&workspace).unwrap();
+        let mut frozen = policy();
+        frozen.canonical_workdir = pinned.canonical_path().to_path_buf();
+        frozen.workdir_identity = pinned.identity().clone();
+        frozen.command_execution = Some(NativeCommandPolicy {
+            allow: vec![NativeCommandRule {
+                program: "touch".into(),
+                args_prefix: Vec::new(),
+            }],
+            writable_roots: vec!["src".into()],
+            max_seconds: 30,
+        });
+        let mounts =
+            prepare_command_mounts(&pinned, frozen.command_execution.as_ref().unwrap()).unwrap();
+
+        for index in 0..128 {
+            let value = NativeAgentInput::fresh(
+                "owner-marker",
+                format!("run-{index}"),
+                "worker-marker",
+                "prompt",
+                frozen.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                spool
+                    .install_workdir_with_command_mounts(&value, &pinned, Some(mounts.clone()))
+                    .unwrap(),
+                NativeWorkdirInstall::Created
+            );
+        }
+        let overflow = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-overflow",
+            "worker-marker",
+            "prompt",
+            frozen,
+        )
+        .unwrap();
+        assert_eq!(
+            spool.install_workdir_with_command_mounts(&overflow, &pinned, Some(mounts)),
+            Err(NativeAgentSpoolError::Io)
+        );
+    }
+
+    #[test]
     fn private_hashed_namespace_is_immutable_and_exactly_bound() {
         use std::os::unix::fs::PermissionsExt as _;
         let (_directory, spool) = fixture();
@@ -1208,6 +1332,7 @@ mod tests {
                 program: "git".into(),
                 args_prefix: vec!["status".into()],
             }],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         });
         let mut invalid = NativeAgentInput::fresh(
@@ -1236,6 +1361,7 @@ mod tests {
                 program: "cargo".into(),
                 args_prefix: vec!["fetch".into()],
             }],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         });
         let mut legacy = NativeAgentInput::fresh(
@@ -1257,6 +1383,7 @@ mod tests {
                 program: "cargo".into(),
                 args_prefix: vec!["fetch".into()],
             }],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         });
         network_policy.command_network = Some(NativeCommandNetworkPolicy {
@@ -1311,6 +1438,41 @@ mod tests {
         )
         .unwrap();
         invalid.schema = WEB_SEARCH_SCHEMA;
+        write_private(&path, serde_json::to_vec(&invalid).unwrap());
+        assert_eq!(
+            spool.read("run-marker", "worker-marker"),
+            Err(NativeAgentSpoolError::CorruptInput)
+        );
+    }
+
+    #[test]
+    fn schema_eight_input_remains_recoverable_without_writable_command_roots() {
+        let (_directory, spool) = fixture();
+        let path = spool.input_path("run-marker").unwrap();
+        let mut legacy = input();
+        legacy.schema = WEB_FETCH_SCHEMA;
+        write_private(&path, serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(spool.read("run-marker", "worker-marker").unwrap(), legacy);
+        spool.remove_exact(&legacy).unwrap();
+
+        let mut writable_command = policy();
+        writable_command.command_execution = Some(NativeCommandPolicy {
+            allow: vec![vyane_harness::native::NativeCommandRule {
+                program: "touch".into(),
+                args_prefix: Vec::new(),
+            }],
+            writable_roots: vec!["src".into()],
+            max_seconds: 30,
+        });
+        let mut invalid = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            writable_command,
+        )
+        .unwrap();
+        invalid.schema = WEB_FETCH_SCHEMA;
         write_private(&path, serde_json::to_vec(&invalid).unwrap());
         assert_eq!(
             spool.read("run-marker", "worker-marker"),
@@ -1421,6 +1583,7 @@ mod tests {
                 program: "cat".into(),
                 args_prefix: Vec::new(),
             }],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         });
         assert_eq!(
@@ -1482,6 +1645,17 @@ mod tests {
                 program: "git".into(),
                 args_prefix: vec!["status".into()],
             }],
+            writable_roots: Vec::new(),
+            max_seconds: 30,
+        });
+        variants.push(value);
+        let mut value = base.clone();
+        value.command_execution = Some(NativeCommandPolicy {
+            allow: vec![vyane_harness::native::NativeCommandRule {
+                program: "touch".into(),
+                args_prefix: Vec::new(),
+            }],
+            writable_roots: vec!["src".into()],
             max_seconds: 30,
         });
         variants.push(value);
@@ -1491,6 +1665,7 @@ mod tests {
                 program: "cargo".into(),
                 args_prefix: vec!["fetch".into()],
             }],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         });
         value.command_network = Some(NativeCommandNetworkPolicy {

@@ -134,6 +134,14 @@ stage    = "review"
 # [native_permissions.filesystem_read]
 # exclude = [".env*", ".git", "private/**"]
 #
+# [native_permissions.command_execution]
+# writable_roots = ["crates", "generated"]
+# max_seconds = 120
+#
+# [[native_permissions.command_execution.allow]]
+# program = "cargo"
+# args_prefix = ["fmt"]
+#
 # [native_permissions.web_fetch]
 # allow_domains = ["docs.rs"]
 # max_fetches = 2

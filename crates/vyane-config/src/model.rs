@@ -73,6 +73,8 @@ pub struct NativeCommandRuleConfig {
 #[serde(deny_unknown_fields)]
 pub struct NativeCommandPolicyConfig {
     pub allow: Vec<NativeCommandRuleConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_roots: Vec<String>,
     #[serde(default = "default_command_seconds")]
     pub max_seconds: u64,
 }

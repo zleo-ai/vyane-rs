@@ -17,6 +17,7 @@ use vyane_core::{
     NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir, Result as VyaneResult,
 };
 
+use super::NativeCommandMountSet;
 use super::{ApprovalPlan, PermissionEffect, PermissionPolicy};
 
 /// Maximum number of Unicode scalar values returned to a model from one tool.
@@ -105,6 +106,8 @@ impl ToolCallValidationError {
 pub struct ToolContext {
     workdir: PathBuf,
     pinned_workdir: Option<PinnedWorkdir>,
+    #[cfg(target_os = "linux")]
+    command_mounts: Option<NativeCommandMountSet>,
     cancellation: CancellationToken,
     timeout: Option<Duration>,
     deadline: Option<Instant>,
@@ -145,6 +148,8 @@ impl ToolContext {
         Ok(Self {
             workdir,
             pinned_workdir: None,
+            #[cfg(target_os = "linux")]
+            command_mounts: None,
             cancellation: CancellationToken::new(),
             timeout: None,
             deadline: None,
@@ -165,6 +170,8 @@ impl ToolContext {
         Self {
             workdir: pinned_workdir.canonical_path().to_path_buf(),
             pinned_workdir: Some(pinned_workdir),
+            #[cfg(target_os = "linux")]
+            command_mounts: None,
             cancellation: CancellationToken::new(),
             timeout: None,
             deadline: None,
@@ -174,6 +181,24 @@ impl ToolContext {
 
     pub fn pinned_workdir(&self) -> Option<&PinnedWorkdir> {
         self.pinned_workdir.as_ref()
+    }
+
+    #[must_use]
+    #[cfg(target_os = "linux")]
+    pub fn with_command_mounts(mut self, command_mounts: NativeCommandMountSet) -> Self {
+        self.command_mounts = Some(command_mounts);
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(target_os = "linux"))]
+    pub fn with_command_mounts(self, _command_mounts: NativeCommandMountSet) -> Self {
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn command_mounts(&self) -> Option<&NativeCommandMountSet> {
+        self.command_mounts.as_ref()
     }
 
     #[must_use]

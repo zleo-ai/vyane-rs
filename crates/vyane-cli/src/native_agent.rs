@@ -387,9 +387,10 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             },
             None => None,
         };
-        let Some(workdir) = self.spool.exact_workdir(&input) else {
+        let Some(execution_handoff) = self.spool.exact_execution(&input) else {
             return AgentExecutorOutcome::Unknown;
         };
+        let workdir = execution_handoff.workdir;
         if workdir.canonical_path() != input.policy.canonical_workdir
             || workdir.identity() != &input.policy.workdir_identity
             || validate_read_only_host(&workdir).is_err()
@@ -421,7 +422,10 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         let Ok(limits) = NativeTurnLimits::new(input.policy.max_model_turns) else {
             return AgentExecutorOutcome::Unknown;
         };
-        let tool_context = ToolContext::from_pinned_workdir(workdir.clone());
+        let mut tool_context = ToolContext::from_pinned_workdir(workdir.clone());
+        if let Some(command_mounts) = execution_handoff.command_mounts {
+            tool_context = tool_context.with_command_mounts(command_mounts);
+        }
         if tool_context.workdir() != workdir.canonical_path()
             || tool_context
                 .pinned_workdir()

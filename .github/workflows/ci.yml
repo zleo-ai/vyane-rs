@@ -55,6 +55,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap keyutils
+          bwrap --help | grep --quiet -- '--bind-fd FD DEST'
           if [[ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]]; then
             sudo install -m 0644 \
               /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
@@ -106,6 +107,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap keyutils
+          bwrap --help | grep --quiet -- '--bind-fd FD DEST'
           if [[ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]]; then
             sudo install -m 0644 \
               /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \

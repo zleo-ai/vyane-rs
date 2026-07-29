@@ -28,7 +28,9 @@ current public integration baseline the 53 matrix items are 7 implemented, 22 pa
 [WP-88](plan/WP-88.md) extends the P1 native lane with independent
 user/project/managed permission ceilings. Configuration never grants an
 optional tool and every configured ceiling can only narrow the explicit
-AgentRun request. Writable command execution remains separate.
+AgentRun request. [WP-90](plan/WP-90.md) keeps writable command execution
+separate and limits it to explicit descriptor-bound roots inside an otherwise
+read-only workspace.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

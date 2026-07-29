@@ -97,7 +97,13 @@ impl NativePermissionSet {
 
     pub fn validate_for_sandbox(&self, sandbox: Sandbox) -> Result<(), NativePermissionSetError> {
         self.validate()?;
-        if sandbox == Sandbox::ReadOnly && self.filesystem_write.is_some() {
+        if sandbox == Sandbox::ReadOnly
+            && (self.filesystem_write.is_some()
+                || self
+                    .command_execution
+                    .as_ref()
+                    .is_some_and(|policy| !policy.writable_roots.is_empty()))
+        {
             return Err(NativePermissionSetError::WriteOutsideSandbox);
         }
         Ok(())
@@ -204,6 +210,7 @@ impl TryFrom<&ConfigCeiling> for NativePermissionSet {
                             args_prefix: rule.args_prefix.clone(),
                         })
                         .collect(),
+                    writable_roots: policy.writable_roots.clone(),
                     max_seconds: policy.max_seconds,
                 }),
             command_network: value.command_network.as_ref().map(|policy| {
@@ -288,6 +295,12 @@ fn restrict_command(
         return Err(NativePermissionSetError::ExceedsCeiling);
     };
     if request.max_seconds > ceiling.max_seconds
+        || request.writable_roots.iter().any(|requested| {
+            !ceiling
+                .writable_roots
+                .iter()
+                .any(|allowed| writable_root_within(requested, allowed))
+        })
         || request.allow.iter().any(|requested| {
             !ceiling.allow.iter().any(|allowed| {
                 requested.program == allowed.program
@@ -298,6 +311,13 @@ fn restrict_command(
         return Err(NativePermissionSetError::ExceedsCeiling);
     }
     Ok(())
+}
+
+fn writable_root_within(requested: &str, allowed: &str) -> bool {
+    requested == allowed
+        || requested
+            .strip_prefix(allowed)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn restrict_network(
@@ -458,6 +478,7 @@ mod tests {
                 program: program.into(),
                 args_prefix: prefix.iter().map(|value| (*value).into()).collect(),
             }],
+            writable_roots: Vec::new(),
             max_seconds: seconds,
         }
     }
@@ -491,6 +512,39 @@ mod tests {
         };
         assert_eq!(
             broad.restrict_by(&ceiling),
+            Err(NativePermissionSetError::ExceedsCeiling)
+        );
+    }
+
+    #[test]
+    fn writable_command_roots_must_be_inside_every_ceiling_and_outer_sandbox() {
+        let mut ceiling_command = command("cargo", &["fmt"], 30);
+        ceiling_command.writable_roots = vec!["crates".into(), "Cargo.toml".into()];
+        let ceiling = NativePermissionSet {
+            command_execution: Some(ceiling_command),
+            ..NativePermissionSet::default()
+        };
+        let mut narrow_command = command("cargo", &["fmt"], 20);
+        narrow_command.writable_roots = vec!["crates/vyane-core".into()];
+        let mut narrow = NativePermissionSet {
+            command_execution: Some(narrow_command),
+            ..NativePermissionSet::default()
+        };
+        narrow.restrict_by(&ceiling).unwrap();
+        assert_eq!(
+            narrow.validate_for_sandbox(Sandbox::ReadOnly),
+            Err(NativePermissionSetError::WriteOutsideSandbox)
+        );
+        narrow.validate_for_sandbox(Sandbox::Write).unwrap();
+
+        let mut outside_command = command("cargo", &["fmt"], 20);
+        outside_command.writable_roots = vec!["docs".into()];
+        let mut outside = NativePermissionSet {
+            command_execution: Some(outside_command),
+            ..NativePermissionSet::default()
+        };
+        assert_eq!(
+            outside.restrict_by(&ceiling),
             Err(NativePermissionSetError::ExceedsCeiling)
         );
     }
