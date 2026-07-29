@@ -35,6 +35,10 @@ pub(crate) type NativeNetworkChannel = OwnedFd;
 #[cfg(not(unix))]
 pub(crate) type NativeNetworkChannel = RawFd;
 #[cfg(unix)]
+pub(crate) type NativeMountHandle = OwnedFd;
+#[cfg(not(unix))]
+pub(crate) type NativeMountHandle = RawFd;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -101,6 +105,7 @@ const NATIVE_NETWORK_FD: RawFd = 5;
 /// Codex/Claude and all descendants.
 #[cfg(unix)]
 const PINNED_WORKDIR_FD: RawFd = 8;
+pub(crate) const NATIVE_MOUNT_FD_START: RawFd = 10;
 /// Private, inherited descriptor containing shell-quoted target environment
 /// exports. The trusted start-gate sentinel itself never inherits target
 /// loader/startup variables.
@@ -772,6 +777,7 @@ struct ControlledSpawn<'a> {
     target_env_fd: Option<InheritedFd>,
     seccomp_filter_fd: Option<InheritedFd>,
     network_channel_fd: Option<InheritedFd>,
+    native_mount_fds: Vec<InheritedFd>,
 }
 
 async fn spawn_controlled_harness_child(
@@ -796,6 +802,7 @@ async fn spawn_controlled_harness_child(
             control.target_env_fd,
             control.seccomp_filter_fd,
             control.network_channel_fd,
+            control.native_mount_fds,
         )?;
         let child = spawn_harness_child(
             command,
@@ -824,6 +831,7 @@ async fn spawn_controlled_harness_child(
         let _ = control.pinned_workdir_fd;
         let _ = control.target_env_fd;
         let _ = control.network_channel_fd;
+        let _ = control.native_mount_fds;
         install_process_group(command, control.seccomp_filter_fd)?;
         let _ = control.native_spawn_gate;
         spawn_harness_child(
@@ -930,11 +938,13 @@ pub(crate) async fn run_capture_with_pinned_limit(
         None,
         None,
         None,
+        Vec::new(),
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn run_capture_with_pinned_limit_authorized(
     program: &str,
     args: &[String],
@@ -958,13 +968,45 @@ pub(crate) async fn run_capture_with_pinned_limit_authorized(
         Some(NativeSpawnGate { authority, effect }),
         Some(seccomp_filter),
         None,
+        Vec::new(),
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
 #[cfg(target_os = "linux")]
-pub(crate) async fn run_capture_with_pinned_limit_authorized_channel(
+pub(crate) async fn run_capture_with_pinned_limit_authorized_mounts(
+    program: &str,
+    args: &[String],
+    cwd: Option<&std::path::Path>,
+    pinned_workdir: Option<&PinnedWorkdir>,
+    env: &BTreeMap<String, String>,
+    control: RunControl,
+    capture_limit: usize,
+    authority: &dyn NativeExecutionAuthority,
+    effect: NativeSideEffect,
+    seccomp_filter: &[u8],
+    native_mounts: Vec<NativeMountHandle>,
+) -> Result<RunResult> {
+    run_capture_with_pinned_limit_confined(
+        program,
+        args,
+        cwd,
+        pinned_workdir,
+        env,
+        control,
+        capture_limit,
+        Some(NativeSpawnGate { authority, effect }),
+        Some(seccomp_filter),
+        None,
+        native_mounts,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "linux")]
+pub(crate) async fn run_capture_with_pinned_limit_authorized_channel_mounts(
     program: &str,
     args: &[String],
     cwd: Option<&std::path::Path>,
@@ -976,6 +1018,7 @@ pub(crate) async fn run_capture_with_pinned_limit_authorized_channel(
     effect: NativeSideEffect,
     seccomp_filter: &[u8],
     network_channel: NativeNetworkChannel,
+    native_mounts: Vec<NativeMountHandle>,
 ) -> Result<RunResult> {
     run_capture_with_pinned_limit_confined(
         program,
@@ -988,6 +1031,7 @@ pub(crate) async fn run_capture_with_pinned_limit_authorized_channel(
         Some(NativeSpawnGate { authority, effect }),
         Some(seccomp_filter),
         Some(network_channel),
+        native_mounts,
     )
     .await
 }
@@ -1004,6 +1048,7 @@ async fn run_capture_with_pinned_limit_confined(
     native_spawn_gate: Option<NativeSpawnGate<'_>>,
     seccomp_filter: Option<&[u8]>,
     network_channel: Option<NativeNetworkChannel>,
+    native_mounts: Vec<NativeMountHandle>,
 ) -> Result<RunResult> {
     let RunControl {
         cancel,
@@ -1076,6 +1121,23 @@ async fn run_capture_with_pinned_limit_confined(
         }
         None
     };
+    #[cfg(unix)]
+    let inherited_native_mount_fds = native_mounts
+        .into_iter()
+        .map(|handle| {
+            duplicate_inherited_fd(handle, "failed to duplicate private native mount handle")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    #[cfg(not(unix))]
+    let inherited_native_mount_fds = {
+        if !native_mounts.is_empty() {
+            return Err(VyaneError::new(
+                ErrorKind::Unsupported,
+                "native mount handles require Unix descriptor passing",
+            ));
+        }
+        Vec::new()
+    };
     let mut cmd = harness_command(program, args, start_gated);
     cmd.stdin(if start_gated {
         Stdio::piped()
@@ -1118,6 +1180,7 @@ async fn run_capture_with_pinned_limit_confined(
             target_env_fd: inherited_target_env_fd,
             seccomp_filter_fd: inherited_seccomp_filter_fd,
             network_channel_fd: inherited_network_channel_fd,
+            native_mount_fds: inherited_native_mount_fds,
         },
     )
     .await?;
@@ -1444,6 +1507,7 @@ pub(crate) async fn run_stream_capture_with_pinned(
             target_env_fd: inherited_target_env_fd,
             seccomp_filter_fd: None,
             network_channel_fd: None,
+            native_mount_fds: Vec::new(),
         },
     )
     .await?;
@@ -1707,9 +1771,10 @@ fn install_process_group(
     target_env_fd: Option<OwnedFd>,
     seccomp_filter_fd: Option<OwnedFd>,
     network_channel_fd: Option<OwnedFd>,
+    native_mount_fds: Vec<OwnedFd>,
 ) -> Result<()> {
     cmd.process_group(0);
-    let mut mappings = Vec::with_capacity(5);
+    let mut mappings = Vec::with_capacity(5 + native_mount_fds.len());
     if let Some(fd) = sentinel_status_fd {
         mappings.push(FdMapping {
             parent_fd: fd,
@@ -1744,6 +1809,20 @@ fn install_process_group(
         mappings.push(FdMapping {
             parent_fd: fd,
             child_fd: NATIVE_NETWORK_FD,
+        });
+    }
+    for (index, fd) in native_mount_fds.into_iter().enumerate() {
+        let child_fd =
+            NATIVE_MOUNT_FD_START
+                .checked_add(i32::try_from(index).map_err(|_| {
+                    VyaneError::new(ErrorKind::Config, "too many native mount handles")
+                })?)
+                .ok_or_else(|| {
+                    VyaneError::new(ErrorKind::Config, "native mount descriptor overflow")
+                })?;
+        mappings.push(FdMapping {
+            parent_fd: fd,
+            child_fd,
         });
     }
     cmd.fd_mappings(mappings).map_err(|source| {
@@ -2805,6 +2884,7 @@ mod tests {
             Some(target_env.source),
             None,
             None,
+            Vec::new(),
         )
         .unwrap();
         let mut child = command.spawn().unwrap();
@@ -2844,6 +2924,7 @@ mod tests {
                 target_env_fd: Some(target_env.source),
                 seccomp_filter_fd: None,
                 network_channel_fd: None,
+                native_mount_fds: Vec::new(),
             },
         )
         .await
@@ -2990,7 +3071,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        install_process_group(&mut command, None, None, None, None, None).unwrap();
+        install_process_group(&mut command, None, None, None, None, None, Vec::new()).unwrap();
         let mut child = command.spawn().unwrap();
         let pgid = child.id().unwrap() as i32;
         let mut guard = ProcessGroupDropGuard::new(child.id(), None);
@@ -3042,7 +3123,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        install_process_group(&mut command, None, None, None, None, None).unwrap();
+        install_process_group(&mut command, None, None, None, None, None, Vec::new()).unwrap();
         let mut child = command.spawn().unwrap();
         let pgid = child.id().unwrap() as i32;
         let (reporter, events) = recording_reporter();

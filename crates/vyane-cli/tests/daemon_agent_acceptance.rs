@@ -337,6 +337,38 @@ async fn submit_native_command(data_dir: &Path, run_id: &str, workdir: &Path) ->
         .unwrap()
 }
 
+async fn submit_native_writable_command(
+    data_dir: &Path,
+    run_id: &str,
+    workdir: &Path,
+) -> reqwest::Response {
+    let (base, token) = control(data_dir);
+    reqwest::Client::new()
+        .post(format!("{base}/v1/agent-runs"))
+        .bearer_auth(token)
+        .json(&json!({
+            "run_id": run_id,
+            "task": "create evidence inside the bounded writable command root",
+            "target": "native",
+            "sandbox": "write",
+            "workdir": workdir,
+            "execution_backend": "native_in_process",
+            "native_permissions": {
+                "command_execution": {
+                    "allow": [
+                        { "program": "touch", "args_prefix": ["src/resident.txt"] }
+                    ],
+                    "writable_roots": ["src"],
+                    "max_seconds": 5
+                }
+            },
+            "timeout_seconds": 10
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
 async fn submit_native_search(data_dir: &Path, run_id: &str, workdir: &Path) -> reqwest::Response {
     let (base, token) = control(data_dir);
     reqwest::Client::new()
@@ -748,6 +780,73 @@ async fn native_command_permission_reaches_the_real_resident_sandbox() {
         tool_output.contains("resident command evidence"),
         "{tool_output}"
     );
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn native_writable_command_root_reaches_the_real_resident_sandbox() {
+    let server = MockServer::start().await;
+    let response_index = Arc::new(AtomicUsize::new(0));
+    let response_index_for_mock = Arc::clone(&response_index);
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |_: &wiremock::Request| {
+            if response_index_for_mock.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "writable-command-call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "run_command",
+                                    "arguments": concat!(
+                                        "{\"program\":\"touch\",",
+                                        "\"args\":[\"src/resident.txt\"]}"
+                                    )
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "model": "native-test-model",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "bounded command write completed"
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-writable-command-workdir");
+    fs::create_dir_all(workdir.join("src")).unwrap();
+    fs::create_dir(workdir.join(".git")).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    let run_id = "0197f524-7a00-7000-8000-000000000122";
+
+    let response = submit_native_writable_command(data_dir.path(), run_id, &workdir).await;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(20)).await;
+    assert_eq!(done["state"], "succeeded");
+    assert_eq!(done["completion_status"], "committed");
+    assert!(workdir.join("src/resident.txt").is_file());
+    assert!(!workdir.join(".git/resident.txt").exists());
+    assert!(!workdir.join("resident.txt").exists());
     assert!(daemon.stop().status.success());
 }
 

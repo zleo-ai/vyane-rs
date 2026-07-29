@@ -1156,6 +1156,7 @@ mod tests {
                 "allow": [
                     { "program": "git", "args_prefix": ["status"] }
                 ],
+                "writable_roots": ["src"],
                 "max_seconds": 30
             },
             "command_network": {
@@ -1200,6 +1201,7 @@ mod tests {
             .expect("explicit command policy");
         assert_eq!(command.allow[0].program, "git");
         assert_eq!(command.allow[0].args_prefix, ["status"]);
+        assert_eq!(command.writable_roots, ["src"]);
         assert_eq!(command.max_seconds, 30);
         let network = configured
             .native_permissions

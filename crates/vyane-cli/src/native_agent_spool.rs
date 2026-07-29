@@ -19,7 +19,8 @@ use vyane_harness::native::{
     NativeWebSearchPolicy, NativeWritePolicy,
 };
 
-const SCHEMA: u32 = 8;
+const SCHEMA: u32 = 9;
+const WEB_FETCH_SCHEMA: u32 = 8;
 const WEB_SEARCH_SCHEMA: u32 = 7;
 const COMMAND_NETWORK_SCHEMA: u32 = 6;
 const COMMAND_EXECUTION_SCHEMA: u32 = 5;
@@ -304,24 +305,31 @@ impl NativeAgentInput {
     }
 
     fn validate(&self) -> Result<(), NativeAgentSpoolError> {
+        let no_writable_command_roots = self
+            .policy
+            .command_execution
+            .as_ref()
+            .is_none_or(|policy| policy.writable_roots.is_empty());
         let supported_schema = self.schema == SCHEMA
-            || (self.schema == WEB_SEARCH_SCHEMA && self.policy.web_fetch.is_none())
-            || (self.schema == COMMAND_NETWORK_SCHEMA
-                && self.policy.web_search.is_none()
-                && self.policy.web_fetch.is_none())
-            || (self.schema == COMMAND_EXECUTION_SCHEMA
-                && self.policy.command_network.is_none()
-                && self.policy.web_search.is_none()
-                && self.policy.web_fetch.is_none())
-            || (self.schema == FILESYSTEM_WRITE_SCHEMA
-                && self.policy.command_execution.is_none()
-                && self.policy.web_search.is_none()
-                && self.policy.web_fetch.is_none())
-            || (self.schema == READ_ONLY_SCHEMA
-                && self.policy.filesystem_write.is_none()
-                && self.policy.command_execution.is_none()
-                && self.policy.web_search.is_none()
-                && self.policy.web_fetch.is_none());
+            || (no_writable_command_roots
+                && (self.schema == WEB_FETCH_SCHEMA
+                    || (self.schema == WEB_SEARCH_SCHEMA && self.policy.web_fetch.is_none())
+                    || (self.schema == COMMAND_NETWORK_SCHEMA
+                        && self.policy.web_search.is_none()
+                        && self.policy.web_fetch.is_none())
+                    || (self.schema == COMMAND_EXECUTION_SCHEMA
+                        && self.policy.command_network.is_none()
+                        && self.policy.web_search.is_none()
+                        && self.policy.web_fetch.is_none())
+                    || (self.schema == FILESYSTEM_WRITE_SCHEMA
+                        && self.policy.command_execution.is_none()
+                        && self.policy.web_search.is_none()
+                        && self.policy.web_fetch.is_none())
+                    || (self.schema == READ_ONLY_SCHEMA
+                        && self.policy.filesystem_write.is_none()
+                        && self.policy.command_execution.is_none()
+                        && self.policy.web_search.is_none()
+                        && self.policy.web_fetch.is_none())));
         if !supported_schema
             || !valid_text(&self.owner, MAX_ID_BYTES)
             || !valid_text(&self.run_id, MAX_ID_BYTES)
@@ -1208,6 +1216,7 @@ mod tests {
                 program: "git".into(),
                 args_prefix: vec!["status".into()],
             }],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         });
         let mut invalid = NativeAgentInput::fresh(
@@ -1236,6 +1245,7 @@ mod tests {
                 program: "cargo".into(),
                 args_prefix: vec!["fetch".into()],
             }],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         });
         let mut legacy = NativeAgentInput::fresh(
@@ -1257,6 +1267,7 @@ mod tests {
                 program: "cargo".into(),
                 args_prefix: vec!["fetch".into()],
             }],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         });
         network_policy.command_network = Some(NativeCommandNetworkPolicy {
@@ -1311,6 +1322,41 @@ mod tests {
         )
         .unwrap();
         invalid.schema = WEB_SEARCH_SCHEMA;
+        write_private(&path, serde_json::to_vec(&invalid).unwrap());
+        assert_eq!(
+            spool.read("run-marker", "worker-marker"),
+            Err(NativeAgentSpoolError::CorruptInput)
+        );
+    }
+
+    #[test]
+    fn schema_eight_input_remains_recoverable_without_writable_command_roots() {
+        let (_directory, spool) = fixture();
+        let path = spool.input_path("run-marker").unwrap();
+        let mut legacy = input();
+        legacy.schema = WEB_FETCH_SCHEMA;
+        write_private(&path, serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(spool.read("run-marker", "worker-marker").unwrap(), legacy);
+        spool.remove_exact(&legacy).unwrap();
+
+        let mut writable_command = policy();
+        writable_command.command_execution = Some(NativeCommandPolicy {
+            allow: vec![vyane_harness::native::NativeCommandRule {
+                program: "touch".into(),
+                args_prefix: Vec::new(),
+            }],
+            writable_roots: vec!["src".into()],
+            max_seconds: 30,
+        });
+        let mut invalid = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            writable_command,
+        )
+        .unwrap();
+        invalid.schema = WEB_FETCH_SCHEMA;
         write_private(&path, serde_json::to_vec(&invalid).unwrap());
         assert_eq!(
             spool.read("run-marker", "worker-marker"),
@@ -1421,6 +1467,7 @@ mod tests {
                 program: "cat".into(),
                 args_prefix: Vec::new(),
             }],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         });
         assert_eq!(
@@ -1482,6 +1529,17 @@ mod tests {
                 program: "git".into(),
                 args_prefix: vec!["status".into()],
             }],
+            writable_roots: Vec::new(),
+            max_seconds: 30,
+        });
+        variants.push(value);
+        let mut value = base.clone();
+        value.command_execution = Some(NativeCommandPolicy {
+            allow: vec![vyane_harness::native::NativeCommandRule {
+                program: "touch".into(),
+                args_prefix: Vec::new(),
+            }],
+            writable_roots: vec!["src".into()],
             max_seconds: 30,
         });
         variants.push(value);
@@ -1491,6 +1549,7 @@ mod tests {
                 program: "cargo".into(),
                 args_prefix: vec!["fetch".into()],
             }],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         });
         value.command_network = Some(NativeCommandNetworkPolicy {

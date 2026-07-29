@@ -321,8 +321,12 @@ model request. Both writable root scratch and `/tmp` are aggregate-size
 capped, `/dev` is reduced to fixed basic devices without `/dev/shm`, and the
 seccomp floor also denies anonymous memory-file and System V/POSIX IPC
 allocation.
-Command-side workspace writes, unconfigured shell access, extra runtime roots
-and all child network remain disabled. Because this first process
+WP-90 optionally overlays exact, pre-existing descriptor-bound writable roots
+inside the otherwise read-only workspace. The request must list those roots,
+every config ceiling must allow them, and the outer sandbox must permit writes.
+The workspace root, unlisted siblings and direct agent/repository control paths
+remain read-only. Unconfigured shell access, extra runtime roots
+and ungranted child network remain disabled. Because the base process
 sandbox mounts the complete workspace read-only, submissions combining command
 execution with filesystem-read exclusions fail closed rather than allowing a
 command to bypass those exclusions. Shells and interpreters are ordinary
@@ -339,7 +343,7 @@ Configuration never grants an optional tool; the request opts in, path
 exclusions accumulate, and rules/limits can only narrow before the effective
 policy is frozen. The managed file named by
 `VYANE_MANAGED_NATIVE_CONFIG` accepts no provider or profile configuration.
-The lane still has no writable command profile, session/domain authority,
+The lane still has no whole-workspace command profile, session/domain authority,
 checkpoint/session-commit consumer, approval resume, or native resume.
 
 ## Dispatch lifecycle

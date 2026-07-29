@@ -13,13 +13,17 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use vyane_core::{
-    NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir, Result as VyaneResult,
-    ToolDefinition,
+    ErrorKind, NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir, Result as VyaneResult,
+    ToolDefinition, VyaneError,
 };
 
 #[cfg(target_os = "linux")]
-use crate::spawn::run_capture_with_pinned_limit_authorized_channel;
-use crate::spawn::{RunControl, Termination, run_capture_with_pinned_limit_authorized};
+use crate::spawn::{
+    NATIVE_MOUNT_FD_START, NativeMountHandle,
+    run_capture_with_pinned_limit_authorized_channel_mounts,
+    run_capture_with_pinned_limit_authorized_mounts,
+};
+use crate::spawn::{RunControl, Termination};
 
 #[cfg(target_os = "linux")]
 use super::trusted_network::run_network_broker;
@@ -37,6 +41,7 @@ const KEYCTL: &str = "/usr/bin/keyctl";
 const DEFAULT_COMMAND_SECONDS: u64 = 60;
 const MAX_COMMAND_SECONDS: u64 = 60 * 60;
 const MAX_RULES: usize = 128;
+const MAX_WRITABLE_ROOTS: usize = 32;
 const MAX_ARGS: usize = 128;
 const MAX_PROGRAM_BYTES: usize = 128;
 const MAX_ARG_BYTES: usize = 4096;
@@ -188,6 +193,8 @@ pub struct NativeCommandRule {
 #[serde(deny_unknown_fields)]
 pub struct NativeCommandPolicy {
     pub allow: Vec<NativeCommandRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_roots: Vec<String>,
     #[serde(default = "default_command_seconds")]
     pub max_seconds: u64,
 }
@@ -200,12 +207,27 @@ impl NativeCommandPolicy {
         if self.allow.len() > MAX_RULES {
             return Err(NativeCommandPolicyError::TooManyRules);
         }
+        if self.writable_roots.len() > MAX_WRITABLE_ROOTS {
+            return Err(NativeCommandPolicyError::TooManyWritableRoots);
+        }
         if self.max_seconds == 0 || self.max_seconds > MAX_COMMAND_SECONDS {
             return Err(NativeCommandPolicyError::InvalidTimeout);
         }
         for rule in &self.allow {
             validate_program(&rule.program)?;
             validate_args(&rule.args_prefix)?;
+        }
+        for root in &self.writable_roots {
+            validate_writable_root(root)?;
+        }
+        if self
+            .writable_roots
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != self.writable_roots.len()
+        {
+            return Err(NativeCommandPolicyError::InvalidWritableRoot);
         }
         Ok(())
     }
@@ -230,12 +252,16 @@ pub enum NativeCommandPolicyError {
     EmptyAllowlist,
     #[error("native command policy contains too many rules")]
     TooManyRules,
+    #[error("native command policy contains too many writable roots")]
+    TooManyWritableRoots,
     #[error("native command policy contains an invalid program")]
     InvalidProgram,
     #[error("native command policy contains invalid arguments")]
     InvalidArguments,
     #[error("native command timeout is invalid")]
     InvalidTimeout,
+    #[error("native command policy contains an invalid writable root")]
+    InvalidWritableRoot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -256,8 +282,16 @@ pub async fn validate_command_network_host(
         .map_err(|_| NativeCommandHostError::Unsupported)?;
     validate_network_route_host(policy).map_err(|_| NativeCommandHostError::Unsupported)?;
     let probe_arguments = command_probe_arguments(command_policy);
-    let args = launcher_args("/bin/sh", &probe_arguments, 5, true)
+    let writable_mounts = open_writable_roots(pinned, &command_policy.writable_roots)
         .map_err(|_| NativeCommandHostError::Unsupported)?;
+    let args = launcher_args(
+        "/bin/sh",
+        &probe_arguments,
+        5,
+        true,
+        &command_policy.writable_roots,
+    )
+    .map_err(|_| NativeCommandHostError::Unsupported)?;
     let probe_authority = ProbeAuthority;
     let result = run_networked_command(
         &args,
@@ -273,6 +307,7 @@ pub async fn validate_command_network_host(
             ordinal: 0,
         },
         policy,
+        writable_mounts,
     )
     .await
     .map_err(|_| NativeCommandHostError::Unsupported)?;
@@ -305,8 +340,9 @@ impl NativeExecutionAuthority for ProbeAuthority {
 pub fn command_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "run_command".into(),
-        description: "Run one explicitly allowlisted argv command in a read-only workspace. \
-            Networking is absent unless the submission grants a separate HTTPS destination policy."
+        description: "Run one explicitly allowlisted argv command. The workspace is read-only \
+            except for separately configured writable roots. Networking is absent unless the \
+            submission grants a separate HTTPS destination policy."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -401,10 +437,18 @@ pub async fn validate_command_host(
 ) -> Result<(), NativeCommandHostError> {
     validate_command_host_requirements(policy)?;
     let probe_arguments = command_probe_arguments(policy);
-    let args = launcher_args("/bin/sh", &probe_arguments, 5, false)
+    let writable_mounts = open_writable_roots(pinned, &policy.writable_roots)
         .map_err(|_| NativeCommandHostError::Unsupported)?;
+    let args = launcher_args(
+        "/bin/sh",
+        &probe_arguments,
+        5,
+        false,
+        &policy.writable_roots,
+    )
+    .map_err(|_| NativeCommandHostError::Unsupported)?;
     let probe_authority = ProbeAuthority;
-    let result = run_capture_with_pinned_limit_authorized(
+    let result = run_capture_with_pinned_limit_authorized_mounts(
         PRLIMIT,
         &args,
         Some(pinned.canonical_path()),
@@ -422,6 +466,7 @@ pub async fn validate_command_host(
             ordinal: 0,
         },
         &command_seccomp_filter(false),
+        writable_mounts,
     )
     .await
     .map_err(|_| NativeCommandHostError::Unsupported)?;
@@ -525,11 +570,16 @@ impl NativeTool for RunCommandTool {
         // Registry dispatch already checked the call. This second check is
         // owned by the command tool and sits directly before the spawn path.
         authority.revalidate(effect).await?;
+        #[cfg(target_os = "linux")]
+        let writable_mounts = open_writable_roots(pinned, &self.policy.writable_roots)?;
+        #[cfg(not(target_os = "linux"))]
+        let writable_mounts = Vec::new();
         let args = match launcher_args(
             &request.program,
             &request.args,
             request.timeout_seconds,
             self.network.is_some(),
+            &self.policy.writable_roots,
         ) {
             Ok(args) => args,
             Err(()) => {
@@ -547,7 +597,7 @@ impl NativeTool for RunCommandTool {
         };
         let result = match self.network.as_deref() {
             None => {
-                run_capture_with_pinned_limit_authorized(
+                run_capture_with_pinned_limit_authorized_mounts(
                     PRLIMIT,
                     &args,
                     Some(pinned.canonical_path()),
@@ -558,11 +608,21 @@ impl NativeTool for RunCommandTool {
                     authority,
                     effect,
                     &command_seccomp_filter(false),
+                    writable_mounts,
                 )
                 .await?
             }
             Some(network) => {
-                run_networked_command(&args, pinned, control(), authority, effect, network).await?
+                run_networked_command(
+                    &args,
+                    pinned,
+                    control(),
+                    authority,
+                    effect,
+                    network,
+                    writable_mounts,
+                )
+                .await?
             }
         };
         Ok(Ok(format_command_result(result)))
@@ -583,6 +643,7 @@ async fn run_networked_command(
     authority: &dyn NativeExecutionAuthority,
     effect: NativeSideEffect,
     network: &NativeCommandNetworkPolicy,
+    writable_mounts: Vec<NativeMountHandle>,
 ) -> VyaneResult<crate::spawn::RunResult> {
     use std::os::fd::OwnedFd;
 
@@ -592,7 +653,7 @@ async fn run_networked_command(
     let environment = command_environment();
     let seccomp_filter = command_seccomp_filter(true);
     let (control, broker_failure_cancel) = control.with_child_cancellation();
-    let run = run_capture_with_pinned_limit_authorized_channel(
+    let run = run_capture_with_pinned_limit_authorized_channel_mounts(
         PRLIMIT,
         args,
         Some(pinned.canonical_path()),
@@ -604,6 +665,7 @@ async fn run_networked_command(
         effect,
         &seccomp_filter,
         child_fd,
+        writable_mounts,
     );
     let broker = run_network_broker(broker_fd, network, authority, effect);
     tokio::pin!(run);
@@ -629,6 +691,7 @@ async fn run_networked_command(
     _authority: &dyn NativeExecutionAuthority,
     _effect: NativeSideEffect,
     _network: &NativeCommandNetworkPolicy,
+    _writable_mounts: Vec<crate::spawn::NativeMountHandle>,
 ) -> VyaneResult<crate::spawn::RunResult> {
     Err(vyane_core::VyaneError::new(
         vyane_core::ErrorKind::Unsupported,
@@ -718,8 +781,87 @@ fn validate_args(args: &[String]) -> Result<(), NativeCommandPolicyError> {
     Ok(())
 }
 
+fn validate_writable_root(root: &str) -> Result<(), NativeCommandPolicyError> {
+    use std::path::{Component, Path};
+
+    const CONTROL_COMPONENTS: [&str; 4] = [".git", ".vyane", ".codex", ".claude"];
+    if root.is_empty()
+        || root.len() > MAX_ARG_BYTES
+        || root.contains('\0')
+        || root.contains('\\')
+        || root.starts_with('/')
+        || root.ends_with('/')
+        || root.contains("//")
+        || root == "."
+        || Path::new(root).components().count() > 32
+        || Path::new(root)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || root
+            .split('/')
+            .any(|component| CONTROL_COMPONENTS.contains(&component))
+    {
+        return Err(NativeCommandPolicyError::InvalidWritableRoot);
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
-fn sandbox_args(program: &str, args: &[String], network: bool) -> Vec<String> {
+fn open_writable_roots(
+    pinned: &PinnedWorkdir,
+    roots: &[String],
+) -> VyaneResult<Vec<NativeMountHandle>> {
+    use std::fs::File;
+    use std::os::fd::OwnedFd;
+
+    use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+
+    roots
+        .iter()
+        .map(|root| {
+            let fd = openat2(
+                pinned.handle(),
+                root,
+                OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+                ResolveFlags::BENEATH
+                    | ResolveFlags::NO_MAGICLINKS
+                    | ResolveFlags::NO_SYMLINKS
+                    | ResolveFlags::NO_XDEV,
+            )
+            .map_err(|source| {
+                VyaneError::with_source(
+                    ErrorKind::Config,
+                    "native command writable root is unavailable or unsafe",
+                    std::io::Error::from_raw_os_error(source.raw_os_error()),
+                )
+            })?;
+            let file = File::from(fd);
+            let metadata = file.metadata().map_err(|source| {
+                VyaneError::with_source(
+                    ErrorKind::Io,
+                    "failed to inspect native command writable root",
+                    source,
+                )
+            })?;
+            if !metadata.is_dir() && !metadata.is_file() {
+                return Err(VyaneError::new(
+                    ErrorKind::Unsupported,
+                    "native command writable roots must be regular files or directories",
+                ));
+            }
+            Ok(OwnedFd::from(file))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn sandbox_args(
+    program: &str,
+    args: &[String],
+    network: bool,
+    writable_roots: &[String],
+) -> Vec<String> {
     let mut sandbox = vec![
         "--die-with-parent".into(),
         "--unshare-user".into(),
@@ -775,6 +917,14 @@ fn sandbox_args(program: &str, args: &[String], network: bool) -> Vec<String> {
         "/proc/self/fd/8".into(),
         "/workspace".into(),
     ];
+    for (index, root) in writable_roots.iter().enumerate() {
+        let child_fd = NATIVE_MOUNT_FD_START + i32::try_from(index).unwrap_or(i32::MAX);
+        sandbox.extend([
+            "--bind-fd".into(),
+            child_fd.to_string(),
+            format!("/workspace/{root}"),
+        ]);
+    }
     for path in [
         "/usr/bin",
         "/usr/lib",
@@ -855,7 +1005,12 @@ fn sandbox_args(program: &str, args: &[String], network: bool) -> Vec<String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn sandbox_args(_program: &str, _args: &[String], _network: bool) -> Vec<String> {
+fn sandbox_args(
+    _program: &str,
+    _args: &[String],
+    _network: bool,
+    _writable_roots: &[String],
+) -> Vec<String> {
     Vec::new()
 }
 
@@ -873,6 +1028,7 @@ fn launcher_args(
     args: &[String],
     cpu_seconds: u64,
     network: bool,
+    writable_roots: &[String],
 ) -> Result<Vec<String>, ()> {
     if !command_arch_supported() {
         return Err(());
@@ -894,7 +1050,7 @@ fn launcher_args(
         "-".into(),
         BWRAP.into(),
     ];
-    launcher.extend(sandbox_args(program, args, network));
+    launcher.extend(sandbox_args(program, args, network, writable_roots));
     Ok(launcher)
 }
 
@@ -1078,6 +1234,7 @@ mod tests {
                     args_prefix: Vec::new(),
                 },
             ],
+            writable_roots: Vec::new(),
             max_seconds: 30,
         }
     }
@@ -1119,6 +1276,7 @@ mod tests {
                     program: program.into(),
                     args_prefix: Vec::new(),
                 }],
+                writable_roots: Vec::new(),
                 max_seconds: 30,
             };
             assert!(invalid.validate().is_err(), "{program}");
@@ -1135,6 +1293,14 @@ mod tests {
             invalid.validate(),
             Err(NativeCommandPolicyError::InvalidTimeout)
         );
+        for root in ["", ".", "../src", "/src", "src/", ".git", "src/.codex"] {
+            let mut invalid = policy();
+            invalid.writable_roots = vec![root.into()];
+            assert!(invalid.validate().is_err(), "{root}");
+        }
+        let mut duplicate = policy();
+        duplicate.writable_roots = vec!["src".into(), "src".into()];
+        assert!(duplicate.validate().is_err());
     }
 
     #[test]

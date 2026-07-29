@@ -47,6 +47,7 @@ fn policy(rules: &[(&str, &[&str])]) -> NativeCommandPolicy {
                 args_prefix: prefix.iter().map(|argument| (*argument).into()).collect(),
             })
             .collect(),
+        writable_roots: Vec::new(),
         max_seconds: 10,
     }
 }
@@ -259,6 +260,63 @@ async fn workspace_is_read_only_and_host_etc_is_not_mounted() {
     .await;
     assert!(!host_output.contains("exit_code: 0"), "{host_output}");
     assert!(!host_output.contains("root:x:"), "{host_output}");
+}
+
+#[tokio::test]
+async fn only_explicit_descriptor_bound_roots_are_writable() {
+    let root = tempdir().expect("workspace");
+    std::fs::create_dir(root.path().join("src")).expect("writable root");
+    std::fs::create_dir(root.path().join(".git")).expect("protected sibling");
+    std::fs::write(root.path().join("manifest.txt"), "original").expect("writable file root");
+    let mut writable = policy(&[("touch", &[]), ("python3", &["-c"])]);
+    writable.writable_roots = vec!["src".into(), "manifest.txt".into()];
+
+    validate_command_host(
+        &PinnedWorkdir::open(root.path()).expect("pin command workspace"),
+        &writable,
+    )
+    .await
+    .expect("supported writable-root command host");
+
+    let allowed = execute(
+        root.path(),
+        writable.clone(),
+        call("touch", &["src/allowed.txt"]),
+    )
+    .await;
+    assert!(allowed.contains("exit_code: 0"), "{allowed}");
+    assert!(root.path().join("src/allowed.txt").is_file());
+
+    let file_allowed = execute(
+        root.path(),
+        writable.clone(),
+        call(
+            "python3",
+            &["-c", "open('manifest.txt','w').write('updated')"],
+        ),
+    )
+    .await;
+    assert!(file_allowed.contains("exit_code: 0"), "{file_allowed}");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("manifest.txt")).expect("updated file"),
+        "updated"
+    );
+
+    let root_denied = execute(
+        root.path(),
+        writable.clone(),
+        call("touch", &["blocked.txt"]),
+    )
+    .await;
+    assert!(!root_denied.contains("exit_code: 0"), "{root_denied}");
+    assert!(!root.path().join("blocked.txt").exists());
+
+    let metadata_denied = execute(root.path(), writable, call("touch", &[".git/blocked"])).await;
+    assert!(
+        !metadata_denied.contains("exit_code: 0"),
+        "{metadata_denied}"
+    );
+    assert!(!root.path().join(".git/blocked").exists());
 }
 
 #[tokio::test]
@@ -553,6 +611,7 @@ async fn timeout_kills_the_sandbox_and_output_is_bounded() {
                 program: "python3".into(),
                 args_prefix: vec!["-c".into()],
             }],
+            writable_roots: Vec::new(),
             max_seconds: 1,
         },
         call(
