@@ -21,9 +21,8 @@ use vyane_core::{
 use crate::spawn::{
     NATIVE_MOUNT_FD_START, NativeMountHandle,
     run_capture_with_pinned_limit_authorized_channel_mounts,
-    run_capture_with_pinned_limit_authorized_mounts,
 };
-use crate::spawn::{RunControl, Termination};
+use crate::spawn::{RunControl, Termination, run_capture_with_pinned_limit_authorized_mounts};
 
 #[cfg(target_os = "linux")]
 use super::trusted_network::run_network_broker;

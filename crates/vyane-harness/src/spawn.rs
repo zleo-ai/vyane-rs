@@ -974,7 +974,6 @@ pub(crate) async fn run_capture_with_pinned_limit_authorized(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(target_os = "linux")]
 pub(crate) async fn run_capture_with_pinned_limit_authorized_mounts(
     program: &str,
     args: &[String],
