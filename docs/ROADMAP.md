@@ -42,6 +42,9 @@ liveness and authenticated-health gate.
 [WP-97](plan/WP-97.md) gives the standard CI test job the same serialized
 broker-supervisor fixture scheduling already used by coverage, without
 skipping tests or reducing concurrency inside each fixture.
+[WP-98](plan/WP-98.md) reconciles the README's stale Native
+graceful-shutdown acceptance statement with WP-66 and the current tested
+roadmap state.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

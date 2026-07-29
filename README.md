@@ -326,8 +326,11 @@ drain. This is not a `Remote` or session-aware native host, does not support
 native resume, live pause/resume or automatic replay, and the local bearer still
 does not represent distinct principals or hostile same-UID isolation. See
 [WP-61](docs/plan/WP-61.md) and [WP-66](docs/plan/WP-66.md).
-The Process-lane graceful drain is acceptance-covered; WP-66's separate
-daemon-level Native graceful-shutdown race acceptance remains open.
+The Process-lane graceful drain and daemon-level Native graceful-shutdown race
+are acceptance-covered, including deadline-bound restart settlement without
+input replay or output publication. Startup and forced-restart fixture
+stabilization are documented in [WP-95](docs/plan/WP-95.md) and
+[WP-96](docs/plan/WP-96.md).
 
 The service layer also has a principal-derived owner phase-A boundary.
 `OwnerContextFactory` freezes a trusted authenticator and resolver, keeps
