@@ -33,6 +33,9 @@ separate and limits it to explicit descriptor-bound roots inside an otherwise
 read-only workspace. [WP-94](plan/WP-94.md) adds a redacted static summary of
 the composed CLI-harness ceiling and Native/Canto capability bounds to both
 `vyane check` surfaces without turning configuration into a grant.
+[WP-95](plan/WP-95.md) keeps daemon startup fail-closed before spawn while
+allowing the bounded post-spawn readiness loop to retry only typed transient
+control-lock contention.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

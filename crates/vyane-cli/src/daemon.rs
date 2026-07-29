@@ -411,7 +411,7 @@ pub(crate) async fn start_daemon(
                     paths.log().display()
                 );
             }
-            if let Some((descriptor, Some(token))) = read_control_optional(&paths)?
+            if let Some((descriptor, Some(token))) = read_starting_control_optional(&paths)?
                 && descriptor.pid == child_pid
                 && matches!(
                     classify_descriptor_identity(&descriptor),
@@ -850,6 +850,24 @@ struct DaemonControlLock {
     file: std::fs::File,
 }
 
+#[derive(Debug)]
+struct DaemonControlLockTimeout {
+    path: PathBuf,
+}
+
+impl std::fmt::Display for DaemonControlLockTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "timed out after {} ms waiting for daemon control lock {}",
+            CONTROL_LOCK_BUDGET.as_millis(),
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for DaemonControlLockTimeout {}
+
 impl Drop for DaemonControlLock {
     fn drop(&mut self) {
         let _ = fs4::fs_std::FileExt::unlock(&self.file);
@@ -898,17 +916,33 @@ fn acquire_control_lock(paths: &DaemonPaths) -> Result<DaemonControlLock> {
                 std::thread::sleep(CONTROL_LOCK_POLL);
             }
             Ok(false) => {
-                bail!(
-                    "timed out after {} ms waiting for daemon control lock {}",
-                    CONTROL_LOCK_BUDGET.as_millis(),
-                    path.display()
-                )
+                return Err(DaemonControlLockTimeout { path }.into());
             }
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("lock daemon control file {}", path.display()));
             }
         }
+    }
+}
+
+/// A daemon that is still publishing its control generation may briefly own
+/// the lock when its launcher polls readiness. Treat only that typed
+/// contention as "not ready yet"; the outer startup deadline remains the
+/// bound, while malformed control data and filesystem failures stay fatal.
+fn read_starting_control_optional(
+    paths: &DaemonPaths,
+) -> Result<Option<(DaemonDescriptor, Option<String>)>> {
+    match read_control_optional(paths) {
+        Ok(control) => Ok(control),
+        Err(error)
+            if error
+                .chain()
+                .any(|cause| cause.downcast_ref::<DaemonControlLockTimeout>().is_some()) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -1366,7 +1400,34 @@ mod tests {
         write_private_atomic(&paths.token(), b"malformed").unwrap();
 
         assert!(read_control_optional(&paths).is_err());
+        assert!(read_starting_control_optional(&paths).is_err());
         assert_eq!(read_descriptor_optional(&paths).unwrap(), Some(descriptor));
+    }
+
+    #[test]
+    fn startup_read_retries_only_typed_control_lock_contention() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = StoragePaths::from_data_dir(directory.path());
+        let paths = DaemonPaths::from_storage(&storage);
+        let held = acquire_control_lock(&paths).unwrap();
+
+        assert!(read_starting_control_optional(&paths).unwrap().is_none());
+
+        drop(held);
+        let descriptor = DaemonDescriptor {
+            schema: DAEMON_DESCRIPTOR_SCHEMA,
+            instance_id: INSTANCE_A.into(),
+            pid: 101,
+            pgid: 101,
+            started_at: Utc::now(),
+            birth_fingerprint: Some("birth-101".into()),
+            addr: "127.0.0.1:9722".parse().unwrap(),
+        };
+        publish_control(&paths, &"a".repeat(64), &descriptor).unwrap();
+        assert_eq!(
+            read_starting_control_optional(&paths).unwrap().unwrap().0,
+            descriptor
+        );
     }
 
     #[test]
