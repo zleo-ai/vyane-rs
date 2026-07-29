@@ -329,11 +329,11 @@ command to bypass those exclusions. Shells and interpreters are ordinary
 programs and remain unavailable unless an exact program/argument prefix rule
 admits them.
 
-Read, write, command, command-network and web-search permissions remain
+Read, write, command, command-network, web-search and web-fetch permissions remain
 separate axes rather than one expanding "full" boolean. This remains narrower
 than a general `Harness`: it provides only explicitly admitted command HTTPS
-destinations and a separately configured hosted search target, with no
-writable command profile, arbitrary URL fetch, session/domain authority,
+destinations, a separately configured hosted search target, and bounded direct
+HTTPS text retrieval from frozen domains, with no writable command profile, session/domain authority,
 checkpoint/session-commit consumer, approval resume, or native resume.
 
 ## Dispatch lifecycle

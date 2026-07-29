@@ -7,6 +7,7 @@ pub mod anthropic_messages;
 pub mod openai_chat;
 pub mod openai_responses;
 pub mod retry;
+pub mod web_fetch;
 
 mod http;
 mod sse;
@@ -17,3 +18,4 @@ pub use http::{ClientOptions, endpoint_routing_digest, validate_http_base_url};
 pub use openai_chat::OpenAiChatClient;
 pub use openai_responses::OpenAiResponsesClient;
 pub use retry::RetryConfig;
+pub use web_fetch::WebFetchClient;

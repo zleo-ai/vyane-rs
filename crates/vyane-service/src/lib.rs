@@ -84,7 +84,8 @@ pub use diagnostics::{
     RouteSelectionBasis,
 };
 pub use factory::{
-    AssemblerFactory, authorized_native_client, authorized_web_search_client, direct_http_client,
+    AssemblerFactory, authorized_native_client, authorized_web_fetch_client,
+    authorized_web_search_client, direct_http_client,
 };
 pub use goal::{
     GOAL_NEXT_ACTION_VIEW_SCHEMA, GoalNextActionKind, GoalNextActionView, GoalNextReasonCode,

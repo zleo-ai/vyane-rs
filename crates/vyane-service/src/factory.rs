@@ -10,14 +10,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use vyane_config::ResolvedConfig;
 use vyane_core::{
-    AdapterTransport, AuthorizedToolChatClient, AuthorizedWebSearchClient, BoundTarget, ChatClient,
-    EnvPolicy, ErrorKind, Harness, HarnessExecutionContext, HarnessJob, HarnessKind,
-    HarnessOutcome, HarnessStreamEvent, Protocol, Result, VyaneError,
+    AdapterTransport, AuthorizedToolChatClient, AuthorizedWebFetchClient,
+    AuthorizedWebSearchClient, BoundTarget, ChatClient, EnvPolicy, ErrorKind, Harness,
+    HarnessExecutionContext, HarnessJob, HarnessKind, HarnessOutcome, HarnessStreamEvent, Protocol,
+    Result, VyaneError,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 use vyane_kernel::{CapabilityManifest, Executor, ExecutorFactory, IsolationStrength};
 use vyane_protocol::{
     AnthropicMessagesClient, ClientOptions, OpenAiChatClient, OpenAiResponsesClient, RetryConfig,
+    WebFetchClient,
 };
 
 #[derive(Clone)]
@@ -269,6 +271,12 @@ pub fn authorized_web_search_client(
     Ok(Arc::new(OpenAiResponsesClient::with_options(
         endpoint, options,
     )?))
+}
+
+/// Build the Vyane-owned public HTTPS fetch capability. Its request policy,
+/// DNS checks, redirects and live authority are enforced below the tool seam.
+pub fn authorized_web_fetch_client() -> Arc<dyn AuthorizedWebFetchClient> {
+    Arc::new(WebFetchClient::new())
 }
 
 fn validate_authorized_native_combo(
