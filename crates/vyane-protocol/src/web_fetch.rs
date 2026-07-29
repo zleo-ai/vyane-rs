@@ -13,6 +13,7 @@ use vyane_core::{
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_DOMAINS: usize = 128;
 const MIN_RESPONSE_BYTES: usize = 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -56,6 +57,7 @@ impl AuthorizedWebFetchClient for WebFetchClient {
             let port = url
                 .port_or_known_default()
                 .ok_or_else(|| invalid_url("web fetch URL has no port"))?;
+            authority.revalidate(effect).await?;
             let lookup = tokio::time::timeout(
                 REQUEST_TIMEOUT,
                 tokio::net::lookup_host((host.as_str(), port)),
@@ -243,7 +245,7 @@ fn build_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client> {
 }
 
 fn validate_fetch_url(input: &str) -> Result<Url> {
-    if input.is_empty() || input.len() > 8 * 1024 {
+    if input.is_empty() || input.len() > MAX_URL_BYTES {
         return Err(invalid_url("web fetch URL is invalid"));
     }
     let mut url = Url::parse(input).map_err(|_| invalid_url("web fetch URL is invalid"))?;
@@ -259,6 +261,9 @@ fn validate_fetch_url(input: &str) -> Result<Url> {
         return Err(invalid_url("web fetch does not accept IP-literal hosts"));
     }
     url.set_fragment(None);
+    if url.as_str().len() > MAX_URL_BYTES {
+        return Err(invalid_url("web fetch URL is invalid"));
+    }
     Ok(url)
 }
 
@@ -269,8 +274,20 @@ fn domain_is_allowed(host: &str, allowed: &[String]) -> bool {
 }
 
 fn accepted_content_type(value: Option<&str>) -> Result<String> {
+    let value = value.ok_or_else(unsupported_content_type)?;
+    for parameter in value.split(';').skip(1) {
+        let Some((name, value)) = parameter.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("charset")
+            && !value.trim().trim_matches('"').eq_ignore_ascii_case("utf-8")
+        {
+            return Err(unsupported_content_type());
+        }
+    }
     let content_type = value
-        .and_then(|value| value.split(';').next())
+        .split(';')
+        .next()
         .map(str::trim)
         .map(str::to_ascii_lowercase)
         .filter(|value| {
@@ -285,13 +302,15 @@ fn accepted_content_type(value: Option<&str>) -> Result<String> {
                         | "application/atom+xml"
                 )
         })
-        .ok_or_else(|| {
-            VyaneError::new(
-                ErrorKind::Protocol,
-                "web fetch accepts only declared text content",
-            )
-        })?;
+        .ok_or_else(unsupported_content_type)?;
     Ok(content_type)
+}
+
+fn unsupported_content_type() -> VyaneError {
+    VyaneError::new(
+        ErrorKind::Protocol,
+        "web fetch accepts only declared UTF-8 text content",
+    )
 }
 
 fn is_redirect(status: StatusCode) -> bool {
@@ -324,6 +343,7 @@ fn is_public_ipv4(ip: Ipv4Addr) -> bool {
         || octets[0] == 0
         || (octets[0] == 100 && (64..=127).contains(&octets[1]))
         || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99 && octets[3] != 2)
         || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
         || octets[0] >= 240)
 }
@@ -372,6 +392,9 @@ mod tests {
         ] {
             assert!(validate_fetch_url(invalid).is_err(), "{invalid}");
         }
+        let normalized_oversize = format!("https://docs.rs/{}", "é".repeat(3_000));
+        assert!(normalized_oversize.len() < MAX_URL_BYTES);
+        assert!(validate_fetch_url(&normalized_oversize).is_err());
     }
 
     #[test]
@@ -383,6 +406,7 @@ mod tests {
             "127.0.0.1",
             "169.254.1.1",
             "192.0.2.1",
+            "192.88.99.1",
             "198.18.0.1",
             "224.0.0.1",
             "::1",
@@ -402,6 +426,7 @@ mod tests {
         for valid in [
             "1.1.1.1",
             "8.8.8.8",
+            "192.88.99.2",
             "2001:4860:4860::8888",
             "2606:4700:4700::1111",
         ] {
@@ -416,10 +441,15 @@ mod tests {
             "text/html"
         );
         assert_eq!(
+            accepted_content_type(Some("text/plain; Charset=\"UTF-8\"")).unwrap(),
+            "text/plain"
+        );
+        assert_eq!(
             accepted_content_type(Some("application/json")).unwrap(),
             "application/json"
         );
         assert!(accepted_content_type(Some("application/octet-stream")).is_err());
+        assert!(accepted_content_type(Some("text/plain; charset=utf-16le")).is_err());
         assert!(accepted_content_type(None).is_err());
     }
 
