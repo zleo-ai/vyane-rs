@@ -206,7 +206,43 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
         }
     }
 
+    let permissions = vyane_service::check_permissions(&loaded.config);
+    println!("permissions:");
+    println!(
+        "  cli-harness: max_sandbox={} ceiling_layers={}",
+        sandbox_name(permissions.harness.max_sandbox),
+        permissions.harness.ceiling_layers
+    );
+    println!(
+        "  native/canto: ceiling_layers={} filesystem_read={} filesystem_write={} command_execution={} command_network={} web_search={} web_fetch={} tool_policy_layers={} tool_policy_rules={}",
+        permissions.native.ceiling_layers,
+        native_axis_name(permissions.native.filesystem_read),
+        native_axis_name(permissions.native.filesystem_write),
+        native_axis_name(permissions.native.command_execution),
+        native_axis_name(permissions.native.command_network),
+        native_axis_name(permissions.native.web_search),
+        native_axis_name(permissions.native.web_fetch),
+        permissions.native.tool_policy_layers,
+        permissions.native.tool_policy_rule_count,
+    );
+
     Ok(ExitCode::SUCCESS)
+}
+
+const fn sandbox_name(sandbox: vyane_core::Sandbox) -> &'static str {
+    match sandbox {
+        vyane_core::Sandbox::ReadOnly => "read-only",
+        vyane_core::Sandbox::Write => "write",
+        vyane_core::Sandbox::Full => "full",
+    }
+}
+
+const fn native_axis_name(status: vyane_service::NativePermissionAxisStatus) -> &'static str {
+    match status {
+        vyane_service::NativePermissionAxisStatus::UnrestrictedByConfig => "unrestricted_by_config",
+        vyane_service::NativePermissionAxisStatus::Bounded => "bounded",
+        vyane_service::NativePermissionAxisStatus::Disabled => "disabled",
+    }
 }
 
 async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {

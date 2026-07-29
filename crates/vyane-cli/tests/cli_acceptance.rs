@@ -295,7 +295,21 @@ async fn dispatch_unknown_target_exits_with_config_code() {
 async fn check_with_temp_config_lists_profile() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
-    let config = write_config(&config_dir, &config_for(&server));
+    let config = write_config(
+        &config_dir,
+        &format!(
+            r#"
+{}
+
+[harness_permissions]
+max_sandbox = "write"
+
+[native_permissions.command_execution]
+allow = [{{ program = "CANARY_PERMISSION_COMMAND" }}]
+"#,
+            config_for(&server)
+        ),
+    );
 
     vyane()
         .env("VYANE_CLI_TEST_KEY", "sk-test")
@@ -304,7 +318,43 @@ async fn check_with_temp_config_lists_profile() {
         .arg("check")
         .assert()
         .success()
-        .stdout(predicate::str::contains("review"));
+        .stdout(predicate::str::contains("review"))
+        .stdout(predicate::str::contains(
+            "cli-harness: max_sandbox=write ceiling_layers=1",
+        ))
+        .stdout(predicate::str::contains(
+            "native/canto: ceiling_layers=1 filesystem_read=unrestricted_by_config \
+             filesystem_write=disabled command_execution=bounded",
+        ))
+        .stdout(predicate::str::contains("CANARY_PERMISSION_COMMAND").not());
+}
+
+#[test]
+fn check_permission_summary_preserves_large_loadable_config_exit_behavior() {
+    let config_dir = TempDir::new().expect("config tempdir");
+    let mut source = String::new();
+    for index in 0..=vyane_service::DIAGNOSTIC_MAX_CONFIG_ITEMS {
+        source.push_str(&format!(
+            r#"
+[providers.provider-{index}]
+base_url = "https://example.invalid/v1"
+auth_style = "bearer"
+protocol = "openai_chat"
+default_model = "model"
+"#
+        ));
+    }
+    let config = write_config(&config_dir, &source);
+
+    vyane()
+        .arg("--config")
+        .arg(config)
+        .arg("check")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "cli-harness: max_sandbox=full ceiling_layers=0",
+        ));
 }
 
 #[tokio::test]
