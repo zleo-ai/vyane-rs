@@ -500,7 +500,9 @@ impl DaemonAgentHost {
         let chain = scoped
             .resolve(&request.target)
             .map_err(|_| AgentApiError::bad_request())?;
-        if chain.chain.len() != 1 {
+        if chain.chain.is_empty()
+            || chain.chain.len() > crate::native_agent_spool::MAX_NATIVE_TARGETS
+        {
             return Err(AgentApiError::bad_request());
         }
         let search_chain = request
@@ -551,7 +553,7 @@ impl DaemonAgentHost {
             NativeSubmissionDetails {
                 prompt: request.task,
                 selector: &request.target,
-                bound: &chain.chain[0],
+                chain: &chain.chain,
                 workdir: &workdir,
                 filesystem_read,
                 filesystem_write,

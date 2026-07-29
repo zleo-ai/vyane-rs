@@ -74,6 +74,40 @@ fn write_native_config(directory: &TempDir, endpoint: &str) -> PathBuf {
     path
 }
 
+fn write_native_failover_config(
+    directory: &TempDir,
+    primary_endpoint: &str,
+    secondary_endpoint: &str,
+) -> PathBuf {
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            r#"
+            [providers.primary_http]
+            base_url = "{primary_endpoint}"
+            auth_style = "bearer"
+            protocol = "openai_chat"
+            default_model = "native-test-model"
+
+            [providers.secondary_http]
+            base_url = "{secondary_endpoint}"
+            auth_style = "bearer"
+            protocol = "openai_chat"
+            default_model = "native-test-model"
+
+            [profiles.native]
+            provider = "primary_http"
+            protocol = "openai_chat"
+            model = "native-test-model"
+            failover = ["secondary_http/native-test-model"]
+            "#
+        ),
+    )
+    .unwrap();
+    path
+}
+
 fn write_native_config_with_read_only_ceiling(directory: &TempDir, endpoint: &str) -> PathBuf {
     let path = write_native_config(directory, endpoint);
     let mut config = fs::read_to_string(&path).unwrap();
@@ -623,6 +657,60 @@ async fn native_agent_submit_uses_the_shared_resident_lane() {
         "an exact terminal retry must not rematerialize private native input"
     );
     assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn native_agent_submit_fails_over_and_exact_retry_rejects_chain_drift() {
+    let primary = MockServer::start().await;
+    let secondary = MockServer::start().await;
+    let drifted_secondary = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&primary)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "native-test-model",
+            "choices": [{
+                "message": {"role": "assistant", "content": "failover answer"},
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&secondary)
+        .await;
+
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_failover_config(&config_dir, &primary.uri(), &secondary.uri());
+    let workdir = data_dir.path().join("native-failover-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let run_id = "0197f524-7a00-7000-8000-000000000124";
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+
+    let response = submit_native(data_dir.path(), run_id, &workdir).await;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let done = terminal(data_dir.path(), run_id, Duration::from_secs(15)).await;
+    assert_eq!(done["state"], "succeeded");
+    assert!(!primary.received_requests().await.unwrap().is_empty());
+    assert_eq!(secondary.received_requests().await.unwrap().len(), 1);
+    assert!(daemon.stop().status.success());
+
+    write_native_failover_config(&config_dir, &primary.uri(), &drifted_secondary.uri());
+    let mut restarted = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+    let retry = submit_native(data_dir.path(), run_id, &workdir).await;
+    assert_eq!(retry.status(), reqwest::StatusCode::CONFLICT);
+    assert!(
+        drifted_secondary
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(restarted.stop().status.success());
 }
 
 #[tokio::test]

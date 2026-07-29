@@ -20,7 +20,8 @@ use vyane_harness::native::{
     NativeWebSearchPolicy, NativeWritePolicy,
 };
 
-const SCHEMA: u32 = 10;
+const SCHEMA: u32 = 11;
+const TOOL_POLICY_SCHEMA: u32 = 10;
 const WRITABLE_ROOT_SCHEMA: u32 = 9;
 const WEB_FETCH_SCHEMA: u32 = 8;
 const WEB_SEARCH_SCHEMA: u32 = 7;
@@ -34,6 +35,7 @@ const MAX_SYSTEM_BYTES: usize = 128 * 1024;
 const MAX_ID_BYTES: usize = 256;
 const MAX_SELECTOR_BYTES: usize = 512;
 const MAX_TARGET_PART_BYTES: usize = 512;
+pub(crate) const MAX_NATIVE_TARGETS: usize = 16;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_MODEL_TURNS: u32 = 32;
@@ -175,6 +177,8 @@ impl std::fmt::Debug for NativeTargetSnapshot {
 pub(crate) struct NativeAgentPolicy {
     pub(crate) target_selector: String,
     pub(crate) target: NativeTargetSnapshot,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) failover_targets: Vec<NativeTargetSnapshot>,
     pub(crate) canonical_workdir: PathBuf,
     pub(crate) workdir_identity: WorkdirIdentity,
     pub(crate) filesystem_read: NativeReadPolicy,
@@ -210,6 +214,7 @@ impl std::fmt::Debug for NativeAgentPolicy {
             .debug_struct("NativeAgentPolicy")
             .field("target_selector", &"[REDACTED]")
             .field("target", &self.target)
+            .field("failover_targets", &self.failover_targets.len())
             .field("canonical_workdir", &"[REDACTED]")
             .field("workdir_identity", &"[OPAQUE]")
             .field(
@@ -316,7 +321,7 @@ impl NativeAgentInput {
             .command_execution
             .as_ref()
             .is_none_or(|policy| policy.writable_roots.is_empty());
-        let supported_legacy_schema = self.policy.tool_permission_layers.is_empty()
+        let supported_before_tool_policy = self.policy.tool_permission_layers.is_empty()
             && (self.schema == WRITABLE_ROOT_SCHEMA
                 || (no_writable_command_roots
                     && (self.schema == WEB_FETCH_SCHEMA
@@ -337,6 +342,8 @@ impl NativeAgentInput {
                             && self.policy.command_execution.is_none()
                             && self.policy.web_search.is_none()
                             && self.policy.web_fetch.is_none()))));
+        let supported_legacy_schema = self.policy.failover_targets.is_empty()
+            && (self.schema == TOOL_POLICY_SCHEMA || supported_before_tool_policy);
         let supported_schema = self.schema == SCHEMA || supported_legacy_schema;
         if !supported_schema
             || !valid_text(&self.owner, MAX_ID_BYTES)
@@ -686,6 +693,7 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
         || !valid_text(&policy.target.provider, MAX_TARGET_PART_BYTES)
         || !valid_text(&policy.target.model, MAX_TARGET_PART_BYTES)
         || !valid_digest(&policy.target.routing_digest)
+        || policy.failover_targets.len() >= MAX_NATIVE_TARGETS
         || policy
             .system
             .as_ref()
@@ -697,6 +705,16 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
         || policy.tool_permission_layers.len() > MAX_NATIVE_TOOL_PERMISSION_LAYERS
     {
         return Err(NativeAgentSpoolError::InvalidInput);
+    }
+    for target in &policy.failover_targets {
+        if target.protocol != NativeProtocolSnapshot::OpenaiChat
+            || !valid_text(&target.provider, MAX_TARGET_PART_BYTES)
+            || !valid_text(&target.model, MAX_TARGET_PART_BYTES)
+            || !valid_digest(&target.routing_digest)
+        {
+            return Err(NativeAgentSpoolError::InvalidInput);
+        }
+        validate_params(&target.params)?;
     }
     validate_path(&policy.canonical_workdir)?;
     policy
@@ -972,6 +990,7 @@ mod tests {
                     extra_digest: Some("b".repeat(64)),
                 },
             },
+            failover_targets: Vec::new(),
             canonical_workdir: PathBuf::from("/workspace/private-marker"),
             workdir_identity: WorkdirIdentity {
                 device: 7,
@@ -1289,6 +1308,80 @@ mod tests {
         assert_eq!(
             spool.read("run-marker", "worker-marker"),
             Err(NativeAgentSpoolError::DigestMismatch)
+        );
+    }
+
+    #[test]
+    fn failover_chain_is_ordered_digest_bound_and_capped() {
+        let mut first = policy().target;
+        first.provider = "provider-b".into();
+        first.model = "model-b".into();
+        first.routing_digest = "c".repeat(64);
+        let mut second = first.clone();
+        second.provider = "provider-c".into();
+        second.model = "model-c".into();
+        second.routing_digest = "d".repeat(64);
+
+        let mut forward_policy = policy();
+        forward_policy.failover_targets = vec![first.clone(), second.clone()];
+        let forward = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            forward_policy,
+        )
+        .unwrap();
+        let mut reverse_policy = policy();
+        reverse_policy.failover_targets = vec![second, first.clone()];
+        let reverse = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            reverse_policy,
+        )
+        .unwrap();
+        assert_ne!(forward.policy_sha256, reverse.policy_sha256);
+
+        let mut oversized = policy();
+        oversized.failover_targets = vec![first; MAX_NATIVE_TARGETS];
+        assert_eq!(
+            NativeAgentInput::fresh(
+                "owner-marker",
+                "run-marker",
+                "worker-marker",
+                "prompt-body-marker",
+                oversized,
+            ),
+            Err(NativeAgentSpoolError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn schema_ten_is_recoverable_only_without_failover_targets() {
+        let (_directory, spool) = fixture();
+        let path = spool.input_path("run-marker").unwrap();
+        let mut legacy = input();
+        legacy.schema = TOOL_POLICY_SCHEMA;
+        write_private(&path, serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(spool.read("run-marker", "worker-marker").unwrap(), legacy);
+
+        let mut invalid_policy = policy();
+        invalid_policy.failover_targets = vec![invalid_policy.target.clone()];
+        let mut invalid = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-marker",
+            "worker-marker",
+            "prompt-body-marker",
+            invalid_policy,
+        )
+        .unwrap();
+        invalid.schema = TOOL_POLICY_SCHEMA;
+        write_private(&path, serde_json::to_vec(&invalid).unwrap());
+        assert_eq!(
+            spool.read("run-marker", "worker-marker"),
+            Err(NativeAgentSpoolError::CorruptInput)
         );
     }
 
