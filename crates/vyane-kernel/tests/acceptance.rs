@@ -1044,6 +1044,58 @@ fn seed_record(
 // Acceptance: early execution identity + whole-chain capability admission
 // ===========================================================================
 
+#[test]
+fn cli_harness_sandbox_ceiling_rejects_the_whole_chain_before_preparation() {
+    let factory = MockFactory::new();
+    let make_calls = factory.make_calls();
+    let dispatcher = dispatcher(factory.into_arc(), MockLedger::new(), MockSessions::new())
+        .with_harness_sandbox_ceiling(Sandbox::ReadOnly)
+        .with_harness_sandbox_ceiling(Sandbox::Full);
+    let task = TaskSpec::new("edit").with_sandbox(Sandbox::Write);
+
+    let error = match dispatcher.prepare(
+        &task,
+        vec![
+            http_target("remote", "first"),
+            cli_target("local", "fallback"),
+        ],
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("one CLI-harness leg must bind the entire chain to the ceiling"),
+    };
+
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert_eq!(
+        error.message,
+        "requested CLI-harness sandbox exceeds configured maximum"
+    );
+    assert_eq!(make_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn cli_harness_sandbox_ceiling_accepts_equal_and_narrower_requests() {
+    let factory = MockFactory::new();
+    let dispatcher = dispatcher(factory.into_arc(), MockLedger::new(), MockSessions::new())
+        .with_harness_sandbox_ceiling(Sandbox::Write);
+
+    dispatcher
+        .prepare(&TaskSpec::new("inspect"), vec![cli_target("local", "read")])
+        .expect("read-only stays within write ceiling");
+
+    #[cfg(target_os = "linux")]
+    {
+        let workdir = tempfile::tempdir().unwrap();
+        dispatcher
+            .prepare(
+                &TaskSpec::new("edit")
+                    .with_sandbox(Sandbox::Write)
+                    .with_workdir(workdir.path()),
+                vec![cli_target("local", "write")],
+            )
+            .expect("write is accepted at the exact write ceiling");
+    }
+}
+
 #[tokio::test]
 async fn direct_http_mutating_sandboxes_are_rejected_before_make() {
     for sandbox in [Sandbox::Write, Sandbox::Full] {

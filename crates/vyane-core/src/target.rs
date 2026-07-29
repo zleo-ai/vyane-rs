@@ -152,6 +152,28 @@ pub enum Sandbox {
     Full,
 }
 
+impl Sandbox {
+    /// Whether this requested sandbox stays within `ceiling`.
+    ///
+    /// Keep the security ordering explicit instead of relying on enum
+    /// declaration order: `read-only <= write <= full`.
+    #[must_use]
+    pub const fn is_within(self, ceiling: Self) -> bool {
+        matches!(
+            (self, ceiling),
+            (Self::ReadOnly, _)
+                | (Self::Write, Self::Write | Self::Full)
+                | (Self::Full, Self::Full)
+        )
+    }
+
+    /// Return the stricter of two sandbox ceilings.
+    #[must_use]
+    pub const fn restrict_with(self, other: Self) -> Self {
+        if self.is_within(other) { self } else { other }
+    }
+}
+
 /// A resolved execution target: the four layers, pinned.
 ///
 /// This is the loggable identity of "where a run went". It carries no
@@ -259,6 +281,25 @@ mod tests {
             let back: HarnessKind = serde_json::from_str(&json).unwrap();
             assert_eq!(kind, back);
         }
+    }
+
+    #[test]
+    fn sandbox_ceiling_order_is_explicit_and_closed() {
+        assert!(Sandbox::ReadOnly.is_within(Sandbox::ReadOnly));
+        assert!(Sandbox::ReadOnly.is_within(Sandbox::Write));
+        assert!(Sandbox::ReadOnly.is_within(Sandbox::Full));
+        assert!(!Sandbox::Write.is_within(Sandbox::ReadOnly));
+        assert!(Sandbox::Write.is_within(Sandbox::Write));
+        assert!(Sandbox::Write.is_within(Sandbox::Full));
+        assert!(!Sandbox::Full.is_within(Sandbox::ReadOnly));
+        assert!(!Sandbox::Full.is_within(Sandbox::Write));
+        assert!(Sandbox::Full.is_within(Sandbox::Full));
+
+        assert_eq!(Sandbox::Full.restrict_with(Sandbox::Write), Sandbox::Write);
+        assert_eq!(
+            Sandbox::ReadOnly.restrict_with(Sandbox::Full),
+            Sandbox::ReadOnly
+        );
     }
 
     #[test]

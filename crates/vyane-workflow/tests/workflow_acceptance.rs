@@ -12,8 +12,8 @@ use tempfile::TempDir;
 use vyane_core::{
     AdapterTransport, BoundTarget, CancellationToken, ChatClient, ChatOutcome, ChatRequest,
     Endpoint, ErrorKind, GenParams, Harness, HarnessJob, HarnessKind, HarnessOutcome, Ledger,
-    ModelId, Protocol, ProviderId, Result, RunQuery, RunRecord, SessionRecord, SessionStore,
-    SessionUpdate, Target, VyaneError,
+    ModelId, Protocol, ProviderId, Result, RunQuery, RunRecord, Sandbox, SessionRecord,
+    SessionStore, SessionUpdate, Target, VyaneError,
 };
 use vyane_kernel::{Dispatcher, Executor, ExecutorFactory};
 use vyane_workflow::{
@@ -310,6 +310,20 @@ fn http_target(provider: &str, model: &str) -> BoundTarget {
     }
 }
 
+fn cli_target(provider: &str, model: &str) -> BoundTarget {
+    BoundTarget {
+        target: Target {
+            provider: ProviderId::new(provider),
+            protocol: Protocol::AnthropicMessages,
+            harness: Some(HarnessKind::ClaudeCode),
+            model: ModelId::new(model),
+        },
+        transport: AdapterTransport::CliWrap,
+        endpoint: None,
+        params: GenParams::default(),
+    }
+}
+
 fn dispatcher(factory: Arc<dyn ExecutorFactory>) -> Arc<Dispatcher> {
     Arc::new(Dispatcher::new(
         factory,
@@ -388,6 +402,48 @@ fn validation_collects_all_requested_problem_types() {
     assert!(text.contains("exactly one of `target` or `fan_out`, not both"));
     assert!(text.contains("could not be resolved"));
     assert!(text.contains("not in its transitive needs"));
+}
+
+#[test]
+fn harness_ceiling_rejects_before_workflow_journal_creation() {
+    let directory = TempDir::new().unwrap();
+    let journal_dir = directory.path().join("journals");
+    let workflow = workflow_from(
+        &directory,
+        r#"
+        [workflow]
+        name = "harness-ceiling"
+
+        [[step]]
+        id = "edit"
+        target = "cli"
+        prompt = "edit"
+        sandbox = "write"
+        "#,
+    );
+    let mut resolver = MockResolver::default();
+    resolver
+        .targets
+        .insert("cli".into(), vec![cli_target("local", "model")]);
+    let engine = WorkflowEngine::new(
+        Arc::new(
+            Dispatcher::new(
+                MockFactory::new().into_arc(),
+                Arc::new(MockLedger::default()),
+                Arc::new(MockSessions),
+            )
+            .with_harness_sandbox_ceiling(Sandbox::ReadOnly),
+        ),
+        Arc::new(resolver),
+        journal_dir.clone(),
+    );
+
+    let error = engine
+        .prepare_run_with_id(WorkflowRunId::generate(), &workflow, BTreeMap::new())
+        .unwrap_err();
+
+    assert!(error.to_string().contains("permission admission"));
+    assert!(!journal_dir.exists());
 }
 
 #[test]
@@ -1421,6 +1477,95 @@ async fn resume_skips_successes_reruns_failed_and_refuses_changed_hash() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("workflow file hash changed"));
+}
+
+#[tokio::test]
+async fn tightened_ceiling_does_not_revalidate_a_successful_resume_step() {
+    let directory = TempDir::new().unwrap();
+    let workflow = workflow_from(
+        &directory,
+        r#"
+        [workflow]
+        name = "resume-ceiling"
+
+        [[step]]
+        id = "edit"
+        target = "cli"
+        prompt = "edit"
+        sandbox = "write"
+
+        [[step]]
+        id = "finish"
+        needs = ["edit"]
+        target = "http"
+        prompt = "finish"
+        "#,
+    );
+    let journal_dir = directory.path().join("journals");
+    let mut resolver = MockResolver::default();
+    resolver
+        .targets
+        .insert("cli".into(), vec![cli_target("local", "edit-model")]);
+    resolver
+        .targets
+        .insert("http".into(), vec![http_target("remote", "finish-model")]);
+    let initial = WorkflowEngine::new(
+        Arc::new(
+            Dispatcher::new(
+                MockFactory::new().into_arc(),
+                Arc::new(MockLedger::default()),
+                Arc::new(MockSessions),
+            )
+            .with_harness_sandbox_ceiling(Sandbox::Full),
+        ),
+        Arc::new(resolver),
+        journal_dir.clone(),
+    );
+    let run_id = WorkflowRunId::generate();
+    initial
+        .prepare_run_with_id(run_id.clone(), &workflow, BTreeMap::new())
+        .unwrap();
+
+    let mut journal = vyane_workflow::read_journal(&journal_dir, run_id.as_str()).unwrap();
+    journal.status = WorkflowRunStatus::CompletedWithFailures;
+    journal.steps.get_mut("edit").unwrap().status = JournalStepStatus::Success;
+    journal.steps.get_mut("edit").unwrap().output = Some("done".into());
+    journal.steps.get_mut("finish").unwrap().status = JournalStepStatus::Failed;
+    journal.steps.get_mut("finish").unwrap().error = Some("retry".into());
+    std::fs::write(
+        journal_dir.join(format!("{run_id}.json")),
+        serde_json::to_vec_pretty(&journal).unwrap(),
+    )
+    .unwrap();
+
+    let factory = MockFactory::new();
+    let probe = factory.probe();
+    let mut resolver = MockResolver::default();
+    resolver
+        .targets
+        .insert("cli".into(), vec![cli_target("local", "edit-model")]);
+    resolver
+        .targets
+        .insert("http".into(), vec![http_target("remote", "finish-model")]);
+    let resumed = WorkflowEngine::new(
+        Arc::new(
+            Dispatcher::new(
+                factory.into_arc(),
+                Arc::new(MockLedger::default()),
+                Arc::new(MockSessions),
+            )
+            .with_harness_sandbox_ceiling(Sandbox::ReadOnly),
+        ),
+        Arc::new(resolver),
+        journal_dir,
+    )
+    .resume(run_id.as_str(), &workflow, CancellationToken::new())
+    .await
+    .unwrap();
+
+    assert_eq!(resumed.status, WorkflowRunStatus::Completed);
+    assert_eq!(probe.call_count("edit-model"), 0);
+    assert_eq!(probe.call_count("finish-model"), 1);
 }
 
 #[tokio::test]

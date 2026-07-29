@@ -348,8 +348,16 @@ HTTPS text retrieval from frozen domains. WP-88 retains each user, project,
 explicit and managed `[native_permissions]` section as an independent ceiling.
 Configuration never grants an optional tool; the request opts in, path
 exclusions accumulate, and rules/limits can only narrow before the effective
-policy is frozen. The managed file named by
-`VYANE_MANAGED_NATIVE_CONFIG` accepts no provider or profile configuration.
+policy is frozen. WP-93 separately retains each
+`[harness_permissions] max_sandbox` as a monotonic ceiling over any CLI-harness
+leg; the strictest ceiling rejects an over-broad task before dispatch
+persistence, outer REST/workflow task identity, workflow-journal creation,
+executor construction or spawn. Synchronous REST reports this typed config
+rejection as a caller error. Resume/replay applies the current ceiling only to
+steps that will execute; an exact successful journal prefix remains reusable.
+The managed file named by
+`VYANE_MANAGED_PERMISSION_CONFIG` accepts no provider or profile configuration;
+`VYANE_MANAGED_NATIVE_CONFIG` remains a compatibility alias.
 The lane still has no whole-workspace command profile, session/domain authority,
 checkpoint/session-commit consumer, approval resume, or native resume.
 

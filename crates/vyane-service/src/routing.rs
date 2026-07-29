@@ -371,6 +371,18 @@ pub fn validate_auto_route_candidates(
     loaded: &LoadedConfig,
     labels: &BTreeMap<String, String>,
 ) -> Result<()> {
+    resolve_auto_route_candidate_chains(loaded, labels).map(|_| ())
+}
+
+/// Resolve every target chain that a deferred `auto` selector may choose.
+///
+/// The returned chains have passed the same candidate and frontier guards as
+/// [`validate_auto_route_candidates`]. Callers can apply execution admission
+/// that depends on the eventual transport without selecting one candidate.
+pub fn resolve_auto_route_candidate_chains(
+    loaded: &LoadedConfig,
+    labels: &BTreeMap<String, String>,
+) -> Result<Vec<Vec<BoundTarget>>> {
     let params = route_params_from_labels(String::new(), labels)?;
     validate_route_param_values(&loaded.config, &params)?;
     let mut names = if params.candidate_profiles.is_empty() {
@@ -390,6 +402,7 @@ pub fn validate_auto_route_candidates(
     if names.is_empty() {
         bail!("no eligible profiles remain for deferred auto routing");
     }
+    let mut chains = Vec::with_capacity(names.len());
     for name in names {
         let patch = loaded
             .config
@@ -401,10 +414,11 @@ pub fn validate_auto_route_candidates(
         }
         let chain = resolve_target_chain(loaded, &name)
             .map_err(|error| anyhow::anyhow!("routing candidate `{name}`: {error:#}"))?;
-        guard_route_chain(loaded, &name, chain, params.allow_frontier)
+        let chain = guard_route_chain(loaded, &name, chain, params.allow_frontier)
             .map_err(|error| anyhow::anyhow!("routing candidate `{name}`: {error:#}"))?;
+        chains.push(chain);
     }
-    Ok(())
+    Ok(chains)
 }
 
 /// Reconstruct a parent-frozen auto route without making a new route decision.
@@ -712,6 +726,7 @@ mod tests {
             providers: Default::default(),
             profiles,
             native_permission_ceilings: Vec::new(),
+            harness_permission_ceilings: Vec::new(),
         }
     }
 
@@ -825,6 +840,7 @@ mod tests {
             providers: Default::default(),
             profiles,
             native_permission_ceilings: Vec::new(),
+            harness_permission_ceilings: Vec::new(),
         };
         let params = RouteParams {
             task: "check the code".into(),
@@ -922,6 +938,7 @@ mod tests {
             providers: Default::default(),
             profiles,
             native_permission_ceilings: Vec::new(),
+            harness_permission_ceilings: Vec::new(),
         };
 
         let result = route_task(
@@ -966,6 +983,7 @@ mod tests {
             providers: Default::default(),
             profiles,
             native_permission_ceilings: Vec::new(),
+            harness_permission_ceilings: Vec::new(),
         };
 
         let result = route_task(
@@ -1011,6 +1029,7 @@ mod tests {
                 providers: Default::default(),
                 profiles,
                 native_permission_ceilings: Vec::new(),
+                harness_permission_ceilings: Vec::new(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
@@ -1046,6 +1065,7 @@ mod tests {
                 providers: Default::default(),
                 profiles,
                 native_permission_ceilings: Vec::new(),
+                harness_permission_ceilings: Vec::new(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
@@ -1089,6 +1109,7 @@ mod tests {
                 providers: Default::default(),
                 profiles,
                 native_permission_ceilings: Vec::new(),
+                harness_permission_ceilings: Vec::new(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),

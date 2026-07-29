@@ -12,7 +12,9 @@ use vyane_core::{
 use vyane_provider::ProviderRegistry;
 
 use crate::layer::ConfigLayers;
-use crate::model::{NativePermissionCeiling, ProfilePatch, RawFailoverElement};
+use crate::model::{
+    HarnessPermissionCeiling, NativePermissionCeiling, ProfilePatch, RawFailoverElement,
+};
 
 /// The fully merged config, ready to resolve profiles and failover chains
 /// against. A thin wrapper over [`ConfigLayers`] — kept as a separate type
@@ -23,6 +25,7 @@ pub struct ResolvedConfig {
     pub providers: ProviderRegistry,
     pub profiles: BTreeMap<String, ProfilePatch>,
     pub native_permission_ceilings: Vec<NativePermissionCeiling>,
+    pub harness_permission_ceilings: Vec<HarnessPermissionCeiling>,
 }
 
 impl From<ConfigLayers> for ResolvedConfig {
@@ -31,6 +34,7 @@ impl From<ConfigLayers> for ResolvedConfig {
             providers: layers.providers,
             profiles: layers.profiles,
             native_permission_ceilings: layers.native_permission_ceilings,
+            harness_permission_ceilings: layers.harness_permission_ceilings,
         }
     }
 }

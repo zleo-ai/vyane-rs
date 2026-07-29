@@ -57,6 +57,7 @@ pub struct Dispatcher {
     ledger: Arc<dyn Ledger>,
     sessions: Arc<dyn SessionStore>,
     owner: String,
+    harness_sandbox_ceiling: vyane_core::Sandbox,
     /// Process-local authority shared only by clones of this dispatcher.
     ///
     /// This deliberately has no serializable representation.  A prepared
@@ -434,6 +435,7 @@ impl Dispatcher {
             ledger,
             sessions,
             owner: DEFAULT_OWNER.to_string(),
+            harness_sandbox_ceiling: vyane_core::Sandbox::Full,
             identity: Arc::new(DispatcherIdentity { _marker: 0 }),
         }
     }
@@ -444,9 +446,42 @@ impl Dispatcher {
         self
     }
 
+    /// Apply a monotonic sandbox ceiling to every CLI-harness leg.
+    ///
+    /// The default is [`vyane_core::Sandbox::Full`], which preserves existing
+    /// behavior. Configuration may only replace it with an equal or stricter
+    /// value before this dispatcher is shared.
+    #[must_use]
+    pub fn with_harness_sandbox_ceiling(mut self, ceiling: vyane_core::Sandbox) -> Self {
+        self.harness_sandbox_ceiling = self.harness_sandbox_ceiling.restrict_with(ceiling);
+        self
+    }
+
+    /// Validate the configured CLI-harness sandbox ceiling without allocating
+    /// execution identity, pinning a workdir, constructing an executor, or
+    /// writing durable state.
+    ///
+    /// Outer durable supervisors call this after resolving a chain and before
+    /// publishing task or workflow identity. [`Self::prepare`] repeats the
+    /// same check at the execution boundary.
+    pub fn validate_harness_sandbox(&self, task: &TaskSpec, chain: &[BoundTarget]) -> Result<()> {
+        if chain
+            .iter()
+            .any(|target| target.transport == AdapterTransport::CliWrap)
+            && !task.sandbox.is_within(self.harness_sandbox_ceiling)
+        {
+            return Err(VyaneError::new(
+                ErrorKind::Config,
+                "requested CLI-harness sandbox exceeds configured maximum",
+            ));
+        }
+        Ok(())
+    }
+
     /// Resolve capability admission and pin a mutating workdir without
     /// constructing an executor, issuing HTTP, or spawning a subprocess.
     pub fn prepare(&self, task: &TaskSpec, chain: Vec<BoundTarget>) -> Result<PreparedDispatch> {
+        self.validate_harness_sandbox(task, &chain)?;
         prepare_dispatch_inner(
             self.factory.as_ref(),
             &self.owner,
@@ -465,6 +500,7 @@ impl Dispatcher {
         chain: Vec<BoundTarget>,
         pinned_workdir: PinnedWorkdir,
     ) -> Result<PreparedDispatch> {
+        self.validate_harness_sandbox(task, &chain)?;
         prepare_dispatch_inner(
             self.factory.as_ref(),
             &self.owner,

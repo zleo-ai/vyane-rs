@@ -11,12 +11,15 @@ use serde::Deserialize;
 use vyane_core::{ErrorKind, Result, VyaneError};
 use vyane_provider::{ProviderPatchSet, ProviderRegistry};
 
-use crate::model::{NativePermissionCeiling, ProfilePatch, RawRoot};
+use crate::model::{HarnessPermissionCeiling, NativePermissionCeiling, ProfilePatch, RawRoot};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManagedNativeRoot {
-    native_permissions: NativePermissionCeiling,
+struct ManagedPermissionRoot {
+    #[serde(default)]
+    native_permissions: Option<NativePermissionCeiling>,
+    #[serde(default)]
+    harness_permissions: Option<HarnessPermissionCeiling>,
 }
 
 /// The stack of config layers, already merged in precedence order (lowest
@@ -28,6 +31,8 @@ pub struct ConfigLayers {
     pub profiles: BTreeMap<String, ProfilePatch>,
     /// Independent monotonic ceilings contributed by exact config files.
     pub native_permission_ceilings: Vec<NativePermissionCeiling>,
+    /// Independent CLI-harness sandbox ceilings from exact config files.
+    pub harness_permission_ceilings: Vec<HarnessPermissionCeiling>,
 }
 
 impl ConfigLayers {
@@ -54,6 +59,9 @@ impl ConfigLayers {
         }
         if let Some(ceiling) = &root.native_permissions {
             self.native_permission_ceilings.push(ceiling.clone());
+        }
+        if let Some(ceiling) = root.harness_permissions {
+            self.harness_permission_ceilings.push(ceiling);
         }
         Ok(())
     }
@@ -83,27 +91,48 @@ impl ConfigLayers {
         self.merge(&root)
     }
 
-    /// Load a managed file that may contain only one complete native
-    /// permission ceiling. Provider/profile changes are deliberately
-    /// impossible through this operator-controlled path.
-    pub fn merge_managed_native_file(&mut self, path: &Path) -> Result<()> {
+    /// Load a managed file that may contain only monotonic permission
+    /// ceilings. Provider/profile changes are deliberately impossible through
+    /// this operator-controlled path.
+    pub fn merge_managed_permission_file(&mut self, path: &Path) -> Result<()> {
         let text = std::fs::read_to_string(path).map_err(|error| {
             VyaneError::with_source(
                 ErrorKind::Io,
-                format!("failed to read managed native config {}", path.display()),
+                format!(
+                    "failed to read managed permission config {}",
+                    path.display()
+                ),
                 error,
             )
         })?;
-        let root: ManagedNativeRoot = toml::from_str(&text).map_err(|error| {
+        let root: ManagedPermissionRoot = toml::from_str(&text).map_err(|error| {
             VyaneError::with_source(
                 ErrorKind::Config,
-                format!("failed to parse managed native config {}", path.display()),
+                format!(
+                    "failed to parse managed permission config {}",
+                    path.display()
+                ),
                 error,
             )
         })?;
-        self.native_permission_ceilings
-            .push(root.native_permissions);
+        if root.native_permissions.is_none() && root.harness_permissions.is_none() {
+            return Err(VyaneError::new(
+                ErrorKind::Config,
+                "managed permission config contains no permission ceiling",
+            ));
+        }
+        if let Some(ceiling) = root.native_permissions {
+            self.native_permission_ceilings.push(ceiling);
+        }
+        if let Some(ceiling) = root.harness_permissions {
+            self.harness_permission_ceilings.push(ceiling);
+        }
         Ok(())
+    }
+
+    /// Backward-compatible name for the original managed native-only entry.
+    pub fn merge_managed_native_file(&mut self, path: &Path) -> Result<()> {
+        self.merge_managed_permission_file(path)
     }
 }
 
@@ -280,6 +309,64 @@ mod tests {
             ["private/**"]
         );
         assert!(layers.native_permission_ceilings[1].web_fetch.is_none());
+    }
+
+    #[test]
+    fn harness_permission_layers_cannot_replace_one_another() {
+        let user: RawRoot = toml::from_str(
+            r#"
+            [harness_permissions]
+            max_sandbox = "write"
+            "#,
+        )
+        .unwrap();
+        let project: RawRoot = toml::from_str(
+            r#"
+            [harness_permissions]
+            max_sandbox = "full"
+            "#,
+        )
+        .unwrap();
+        let mut layers = ConfigLayers::new();
+        layers.merge(&user).unwrap();
+        layers.merge(&project).unwrap();
+
+        assert_eq!(
+            layers.harness_permission_ceilings,
+            [
+                HarnessPermissionCeiling {
+                    max_sandbox: vyane_core::Sandbox::Write,
+                },
+                HarnessPermissionCeiling {
+                    max_sandbox: vyane_core::Sandbox::Full,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_permission_file_accepts_only_permission_ceilings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [native_permissions.filesystem_read]
+            exclude = [".env*"]
+
+            [harness_permissions]
+            max_sandbox = "read-only"
+            "#,
+        )
+        .unwrap();
+
+        let mut layers = ConfigLayers::new();
+        layers.merge_managed_permission_file(&path).unwrap();
+        assert_eq!(layers.native_permission_ceilings.len(), 1);
+        assert_eq!(
+            layers.harness_permission_ceilings[0].max_sandbox,
+            vyane_core::Sandbox::ReadOnly
+        );
     }
 
     #[test]

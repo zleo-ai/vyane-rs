@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use vyane_core::{BoundTarget, Result as VyaneResult, TaskSpec};
+use vyane_core::{BoundTarget, Result as VyaneResult, Sandbox, TaskSpec};
 
 use crate::error::{WorkflowError, WorkflowResult};
 use crate::model::{StepTargets, Workflow, WorkflowRouteHints};
@@ -34,6 +34,26 @@ pub trait TargetResolver: Send + Sync {
     /// viability without committing to the prompt-dependent final route.
     fn validate_deferred(&self, _target: &str, _route: &WorkflowRouteHints) -> VyaneResult<()> {
         Ok(())
+    }
+
+    /// Validate execution admission for a deferred selector whose concrete
+    /// chain is unavailable to the workflow engine.
+    ///
+    /// Mutating requests fail closed unless the resolver explicitly proves
+    /// every candidate chain against the active execution policy.
+    fn validate_deferred_admission(
+        &self,
+        _target: &str,
+        _route: &WorkflowRouteHints,
+        sandbox: Sandbox,
+    ) -> VyaneResult<()> {
+        if sandbox == Sandbox::ReadOnly {
+            Ok(())
+        } else {
+            Err(vyane_core::VyaneError::config(
+                "deferred mutating target requires explicit execution-admission validation",
+            ))
+        }
     }
 }
 

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use vyane_config::{ConfigLayers, ResolvedConfig, load_secrets_file};
-use vyane_core::{Ledger, SessionStore};
+use vyane_core::{Ledger, Sandbox, SessionStore};
 use vyane_ledger::{FsSessionStore, JsonlLedger};
 
 use crate::factory::AssemblerFactory;
@@ -25,6 +25,7 @@ const AGENT_METADATA_DB_FILE: &str = "agent-runs.sqlite3";
 const MESSAGE_DB_FILE: &str = "messages.sqlite3";
 const GOAL_DB_FILE: &str = "goals.sqlite3";
 const EVENT_LOG_DIR: &str = "events";
+const MANAGED_PERMISSION_CONFIG_ENV: &str = "VYANE_MANAGED_PERMISSION_CONFIG";
 const MANAGED_NATIVE_CONFIG_ENV: &str = "VYANE_MANAGED_NATIVE_CONFIG";
 
 /// The loaded configuration plus the secrets needed to resolve endpoints.
@@ -59,12 +60,31 @@ impl LoadedConfig {
 
 /// Load the default user + project config layers, merging each file and its
 /// sibling `secrets.env`. Pass `override_path` to load a single file instead
-/// (mirrors `--config`). When `VYANE_MANAGED_NATIVE_CONFIG` is set, that exact
-/// file contributes one final native-permission ceiling and cannot configure
-/// providers, profiles, or secrets.
+/// (mirrors `--config`). When `VYANE_MANAGED_PERMISSION_CONFIG` is set, that
+/// exact file contributes final monotonic permission ceilings and cannot
+/// configure providers, profiles, or secrets. The older
+/// `VYANE_MANAGED_NATIVE_CONFIG` name remains a compatibility alias; setting
+/// both is rejected as ambiguous.
 pub fn load_config(override_path: Option<&Path>) -> Result<LoadedConfig> {
-    let managed_path = std::env::var_os(MANAGED_NATIVE_CONFIG_ENV).map(PathBuf::from);
+    let managed_permission_path =
+        std::env::var_os(MANAGED_PERMISSION_CONFIG_ENV).map(PathBuf::from);
+    let managed_native_path = std::env::var_os(MANAGED_NATIVE_CONFIG_ENV).map(PathBuf::from);
+    let managed_path =
+        select_managed_permission_path(managed_permission_path, managed_native_path)?;
     load_config_with_managed_path(override_path, managed_path.as_deref())
+}
+
+fn select_managed_permission_path(
+    managed_permission_path: Option<PathBuf>,
+    managed_native_path: Option<PathBuf>,
+) -> Result<Option<PathBuf>> {
+    match (managed_permission_path, managed_native_path) {
+        (Some(_), Some(_)) => Err(anyhow!(
+            "both managed permission config environment variables are set"
+        )),
+        (Some(path), None) | (None, Some(path)) => Ok(Some(path)),
+        (None, None) => Ok(None),
+    }
 }
 
 fn load_config_with_managed_path(
@@ -91,8 +111,8 @@ fn load_config_with_managed_path(
 
     if let Some(path) = managed_path {
         layers
-            .merge_managed_native_file(path)
-            .with_context(|| format!("load managed native config {}", path.display()))?;
+            .merge_managed_permission_file(path)
+            .with_context(|| format!("load managed permission config {}", path.display()))?;
         files.push(path.to_path_buf());
     }
     for ceiling in &layers.native_permission_ceilings {
@@ -139,11 +159,18 @@ impl Runtime {
                 .with_context(|| format!("create ledger dir {}", parent.display()))?;
         }
 
+        let harness_sandbox_ceiling = config
+            .harness_permission_ceilings
+            .iter()
+            .fold(Sandbox::Full, |current, ceiling| {
+                current.restrict_with(ceiling.max_sandbox)
+            });
         let factory = Arc::new(AssemblerFactory::new(config));
         let ledger: Arc<dyn Ledger> = Arc::new(JsonlLedger::new(paths.ledger_path));
         let sessions: Arc<dyn SessionStore> = Arc::new(FsSessionStore::new(paths.sessions_dir));
         let dispatcher =
-            vyane_kernel::Dispatcher::new(factory, Arc::clone(&ledger), Arc::clone(&sessions));
+            vyane_kernel::Dispatcher::new(factory, Arc::clone(&ledger), Arc::clone(&sessions))
+                .with_harness_sandbox_ceiling(harness_sandbox_ceiling);
 
         Ok(Self {
             dispatcher,
@@ -223,6 +250,7 @@ impl StoragePaths {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use vyane_config::HarnessPermissionCeiling;
 
     #[test]
     fn explicit_data_dir_derives_all_storage_paths_without_environment_state() {
@@ -263,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_native_ceiling_is_loaded_and_validated_without_environment_mutation() {
+    fn managed_permission_ceilings_are_loaded_and_validated_without_environment_mutation() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("base.toml");
         let managed = dir.path().join("managed.toml");
@@ -277,13 +305,81 @@ mod tests {
             [native_permissions.web_fetch]
             allow_domains = ["example.com"]
             max_fetches = 2
+
+            [harness_permissions]
+            max_sandbox = "write"
             "#,
         )
         .unwrap();
 
         let loaded = load_config_with_managed_path(Some(&base), Some(&managed)).unwrap();
         assert_eq!(loaded.config.native_permission_ceilings.len(), 1);
+        assert_eq!(
+            loaded.config.harness_permission_ceilings[0].max_sandbox,
+            Sandbox::Write
+        );
         assert_eq!(loaded.files, [base, managed]);
+    }
+
+    #[test]
+    fn runtime_applies_the_strictest_harness_sandbox_ceiling_before_preparation() {
+        let mut layers = ConfigLayers::new();
+        layers.harness_permission_ceilings = vec![
+            HarnessPermissionCeiling {
+                max_sandbox: Sandbox::Write,
+            },
+            HarnessPermissionCeiling {
+                max_sandbox: Sandbox::ReadOnly,
+            },
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let runtime =
+            Runtime::new(layers.into(), StoragePaths::from_data_dir(directory.path())).unwrap();
+        let task = vyane_core::TaskSpec::new("edit").with_sandbox(Sandbox::Write);
+        let chain = vec![vyane_core::BoundTarget {
+            target: vyane_core::Target {
+                provider: vyane_core::ProviderId::new("local"),
+                protocol: vyane_core::Protocol::AnthropicMessages,
+                harness: Some(vyane_core::HarnessKind::ClaudeCode),
+                model: vyane_core::ModelId::new("test"),
+            },
+            transport: vyane_core::AdapterTransport::CliWrap,
+            endpoint: None,
+            params: vyane_core::GenParams::default(),
+        }];
+
+        let error = match runtime.dispatcher.prepare(&task, chain) {
+            Err(error) => error,
+            Ok(_) => panic!("write request must exceed the effective read-only ceiling"),
+        };
+        assert_eq!(error.kind, vyane_core::ErrorKind::Config);
+    }
+
+    #[test]
+    fn managed_permission_environment_aliases_are_unambiguous() {
+        let current = PathBuf::from("/etc/vyane/permissions.toml");
+        let legacy = PathBuf::from("/etc/vyane/native-permissions.toml");
+
+        assert_eq!(
+            select_managed_permission_path(Some(current.clone()), None).unwrap(),
+            Some(current)
+        );
+        assert_eq!(
+            select_managed_permission_path(None, Some(legacy.clone())).unwrap(),
+            Some(legacy)
+        );
+        assert!(
+            select_managed_permission_path(None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            select_managed_permission_path(
+                Some(PathBuf::from("current")),
+                Some(PathBuf::from("legacy"))
+            )
+            .is_err()
+        );
     }
 
     #[test]

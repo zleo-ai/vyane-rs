@@ -14,7 +14,7 @@ use crate::journal::{
     JournalStep, JournalStepStatus, JournalTargetOutput, WorkflowJournal, WorkflowReplayProvenance,
     WorkflowRunId, journal_path, read_journal, write_journal_atomic, write_journal_create_atomic,
 };
-use crate::model::{OnError, Workflow, WorkflowOutcome, WorkflowRunStatus};
+use crate::model::{OnError, Workflow, WorkflowOutcome, WorkflowRouteHints, WorkflowRunStatus};
 use crate::plan::{WorkflowPlan, WorkflowPlanStep};
 use crate::template::render_template_inner;
 use crate::validate::{ResolvedStepTargets, TargetResolver, ValidatedWorkflow, validate_plan};
@@ -146,15 +146,89 @@ impl WorkflowEngine {
         self.prepare_plan_with_id(wf_run_id, &plan, vars)
     }
 
+    /// Validate workflow structure, target resolution, and configured
+    /// CLI-harness admission without creating a journal or dispatching work.
+    pub fn validate_run(
+        &self,
+        wf: &Workflow,
+        vars: &BTreeMap<String, String>,
+    ) -> WorkflowResult<()> {
+        let plan = wf.compile_plan()?;
+        self.validate_plan_admission(&plan, vars).map(|_| ())
+    }
+
     pub fn prepare_plan_with_id(
         &self,
         wf_run_id: WorkflowRunId,
         plan: &WorkflowPlan,
         vars: BTreeMap<String, String>,
     ) -> WorkflowResult<()> {
-        validate_plan(plan, &vars, self.resolver.as_ref())?;
+        self.validate_plan_admission(plan, &vars)?;
         let mut journal = WorkflowJournal::new_with_plan(wf_run_id, plan, vars);
         write_journal_create_atomic(&self.journal_dir, &mut journal)
+    }
+
+    fn validate_plan_admission(
+        &self,
+        plan: &WorkflowPlan,
+        vars: &BTreeMap<String, String>,
+    ) -> WorkflowResult<ValidatedWorkflow> {
+        let validated = validate_plan(plan, vars, self.resolver.as_ref())?;
+        self.validate_resolved_admission(plan, &validated, |_| true)?;
+        Ok(validated)
+    }
+
+    fn validate_resolved_admission(
+        &self,
+        plan: &WorkflowPlan,
+        validated: &ValidatedWorkflow,
+        mut should_check: impl FnMut(&str) -> bool,
+    ) -> WorkflowResult<()> {
+        let mut problems = Vec::new();
+        for step in &plan.steps {
+            if !should_check(&step.id) {
+                continue;
+            }
+            let Some(resolved) = validated.resolved_targets.get(&step.id) else {
+                continue;
+            };
+            let task = TaskSpec::new("workflow permission validation").with_sandbox(step.sandbox);
+            let chains = match resolved {
+                ResolvedStepTargets::Single {
+                    chain: Some(chain), ..
+                } => std::slice::from_ref(chain),
+                ResolvedStepTargets::Single {
+                    target,
+                    chain: None,
+                } => {
+                    let route = WorkflowRouteHints::from(&step.route);
+                    if let Err(error) =
+                        self.resolver
+                            .validate_deferred_admission(target, &route, step.sandbox)
+                    {
+                        problems.push(format!(
+                            "step `{}` failed deferred execution admission: {}",
+                            step.id, error.message
+                        ));
+                    }
+                    continue;
+                }
+                ResolvedStepTargets::FanOut { chains, .. } => chains.as_slice(),
+            };
+            for chain in chains {
+                if let Err(error) = self.dispatcher.validate_harness_sandbox(&task, chain) {
+                    problems.push(format!(
+                        "step `{}` failed CLI-harness permission admission: {}",
+                        step.id, error.message
+                    ));
+                }
+            }
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(WorkflowError::validation(problems))
+        }
     }
 
     /// Execute a pristine journal created by [`Self::prepare_run_with_id`].
@@ -214,7 +288,7 @@ impl WorkflowEngine {
                 "prepared workflow journal `{wf_run_id}` is not pristine"
             )]));
         }
-        let validated = validate_plan(plan, &journal.vars, self.resolver.as_ref())?;
+        let validated = self.validate_plan_admission(plan, &journal.vars)?;
         self.execute(plan, &validated, journal, cancel).await
     }
 
@@ -310,6 +384,11 @@ impl WorkflowEngine {
         let validated = validate_plan(plan, &source.vars, self.resolver.as_ref())?;
         let mut journal = WorkflowJournal::new_with_plan(new_wf_run_id, plan, source.vars.clone());
         let reused_step_ids = copy_replay_prefix(&source, plan, &validated, &mut journal)?;
+        let reused = reused_step_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        self.validate_resolved_admission(plan, &validated, |step_id| !reused.contains(step_id))?;
         let reused_steps_sha256 = replay_steps_digest(&journal, &reused_step_ids)?;
         journal.replay = Some(WorkflowReplayProvenance {
             source_wf_run_id: source.wf_run_id,
@@ -328,6 +407,12 @@ impl WorkflowEngine {
         cancel: CancellationToken,
     ) -> WorkflowResult<WorkflowOutcome> {
         let validated = validate_plan(plan, &journal.vars, self.resolver.as_ref())?;
+        self.validate_resolved_admission(plan, &validated, |step_id| {
+            journal
+                .steps
+                .get(step_id)
+                .is_none_or(|step| step.status != JournalStepStatus::Success)
+        })?;
         journal.status = WorkflowRunStatus::Running;
         for step in journal.steps.values_mut() {
             step.reset_for_rerun();

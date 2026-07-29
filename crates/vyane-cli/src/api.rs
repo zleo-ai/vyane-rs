@@ -43,7 +43,7 @@ use futures::{FutureExt as _, stream::Stream};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::{Notify, mpsc, oneshot};
-use vyane_core::{CancellationToken, RunStatus, Sandbox};
+use vyane_core::{CancellationToken, ErrorKind, RunStatus, Sandbox, VyaneError};
 use vyane_kernel::{DispatchOutcome, StreamDispatchEvent};
 use vyane_service::{
     BroadcastParams, DispatchParams, GoalNextActionView, GoalReadError, GoalReadService,
@@ -1489,7 +1489,10 @@ impl ApiError {
         let msg = e.to_string();
         let display = format!("{e:#}");
         eprintln!("dispatch/broadcast error: {display}");
-        if is_caller_fault(&msg) {
+        if e.downcast_ref::<VyaneError>()
+            .is_some_and(|error| error.kind == ErrorKind::Config)
+            || is_caller_fault(&msg)
+        {
             Self::bad_request("invalid dispatch request")
         } else {
             Self::internal("internal error")
@@ -2219,6 +2222,10 @@ async fn submit_task(
         .service
         .plan_dispatch(&params.target, &mut task)
         .map_err(ApiError::from_service_error)?;
+    state
+        .service
+        .validate_dispatch_admission(&task, &plan.chain)
+        .map_err(|error| ApiError::from_service_error(error.into()))?;
     let metadata = DurableTaskMetadata {
         task_digest: vyane_kernel::task_digest(&task.prompt),
         target_key: plan.selector,
@@ -2686,6 +2693,48 @@ mod tests {
                         },
                     )]),
                     native_permission_ceilings: Vec::new(),
+                    harness_permission_ceilings: Vec::new(),
+                },
+                files: Vec::new(),
+                secrets: std::collections::BTreeMap::new(),
+            },
+            vyane_service::StoragePaths::from_data_dir(data_dir),
+        )
+        .unwrap()
+    }
+
+    fn cli_harness_ceiling_test_service(data_dir: &FsPath) -> VyaneService {
+        let mut providers = ProviderRegistry::new();
+        providers.insert(
+            "test-provider",
+            Provider {
+                base_url: "https://api.example.test".into(),
+                api_key_env: None,
+                auth_style: AuthStyle::Bearer,
+                protocol: Protocol::AnthropicMessages,
+                default_model: Some(ModelId::new("test-model")),
+                extra: Default::default(),
+                env_inject: Default::default(),
+            },
+        );
+        VyaneService::from_loaded_with_paths(
+            vyane_service::LoadedConfig {
+                config: vyane_config::ResolvedConfig {
+                    providers,
+                    profiles: std::collections::BTreeMap::from([(
+                        "test".into(),
+                        ProfilePatch {
+                            provider: Some("test-provider".into()),
+                            protocol: Some(Protocol::AnthropicMessages),
+                            harness: Some("claude-code".into()),
+                            model: Some(ModelId::new("test-model")),
+                            ..Default::default()
+                        },
+                    )]),
+                    native_permission_ceilings: Vec::new(),
+                    harness_permission_ceilings: vec![vyane_config::HarnessPermissionCeiling {
+                        max_sandbox: Sandbox::ReadOnly,
+                    }],
                 },
                 files: Vec::new(),
                 secrets: std::collections::BTreeMap::new(),
@@ -4138,6 +4187,47 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(supervisor.list_rest_tasks().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn harness_ceiling_is_a_400_and_async_submission_leaves_no_metadata() {
+        let (_directory, supervisor) = temp_supervisor().await;
+        let service_directory = tempfile::tempdir().unwrap();
+        let app = router_from_parts(
+            cli_harness_ceiling_test_service(service_directory.path()),
+            supervisor.clone(),
+            API_TOKEN,
+        )
+        .unwrap();
+        let body = r#"{"task":"edit","target":"test","sandbox":"write"}"#;
+
+        let sync = app
+            .clone()
+            .oneshot(
+                axum::http::Request::post("/v1/dispatch")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:9721")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sync.status(), StatusCode::BAD_REQUEST);
+
+        let asynchronous = app
+            .oneshot(
+                axum::http::Request::post("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:9721")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(asynchronous.status(), StatusCode::BAD_REQUEST);
         assert!(supervisor.list_rest_tasks().await.unwrap().is_empty());
     }
 
