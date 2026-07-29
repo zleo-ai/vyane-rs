@@ -4357,7 +4357,7 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while store.settle_calls.load(Ordering::Acquire) == 0 {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
@@ -4378,7 +4378,7 @@ mod tests {
                 {
                     break record;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
