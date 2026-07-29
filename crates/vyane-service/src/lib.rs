@@ -41,6 +41,7 @@ mod goal_observation;
 mod inprocess_agent;
 mod message;
 mod native_authority;
+mod native_permissions;
 mod owner;
 mod routing;
 mod selector;
@@ -119,6 +120,7 @@ pub use message::{
     AgentMessageCompletionReadError, AgentMessageCompletionStageError, MessageComponents,
 };
 pub use native_authority::AgentRunModelToolAuthority;
+pub use native_permissions::{NativePermissionSet, NativePermissionSetError, NativeWebSearchGrant};
 pub use owner::{
     AuthenticatedPrincipal, OwnerContext, OwnerContextError, OwnerContextFactory,
     PrincipalAuthenticator, PrincipalOwnerResolver,

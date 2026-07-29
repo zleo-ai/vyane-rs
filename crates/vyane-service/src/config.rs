@@ -16,6 +16,7 @@ use vyane_core::{Ledger, SessionStore};
 use vyane_ledger::{FsSessionStore, JsonlLedger};
 
 use crate::factory::AssemblerFactory;
+use crate::native_permissions::NativePermissionSet;
 
 const APP_DIR_NAME: &str = "vyane";
 const SECRETS_FILE: &str = "secrets.env";
@@ -24,6 +25,7 @@ const AGENT_METADATA_DB_FILE: &str = "agent-runs.sqlite3";
 const MESSAGE_DB_FILE: &str = "messages.sqlite3";
 const GOAL_DB_FILE: &str = "goals.sqlite3";
 const EVENT_LOG_DIR: &str = "events";
+const MANAGED_NATIVE_CONFIG_ENV: &str = "VYANE_MANAGED_NATIVE_CONFIG";
 
 /// The loaded configuration plus the secrets needed to resolve endpoints.
 ///
@@ -57,9 +59,19 @@ impl LoadedConfig {
 
 /// Load the default user + project config layers, merging each file and its
 /// sibling `secrets.env`. Pass `override_path` to load a single file instead
-/// (mirrors `--config`).
+/// (mirrors `--config`). When `VYANE_MANAGED_NATIVE_CONFIG` is set, that exact
+/// file contributes one final native-permission ceiling and cannot configure
+/// providers, profiles, or secrets.
 pub fn load_config(override_path: Option<&Path>) -> Result<LoadedConfig> {
-    let files = config_file_list(override_path);
+    let managed_path = std::env::var_os(MANAGED_NATIVE_CONFIG_ENV).map(PathBuf::from);
+    load_config_with_managed_path(override_path, managed_path.as_deref())
+}
+
+fn load_config_with_managed_path(
+    override_path: Option<&Path>,
+    managed_path: Option<&Path>,
+) -> Result<LoadedConfig> {
+    let mut files = config_file_list(override_path);
     let mut layers = ConfigLayers::new();
     let mut secrets = BTreeMap::new();
 
@@ -75,6 +87,16 @@ pub fn load_config(override_path: Option<&Path>) -> Result<LoadedConfig> {
                 secrets.insert(key, value);
             }
         }
+    }
+
+    if let Some(path) = managed_path {
+        layers
+            .merge_managed_native_file(path)
+            .with_context(|| format!("load managed native config {}", path.display()))?;
+        files.push(path.to_path_buf());
+    }
+    for ceiling in &layers.native_permission_ceilings {
+        NativePermissionSet::try_from(ceiling).context("validate native permission ceiling")?;
     }
 
     Ok(LoadedConfig {
@@ -198,6 +220,7 @@ impl StoragePaths {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -237,5 +260,68 @@ mod tests {
             paths.event_log_dir(),
             PathBuf::from("/tmp/vyane-explicit-path-test/events")
         );
+    }
+
+    #[test]
+    fn managed_native_ceiling_is_loaded_and_validated_without_environment_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.toml");
+        let managed = dir.path().join("managed.toml");
+        std::fs::write(&base, "").unwrap();
+        std::fs::write(
+            &managed,
+            r#"
+            [native_permissions.filesystem_read]
+            exclude = [".env*"]
+
+            [native_permissions.web_fetch]
+            allow_domains = ["example.com"]
+            max_fetches = 2
+            "#,
+        )
+        .unwrap();
+
+        let loaded = load_config_with_managed_path(Some(&base), Some(&managed)).unwrap();
+        assert_eq!(loaded.config.native_permission_ceilings.len(), 1);
+        assert_eq!(loaded.files, [base, managed]);
+    }
+
+    #[test]
+    fn invalid_managed_native_ceiling_fails_config_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.toml");
+        let managed = dir.path().join("managed.toml");
+        std::fs::write(&base, "").unwrap();
+        std::fs::write(
+            &managed,
+            r#"
+            [native_permissions.command_network]
+            allow = [{ host = "example.com", ports = [443] }]
+            "#,
+        )
+        .unwrap();
+
+        assert!(load_config_with_managed_path(Some(&base), Some(&managed)).is_err());
+    }
+
+    #[test]
+    fn command_ceiling_with_read_exclusions_fails_config_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.toml");
+        let managed = dir.path().join("managed.toml");
+        std::fs::write(&base, "").unwrap();
+        std::fs::write(
+            &managed,
+            r#"
+            [native_permissions.filesystem_read]
+            exclude = [".env*"]
+
+            [native_permissions.command_execution]
+            allow = [{ program = "git", args_prefix = ["status"] }]
+            "#,
+        )
+        .unwrap();
+
+        assert!(load_config_with_managed_path(Some(&base), Some(&managed)).is_err());
     }
 }

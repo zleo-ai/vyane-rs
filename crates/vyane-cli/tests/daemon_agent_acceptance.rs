@@ -74,6 +74,20 @@ fn write_native_config(directory: &TempDir, endpoint: &str) -> PathBuf {
     path
 }
 
+fn write_native_config_with_read_only_ceiling(directory: &TempDir, endpoint: &str) -> PathBuf {
+    let path = write_native_config(directory, endpoint);
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str(
+        r#"
+
+        [native_permissions.filesystem_read]
+        exclude = [".env*"]
+        "#,
+    );
+    fs::write(&path, config).unwrap();
+    path
+}
+
 fn write_native_search_config(
     directory: &TempDir,
     main_endpoint: &str,
@@ -530,6 +544,28 @@ async fn native_agent_submit_uses_the_shared_resident_lane() {
         spool_modified_before_retry,
         "an exact terminal retry must not rematerialize private native input"
     );
+    assert!(daemon.stop().status.success());
+}
+
+#[tokio::test]
+async fn configured_native_ceiling_rejects_an_optional_axis_before_the_model() {
+    let server = MockServer::start().await;
+    let config_dir = TempDir::new().unwrap();
+    let data_dir = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    let config = write_native_config_with_read_only_ceiling(&config_dir, &server.uri());
+    let workdir = data_dir.path().join("native-ceiling-workdir");
+    fs::create_dir(&workdir).unwrap();
+    let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
+
+    let response = submit_native_write(
+        data_dir.path(),
+        "0197f524-7a00-7000-8000-000000000118",
+        &workdir,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(server.received_requests().await.unwrap().is_empty());
     assert!(daemon.stop().status.success());
 }
 

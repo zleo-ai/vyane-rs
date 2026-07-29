@@ -333,7 +333,13 @@ Read, write, command, command-network, web-search and web-fetch permissions rema
 separate axes rather than one expanding "full" boolean. This remains narrower
 than a general `Harness`: it provides only explicitly admitted command HTTPS
 destinations, a separately configured hosted search target, and bounded direct
-HTTPS text retrieval from frozen domains, with no writable command profile, session/domain authority,
+HTTPS text retrieval from frozen domains. WP-88 retains each user, project,
+explicit and managed `[native_permissions]` section as an independent ceiling.
+Configuration never grants an optional tool; the request opts in, path
+exclusions accumulate, and rules/limits can only narrow before the effective
+policy is frozen. The managed file named by
+`VYANE_MANAGED_NATIVE_CONFIG` accepts no provider or profile configuration.
+The lane still has no writable command profile, session/domain authority,
 checkpoint/session-commit consumer, approval resume, or native resume.
 
 ## Dispatch lifecycle

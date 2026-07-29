@@ -8,10 +8,11 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use vyane_core::{Effort, ErrorKind, ModelId, Protocol, Sandbox, VyaneError};
+use vyane_core::{Effort, ErrorKind, ModelId, Protocol, Sandbox, VyaneError, WebSearchContextSize};
 use vyane_provider::ProviderPatch;
 
-/// One parsed config layer: `[providers.*]` and `[profiles.*]` tables.
+/// One parsed config layer: `[providers.*]`, `[profiles.*]`, and an optional
+/// `[native_permissions]` ceiling.
 ///
 /// `cost` and other v0.1-future sections (see `profiles.example.toml`) are
 /// intentionally not modeled here — parsing them is out of this work
@@ -24,6 +25,141 @@ pub struct RawRoot {
     pub providers: BTreeMap<String, ProviderPatch>,
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfilePatch>,
+    /// Optional native-agent ceiling contributed by this exact config layer.
+    ///
+    /// Every configured layer is retained as an independent ceiling instead
+    /// of using ordinary higher-wins field replacement. A project or request
+    /// can therefore narrow, but never erase, a user or managed restriction.
+    #[serde(default)]
+    pub native_permissions: Option<NativePermissionCeiling>,
+}
+
+/// One complete maximum native permission set from a user, project, explicit,
+/// or managed config layer. The request still has to opt into optional axes;
+/// this section never grants a tool by itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativePermissionCeiling {
+    #[serde(default)]
+    pub filesystem_read: NativePathPolicyConfig,
+    #[serde(default)]
+    pub filesystem_write: Option<NativePathPolicyConfig>,
+    #[serde(default)]
+    pub command_execution: Option<NativeCommandPolicyConfig>,
+    #[serde(default)]
+    pub command_network: Option<NativeCommandNetworkPolicyConfig>,
+    #[serde(default)]
+    pub web_search: Option<NativeWebSearchPolicyConfig>,
+    #[serde(default)]
+    pub web_fetch: Option<NativeWebFetchPolicyConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativePathPolicyConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCommandRuleConfig {
+    pub program: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args_prefix: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCommandPolicyConfig {
+    pub allow: Vec<NativeCommandRuleConfig>,
+    #[serde(default = "default_command_seconds")]
+    pub max_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCommandNetworkRuleConfig {
+    pub host: String,
+    pub ports: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeCommandNetworkRouteConfig {
+    #[default]
+    Direct,
+    EnvironmentProxy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCommandNetworkPolicyConfig {
+    pub allow: Vec<NativeCommandNetworkRuleConfig>,
+    #[serde(default)]
+    pub route: NativeCommandNetworkRouteConfig,
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+    #[serde(default = "default_max_network_bytes")]
+    pub max_bytes: u64,
+    #[serde(default = "default_connect_timeout_seconds")]
+    pub connect_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeWebSearchPolicyConfig {
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_domains: Option<Vec<String>>,
+    #[serde(default = "default_max_searches")]
+    pub max_searches: u32,
+    #[serde(default)]
+    pub search_context_size: WebSearchContextSize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeWebFetchPolicyConfig {
+    pub allow_domains: Vec<String>,
+    #[serde(default = "default_max_fetches")]
+    pub max_fetches: u32,
+    #[serde(default = "default_max_response_bytes")]
+    pub max_response_bytes: usize,
+    #[serde(default = "default_max_redirects")]
+    pub max_redirects: u32,
+}
+
+const fn default_command_seconds() -> u64 {
+    60
+}
+
+const fn default_max_connections() -> u32 {
+    8
+}
+
+const fn default_max_network_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
+const fn default_connect_timeout_seconds() -> u64 {
+    10
+}
+
+const fn default_max_searches() -> u32 {
+    4
+}
+
+const fn default_max_fetches() -> u32 {
+    4
+}
+
+const fn default_max_response_bytes() -> usize {
+    512 * 1024
+}
+
+const fn default_max_redirects() -> u32 {
+    3
 }
 
 /// A generation-parameters patch, mirroring `vyane_core::GenParams` but with

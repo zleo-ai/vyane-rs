@@ -1,14 +1,23 @@
 //! Layered config merge: built-in defaults < user file < project file <
-//! explicit CLI args, each layer overriding the ones below it **per field**
-//! (see `docs/plan/WP-01.md` — "Layering precedence").
+//! explicit CLI args, each ordinary layer overriding the ones below it **per
+//! field** (see `docs/plan/WP-01.md` — "Layering precedence"). Native
+//! permission sections are the exception: every exact file contributes an
+//! independent monotonic ceiling.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use serde::Deserialize;
 use vyane_core::{ErrorKind, Result, VyaneError};
 use vyane_provider::{ProviderPatchSet, ProviderRegistry};
 
-use crate::model::{ProfilePatch, RawRoot};
+use crate::model::{NativePermissionCeiling, ProfilePatch, RawRoot};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedNativeRoot {
+    native_permissions: NativePermissionCeiling,
+}
 
 /// The stack of config layers, already merged in precedence order (lowest
 /// first): built-ins, then user file, then project file, then CLI-derived
@@ -17,6 +26,8 @@ use crate::model::{ProfilePatch, RawRoot};
 pub struct ConfigLayers {
     pub providers: ProviderRegistry,
     pub profiles: BTreeMap<String, ProfilePatch>,
+    /// Independent monotonic ceilings contributed by exact config files.
+    pub native_permission_ceilings: Vec<NativePermissionCeiling>,
 }
 
 impl ConfigLayers {
@@ -40,6 +51,9 @@ impl ConfigLayers {
                     self.profiles.insert(name.clone(), patch.clone());
                 }
             }
+        }
+        if let Some(ceiling) = &root.native_permissions {
+            self.native_permission_ceilings.push(ceiling.clone());
         }
         Ok(())
     }
@@ -67,6 +81,29 @@ impl ConfigLayers {
             )
         })?;
         self.merge(&root)
+    }
+
+    /// Load a managed file that may contain only one complete native
+    /// permission ceiling. Provider/profile changes are deliberately
+    /// impossible through this operator-controlled path.
+    pub fn merge_managed_native_file(&mut self, path: &Path) -> Result<()> {
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            VyaneError::with_source(
+                ErrorKind::Io,
+                format!("failed to read managed native config {}", path.display()),
+                error,
+            )
+        })?;
+        let root: ManagedNativeRoot = toml::from_str(&text).map_err(|error| {
+            VyaneError::with_source(
+                ErrorKind::Config,
+                format!("failed to parse managed native config {}", path.display()),
+                error,
+            )
+        })?;
+        self.native_permission_ceilings
+            .push(root.native_permissions);
+        Ok(())
     }
 }
 
@@ -207,5 +244,62 @@ mod tests {
             layers.providers.get("anthropic").unwrap().base_url,
             "https://file.example"
         );
+    }
+
+    #[test]
+    fn permission_layers_accumulate_as_independent_ceilings() {
+        let user: RawRoot = toml::from_str(
+            r#"
+            [native_permissions.filesystem_read]
+            exclude = [".env*"]
+
+            [native_permissions.web_fetch]
+            allow_domains = ["example.com"]
+            max_fetches = 4
+            "#,
+        )
+        .unwrap();
+        let project: RawRoot = toml::from_str(
+            r#"
+            [native_permissions.filesystem_read]
+            exclude = ["private/**"]
+            "#,
+        )
+        .unwrap();
+        let mut layers = ConfigLayers::new();
+        layers.merge(&user).unwrap();
+        layers.merge(&project).unwrap();
+
+        assert_eq!(layers.native_permission_ceilings.len(), 2);
+        assert_eq!(
+            layers.native_permission_ceilings[0].filesystem_read.exclude,
+            [".env*"]
+        );
+        assert_eq!(
+            layers.native_permission_ceilings[1].filesystem_read.exclude,
+            ["private/**"]
+        );
+        assert!(layers.native_permission_ceilings[1].web_fetch.is_none());
+    }
+
+    #[test]
+    fn managed_native_file_rejects_provider_or_unknown_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [native_permissions.filesystem_read]
+            exclude = [".env*"]
+
+            [providers.forbidden]
+            base_url = "https://example.com"
+            "#,
+        )
+        .unwrap();
+
+        let mut layers = ConfigLayers::new();
+        assert!(layers.merge_managed_native_file(&path).is_err());
+        assert!(layers.native_permission_ceilings.is_empty());
     }
 }
