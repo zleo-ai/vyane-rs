@@ -911,7 +911,7 @@ pub fn prepare_command_mounts(
             let metadata = file
                 .metadata()
                 .map_err(|_| NativeCommandHostError::Unsupported)?;
-            if !metadata.is_dir() && !metadata.is_file() {
+            if !metadata.is_dir() {
                 return Err(NativeCommandHostError::Unsupported);
             }
             Ok(file)
@@ -958,6 +958,10 @@ pub async fn prepare_command_mounts_async(
 impl NativeCommandMountSet {
     pub fn matches_policy(&self, policy: &NativeCommandPolicy) -> bool {
         self.paths.as_slice() == policy.writable_roots
+    }
+
+    pub fn retained_handle_count(&self) -> usize {
+        self.paths.len()
     }
 
     #[cfg(target_os = "linux")]
@@ -1053,20 +1057,10 @@ fn audit_writable_root(root: &std::fs::File) -> VyaneResult<()> {
             source,
         )
     })?;
-    if metadata.is_file() {
-        return if metadata.nlink() == 1 {
-            Ok(())
-        } else {
-            Err(VyaneError::new(
-                ErrorKind::Unsupported,
-                "native command writable files must not have hard-link aliases",
-            ))
-        };
-    }
     if !metadata.is_dir() {
         return Err(VyaneError::new(
             ErrorKind::Unsupported,
-            "native command writable roots must be regular files or directories",
+            "native command writable roots must be directories",
         ));
     }
 

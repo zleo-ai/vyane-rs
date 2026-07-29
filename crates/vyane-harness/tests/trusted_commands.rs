@@ -272,9 +272,8 @@ async fn only_explicit_descriptor_bound_roots_are_writable() {
     let root = tempdir().expect("workspace");
     std::fs::create_dir(root.path().join("src")).expect("writable root");
     std::fs::create_dir(root.path().join(".git")).expect("protected sibling");
-    std::fs::write(root.path().join("manifest.txt"), "original").expect("writable file root");
     let mut writable = policy(&[("touch", &[]), ("python3", &["-c"])]);
-    writable.writable_roots = vec!["src".into(), "manifest.txt".into()];
+    writable.writable_roots = vec!["src".into()];
 
     validate_command_host(
         &PinnedWorkdir::open(root.path()).expect("pin command workspace"),
@@ -292,21 +291,6 @@ async fn only_explicit_descriptor_bound_roots_are_writable() {
     assert!(allowed.contains("exit_code: 0"), "{allowed}");
     assert!(root.path().join("src/allowed.txt").is_file());
 
-    let file_allowed = execute(
-        root.path(),
-        writable.clone(),
-        call(
-            "python3",
-            &["-c", "open('manifest.txt','w').write('updated')"],
-        ),
-    )
-    .await;
-    assert!(file_allowed.contains("exit_code: 0"), "{file_allowed}");
-    assert_eq!(
-        std::fs::read_to_string(root.path().join("manifest.txt")).expect("updated file"),
-        "updated"
-    );
-
     let root_denied = execute(
         root.path(),
         writable.clone(),
@@ -322,6 +306,17 @@ async fn only_explicit_descriptor_bound_roots_are_writable() {
         "{metadata_denied}"
     );
     assert!(!root.path().join(".git/blocked").exists());
+}
+
+#[tokio::test]
+async fn regular_file_writable_roots_are_rejected() {
+    let root = tempdir().expect("workspace");
+    std::fs::write(root.path().join("manifest.txt"), "original").expect("file root");
+    let mut writable = policy(&[("python3", &["-c"])]);
+    writable.writable_roots = vec!["manifest.txt".into()];
+    let pinned = PinnedWorkdir::open(root.path()).expect("pin command workspace");
+
+    assert!(prepare_command_mounts(&pinned, &writable).is_err());
 }
 
 #[tokio::test]

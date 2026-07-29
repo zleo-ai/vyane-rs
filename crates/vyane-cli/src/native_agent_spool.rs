@@ -36,6 +36,7 @@ const MAX_PATH_BYTES: usize = 4096;
 const MAX_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_MODEL_TURNS: u32 = 32;
 const MAX_WORKDIR_HANDOFFS: usize = 1024;
+const MAX_RETAINED_HANDOFF_HANDLES: usize = 256;
 
 const OWNER_PATH_DOMAIN: &[u8] = b"vyane.native-input.owner-path.v1\0";
 const RUN_PATH_DOMAIN: &[u8] = b"vyane.native-input.run-path.v1\0";
@@ -460,6 +461,16 @@ impl NativeAgentInputSpool {
         if workdirs.len() >= MAX_WORKDIR_HANDOFFS {
             return Err(NativeAgentSpoolError::Io);
         }
+        let retained_handles = workdirs.values().try_fold(0usize, |total, handoff| {
+            total.checked_add(handoff.retained_handle_count())
+        });
+        let incoming_handles = retained_handoff_handle_count(command_mounts.as_ref());
+        if retained_handles
+            .and_then(|total| total.checked_add(incoming_handles))
+            .is_none_or(|total| total > MAX_RETAINED_HANDOFF_HANDLES)
+        {
+            return Err(NativeAgentSpoolError::Io);
+        }
         workdirs.insert(
             input.run_id.clone(),
             NativeWorkdirHandoff {
@@ -729,6 +740,16 @@ fn validate_policy(policy: &NativeAgentPolicy) -> Result<(), NativeAgentSpoolErr
         return Err(NativeAgentSpoolError::InvalidInput);
     }
     validate_params(&policy.target.params)
+}
+
+impl NativeWorkdirHandoff {
+    fn retained_handle_count(&self) -> usize {
+        retained_handoff_handle_count(self.command_mounts.as_ref())
+    }
+}
+
+fn retained_handoff_handle_count(command_mounts: Option<&NativeCommandMountSet>) -> usize {
+    1 + command_mounts.map_or(0, NativeCommandMountSet::retained_handle_count)
 }
 
 fn command_mounts_match_policy(
@@ -1008,6 +1029,58 @@ mod tests {
         assert_eq!(metadata.ino(), value.policy.workdir_identity.inode);
         assert!(spool.remove_workdir_exact(&value));
         assert!(spool.exact_workdir(&value).is_none());
+    }
+
+    #[test]
+    fn workdir_handoffs_share_one_bounded_retained_handle_budget() {
+        use vyane_harness::native::{NativeCommandRule, prepare_command_mounts};
+
+        let (directory, spool) = fixture();
+        let workspace = directory.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        let pinned = PinnedWorkdir::open(&workspace).unwrap();
+        let mut frozen = policy();
+        frozen.canonical_workdir = pinned.canonical_path().to_path_buf();
+        frozen.workdir_identity = pinned.identity().clone();
+        frozen.command_execution = Some(NativeCommandPolicy {
+            allow: vec![NativeCommandRule {
+                program: "touch".into(),
+                args_prefix: Vec::new(),
+            }],
+            writable_roots: vec!["src".into()],
+            max_seconds: 30,
+        });
+        let mounts =
+            prepare_command_mounts(&pinned, frozen.command_execution.as_ref().unwrap()).unwrap();
+
+        for index in 0..128 {
+            let value = NativeAgentInput::fresh(
+                "owner-marker",
+                format!("run-{index}"),
+                "worker-marker",
+                "prompt",
+                frozen.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                spool
+                    .install_workdir_with_command_mounts(&value, &pinned, Some(mounts.clone()))
+                    .unwrap(),
+                NativeWorkdirInstall::Created
+            );
+        }
+        let overflow = NativeAgentInput::fresh(
+            "owner-marker",
+            "run-overflow",
+            "worker-marker",
+            "prompt",
+            frozen,
+        )
+        .unwrap();
+        assert_eq!(
+            spool.install_workdir_with_command_mounts(&overflow, &pinned, Some(mounts)),
+            Err(NativeAgentSpoolError::Io)
+        );
     }
 
     #[test]

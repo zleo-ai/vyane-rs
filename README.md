@@ -799,7 +799,9 @@ operator-managed config files only impose independent ceilings; see
 request and every ceiling list exact pre-existing `writable_roots`; see
 [WP-90](docs/plan/WP-90.md). Non-empty command writable roots additionally
 require `/usr/bin/bwrap --help` to advertise `--bind-fd FD DEST`; current
-Ubuntu 24.04 security updates provide that capability.
+Ubuntu 24.04 security updates provide that capability. Roots must be
+directories; regular files are rejected so atomic editor replacement is not
+misrepresented as supported.
 
 ```toml
 [providers.anthropic]
