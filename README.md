@@ -846,6 +846,11 @@ ceiling. Native/Canto capability rows distinguish `unrestricted_by_config`,
 and never include raw paths, domains, commands, environment names, or tool
 rules. See [WP-94](docs/plan/WP-94.md).
 
+`vyane daemon start` keeps its 500 ms per-attempt control-lock budget while
+using the existing 30 second readiness window to retry typed, transient lock
+contention after the child has spawned. Startup filesystem, permission, and
+control-data failures remain fatal; see [WP-95](docs/plan/WP-95.md).
+
 ```toml
 [providers.anthropic]
 base_url      = "https://api.anthropic.com"
