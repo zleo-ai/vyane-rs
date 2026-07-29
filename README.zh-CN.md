@@ -225,8 +225,10 @@ drain 已准入的 submit/cancel initializer，再 signal AgentRun supervisor，
 这不是 `Remote` 或 session-aware native host，不支持 native resume、live pause/resume 或自动 replay，
 本地 bearer 也仍不代表 distinct principal 或 hostile same-UID isolation。见
 [WP-61](docs/plan/WP-61.md) 与 [WP-66](docs/plan/WP-66.md)。
-Process lane 的 graceful drain 已有 acceptance；WP-66 单独要求的 daemon-level Native
-graceful-shutdown race acceptance 仍未收口。
+Process lane 的 graceful drain 与 daemon-level Native graceful-shutdown race 均已有
+acceptance 覆盖，包括有 deadline 上限的 restart settlement，且不 replay input、不发布
+output。启动与强杀重启 fixture 的稳定化见 [WP-95](docs/plan/WP-95.md) 与
+[WP-96](docs/plan/WP-96.md)。
 
 service 层也增加 principal-derived owner 的 phase-A boundary。`OwnerContextFactory` 冻结 trusted
 authenticator/resolver，隐藏 `AuthenticatedPrincipal` 构造，并拒绝 authenticated principal 进入保留
