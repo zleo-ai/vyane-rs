@@ -491,16 +491,25 @@ async fn submit_native_search(data_dir: &Path, run_id: &str, workdir: &Path) -> 
 }
 
 async fn get_json(data_dir: &Path, suffix: &str) -> (reqwest::StatusCode, Value) {
+    get_json_with_client(&http_client(), data_dir, suffix)
+        .await
+        .unwrap()
+}
+
+async fn get_json_with_client(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    suffix: &str,
+) -> Result<(reqwest::StatusCode, Value), reqwest::Error> {
     let (base, token) = control(data_dir);
-    let response = http_client()
+    let response = client
         .get(format!("{base}{suffix}"))
         .bearer_auth(token)
         .send()
-        .await
-        .unwrap();
+        .await?;
     let status = response.status();
-    let body = response.json().await.unwrap();
-    (status, body)
+    let body = response.json().await?;
+    Ok((status, body))
 }
 
 async fn post_json(data_dir: &Path, suffix: &str) -> (reqwest::StatusCode, Value) {
@@ -518,8 +527,31 @@ async fn post_json(data_dir: &Path, suffix: &str) -> (reqwest::StatusCode, Value
 
 async fn terminal(data_dir: &Path, run_id: &str, budget: Duration) -> Value {
     let deadline = Instant::now() + budget;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
     loop {
-        let (_, body) = get_json(data_dir, &format!("/v1/agent-runs/{run_id}")).await;
+        let body = match get_json_with_client(
+            &client,
+            data_dir,
+            &format!("/v1/agent-runs/{run_id}"),
+        )
+        .await
+        {
+            Ok((_, body)) => body,
+            Err(error) if error.is_timeout() || error.is_connect() => {
+                assert!(
+                    Instant::now() < deadline,
+                    "AgentRun status remained unavailable: {error}; log: {}",
+                    fs::read_to_string(data_dir.join("daemon.log")).unwrap_or_default()
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            Err(error) => panic!("AgentRun status response was invalid: {error}"),
+        };
         if !matches!(
             body["state"].as_str(),
             Some("queued" | "starting" | "running" | "cancelling")

@@ -45,6 +45,9 @@ skipping tests or reducing concurrency inside each fixture.
 [WP-98](plan/WP-98.md) reconciles the README's stale Native
 graceful-shutdown acceptance statement with WP-66 and the current tested
 roadmap state.
+[WP-100](plan/WP-100.md) makes daemon terminal acceptance polling reuse one
+short-timeout client and retry transient loopback timeouts only inside the
+existing total terminal budget.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
