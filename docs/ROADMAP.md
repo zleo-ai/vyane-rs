@@ -114,6 +114,9 @@ fixtures on the current-thread runtime.
 [WP-121](plan/WP-121.md) puts authorized OpenAI Responses web-search
 MockServer fixtures on two-worker Tokio runtimes so cancel/retry paths stay
 schedulable under suite load.
+[WP-122](plan/WP-122.md) puts long-delay detached CLI acceptance fixtures on
+two-worker Tokio runtimes so delayed targets stay schedulable while the parent
+returns from `--detach` or cancels the worker group.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
