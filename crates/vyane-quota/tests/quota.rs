@@ -507,7 +507,9 @@ async fn http_reader_rejects_invalid_urls() {
     }
 }
 
-#[tokio::test]
+// Delayed MockServer timeout fixtures need independent Tokio workers so
+// the timer and client path stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_reader_times_out_without_using_real_network() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
