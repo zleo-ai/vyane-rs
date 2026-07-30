@@ -117,6 +117,9 @@ schedulable under suite load.
 [WP-122](plan/WP-122.md) puts long-delay detached CLI acceptance fixtures on
 two-worker Tokio runtimes so delayed targets stay schedulable while the parent
 returns from `--detach` or cancels the worker group.
+[WP-123](plan/WP-123.md) isolates the native writable-command-root sandbox
+fixture in a fresh CI process after coverage left its first submit with only
+the daemon listen line.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
