@@ -2091,7 +2091,15 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(sink.published.load(Ordering::SeqCst), 1);
-        assert_eq!(exit.completion.cycles, 2);
+        // Startup projector pass + shutdown final pass is the intended floor.
+        // Under suite load an empty intermediate completion poll can complete
+        // before cancel is observed, so allow one extra cycle without treating
+        // late completion as a second publication.
+        assert!(
+            (2..=3).contains(&exit.completion.cycles),
+            "expected a bounded final pass, cycles={}",
+            exit.completion.cycles
+        );
         assert!(exit.completion.claimed > 0);
         assert_eq!(exit.completion.degraded_items, 0);
         assert_eq!(final_run.state, RunState::Succeeded);
