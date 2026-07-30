@@ -150,7 +150,8 @@ jobs:
             --skip configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay \
             --skip read_only_explicit_workdir_is_the_fake_harness_cwd \
             --skip configured_native_ceiling_rejects_an_optional_axis_before_the_model \
-            --skip exit_zero_without_terminal_result_fails_without_completion
+            --skip exit_zero_without_terminal_result_fails_without_completion \
+            --skip cancel_stops_the_exact_process_group_and_settles_cancelled
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -209,6 +210,11 @@ jobs:
           # under suite load with only the daemon listen line.
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             exit_zero_without_terminal_result_fails_without_completion \
+            -- --exact
+          # Process-group cancel settlement shares process-lane suite-handoff
+          # sensitivity with neighboring process AgentRun fixtures.
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            cancel_stops_the_exact_process_group_and_settles_cancelled \
             -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
@@ -323,7 +329,8 @@ jobs:
             --skip configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay \
             --skip read_only_explicit_workdir_is_the_fake_harness_cwd \
             --skip configured_native_ceiling_rejects_an_optional_axis_before_the_model \
-            --skip exit_zero_without_terminal_result_fails_without_completion
+            --skip exit_zero_without_terminal_result_fails_without_completion \
+            --skip cancel_stops_the_exact_process_group_and_settles_cancelled
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -365,6 +372,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- exit_zero_without_terminal_result_fails_without_completion \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
+            -- cancel_stops_the_exact_process_group_and_settles_cancelled \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \
