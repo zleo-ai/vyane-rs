@@ -166,22 +166,48 @@ fn workflow_status(data_dir: &Path, timeout: Duration) -> Option<Value> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
+fn daemon_log_excerpt(data_dir: &Path) -> String {
+    let path = data_dir.join("daemon.log");
+    match fs::read_to_string(&path) {
+        Ok(log) => {
+            let tail: String = log
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if tail.is_empty() {
+                format!("daemon.log at {} is empty", path.display())
+            } else {
+                tail
+            }
+        }
+        Err(err) => format!("daemon.log unreadable at {}: {err}", path.display()),
+    }
+}
+
 async fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
     let deadline = Instant::now() + budget;
     let mut last_state = "not yet observable".to_string();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(
-            !remaining.is_zero(),
-            "daemon workflow did not finish within {budget:?}; last state = {last_state}"
-        );
+        if remaining.is_zero() {
+            panic!(
+                "daemon workflow did not finish within {budget:?}; last state = {last_state}; log=\n{}",
+                daemon_log_excerpt(data_dir)
+            );
+        }
         // CLI status is a blocking subprocess. Run it off the runtime worker so
         // Wiremock tasks keep progressing on the multi-thread test runtime.
         let status_timeout = remaining.min(STATUS_COMMAND_TIMEOUT);
-        let data_dir = data_dir.to_path_buf();
-        let view = tokio::task::spawn_blocking(move || workflow_status(&data_dir, status_timeout))
-            .await
-            .expect("workflow status worker");
+        let data_dir_owned = data_dir.to_path_buf();
+        let view =
+            tokio::task::spawn_blocking(move || workflow_status(&data_dir_owned, status_timeout))
+                .await
+                .expect("workflow status worker");
         if let Some(view) = view {
             let state = view["task"]["state"].as_str().unwrap_or("unknown");
             if !matches!(state, "queued" | "running" | "cancelling") {
@@ -189,10 +215,12 @@ async fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
             }
             last_state = state.to_string();
         }
-        assert!(
-            Instant::now() < deadline,
-            "daemon workflow did not finish within {budget:?}; last state = {last_state}"
-        );
+        if Instant::now() >= deadline {
+            panic!(
+                "daemon workflow did not finish within {budget:?}; last state = {last_state}; log=\n{}",
+                daemon_log_excerpt(data_dir)
+            );
+        }
         tokio::time::sleep(
             STATUS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
         )
@@ -201,14 +229,16 @@ async fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
 }
 
 // The test drives blocking CLI subprocesses while Wiremock must continue
-// serving the detached daemon. A current-thread runtime can starve the mock
-// server during synchronous status polling and leave the workflow `running`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// serving the detached daemon. Keep several runtime workers free for the mock
+// delay future, and never block those workers on CLI subprocess I/O.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
     let server = MockServer::start().await;
     // Keep the target in flight long enough to prove that `workflow submit`
     // returned after durable admission rather than after executing the step.
-    const TARGET_DELAY: Duration = Duration::from_secs(10);
+    // Three seconds is well above CLI submit latency and short enough that
+    // coverage-instrumented daemons still settle inside the poll budget.
+    const TARGET_DELAY: Duration = Duration::from_secs(3);
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(
@@ -232,9 +262,21 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
     let data_dir = TempDir::new().expect("data tempdir");
     let config = write_config(&config_dir, &server);
     let workflow = write_workflow(&config_dir);
-    let mut daemon = DaemonGuard::start(data_dir.path(), &config);
 
-    let submitted = submit_workflow(data_dir.path(), &workflow);
+    // Start and submit block on subprocess I/O. Keep that off the mock runtime.
+    let data_dir_path = data_dir.path().to_path_buf();
+    let config_path = config.clone();
+    let mut daemon =
+        tokio::task::spawn_blocking(move || DaemonGuard::start(&data_dir_path, &config_path))
+            .await
+            .expect("daemon start worker");
+
+    let data_dir_path = data_dir.path().to_path_buf();
+    let workflow_path = workflow.clone();
+    let submitted =
+        tokio::task::spawn_blocking(move || submit_workflow(&data_dir_path, &workflow_path))
+            .await
+            .expect("workflow submit worker");
     assert_eq!(submitted["task"]["id"], EXPLICIT_RUN_ID);
     assert!(
         matches!(
@@ -252,8 +294,28 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
         "initial journal must be non-terminal: {submitted}"
     );
 
+    // Fail closed early if the instrumented daemon never reaches the mock.
+    // That distinguishes wire starvation from a later settlement hang.
+    let wire_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let hits = server
+            .received_requests()
+            .await
+            .expect("request recording")
+            .len();
+        if hits >= 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < wire_deadline,
+            "daemon never hit the delayed mock within 30s after submit; last submission = {submitted}; log=\n{}",
+            daemon_log_excerpt(data_dir.path())
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
     // Coverage instrumentation can make the detached daemon substantially
-    // slower on shared CI runners. Keep the explicit 10s in-flight proof, but
+    // slower on shared CI runners. Keep the explicit in-flight proof, but
     // give the independent resident process enough time to publish terminal
     // state before treating it as stuck.
     let terminal = poll_workflow_terminal(data_dir.path(), Duration::from_secs(120)).await;
@@ -265,13 +327,20 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
 
     // Retrying the identical intent with the same caller-generated UUIDv7
     // returns the existing durable task/journal and must not replay the target.
-    let retried = submit_workflow(data_dir.path(), &workflow);
+    let data_dir_path = data_dir.path().to_path_buf();
+    let workflow_path = workflow.clone();
+    let retried =
+        tokio::task::spawn_blocking(move || submit_workflow(&data_dir_path, &workflow_path))
+            .await
+            .expect("workflow retry worker");
     assert_eq!(retried["task"]["id"], terminal["task"]["id"]);
     assert_eq!(retried["task"]["state"], "succeeded");
     assert_eq!(retried["journal"]["id"], terminal["journal"]["id"]);
     assert_eq!(retried["journal"]["status"], "completed");
 
-    let stopped = daemon.stop();
+    let stopped = tokio::task::spawn_blocking(move || daemon.stop())
+        .await
+        .expect("daemon stop worker");
     assert!(
         stopped.status.success(),
         "daemon stop failed: {}",
