@@ -66,6 +66,9 @@ workflow token access to read-only repository contents.
 [WP-105](plan/WP-105.md) gives the service-owned no-lane resident broker
 fixture a fresh process in normal and coverage gates after an exact macOS main
 run hung at that runtime handoff.
+[WP-106](plan/WP-106.md) gives the resident workflow acceptance fixture a
+two-thread Tokio runtime so its blocking CLI polling cannot starve the mock
+target serving the detached daemon.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
