@@ -272,7 +272,9 @@ fn write_workflow(dir: &TempDir, text: &str) -> std::path::PathBuf {
     path
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_unknown_target_exits_with_config_code() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -291,7 +293,9 @@ async fn dispatch_unknown_target_exits_with_config_code() {
         .stderr(predicate::str::contains("config error"));
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn check_with_temp_config_lists_profile() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -357,7 +361,9 @@ default_model = "model"
         ));
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_openai_chat_writes_success_ledger_and_json_parses() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "wiremock answer").await;
@@ -395,7 +401,9 @@ async fn dispatch_openai_chat_writes_success_ledger_and_json_parses() {
     assert_eq!(parsed["output"], "wiremock answer");
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_auto_routes_executes_effort_and_records_decision() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "auto answer").await;
@@ -461,7 +469,9 @@ async fn dispatch_auto_routes_executes_effort_and_records_decision() {
     assert_eq!(records[2]["labels"]["routing.profile"], "cheap");
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_cannot_forge_routing_decision_labels() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -516,7 +526,9 @@ async fn user_cannot_forge_routing_decision_labels() {
     assert!(!data_dir.path().join("ledger.jsonl").exists());
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generic_effort_label_does_not_forge_the_reserved_route_effort() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "auto answer").await;
@@ -549,7 +561,9 @@ async fn generic_effort_label_does_not_forge_the_reserved_route_effort() {
     assert_eq!(records[0]["labels"]["routing.effort"], "low");
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn profile_prefix_disambiguates_a_profile_named_auto() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "literal auto profile").await;
@@ -637,7 +651,9 @@ async fn dispatch_failover_and_history_work_end_to_end() {
     assert_eq!(parsed.as_array().expect("history array").len(), 1);
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_run_and_list_work_end_to_end() {
     let server = MockServer::start().await;
     mock_openai_workflow(&server).await;
@@ -704,7 +720,9 @@ async fn workflow_run_and_list_work_end_to_end() {
         .stdout(predicate::str::contains("completed"));
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_replay_creates_a_new_run_without_reexecuting_recorded_successes() {
     let server = MockServer::start().await;
     mock_openai_workflow(&server).await;
@@ -819,7 +837,9 @@ fn workflow_replay_rejects_var_before_config_or_journal_access() {
     assert!(!data_dir.path().join("workflows").exists());
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_auto_target_resolves_after_render_and_records_route() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "workflow auto").await;
@@ -947,7 +967,9 @@ async fn workflow_explicit_effort_overrides_profile_and_tier_across_failover() {
     );
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_workflow_effort_fails_before_journal_or_network_without_echo() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -994,7 +1016,9 @@ async fn invalid_workflow_effort_fails_before_journal_or_network_without_echo() 
     assert!(!data_dir.path().join("ledger.jsonl").exists());
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_effort_cannot_bypass_frontier_guard() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -1039,7 +1063,9 @@ async fn workflow_effort_cannot_bypass_frontier_guard() {
     assert!(!data_dir.path().join("ledger.jsonl").exists());
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_route_hints_on_explicit_target_fail_before_journal_or_network() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -1084,7 +1110,9 @@ async fn workflow_route_hints_on_explicit_target_fail_before_journal_or_network(
     assert!(!data_dir.path().join("ledger.jsonl").exists());
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_auto_route_hints_are_validated_before_journal_or_dispatch() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -1136,7 +1164,9 @@ async fn workflow_auto_route_hints_are_validated_before_journal_or_dispatch() {
     );
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_auto_preflight_validates_every_eligible_profile() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -1190,7 +1220,9 @@ async fn workflow_auto_preflight_validates_every_eligible_profile() {
     assert!(!data_dir.path().join("workflows").exists());
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_stream_prints_deltas_and_writes_ledger() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1340,7 +1372,9 @@ async fn dispatch_stream_on_harness_target_streams() {
     assert_eq!(records[0]["transport"], "cli_wrap");
 }
 
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_stream_with_session_falls_back() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "session answer").await;
@@ -1481,7 +1515,9 @@ async fn route_explicit_tier_override() {
 }
 
 /// `vyane review` with fewer than 2 reviewers exits with a config error.
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_with_one_reviewer_exits_two() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -1588,7 +1624,9 @@ async fn mock_review_pipeline(server: &MockServer) {
 
 /// `vyane review` runs the full three-step pipeline (implement → review →
 /// synthesize) and produces a completed workflow outcome.
-#[tokio::test]
+// MockServer-backed CLI acceptance fixtures use two workers so wire
+// paths stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_pipeline_runs_three_steps_end_to_end() {
     let server = MockServer::start().await;
     mock_review_pipeline(&server).await;

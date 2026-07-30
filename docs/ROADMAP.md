@@ -138,6 +138,9 @@ suite load still observed non-terminal restart states while the bodies stayed
 stable alone.
 [WP-129](plan/WP-129.md) isolates the plain-to-auto-pursuit daemon start fixture
 in a fresh CI process after macOS suite handoff left plain daemon stop unclean.
+[WP-130](plan/WP-130.md) puts the remaining MockServer-backed CLI acceptance
+fixtures on two-worker Tokio runtimes so dispatch/workflow/stream/review wire
+paths stay schedulable under suite load.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
