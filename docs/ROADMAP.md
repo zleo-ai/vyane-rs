@@ -143,6 +143,8 @@ fixtures on two-worker Tokio runtimes so dispatch/workflow/stream/review wire
 paths stay schedulable under suite load.
 [WP-131](plan/WP-131.md) isolates graceful-stop restart settlement in a fresh CI
 process, completing the long-delay restart fixture process isolations.
+[WP-132](plan/WP-132.md) widens the cooperative pursuit-cancel wall-clock check
+to two seconds after macOS suite load exceeded the prior one-second bound.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

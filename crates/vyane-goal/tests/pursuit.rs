@@ -804,7 +804,10 @@ async fn overall_timeout_and_cancellation_pause_without_another_segment() {
         .await
         .unwrap();
     canceller.await.unwrap();
-    assert!(started.elapsed() < Duration::from_secs(1));
+    // Wall-clock bound for cooperative cancel only: keep it tight enough to
+    // catch a stuck pursue path, but loose enough for loaded CI runners where
+    // macOS suite handoff can push a healthy cancel past one second.
+    assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(token_cancelled.status, PursuitStatus::Paused);
     assert_eq!(token_cancelled.reason, "pursuit cancelled");
     assert_eq!(token_cancelled.segments_started, 1);
