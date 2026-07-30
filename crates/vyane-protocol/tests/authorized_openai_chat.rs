@@ -178,7 +178,9 @@ async fn every_wire_retry_is_revalidated_before_it_is_sent() {
     );
 }
 
-#[tokio::test]
+// Multi-mock or cancellation fixtures need independent Tokio workers so
+// delayed targets and cancel paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redirects_never_create_an_unvalidated_physical_request() {
     let redirect_target = MockServer::start().await;
     Mock::given(method("POST"))
@@ -291,7 +293,9 @@ async fn pre_cancelled_turn_neither_authorizes_nor_sends() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
-#[tokio::test]
+// Multi-mock or cancellation fixtures need independent Tokio workers so
+// delayed targets and cancel paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_during_revalidation_is_observed_before_send() {
     let server = MockServer::start().await;
     let cancel = CancellationToken::new();
@@ -306,7 +310,9 @@ async fn cancellation_during_revalidation_is_observed_before_send() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
-#[tokio::test]
+// Multi-mock or cancellation fixtures need independent Tokio workers so
+// delayed targets and cancel paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_interrupts_blocked_revalidation_before_send() {
     let server = MockServer::start().await;
     let entered = Arc::new(Notify::new());
@@ -354,7 +360,9 @@ async fn invalid_typed_request_fails_before_authority_or_http() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
-#[tokio::test]
+// Multi-mock or cancellation fixtures need independent Tokio workers so
+// delayed targets and cancel paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_interrupts_an_in_flight_send() {
     let server = MockServer::start().await;
     let request_seen = Arc::new(Notify::new());
@@ -400,7 +408,9 @@ async fn cancellation_interrupts_an_in_flight_send() {
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
-#[tokio::test]
+// Multi-mock or cancellation fixtures need independent Tokio workers so
+// delayed targets and cancel paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_interrupts_retry_backoff() {
     let server = MockServer::start().await;
     let request_seen = Arc::new(Notify::new());
