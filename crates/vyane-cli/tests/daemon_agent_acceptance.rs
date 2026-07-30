@@ -1376,7 +1376,10 @@ async fn native_web_search_uses_the_separate_frozen_responses_target() {
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// The fixture concurrently drives the daemon control plane and a Wiremock
+// native-model target. Keep both independently schedulable after earlier
+// acceptance runtimes in the same test process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mixed_process_and_native_lanes_run_concurrently_in_one_daemon() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

@@ -72,6 +72,9 @@ target serving the detached daemon.
 [WP-107](plan/WP-107.md) gives the resident completion supervisor fixture
 independent Tokio workers and a bounded final join after an exact coverage
 process consumed the whole job timeout during shutdown.
+[WP-108](plan/WP-108.md) gives the mixed process/native daemon fixture
+independent Tokio workers after Ubuntu delayed its two 15-second terminal
+pollers for roughly 90 seconds in the full acceptance-test process.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
