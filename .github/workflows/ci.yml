@@ -142,7 +142,8 @@ jobs:
             --skip restart_settles_expired_native_controller_without_replaying_private_input \
             --skip restart_recovers_exact_controller_without_replay \
             --skip enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first \
-            --skip graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay
+            --skip graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay \
+            --skip native_write_permission_reaches_the_real_resident_tool_lane
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -169,6 +170,9 @@ jobs:
           # multi-thread daemon fixtures even though the body is stable alone.
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             native_agent_submit_uses_the_shared_resident_lane \
+            -- --exact
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            native_write_permission_reaches_the_real_resident_tool_lane \
             -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
@@ -275,7 +279,8 @@ jobs:
             --skip native_agent_submit_uses_the_shared_resident_lane \
             --skip restart_settles_expired_native_controller_without_replaying_private_input \
             --skip enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first \
-            --skip graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay
+            --skip graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay \
+            --skip native_write_permission_reaches_the_real_resident_tool_lane
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -293,6 +298,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- native_agent_submit_uses_the_shared_resident_lane \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
+            -- native_write_permission_reaches_the_real_resident_tool_lane \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \
