@@ -99,6 +99,9 @@ schedulable under llvm-cov after main coverage left it `running` for the full
 poll budget: more workers, non-blocking CLI I/O, hold-until-release mock gate,
 daemon-log settlement panics, and incremental-cache cleanup before the
 isolated coverage process.
+[WP-117](plan/WP-117.md) puts authorized OpenAI Chat dual-mock redirect and
+cancellation fixtures on two-worker Tokio runtimes so delayed targets and
+cancel paths stay schedulable under suite load.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
