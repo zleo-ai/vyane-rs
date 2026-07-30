@@ -63,6 +63,9 @@ main-branch failures, without changing production lifecycle budgets.
 [WP-104](plan/WP-104.md) moves every CI and publish checkout to the immutable
 official `actions/checkout` v6.0.2 commit and explicitly narrows ordinary CI
 workflow token access to read-only repository contents.
+[WP-105](plan/WP-105.md) gives the service-owned no-lane resident broker
+fixture a fresh process in normal and coverage gates after an exact macOS main
+run hung at that runtime handoff.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

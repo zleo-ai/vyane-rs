@@ -100,16 +100,19 @@ jobs:
           cargo test -p vyane-broker --test supervisor_contract \
             maintenance_runs_without_delivery_lanes \
             -- --exact
-          # The resident completion supervisor can occasionally stall at the
-          # handoff from an earlier service test's Tokio runtime on Linux even
-          # though the same test is stable in a fresh process. Keep the rest of
-          # the service suite serialized and give this lifecycle case its own
-          # runtime/process boundary.
+          # Resident service lifecycle fixtures can occasionally stall at the
+          # handoff from earlier Tokio runtimes even though each is stable in a
+          # fresh process. Keep the rest of the service suite serialized and
+          # give each observed lifecycle case its own runtime/process boundary.
           cargo test -p vyane-service -- \
             --test-threads=1 \
-            --skip agent_supervisor::tests::resident_supervisor_publishes_committed_completion
+            --skip agent_supervisor::tests::resident_supervisor_publishes_committed_completion \
+            --skip message::tests::resident_broker_assembly_owns_scope_and_drains_without_delivery_lanes
           cargo test -p vyane-service \
             agent_supervisor::tests::resident_supervisor_publishes_committed_completion \
+            -- --exact
+          cargo test -p vyane-service \
+            message::tests::resident_broker_assembly_owns_scope_and_drains_without_delivery_lanes \
             -- --exact
           # These adjacent unit tests both exercise the opaque dispatch cleanup
           # path. On macOS their per-test Tokio runtimes can occasionally stall
@@ -171,9 +174,13 @@ jobs:
           cargo llvm-cov --no-report -p vyane-broker -- --test-threads=1
           cargo llvm-cov --no-report -p vyane-service -- \
             --test-threads=1 \
-            --skip agent_supervisor::tests::resident_supervisor_publishes_committed_completion
+            --skip agent_supervisor::tests::resident_supervisor_publishes_committed_completion \
+            --skip message::tests::resident_broker_assembly_owns_scope_and_drains_without_delivery_lanes
           cargo llvm-cov --no-report -p vyane-service -- \
             agent_supervisor::tests::resident_supervisor_publishes_committed_completion \
+            --exact
+          cargo llvm-cov --no-report -p vyane-service -- \
+            message::tests::resident_broker_assembly_owns_scope_and_drains_without_delivery_lanes \
             --exact
           # The process-restart acceptance case launches and observes a
           # detached daemon. Under instrumentation, running it after the other
