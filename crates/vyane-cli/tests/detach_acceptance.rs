@@ -423,7 +423,9 @@ fn poll_status_file<F: Fn(&Value) -> bool>(
 /// Acceptance #1: `--detach` returns fast with an id while a slow target is
 /// still running; polling `task status` goes running → success; `output.txt`
 /// matches the answer; the ledger records the run.
-#[tokio::test]
+// Detached long-delay MockServer fixtures need independent Tokio workers so
+// the delayed target stays schedulable while the parent CLI returns/cancels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detach_returns_fast_then_completes_success() {
     let server = MockServer::start().await;
     // A long target delay so the run is *guaranteed* still in flight when the
@@ -1113,7 +1115,9 @@ async fn new_scaffold_without_status_or_job_shows_stale_and_explains() {
 /// Acceptance #3: `task cancel` on a long-running detached run leaves
 /// `status.json` == cancelled, kills the process group, and the ledger has the
 /// cancelled RunRecord.
-#[tokio::test]
+// Detached long-delay MockServer fixtures need independent Tokio workers so
+// the delayed target stays schedulable while the parent CLI returns/cancels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_finalizes_cancelled_and_kills_group() {
     let server = MockServer::start().await;
     // Long delay so the run is comfortably still in-flight when we cancel.
@@ -1202,7 +1206,9 @@ async fn cancel_finalizes_cancelled_and_kills_group() {
 /// depend on `ps` being present in PATH. Cancellation remains safe and usable
 /// even when no external process-inspection command can be executed.
 #[cfg(target_os = "linux")]
-#[tokio::test]
+// Detached long-delay MockServer fixtures need independent Tokio workers so
+// the delayed target stays schedulable while the parent CLI returns/cancels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fingerprint_cancel_does_not_depend_on_ps_or_path() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "never delivered", Duration::from_secs(30)).await;
