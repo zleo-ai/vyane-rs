@@ -123,6 +123,9 @@ the daemon listen line.
 [WP-124](plan/WP-124.md) puts the remaining authorized OpenAI Chat MockServer
 unit fixtures on two-worker Tokio runtimes so the full suite shares one
 scheduling class.
+[WP-125](plan/WP-125.md) isolates the native command-permission sandbox
+fixture in a fresh CI process after coverage left status polling with only the
+daemon listen line under suite load.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
