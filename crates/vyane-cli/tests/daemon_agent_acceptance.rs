@@ -40,6 +40,10 @@ fn http_client() -> reqwest::Client {
         .unwrap()
 }
 
+fn terminal_budget(execution_timeout_seconds: u64) -> Duration {
+    Duration::from_secs(execution_timeout_seconds.saturating_add(15))
+}
+
 fn write_config(directory: &TempDir) -> PathBuf {
     let path = directory.path().join("config.toml");
     fs::write(
@@ -998,7 +1002,7 @@ async fn native_write_permission_reaches_the_real_resident_tool_lane() {
 
     let response = submit_native_write(data_dir.path(), run_id, &workdir).await;
     assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
-    let done = terminal(data_dir.path(), run_id, Duration::from_secs(15)).await;
+    let done = terminal(data_dir.path(), run_id, terminal_budget(5)).await;
     assert_eq!(done["state"], "succeeded");
     assert_eq!(
         fs::read_to_string(workdir.join("created.txt")).unwrap(),
@@ -1516,7 +1520,7 @@ async fn exit_zero_without_terminal_result_fails_without_completion() {
             .status()
             .is_success()
     );
-    let done = terminal(data_dir.path(), MISSING_RUN, Duration::from_secs(15)).await;
+    let done = terminal(data_dir.path(), MISSING_RUN, terminal_budget(30)).await;
     assert_eq!(done["state"], "failed");
     assert_eq!(done["failure_code"], "dispatch_failed");
     assert!(done.get("completion_status").is_none());
