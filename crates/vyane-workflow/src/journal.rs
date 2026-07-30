@@ -318,6 +318,68 @@ impl From<&WorkflowJournal> for WorkflowJournalSummary {
     }
 }
 
+/// Maximum UTF-8 bytes of answer text projected into a public workflow view.
+pub const WORKFLOW_VIEW_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+
+/// Allowlisted success-answer projection for lifecycle views (MCP / daemon).
+///
+/// Never carries paths, prompts, variables, ownership, step ids, target names,
+/// or raw step errors. Empty when the journal is not a completed success or has
+/// no projectable single-target answer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorkflowViewOutputProjection {
+    pub output: Option<String>,
+    pub output_omitted: bool,
+}
+
+/// Select one bounded answer from a completed journal for public lifecycle
+/// views.
+///
+/// Selection rules:
+/// - only `WorkflowRunStatus::Completed` journals project;
+/// - only successful single-target steps with non-empty `output` are candidates;
+/// - fan-out steps (`outputs: Some(...)`) are ignored in this package;
+/// - when several candidates exist, the lexicographically last step id wins
+///   (`BTreeMap` order);
+/// - bodies larger than [`WORKFLOW_VIEW_OUTPUT_MAX_BYTES`] set `output_omitted`
+///   and drop the body (no silent prefix).
+#[must_use]
+pub fn project_workflow_view_output(journal: &WorkflowJournal) -> WorkflowViewOutputProjection {
+    if journal.status != WorkflowRunStatus::Completed {
+        return WorkflowViewOutputProjection::default();
+    }
+
+    // BTreeMap iteration is sorted by step id; the last match is deterministic.
+    let mut selected: Option<&str> = None;
+    for step in journal.steps.values() {
+        if step.status != JournalStepStatus::Success {
+            continue;
+        }
+        if step.outputs.is_some() {
+            continue;
+        }
+        if let Some(output) = step.output.as_deref()
+            && !output.is_empty()
+        {
+            selected = Some(output);
+        }
+    }
+
+    let Some(body) = selected else {
+        return WorkflowViewOutputProjection::default();
+    };
+    if body.len() > WORKFLOW_VIEW_OUTPUT_MAX_BYTES {
+        return WorkflowViewOutputProjection {
+            output: None,
+            output_omitted: true,
+        };
+    }
+    WorkflowViewOutputProjection {
+        output: Some(body.to_string()),
+        output_omitted: false,
+    }
+}
+
 pub fn journal_path(journal_dir: &Path, wf_run_id: &WorkflowRunId) -> PathBuf {
     journal_dir.join(format!("{wf_run_id}.json"))
 }
@@ -605,6 +667,79 @@ mod tests {
 
     fn journal(id: &str) -> WorkflowJournal {
         WorkflowJournal::new_with_id(id.parse().unwrap(), &workflow(), BTreeMap::new())
+    }
+
+    fn completed_journal_with_steps(steps: BTreeMap<String, JournalStep>) -> WorkflowJournal {
+        let mut journal = journal(ID_A);
+        journal.status = WorkflowRunStatus::Completed;
+        journal.steps = steps;
+        journal
+    }
+
+    fn success_step(output: Option<&str>) -> JournalStep {
+        JournalStep {
+            status: JournalStepStatus::Success,
+            run_ids: vec!["run-1".into()],
+            output: output.map(str::to_string),
+            outputs: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn project_workflow_view_output_selects_single_step_and_last_id() {
+        let mut steps = BTreeMap::new();
+        steps.insert("a".into(), success_step(Some("first")));
+        steps.insert("z".into(), success_step(Some("last")));
+        let projection = project_workflow_view_output(&completed_journal_with_steps(steps));
+        assert_eq!(projection.output.as_deref(), Some("last"));
+        assert!(!projection.output_omitted);
+
+        let mut single = BTreeMap::new();
+        single.insert("only".into(), success_step(Some("OK")));
+        let projection = project_workflow_view_output(&completed_journal_with_steps(single));
+        assert_eq!(projection.output.as_deref(), Some("OK"));
+    }
+
+    #[test]
+    fn project_workflow_view_output_ignores_non_completed_fanout_and_errors() {
+        let mut running = journal(ID_A);
+        running.status = WorkflowRunStatus::Running;
+        let mut steps = BTreeMap::new();
+        steps.insert("only".into(), success_step(Some("secret-answer")));
+        running.steps = steps;
+        assert_eq!(
+            project_workflow_view_output(&running),
+            WorkflowViewOutputProjection::default()
+        );
+
+        let mut fan = BTreeMap::new();
+        fan.insert(
+            "fan".into(),
+            JournalStep {
+                status: JournalStepStatus::Success,
+                run_ids: vec!["r1".into()],
+                output: None,
+                outputs: Some(vec![JournalTargetOutput {
+                    target: "a".into(),
+                    ok: true,
+                    output: Some("fan-answer".into()),
+                }]),
+                error: Some("/private/path boom".into()),
+            },
+        );
+        let projection = project_workflow_view_output(&completed_journal_with_steps(fan));
+        assert_eq!(projection, WorkflowViewOutputProjection::default());
+    }
+
+    #[test]
+    fn project_workflow_view_output_omits_oversized_bodies() {
+        let oversized = "x".repeat(WORKFLOW_VIEW_OUTPUT_MAX_BYTES + 1);
+        let mut steps = BTreeMap::new();
+        steps.insert("only".into(), success_step(Some(&oversized)));
+        let projection = project_workflow_view_output(&completed_journal_with_steps(steps));
+        assert!(projection.output.is_none());
+        assert!(projection.output_omitted);
     }
 
     #[test]

@@ -111,13 +111,22 @@ pub struct WorkflowSubmitRequest {
 }
 
 /// Public lifecycle projection. Deliberately excludes ownership, controller,
-/// lease, authentication, paths, prompts, and raw error fields.
+/// lease, authentication, paths, prompts, variables, step ids, target names,
+/// and raw error fields. On success only, may include a single bounded answer
+/// body (see `output` / `output_omitted`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkflowView {
     pub caller_id: WorkflowRunId,
     pub state: WorkflowState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<WorkflowFailureCode>,
+    /// Present only when `state` is `succeeded` and the answer fits the bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// True when the run succeeded and an answer existed but was not projected
+    /// (over the view byte bound or the outer tool serialization budget).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub output_omitted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -851,14 +860,14 @@ impl VyaneMcpServer {
             )));
         };
         match control.submit(request).await {
-            Ok(view) => Ok(success_json(&view)),
+            Ok(view) => Ok(workflow_view_success_json(&view)),
             Err(error) => Ok(error_json(SafeToolError::workflow_control(error))),
         }
     }
 
     /// Read one workflow's redacted lifecycle view.
     #[tool(
-        description = "Return the redacted lifecycle state for one canonical UUIDv7 workflow caller id.",
+        description = "Return the redacted lifecycle state for one canonical UUIDv7 workflow caller id. Succeeded runs may include a bounded output or output_omitted=true.",
         input_schema = rmcp::handler::server::tool::schema_for_type::<WorkflowIdArgs>()
     )]
     async fn vyane_workflow_status(
@@ -875,7 +884,7 @@ impl VyaneMcpServer {
             )));
         };
         match control.status(caller_id).await {
-            Ok(view) => Ok(success_json(&view)),
+            Ok(view) => Ok(workflow_view_success_json(&view)),
             Err(error) => Ok(error_json(SafeToolError::workflow_control(error))),
         }
     }
@@ -900,7 +909,7 @@ impl VyaneMcpServer {
             )));
         };
         match control.cancel(caller_id).await {
-            Ok(view) => Ok(success_json(&view)),
+            Ok(view) => Ok(workflow_view_success_json(&view)),
             Err(error) => Ok(error_json(SafeToolError::workflow_control(error))),
         }
     }
@@ -1156,6 +1165,24 @@ fn upsert_label(labels: &mut Vec<String>, key: &str, value: &str) {
 /// does not hold.
 fn success_json<T: Serialize + ?Sized>(value: &T) -> CallToolResult {
     match serialize_json_bounded(value, MAX_TOOL_OUTPUT_BYTES) {
+        Some(text) => success_text(text),
+        None => error_json(SafeToolError::output_limit()),
+    }
+}
+
+/// Serialize a workflow lifecycle view. If the full view (including a large
+/// success answer) cannot fit the tool budget, drop the answer body and set
+/// `output_omitted` rather than failing a successful run as a tool error.
+fn workflow_view_success_json(view: &WorkflowView) -> CallToolResult {
+    if let Some(text) = serialize_json_bounded(view, MAX_TOOL_OUTPUT_BYTES) {
+        return success_text(text);
+    }
+    let mut reduced = view.clone();
+    if reduced.output.is_some() || reduced.state == WorkflowState::Succeeded {
+        reduced.output = None;
+        reduced.output_omitted = reduced.state == WorkflowState::Succeeded;
+    }
+    match serialize_json_bounded(&reduced, MAX_TOOL_OUTPUT_BYTES) {
         Some(text) => success_text(text),
         None => error_json(SafeToolError::output_limit()),
     }

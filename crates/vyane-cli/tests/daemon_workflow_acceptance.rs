@@ -509,8 +509,14 @@ async fn mcp_workflow_tools_use_the_authenticated_resident_daemon() -> anyhow::R
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert_eq!(terminal["caller_id"], MCP_RUN_ID);
+    assert_eq!(terminal["output"], "mcp daemon answer");
+    assert!(terminal.get("output_omitted").is_none());
     assert!(terminal.get("owner").is_none());
     assert!(terminal.get("controller").is_none());
+    assert!(terminal.get("error").is_none());
+    let terminal_wire = terminal.to_string();
+    assert!(!terminal_wire.contains("private-owner"));
+    assert!(!terminal_wire.contains("/outside"));
 
     for _ in 0..2 {
         let cancelled = mcp_call(
@@ -520,6 +526,8 @@ async fn mcp_workflow_tools_use_the_authenticated_resident_daemon() -> anyhow::R
         )
         .await?;
         assert_eq!(cancelled["state"], "succeeded");
+        // Cancel remains lifecycle-only; do not require re-projection of the body.
+        assert!(cancelled.get("owner").is_none());
     }
 
     client.cancel().await?;
