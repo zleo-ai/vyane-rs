@@ -857,7 +857,9 @@ async fn native_agent_submit_uses_the_shared_resident_lane() {
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// Primary/secondary Wiremock targets must stay independently schedulable while
+// the fixture polls daemon status through failover under coverage load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_agent_submit_fails_over_and_exact_retry_rejects_chain_drift() {
     let primary = MockServer::start().await;
     let secondary = MockServer::start().await;
