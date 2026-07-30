@@ -118,15 +118,23 @@ jobs:
           # path. On macOS their per-test Tokio runtimes can occasionally stall
           # at the handoff between tests even though each body has completed.
           # Run each in its own process, then run every remaining CLI target.
+          # The long dual-path workflow fixture drives blocking CLI polling
+          # against Wiremock after earlier daemon fixtures. Run it last in a
+          # fresh process so mock/runtime handoff cannot leave the workflow
+          # stuck in `running` for the full 120s budget.
           cargo test -p vyane-cli -- \
             --test-threads=1 \
             --skip api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
-            --skip api::tests::dispatch_panic_is_classified_internal_and_cleans_live_token
+            --skip api::tests::dispatch_panic_is_classified_internal_and_cleans_live_token \
+            --skip submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
           cargo test -p vyane-cli --bin vyane \
             api::tests::dispatch_panic_is_classified_internal_and_cleans_live_token \
+            -- --exact
+          cargo test -p vyane-cli --test daemon_workflow_acceptance \
+            submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
             -- --exact
 
   coverage:
@@ -189,8 +197,12 @@ jobs:
           # case in a fresh test process.
           cargo llvm-cov --no-report -p vyane-cli -- \
             --test-threads=1 \
-            --skip restart_recovers_exact_controller_without_replay
+            --skip restart_recovers_exact_controller_without_replay \
+            --skip submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_workflow_acceptance \
+            -- submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
             --exact
           cargo llvm-cov report --summary-only

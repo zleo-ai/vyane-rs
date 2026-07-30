@@ -166,7 +166,7 @@ fn workflow_status(data_dir: &Path, timeout: Duration) -> Option<Value> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
-fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
+async fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
     let deadline = Instant::now() + budget;
     let mut last_state = "not yet observable".to_string();
     loop {
@@ -175,7 +175,14 @@ fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
             !remaining.is_zero(),
             "daemon workflow did not finish within {budget:?}; last state = {last_state}"
         );
-        if let Some(view) = workflow_status(data_dir, remaining.min(STATUS_COMMAND_TIMEOUT)) {
+        // CLI status is a blocking subprocess. Run it off the runtime worker so
+        // Wiremock tasks keep progressing on the multi-thread test runtime.
+        let status_timeout = remaining.min(STATUS_COMMAND_TIMEOUT);
+        let data_dir = data_dir.to_path_buf();
+        let view = tokio::task::spawn_blocking(move || workflow_status(&data_dir, status_timeout))
+            .await
+            .expect("workflow status worker");
+        if let Some(view) = view {
             let state = view["task"]["state"].as_str().unwrap_or("unknown");
             if !matches!(state, "queued" | "running" | "cancelling") {
                 return view;
@@ -186,9 +193,10 @@ fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
             Instant::now() < deadline,
             "daemon workflow did not finish within {budget:?}; last state = {last_state}"
         );
-        std::thread::sleep(
+        tokio::time::sleep(
             STATUS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-        );
+        )
+        .await;
     }
 }
 
@@ -248,7 +256,7 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
     // slower on shared CI runners. Keep the explicit 10s in-flight proof, but
     // give the independent resident process enough time to publish terminal
     // state before treating it as stuck.
-    let terminal = poll_workflow_terminal(data_dir.path(), Duration::from_secs(120));
+    let terminal = poll_workflow_terminal(data_dir.path(), Duration::from_secs(120)).await;
     assert_eq!(terminal["task"]["id"], EXPLICIT_RUN_ID);
     assert_eq!(terminal["task"]["state"], "succeeded");
     assert_eq!(terminal["journal"]["id"], EXPLICIT_RUN_ID);
@@ -299,7 +307,10 @@ async fn resident_daemon_projectors_start_and_gracefully_stop() {
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// MCP client I/O, the resident daemon, and Wiremock must progress together.
+// A current-thread runtime can starve the mock while the MCP child waits on
+// daemon status after earlier fixtures have torn down their runtimes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_workflow_tools_use_the_authenticated_resident_daemon() -> anyhow::Result<()> {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

@@ -84,6 +84,9 @@ on residual loop-start lease alone.
 [WP-111](plan/WP-111.md) gives multi-mock native AgentRun fixtures (web-search
 and failover) independent Tokio workers after Ubuntu and coverage left them
 polling until the status budget expired with only the daemon listen line.
+[WP-112](plan/WP-112.md) keeps resident workflow daemon fixtures schedulable:
+two-worker MCP runtime, async workflow status polling, and a fresh CI process
+for the long dual-path workflow fixture after macOS/Ubuntu suite stalls.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
