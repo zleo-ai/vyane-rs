@@ -69,6 +69,9 @@ run hung at that runtime handoff.
 [WP-106](plan/WP-106.md) gives the resident workflow acceptance fixture a
 two-thread Tokio runtime so its blocking CLI polling cannot starve the mock
 target serving the detached daemon.
+[WP-107](plan/WP-107.md) gives the resident completion supervisor fixture
+independent Tokio workers and a bounded final join after an exact coverage
+process consumed the whole job timeout during shutdown.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
