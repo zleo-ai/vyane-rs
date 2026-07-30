@@ -87,6 +87,9 @@ polling until the status budget expired with only the daemon listen line.
 [WP-112](plan/WP-112.md) keeps resident workflow daemon fixtures schedulable:
 two-worker MCP runtime, async workflow status polling, and a fresh CI process
 for the long dual-path workflow fixture after macOS/Ubuntu suite stalls.
+[WP-113](plan/WP-113.md) puts the remaining Wiremock-backed native AgentRun
+acceptance fixtures on two-worker Tokio runtimes so suite handoffs cannot
+starve mock targets during status polling.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

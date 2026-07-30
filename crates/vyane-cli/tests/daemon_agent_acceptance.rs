@@ -621,7 +621,9 @@ async fn terminal(data_dir: &Path, run_id: &str, budget: Duration) -> Value {
     }
 }
 
-#[tokio::test]
+// Wiremock/control-plane fixtures must stay independently schedulable after
+// earlier acceptance runtimes in the same process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_polling_never_crosses_total_budget() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -666,7 +668,9 @@ impl Respond for DelayFirstSubmission {
     }
 }
 
-#[tokio::test]
+// Wiremock/control-plane fixtures must stay independently schedulable after
+// earlier acceptance runtimes in the same process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn submission_retries_an_ambiguous_timeout_within_one_total_budget() {
     let server = MockServer::start().await;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -763,7 +767,9 @@ async fn process_agent_success_is_idempotent_and_publishes_exact_output() {
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// Wiremock/control-plane fixtures must stay independently schedulable after
+// earlier acceptance runtimes in the same process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_agent_submit_uses_the_shared_resident_lane() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -913,7 +919,9 @@ async fn native_agent_submit_fails_over_and_exact_retry_rejects_chain_drift() {
     assert!(restarted.stop().status.success());
 }
 
-#[tokio::test]
+// Wiremock/control-plane fixtures must stay independently schedulable after
+// earlier acceptance runtimes in the same process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_native_ceiling_rejects_an_optional_axis_before_the_model() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().unwrap();
@@ -935,7 +943,9 @@ async fn configured_native_ceiling_rejects_an_optional_axis_before_the_model() {
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// Wiremock/control-plane fixtures must stay independently schedulable after
+// earlier acceptance runtimes in the same process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_write_permission_reaches_the_real_resident_tool_lane() {
     let server = MockServer::start().await;
     let response_index = Arc::new(AtomicUsize::new(0));
@@ -1028,7 +1038,9 @@ async fn native_write_permission_reaches_the_real_resident_tool_lane() {
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// Wiremock/control-plane fixtures must stay independently schedulable after
+// earlier acceptance runtimes in the same process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1073,7 +1085,9 @@ async fn configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay(
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// Wiremock/control-plane fixtures must stay independently schedulable after
+// earlier acceptance runtimes in the same process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_command_permission_reaches_the_real_resident_sandbox() {
     let server = MockServer::start().await;
     let response_index = Arc::new(AtomicUsize::new(0));
@@ -1162,7 +1176,9 @@ async fn native_command_permission_reaches_the_real_resident_sandbox() {
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// Wiremock/control-plane fixtures must stay independently schedulable after
+// earlier acceptance runtimes in the same process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_writable_command_root_reaches_the_real_resident_sandbox() {
     let server = MockServer::start().await;
     let response_index = Arc::new(AtomicUsize::new(0));
@@ -1428,7 +1444,9 @@ async fn mixed_process_and_native_lanes_run_concurrently_in_one_daemon() {
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// Wiremock/control-plane fixtures must stay independently schedulable after
+// earlier acceptance runtimes in the same process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_agent_cancel_uses_the_exact_in_process_controller() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
