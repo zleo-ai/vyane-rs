@@ -299,7 +299,10 @@ async fn resident_daemon_projectors_start_and_gracefully_stop() {
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// MCP client I/O, the resident daemon, and Wiremock must progress together.
+// A current-thread runtime can starve the mock while the MCP child waits on
+// daemon status after earlier fixtures have torn down their runtimes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_workflow_tools_use_the_authenticated_resident_daemon() -> anyhow::Result<()> {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
