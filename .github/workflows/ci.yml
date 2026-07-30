@@ -134,14 +134,14 @@ jobs:
           cargo test -p vyane-cli --bin vyane \
             api::tests::dispatch_panic_is_classified_internal_and_cleans_live_token \
             -- --exact
-          cargo test -p vyane-cli --test daemon_workflow_acceptance \
-            submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
-            -- --exact
-          # Process-lane AgentRun submission can miss the first HTTP accept after
-          # earlier multi-thread daemon fixtures even though each body is stable
-          # alone. Measure/run it last in a fresh process.
+          # Process-lane AgentRun success can stall status polling after heavy
+          # dual-path workflow isolation on the same runner. Run it alone before
+          # the long workflow fixture so submit/status stay responsive.
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             process_agent_success_is_idempotent_and_publishes_exact_output \
+            -- --exact
+          cargo test -p vyane-cli --test daemon_workflow_acceptance \
+            submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
             -- --exact
 
   coverage:
