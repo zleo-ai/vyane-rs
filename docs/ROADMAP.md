@@ -166,6 +166,8 @@ in a fresh CI process with the other multi-thread native AgentRun isolations.
 [WP-141](plan/WP-141.md) isolates the read-only process-harness workdir fixture
 in a fresh CI process after instrumented suite load left status polling with
 only the daemon listen line.
+[WP-142](plan/WP-142.md) isolates the configured native-ceiling AgentRun fixture
+in a fresh CI process with the other multi-thread native AgentRun isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

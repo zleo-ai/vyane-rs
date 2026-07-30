@@ -148,7 +148,8 @@ jobs:
             --skip native_agent_submit_fails_over_and_exact_retry_rejects_chain_drift \
             --skip native_agent_cancel_uses_the_exact_in_process_controller \
             --skip configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay \
-            --skip read_only_explicit_workdir_is_the_fake_harness_cwd
+            --skip read_only_explicit_workdir_is_the_fake_harness_cwd \
+            --skip configured_native_ceiling_rejects_an_optional_axis_before_the_model
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -197,6 +198,11 @@ jobs:
           # instrumented suite load even though the body is stable alone.
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             read_only_explicit_workdir_is_the_fake_harness_cwd \
+            -- --exact
+          # Configured native ceiling reject is a multi-thread native AgentRun
+          # control-plane fixture sharing suite-handoff sensitivity with neighbors.
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            configured_native_ceiling_rejects_an_optional_axis_before_the_model \
             -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
@@ -309,7 +315,8 @@ jobs:
             --skip native_agent_submit_fails_over_and_exact_retry_rejects_chain_drift \
             --skip native_agent_cancel_uses_the_exact_in_process_controller \
             --skip configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay \
-            --skip read_only_explicit_workdir_is_the_fake_harness_cwd
+            --skip read_only_explicit_workdir_is_the_fake_harness_cwd \
+            --skip configured_native_ceiling_rejects_an_optional_axis_before_the_model
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -345,6 +352,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- read_only_explicit_workdir_is_the_fake_harness_cwd \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
+            -- configured_native_ceiling_rejects_an_optional_axis_before_the_model \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \
