@@ -136,6 +136,8 @@ load.
 extends exact-controller restart recovery isolation to the normal CI job after
 suite load still observed non-terminal restart states while the bodies stayed
 stable alone.
+[WP-129](plan/WP-129.md) isolates the plain-to-auto-pursuit daemon start fixture
+in a fresh CI process after macOS suite handoff left plain daemon stop unclean.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
