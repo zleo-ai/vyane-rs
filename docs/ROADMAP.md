@@ -94,6 +94,11 @@ starve mock targets during status polling.
 two-worker Tokio runtimes for the same multi-mock scheduling class.
 [WP-115](plan/WP-115.md) puts multi-mock CLI acceptance failover/stream
 fixtures on two-worker Tokio runtimes.
+[WP-116](plan/WP-116.md) keeps the long dual-path workflow fixture
+schedulable under llvm-cov after main coverage left it `running` for the full
+poll budget: more workers, non-blocking CLI I/O, hold-until-release mock gate,
+daemon-log settlement panics, and incremental-cache cleanup before the
+isolated coverage process.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

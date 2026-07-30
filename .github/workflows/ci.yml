@@ -202,6 +202,10 @@ jobs:
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
+          # Drop incremental debris after the full instrumented suite so the
+          # long dual-path workflow fixture is not disk- or fd-starved while
+          # Wiremock holds an in-flight delayed target for the resident daemon.
+          rm -rf target/llvm-cov-target/debug/incremental
           cargo llvm-cov --no-report -p vyane-cli --test daemon_workflow_acceptance \
             -- submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
             --exact
