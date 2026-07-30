@@ -548,7 +548,9 @@ async fn detach_returns_fast_then_completes_success() {
     assert_task_database_excludes(data_dir.path(), &canaries);
 }
 
-#[tokio::test]
+// MockServer-backed detached CLI fixtures use two workers so delayed or
+// concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detached_auto_route_freezes_profile_effort_and_labels() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "auto detached", Duration::ZERO).await;
@@ -595,7 +597,9 @@ async fn detached_auto_route_freezes_profile_effort_and_labels() {
     assert_eq!(records[0]["labels"]["routing.effort"], "low");
 }
 
-#[tokio::test]
+// MockServer-backed detached CLI fixtures use two workers so delayed or
+// concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detached_no_frontier_replays_parent_failover_filter() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "guarded detached", Duration::ZERO).await;
@@ -649,7 +653,9 @@ async fn detached_no_frontier_replays_parent_failover_filter() {
 
 /// Acceptance #2: a config error with `--detach` exits 2 and creates no task
 /// dir (validation happens before anything is spawned).
-#[tokio::test]
+// MockServer-backed detached CLI fixtures use two workers so delayed or
+// concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detach_config_error_exits_two_and_creates_no_task_dir() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -680,7 +686,9 @@ async fn detach_config_error_exits_two_and_creates_no_task_dir() {
 /// no task dir. The reviewer's repro: `--label bad`. This proves the full
 /// TaskSpec (label parsing included) is validated before anything is spawned,
 /// not deferred into a worker that would leave a stray task dir behind.
-#[tokio::test]
+// MockServer-backed detached CLI fixtures use two workers so delayed or
+// concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detach_bad_label_exits_two_and_creates_no_task_dir() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -709,7 +717,9 @@ async fn detach_bad_label_exits_two_and_creates_no_task_dir() {
 /// Capability admission is also a parent-side detached preflight: a chat-only
 /// target cannot accept filesystem mutation, and rejection leaves both the
 /// task database and worker population at zero.
-#[tokio::test]
+// MockServer-backed detached CLI fixtures use two workers so delayed or
+// concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detached_direct_http_write_is_rejected_before_task_or_process() {
     let server = MockServer::start().await;
     let config_dir = TempDir::new().expect("config tempdir");
@@ -901,7 +911,9 @@ async fn corrupt_stdin_envelope_finalizes_error_not_running() {
     );
 }
 
-#[tokio::test]
+// MockServer-backed detached CLI fixtures use two workers so delayed or
+// concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_job_reader_preserves_target_snapshot_drift_check() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "must not execute", Duration::ZERO).await;
@@ -972,7 +984,9 @@ async fn legacy_job_reader_preserves_target_snapshot_drift_check() {
 /// Empty stdin is the explicit migration fallback for task directories written
 /// by old parents. A valid legacy job must still run to completion and remain
 /// readable after the stdin-envelope transport ships.
-#[tokio::test]
+// MockServer-backed detached CLI fixtures use two workers so delayed or
+// concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_job_json_still_executes_with_empty_stdin() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "legacy answer", Duration::ZERO).await;
@@ -1634,7 +1648,9 @@ async fn orphan_running_with_dead_pid_shows_died() {
 }
 
 /// Acceptance #5: `task list` orders most-recent-first and `--json` parses.
-#[tokio::test]
+// MockServer-backed detached CLI fixtures use two workers so delayed or
+// concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_list_orders_recent_first_and_json_parses() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "quick", Duration::from_millis(50)).await;
