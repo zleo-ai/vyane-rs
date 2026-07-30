@@ -1243,7 +1243,10 @@ async fn native_writable_command_root_reaches_the_real_resident_sandbox() {
     assert!(daemon.stop().status.success());
 }
 
-#[tokio::test]
+// Dual Wiremock targets (chat + hosted search) must stay independently
+// schedulable while the fixture polls the daemon control plane after earlier
+// acceptance runtimes in the same process have torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_web_search_uses_the_separate_frozen_responses_target() {
     let main_server = MockServer::start().await;
     let response_index = Arc::new(AtomicUsize::new(0));

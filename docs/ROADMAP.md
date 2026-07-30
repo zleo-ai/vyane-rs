@@ -81,6 +81,9 @@ the runtime budget elapses, without extending execution timeouts.
 [WP-110](plan/WP-110.md) adds a second, settlement-only lease heartbeat
 immediately before terminal pause writes so pause settlement does not depend
 on residual loop-start lease alone.
+[WP-111](plan/WP-111.md) gives the dual-mock native web-search fixture
+independent Tokio workers after Ubuntu left it polling until the status budget
+expired with only the daemon listen line in the log.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
