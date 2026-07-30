@@ -141,6 +141,8 @@ in a fresh CI process after macOS suite handoff left plain daemon stop unclean.
 [WP-130](plan/WP-130.md) puts the remaining MockServer-backed CLI acceptance
 fixtures on two-worker Tokio runtimes so dispatch/workflow/stream/review wire
 paths stay schedulable under suite load.
+[WP-131](plan/WP-131.md) isolates graceful-stop restart settlement in a fresh CI
+process, completing the long-delay restart fixture process isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
