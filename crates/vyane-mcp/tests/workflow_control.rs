@@ -27,6 +27,8 @@ impl FakeWorkflowControl {
             caller_id,
             state,
             failure_code: None,
+            output: None,
+            output_omitted: false,
         }
     }
 }
@@ -56,6 +58,8 @@ impl WorkflowControl for FakeWorkflowControl {
                 caller_id,
                 state: WorkflowState::Failed,
                 failure_code: Some(WorkflowFailureCode::DispatchFailed),
+                output: None,
+                output_omitted: false,
             })
         })
     }
@@ -69,6 +73,60 @@ impl WorkflowControl for FakeWorkflowControl {
             // Returning an already-terminal view is the idempotent cancel
             // contract, not a conflict.
             Ok(Self::view(caller_id, WorkflowState::Cancelled))
+        })
+    }
+}
+
+#[derive(Default)]
+struct SucceededWorkflowControl {
+    answer: String,
+}
+
+impl WorkflowControl for SucceededWorkflowControl {
+    fn submit(
+        &self,
+        request: WorkflowSubmitRequest,
+    ) -> WorkflowControlFuture<'_, Result<WorkflowView, WorkflowControlError>> {
+        let answer = self.answer.clone();
+        Box::pin(async move {
+            Ok(WorkflowView {
+                caller_id: request.caller_id,
+                state: WorkflowState::Succeeded,
+                failure_code: None,
+                output: Some(answer),
+                output_omitted: false,
+            })
+        })
+    }
+
+    fn status(
+        &self,
+        caller_id: WorkflowRunId,
+    ) -> WorkflowControlFuture<'_, Result<WorkflowView, WorkflowControlError>> {
+        let answer = self.answer.clone();
+        Box::pin(async move {
+            Ok(WorkflowView {
+                caller_id,
+                state: WorkflowState::Succeeded,
+                failure_code: None,
+                output: Some(answer),
+                output_omitted: false,
+            })
+        })
+    }
+
+    fn cancel(
+        &self,
+        caller_id: WorkflowRunId,
+    ) -> WorkflowControlFuture<'_, Result<WorkflowView, WorkflowControlError>> {
+        Box::pin(async move {
+            Ok(WorkflowView {
+                caller_id,
+                state: WorkflowState::Succeeded,
+                failure_code: None,
+                output: None,
+                output_omitted: false,
+            })
         })
     }
 }
@@ -133,6 +191,8 @@ async fn optional_workflow_port_preserves_six_tool_default_and_enables_strict_co
     .await?;
     assert_eq!(status["state"], "failed");
     assert_eq!(status["failure_code"], "dispatch_failed");
+    assert!(status.get("output").is_none());
+    assert!(status.get("output_omitted").is_none());
 
     for (error, code) in [
         (WorkflowControlError::InvalidRequest, "invalid_argument"),
@@ -186,6 +246,39 @@ async fn optional_workflow_port_preserves_six_tool_default_and_enables_strict_co
     .await?;
     assert_eq!(invalid_id["error"]["code"], "invalid_argument");
     assert!(!invalid_id.to_string().contains(CANARY));
+
+    client.cancel().await?;
+    server_handle.await??;
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn succeeded_status_projects_bounded_output_and_omits_on_oversized() -> anyhow::Result<()> {
+    let (service, root) = test_service()?;
+    let fake = Arc::new(SucceededWorkflowControl {
+        answer: "mcp daemon answer".into(),
+    });
+    let server = VyaneMcpServer::with_workflow_control(service, fake);
+    let (server_transport, client_transport) = tokio::io::duplex(512 * 1024);
+    let server_handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+
+    let caller_id = WorkflowRunId::generate().to_string();
+    let status = call(
+        &client,
+        "vyane_workflow_status",
+        serde_json::json!({ "caller_id": caller_id }),
+    )
+    .await?;
+    assert_eq!(status["state"], "succeeded");
+    assert_eq!(status["output"], "mcp daemon answer");
+    assert!(status.get("output_omitted").is_none());
+    assert!(status.get("owner").is_none());
+    assert!(status.get("error").is_none());
 
     client.cancel().await?;
     server_handle.await??;
