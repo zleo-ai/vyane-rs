@@ -66,6 +66,18 @@ workflow token access to read-only repository contents.
 [WP-105](plan/WP-105.md) gives the service-owned no-lane resident broker
 fixture a fresh process in normal and coverage gates after an exact macOS main
 run hung at that runtime handoff.
+[WP-106](plan/WP-106.md) gives the resident workflow acceptance fixture a
+two-thread Tokio runtime so its blocking CLI polling cannot starve the mock
+target serving the detached daemon.
+[WP-107](plan/WP-107.md) gives the resident completion supervisor fixture
+independent Tokio workers and a bounded final join after an exact coverage
+process consumed the whole job timeout during shutdown.
+[WP-108](plan/WP-108.md) gives the mixed process/native daemon fixture
+independent Tokio workers after Ubuntu delayed its two 15-second terminal
+pollers for roughly 90 seconds in the full acceptance-test process.
+[WP-109](plan/WP-109.md) reserves a documented settlement margin on each
+pursuit lease renewal so overall-timeout pause checkpoints can finish after
+the runtime budget elapses, without extending execution timeouts.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

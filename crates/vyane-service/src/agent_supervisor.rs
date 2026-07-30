@@ -2430,7 +2430,10 @@ mod tests {
         release.notify_one();
     }
 
-    #[tokio::test]
+    // The resident supervisor owns concurrent execution and completion loops.
+    // Keep them independently schedulable and bound shutdown just like the
+    // adjacent host-cancellation fixture.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resident_supervisor_publishes_committed_completion() {
         let fixture = Fixture::new();
         fixture.enqueue_in_process(OWNER_COMPLETION, "publish", 0);
@@ -2477,7 +2480,10 @@ mod tests {
             .await
             .unwrap();
         cancel.cancel();
-        let exit = task.await.unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(sink.published.load(Ordering::SeqCst), 1);
         assert!(exit.completion.claimed >= 1);

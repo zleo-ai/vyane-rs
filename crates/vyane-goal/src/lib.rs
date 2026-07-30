@@ -39,9 +39,10 @@ pub use projection::{
 };
 pub use pursuit::{
     GoalPursuer, GoalPursuitCheckpoint, GoalSegmentRuntime, MAX_PURSUIT_FAILURES,
-    MAX_PURSUIT_SEGMENTS, MAX_PURSUIT_TIMEOUT, MAX_SEGMENT_TIMEOUT, PursuitCheckpointStatus,
-    PursuitConfig, PursuitOutcome, PursuitSegmentRequest, PursuitSegmentResult,
-    PursuitSegmentStatus, PursuitStatus,
+    MAX_PURSUIT_SEGMENTS, MAX_PURSUIT_TIMEOUT, MAX_SEGMENT_TIMEOUT,
+    PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS, PursuitCheckpointStatus, PursuitConfig,
+    PursuitOutcome, PursuitSegmentRequest, PursuitSegmentResult, PursuitSegmentStatus,
+    PursuitStatus, pursuit_lease_seconds,
 };
 pub use sqlite::{SCHEMA_VERSION, SqliteGoalStore};
 pub use store::GoalStore;

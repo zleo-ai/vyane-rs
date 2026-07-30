@@ -192,7 +192,10 @@ fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
     }
 }
 
-#[tokio::test]
+// The test drives blocking CLI subprocesses while Wiremock must continue
+// serving the detached daemon. A current-thread runtime can starve the mock
+// server during synchronous status polling and leave the workflow `running`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
     let server = MockServer::start().await;
     // Keep the target in flight long enough to prove that `workflow submit`
