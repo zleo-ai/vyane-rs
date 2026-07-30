@@ -87,7 +87,16 @@ jobs:
           # scheduling, including paused-time tests that rely on Tokio's
           # automatic clock advancement.
           cargo test --workspace --exclude vyane-broker --exclude vyane-cli --exclude vyane-service
-          cargo test -p vyane-broker -- --test-threads=1
+          # The no-lane maintenance case owns a paused Tokio runtime around
+          # SQLite-backed maintenance. On macOS it can stall when that runtime
+          # is created after the other supervisor contract runtimes have torn
+          # down, even though it is stable in a fresh process.
+          cargo test -p vyane-broker -- \
+            --test-threads=1 \
+            --skip maintenance_runs_without_delivery_lanes
+          cargo test -p vyane-broker --test supervisor_contract \
+            maintenance_runs_without_delivery_lanes \
+            -- --exact
           # The resident completion supervisor can occasionally stall at the
           # handoff from an earlier service test's Tokio runtime on Linux even
           # though the same test is stable in a fresh process. Keep the rest of
@@ -163,5 +172,15 @@ jobs:
           cargo llvm-cov --no-report -p vyane-service -- \
             agent_supervisor::tests::resident_supervisor_publishes_committed_completion \
             --exact
-          cargo llvm-cov --no-report -p vyane-cli -- --test-threads=1
+          # The process-restart acceptance case launches and observes a
+          # detached daemon. Under instrumentation, running it after the other
+          # daemon fixtures can delay the first worker invocation beyond its
+          # own explicit startup guard. Preserve that guard and measure the
+          # case in a fresh test process.
+          cargo llvm-cov --no-report -p vyane-cli -- \
+            --test-threads=1 \
+            --skip restart_recovers_exact_controller_without_replay
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
+            -- restart_recovers_exact_controller_without_replay \
+            --exact
           cargo llvm-cov report --summary-only
