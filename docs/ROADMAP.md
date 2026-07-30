@@ -132,6 +132,10 @@ paths stay schedulable under suite load.
 [WP-127](plan/WP-127.md) isolates the shared-resident native submit fixture in a
 fresh CI process after suite handoff left AgentRun output HTTP timed out under
 load.
+[WP-128](plan/WP-128.md) isolates expired-controller restart settlement and
+extends exact-controller restart recovery isolation to the normal CI job after
+suite load still observed non-terminal restart states while the bodies stayed
+stable alone.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

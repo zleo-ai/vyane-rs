@@ -131,7 +131,9 @@ jobs:
             --skip mixed_process_and_native_lanes_run_concurrently_in_one_daemon \
             --skip native_writable_command_root_reaches_the_real_resident_sandbox \
             --skip native_command_permission_reaches_the_real_resident_sandbox \
-            --skip native_agent_submit_uses_the_shared_resident_lane
+            --skip native_agent_submit_uses_the_shared_resident_lane \
+            --skip restart_settles_expired_native_controller_without_replaying_private_input \
+            --skip restart_recovers_exact_controller_without_replay
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -158,6 +160,18 @@ jobs:
           # multi-thread daemon fixtures even though the body is stable alone.
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             native_agent_submit_uses_the_shared_resident_lane \
+            -- --exact
+          # Expired-controller restart settlement can still observe `running`
+          # under suite load after earlier daemon fixtures; the body is stable
+          # alone on the intentional current-thread runtime.
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            restart_settles_expired_native_controller_without_replaying_private_input \
+            -- --exact
+          # Exact-controller restart recovery was already isolated under
+          # coverage; PR #82 showed the same suite-load deadline miss on the
+          # normal job once neighboring restart fixtures were skipped out.
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            restart_recovers_exact_controller_without_replay \
             -- --exact
           cargo test -p vyane-cli --test daemon_workflow_acceptance \
             submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
@@ -229,7 +243,8 @@ jobs:
             --skip mixed_process_and_native_lanes_run_concurrently_in_one_daemon \
             --skip native_writable_command_root_reaches_the_real_resident_sandbox \
             --skip native_command_permission_reaches_the_real_resident_sandbox \
-            --skip native_agent_submit_uses_the_shared_resident_lane
+            --skip native_agent_submit_uses_the_shared_resident_lane \
+            --skip restart_settles_expired_native_controller_without_replaying_private_input
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -247,6 +262,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- native_agent_submit_uses_the_shared_resident_lane \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
+            -- restart_settles_expired_native_controller_without_replaying_private_input \
             --exact
           # Drop incremental debris after the full instrumented suite so the
           # long dual-path workflow fixture is not disk- or fd-starved while
