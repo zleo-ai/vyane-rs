@@ -155,6 +155,8 @@ two-worker Tokio runtimes so submit/control wire paths stay schedulable under
 suite load.
 [WP-136](plan/WP-136.md) isolates the native write-permission tool-lane fixture
 in a fresh CI process alongside the other resident sandbox isolations.
+[WP-137](plan/WP-137.md) isolates the native web-search frozen target fixture in
+a fresh CI process with the other multi-thread native AgentRun isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
