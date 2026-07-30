@@ -1093,7 +1093,9 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    // Multi-mock unit fixtures need independent Tokio workers so delayed targets
+    // and failover chains stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn native_submission_freezes_the_complete_resolved_chain() {
         let _assembly = assembly_test_lock().lock().await;
         let primary = MockServer::start().await;
@@ -1225,7 +1227,9 @@ mod tests {
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
-    #[tokio::test]
+    // Multi-mock unit fixtures need independent Tokio workers so delayed targets
+    // and failover chains stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resident_native_run_fails_over_before_tool_activity() {
         let _assembly = assembly_test_lock().lock().await;
         let primary = MockServer::start().await;
@@ -1270,7 +1274,9 @@ mod tests {
         assert_eq!(secondary.received_requests().await.unwrap().len(), 1);
     }
 
-    #[tokio::test]
+    // Multi-mock unit fixtures need independent Tokio workers so delayed targets
+    // and failover chains stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resident_native_run_rejects_frozen_chain_drift_before_wire() {
         let _assembly = assembly_test_lock().lock().await;
         let primary = MockServer::start().await;
@@ -1302,7 +1308,9 @@ mod tests {
         assert!(secondary.received_requests().await.unwrap().is_empty());
     }
 
-    #[tokio::test]
+    // Multi-mock unit fixtures need independent Tokio workers so delayed targets
+    // and failover chains stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resident_native_run_never_fails_over_after_tool_activity() {
         let _assembly = assembly_test_lock().lock().await;
         let primary = MockServer::start().await;
@@ -1369,7 +1377,9 @@ mod tests {
         assert!(secondary.received_requests().await.unwrap().is_empty());
     }
 
-    #[tokio::test]
+    // Multi-mock unit fixtures need independent Tokio workers so delayed targets
+    // and failover chains stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dark_native_run_validates_scope_then_commits_and_publishes_once() {
         let _assembly = assembly_test_lock().lock().await;
         assert_pre_wire_rejection(PreWireCase::PromptDigest).await;
@@ -1552,7 +1562,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    // Multi-mock unit fixtures need independent Tokio workers so delayed targets
+    // and failover chains stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn malformed_private_input_is_body_free_and_zero_wire() {
         let _assembly = assembly_test_lock().lock().await;
         let server = MockServer::start().await;
@@ -1597,7 +1609,9 @@ mod tests {
         assert!(!format!("{report:?}").contains("TEST_MALFORMED_BODY_CANARY"));
     }
 
-    #[tokio::test]
+    // Multi-mock unit fixtures need independent Tokio workers so delayed targets
+    // and failover chains stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn durable_timeout_bounds_wire_and_retains_recovery_input() {
         let _assembly = assembly_test_lock().lock().await;
         let server = MockServer::start().await;
@@ -1657,7 +1671,9 @@ mod tests {
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
-    #[tokio::test]
+    // Multi-mock unit fixtures need independent Tokio workers so delayed targets
+    // and failover chains stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancellation_after_send_leaves_durable_reconciliation_in_charge() {
         let _assembly = assembly_test_lock().lock().await;
         let server = MockServer::start().await;
@@ -1720,7 +1736,9 @@ mod tests {
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
-    #[tokio::test]
+    // Multi-mock unit fixtures need independent Tokio workers so delayed targets
+    // and failover chains stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unavailable_completion_store_never_reports_success_or_drops_input() {
         let _assembly = assembly_test_lock().lock().await;
         let server = MockServer::start().await;

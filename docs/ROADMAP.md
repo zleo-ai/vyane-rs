@@ -90,6 +90,8 @@ for the long dual-path workflow fixture after macOS/Ubuntu suite stalls.
 [WP-113](plan/WP-113.md) puts the remaining Wiremock-backed native AgentRun
 acceptance fixtures on two-worker Tokio runtimes so suite handoffs cannot
 starve mock targets during status polling.
+[WP-114](plan/WP-114.md) puts Wiremock-backed `native_agent` unit fixtures on
+two-worker Tokio runtimes for the same multi-mock scheduling class.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
