@@ -150,6 +150,9 @@ fresh CI process after macOS suite handoff left a `supervisor_cont` orphan.
 [WP-134](plan/WP-134.md) puts MockServer-backed protocol client fixtures on
 two-worker Tokio runtimes so complete/stream/retry wire paths stay schedulable
 under suite load.
+[WP-135](plan/WP-135.md) puts MockServer-backed daemon client unit fixtures on
+two-worker Tokio runtimes so submit/control wire paths stay schedulable under
+suite load.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
