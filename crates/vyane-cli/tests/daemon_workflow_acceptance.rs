@@ -233,17 +233,32 @@ async fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
 /// Holds the mock HTTP response open until the test proves submit returned
 /// while the workflow is still non-terminal, then releases completion.
 /// Blocking the Wiremock worker is intentional: it is the in-flight target.
+/// The hold is time-bounded so a submit-path regression that waits for the
+/// target cannot deadlock against this responder forever.
 struct HoldUntilRelease {
     release: Mutex<Option<Receiver<()>>>,
     template: ResponseTemplate,
+    hold_budget: Duration,
 }
 
 impl Respond for HoldUntilRelease {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         if let Some(rx) = self.release.lock().expect("hold release mutex").take() {
-            let _ = rx.recv();
+            let _ = rx.recv_timeout(self.hold_budget);
         }
         self.template.clone()
+    }
+}
+
+/// Best-effort release if the submission path panics or is cancelled before
+/// the explicit post-admission send.
+struct ReleaseOnDrop(Option<mpsc::Sender<()>>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
     }
 }
 
@@ -256,7 +271,11 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
     // Do not rely on wall-clock delay: under llvm-cov the instrumented daemon
     // can take longer than any fixed mock delay to return the submit view.
     // Hold the target open until after we observe a non-terminal submission.
+    // Bound the hold so a submit-waits-for-target regression cannot deadlock
+    // the mock forever (the non-terminal assert still fails if that happens).
+    const HOLD_BUDGET: Duration = Duration::from_secs(45);
     let (release_tx, release_rx) = mpsc::channel();
+    let mut release = ReleaseOnDrop(Some(release_tx));
     let held = ResponseTemplate::new(200).set_body_json(json!({
         "id": "chatcmpl-daemon-acceptance",
         "model": "test-model",
@@ -271,6 +290,7 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
         .respond_with(HoldUntilRelease {
             release: Mutex::new(Some(release_rx)),
             template: held,
+            hold_budget: HOLD_BUDGET,
         })
         .expect(1)
         .mount(&server)
@@ -312,13 +332,12 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
         "initial journal must be non-terminal: {submitted}"
     );
 
-    // Release only after the non-terminal admission proof. Do not wait on
-    // `received_requests` while the responder still holds the connection —
-    // Wiremock may only record the request after `respond` returns, which
-    // would deadlock with a pre-release hit wait.
-    release_tx
-        .send(())
-        .expect("release held mock after non-terminal submit");
+    // Explicit release after the non-terminal admission proof. Drop also
+    // releases on panic; the responder itself times out after HOLD_BUDGET.
+    if let Some(tx) = release.0.take() {
+        tx.send(())
+            .expect("release held mock after non-terminal submit");
+    }
 
     // Coverage instrumentation can make the detached daemon substantially
     // slower on shared CI runners. Give the independent resident process
