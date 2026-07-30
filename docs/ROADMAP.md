@@ -108,6 +108,9 @@ the daemon listen line.
 [WP-119](plan/WP-119.md) isolates the concurrent process/native multi-lane
 fixture the same way after main Ubuntu left its first submit with only the
 daemon listen line inside the serialized suite.
+[WP-120](plan/WP-120.md) puts remaining delayed MockServer timeout unit
+fixtures on two-worker Tokio runtimes while leaving lease-sensitive restart
+fixtures on the current-thread runtime.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
