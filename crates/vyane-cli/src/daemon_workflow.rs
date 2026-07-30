@@ -26,8 +26,8 @@ use vyane_task::{
 };
 use vyane_workflow::{
     Workflow, WorkflowEngine, WorkflowError, WorkflowJournalSummary, WorkflowOutcome,
-    WorkflowResult, WorkflowRunId, WorkflowRunStatus, WorkflowSourceBundle, read_journal,
-    validate_workflow,
+    WorkflowResult, WorkflowRunId, WorkflowRunStatus, WorkflowSourceBundle,
+    project_workflow_view_output, read_journal, validate_workflow,
 };
 
 use crate::command::CliWorkflowResolver;
@@ -70,6 +70,11 @@ pub(crate) struct WorkflowTaskView {
     pub(crate) task: TaskRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) journal: Option<WorkflowJournalSummary>,
+    /// Bounded success answer projected from the durable journal (MCP/public).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) output: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) output_omitted: bool,
 }
 
 #[derive(Clone)]
@@ -1027,16 +1032,32 @@ impl DaemonWorkflowSupervisor {
         let journal = tokio::task::spawn_blocking(move || read_journal(&journal_dir, &id))
             .await
             .context("join workflow journal reader")?;
-        let journal = match journal {
-            Ok(journal) => Some(WorkflowJournalSummary::from(&journal)),
+        let (journal, output, output_omitted) = match journal {
+            Ok(journal) => {
+                let projection = if task.state == TaskState::Succeeded {
+                    project_workflow_view_output(&journal)
+                } else {
+                    Default::default()
+                };
+                (
+                    Some(WorkflowJournalSummary::from(&journal)),
+                    projection.output,
+                    projection.output_omitted,
+                )
+            }
             Err(vyane_workflow::WorkflowError::ReadJournal { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
-                None
+                (None, None, false)
             }
             Err(error) => return Err(error.into()),
         };
-        Ok(Some(WorkflowTaskView { task, journal }))
+        Ok(Some(WorkflowTaskView {
+            task,
+            journal,
+            output,
+            output_omitted,
+        }))
     }
 
     pub(crate) async fn cancel(&self, run_id: &WorkflowRunId) -> Result<Option<TaskRecord>> {
@@ -1754,6 +1775,8 @@ async fn submit_workflow(
         .unwrap_or(WorkflowTaskView {
             task,
             journal: None,
+            output: None,
+            output_omitted: false,
         });
     Ok((StatusCode::ACCEPTED, Json(view)))
 }
