@@ -96,9 +96,16 @@ jobs:
           # down, even though it is stable in a fresh process.
           cargo test -p vyane-broker -- \
             --test-threads=1 \
-            --skip maintenance_runs_without_delivery_lanes
+            --skip maintenance_runs_without_delivery_lanes \
+            --skip panics_use_bounded_exponential_backoff
           cargo test -p vyane-broker --test supervisor_contract \
             maintenance_runs_without_delivery_lanes \
+            -- --exact
+          # Paused-time panic backoff can stall after earlier supervisor
+          # contract runtimes under suite load even though the body is stable
+          # alone on start_paused Tokio time.
+          cargo test -p vyane-broker --test supervisor_contract \
+            panics_use_bounded_exponential_backoff \
             -- --exact
           # Resident service lifecycle fixtures can occasionally stall at the
           # handoff from earlier Tokio runtimes even though each is stable in a
@@ -232,7 +239,16 @@ jobs:
             --exclude vyane-broker \
             --exclude vyane-cli \
             --exclude vyane-service
-          cargo llvm-cov --no-report -p vyane-broker -- --test-threads=1
+          cargo llvm-cov --no-report -p vyane-broker -- \
+            --test-threads=1 \
+            --skip maintenance_runs_without_delivery_lanes \
+            --skip panics_use_bounded_exponential_backoff
+          cargo llvm-cov --no-report -p vyane-broker --test supervisor_contract -- \
+            maintenance_runs_without_delivery_lanes \
+            --exact
+          cargo llvm-cov --no-report -p vyane-broker --test supervisor_contract -- \
+            panics_use_bounded_exponential_backoff \
+            --exact
           cargo llvm-cov --no-report -p vyane-service -- \
             --test-threads=1 \
             --skip agent_supervisor::tests::resident_supervisor_publishes_committed_completion \

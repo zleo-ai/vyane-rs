@@ -145,6 +145,8 @@ paths stay schedulable under suite load.
 process, completing the long-delay restart fixture process isolations.
 [WP-132](plan/WP-132.md) widens the cooperative pursuit-cancel wall-clock check
 to two seconds after macOS suite load exceeded the prior one-second bound.
+[WP-133](plan/WP-133.md) isolates the supervisor panic-backoff fixture in a
+fresh CI process after macOS suite handoff left a `supervisor_cont` orphan.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
