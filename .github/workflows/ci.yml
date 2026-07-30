@@ -134,7 +134,8 @@ jobs:
             --skip native_agent_submit_uses_the_shared_resident_lane \
             --skip restart_settles_expired_native_controller_without_replaying_private_input \
             --skip restart_recovers_exact_controller_without_replay \
-            --skip enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first
+            --skip enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first \
+            --skip graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -173,6 +174,12 @@ jobs:
           # normal job once neighboring restart fixtures were skipped out.
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             restart_recovers_exact_controller_without_replay \
+            -- --exact
+          # Long-delay graceful stop + restart settlement is the remaining
+          # restart-class fixture still sharing the serialized suite with
+          # neighbors that already needed process isolation.
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay \
             -- --exact
           # Plain-to-auto-pursuit daemon start can fail stop under suite load on
           # macOS even though the body is stable alone.
@@ -251,7 +258,8 @@ jobs:
             --skip native_command_permission_reaches_the_real_resident_sandbox \
             --skip native_agent_submit_uses_the_shared_resident_lane \
             --skip restart_settles_expired_native_controller_without_replaying_private_input \
-            --skip enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first
+            --skip enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first \
+            --skip graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -272,6 +280,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
+            -- graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_goal_acceptance \
             -- enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first \
