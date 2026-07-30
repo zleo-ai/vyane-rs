@@ -1163,6 +1163,7 @@ mod tests {
             timeout_seconds: u64,
             execution_backend: ExecutionBackend,
         ) {
+            let available_at = *self.clock.0.lock().unwrap() - chrono::TimeDelta::seconds(1);
             let worker = NewWorker {
                 id: format!("worker-{suffix}"),
                 logical_session_id: None,
@@ -1178,7 +1179,7 @@ mod tests {
                 target_key: "http:test/model".into(),
                 prompt_digest: "a".repeat(64),
                 policy_digest: "b".repeat(64),
-                available_at: Utc::now() - chrono::TimeDelta::seconds(1),
+                available_at,
                 timeout_seconds,
                 max_resume_attempts: 0,
             };
