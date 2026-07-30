@@ -128,7 +128,8 @@ jobs:
             --skip api::tests::dispatch_panic_is_classified_internal_and_cleans_live_token \
             --skip submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
             --skip process_agent_success_is_idempotent_and_publishes_exact_output \
-            --skip mixed_process_and_native_lanes_run_concurrently_in_one_daemon
+            --skip mixed_process_and_native_lanes_run_concurrently_in_one_daemon \
+            --skip native_writable_command_root_reaches_the_real_resident_sandbox
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -144,6 +145,9 @@ jobs:
             -- --exact
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             process_agent_success_is_idempotent_and_publishes_exact_output \
+            -- --exact
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            native_writable_command_root_reaches_the_real_resident_sandbox \
             -- --exact
           cargo test -p vyane-cli --test daemon_workflow_acceptance \
             submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
@@ -212,7 +216,8 @@ jobs:
             --skip restart_recovers_exact_controller_without_replay \
             --skip submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
             --skip process_agent_success_is_idempotent_and_publishes_exact_output \
-            --skip mixed_process_and_native_lanes_run_concurrently_in_one_daemon
+            --skip mixed_process_and_native_lanes_run_concurrently_in_one_daemon \
+            --skip native_writable_command_root_reaches_the_real_resident_sandbox
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -221,6 +226,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- process_agent_success_is_idempotent_and_publishes_exact_output \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
+            -- native_writable_command_root_reaches_the_real_resident_sandbox \
             --exact
           # Drop incremental debris after the full instrumented suite so the
           # long dual-path workflow fixture is not disk- or fd-starved while
