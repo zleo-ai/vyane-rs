@@ -555,7 +555,9 @@ prompt = "{PRIVATE_PROMPT}"
         }
     }
 
-    #[tokio::test]
+    // MockServer-backed daemon client fixtures use two workers so delayed
+    // or concurrent wire paths stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_sends_bearer_and_never_follows_redirects() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -578,7 +580,9 @@ prompt = "{PRIVATE_PROMPT}"
         assert!(error.contains("HTTP 302"));
     }
 
-    #[tokio::test]
+    // MockServer-backed daemon client fixtures use two workers so delayed
+    // or concurrent wire paths stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_rejects_oversized_response_before_json_parsing() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -595,7 +599,9 @@ prompt = "{PRIVATE_PROMPT}"
         assert!(error.contains("response exceeds"));
     }
 
-    #[tokio::test]
+    // MockServer-backed daemon client fixtures use two workers so delayed
+    // or concurrent wire paths stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn submission_sends_client_id_and_canonical_cwd_and_bounds_4xx_error() {
         let server = MockServer::start().await;
         let execution_cwd = PathBuf::from("/tmp/vyane-client-test");
@@ -651,7 +657,9 @@ prompt = "{PRIVATE_PROMPT}"
         }
     }
 
-    #[tokio::test]
+    // MockServer-backed daemon client fixtures use two workers so delayed
+    // or concurrent wire paths stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn submission_5xx_is_bounded_outcome_unknown() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -696,7 +704,9 @@ prompt = "{PRIVATE_PROMPT}"
         assert_eq!(json["http_status"], 500);
     }
 
-    #[tokio::test]
+    // MockServer-backed daemon client fixtures use two workers so delayed
+    // or concurrent wire paths stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn malformed_accepted_response_is_outcome_unknown_without_body_echo() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -733,7 +743,9 @@ prompt = "{PRIVATE_PROMPT}"
         }
     }
 
-    #[tokio::test]
+    // MockServer-backed daemon client fixtures use two workers so delayed
+    // or concurrent wire paths stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn oversized_accepted_response_is_outcome_unknown_without_body_echo() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -771,7 +783,9 @@ prompt = "{PRIVATE_PROMPT}"
         }
     }
 
-    #[tokio::test]
+    // MockServer-backed daemon client fixtures use two workers so delayed
+    // or concurrent wire paths stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn accepted_response_with_another_id_is_outcome_unknown() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -847,7 +861,9 @@ prompt = "{PRIVATE_PROMPT}"
         assert!(rendered.len() < 1_024);
     }
 
-    #[tokio::test]
+    // MockServer-backed daemon client fixtures use two workers so delayed
+    // or concurrent wire paths stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workflow_control_status_maps_missing_without_echoing_daemon_body() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -868,7 +884,9 @@ prompt = "{PRIVATE_PROMPT}"
         );
     }
 
-    #[tokio::test]
+    // MockServer-backed daemon client fixtures use two workers so delayed
+    // or concurrent wire paths stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workflow_control_cancel_rejects_malformed_success_as_internal() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -886,7 +904,9 @@ prompt = "{PRIVATE_PROMPT}"
         );
     }
 
-    #[tokio::test]
+    // MockServer-backed daemon client fixtures use two workers so delayed
+    // or concurrent wire paths stay schedulable under suite load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workflow_control_treats_authentication_drift_as_unavailable() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
