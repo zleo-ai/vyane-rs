@@ -48,6 +48,9 @@ roadmap state.
 [WP-100](plan/WP-100.md) makes daemon terminal acceptance polling reuse one
 short-timeout client and retry transient loopback timeouts only inside the
 existing total terminal budget.
+[WP-102](plan/WP-102.md) gives the pursuit overall-timeout fixture enough room
+for its real verifier while still proving the segment receives only the
+remaining total budget.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
