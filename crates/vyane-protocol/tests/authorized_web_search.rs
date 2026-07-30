@@ -74,7 +74,9 @@ fn request() -> WebSearchRequest {
     }
 }
 
-#[tokio::test]
+// Authorized web-search fixtures drive MockServer plus cancel/retry paths.
+// Independent Tokio workers keep the mock schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_is_bounded_and_response_preserves_cited_sources() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -150,7 +152,9 @@ async fn request_is_bounded_and_response_preserves_cited_sources() {
     assert_eq!(body["include"], json!(["web_search_call.action.sources"]));
 }
 
-#[tokio::test]
+// Authorized web-search fixtures drive MockServer plus cancel/retry paths.
+// Independent Tokio workers keep the mock schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_or_oversized_sources_fail_as_protocol_errors() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -179,7 +183,9 @@ async fn malformed_or_oversized_sources_fail_as_protocol_errors() {
     assert_eq!(error.kind, vyane_core::ErrorKind::Protocol);
 }
 
-#[tokio::test]
+// Authorized web-search fixtures drive MockServer plus cancel/retry paths.
+// Independent Tokio workers keep the mock schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revocation_before_retry_prevents_the_next_search_request() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -205,7 +211,9 @@ async fn revocation_before_retry_prevents_the_next_search_request() {
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
-#[tokio::test]
+// Authorized web-search fixtures drive MockServer plus cancel/retry paths.
+// Independent Tokio workers keep the mock schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pre_cancelled_search_sends_nothing() {
     let server = MockServer::start().await;
     let cancel = CancellationToken::new();

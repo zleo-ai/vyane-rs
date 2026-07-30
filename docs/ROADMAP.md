@@ -111,6 +111,9 @@ daemon listen line inside the serialized suite.
 [WP-120](plan/WP-120.md) puts remaining delayed MockServer timeout unit
 fixtures on two-worker Tokio runtimes while leaving lease-sensitive restart
 fixtures on the current-thread runtime.
+[WP-121](plan/WP-121.md) puts authorized OpenAI Responses web-search
+MockServer fixtures on two-worker Tokio runtimes so cancel/retry paths stay
+schedulable under suite load.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
