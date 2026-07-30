@@ -129,6 +129,9 @@ daemon listen line under suite load.
 [WP-126](plan/WP-126.md) puts the remaining MockServer-backed detached CLI
 acceptance fixtures on two-worker Tokio runtimes so wiremock-backed dispatch
 paths stay schedulable under suite load.
+[WP-127](plan/WP-127.md) isolates the shared-resident native submit fixture in a
+fresh CI process after suite handoff left AgentRun output HTTP timed out under
+load.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
