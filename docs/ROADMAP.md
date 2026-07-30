@@ -96,7 +96,7 @@ two-worker Tokio runtimes for the same multi-mock scheduling class.
 fixtures on two-worker Tokio runtimes.
 [WP-116](plan/WP-116.md) keeps the long dual-path workflow fixture
 schedulable under llvm-cov after main coverage left it `running` for the full
-poll budget: more workers, non-blocking CLI I/O, shorter in-flight mock delay,
+poll budget: more workers, non-blocking CLI I/O, hold-until-release mock gate,
 early mock-hit detection, and incremental-cache cleanup before the isolated
 coverage process.
 

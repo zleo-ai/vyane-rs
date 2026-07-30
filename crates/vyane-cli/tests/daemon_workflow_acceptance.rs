@@ -9,6 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::process::Stdio;
+use std::sync::Mutex;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
@@ -16,7 +18,7 @@ use rmcp::model::{CallToolRequestParams, CallToolResult};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const VYANE_BIN: &str = env!("CARGO_BIN_EXE_vyane");
 const EXPLICIT_RUN_ID: &str = "0197f524-7a00-7000-8000-000000000001";
@@ -228,32 +230,48 @@ async fn poll_workflow_terminal(data_dir: &Path, budget: Duration) -> Value {
     }
 }
 
+/// Holds the mock HTTP response open until the test proves submit returned
+/// while the workflow is still non-terminal, then releases completion.
+/// Blocking the Wiremock worker is intentional: it is the in-flight target.
+struct HoldUntilRelease {
+    release: Mutex<Option<Receiver<()>>>,
+    template: ResponseTemplate,
+}
+
+impl Respond for HoldUntilRelease {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        if let Some(rx) = self.release.lock().expect("hold release mutex").take() {
+            let _ = rx.recv();
+        }
+        self.template.clone()
+    }
+}
+
 // The test drives blocking CLI subprocesses while Wiremock must continue
 // serving the detached daemon. Keep several runtime workers free for the mock
-// delay future, and never block those workers on CLI subprocess I/O.
+// hold path, and never block those workers on CLI subprocess I/O.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
     let server = MockServer::start().await;
-    // Keep the target in flight long enough to prove that `workflow submit`
-    // returned after durable admission rather than after executing the step.
-    // Three seconds is well above CLI submit latency and short enough that
-    // coverage-instrumented daemons still settle inside the poll budget.
-    const TARGET_DELAY: Duration = Duration::from_secs(3);
+    // Do not rely on wall-clock delay: under llvm-cov the instrumented daemon
+    // can take longer than any fixed mock delay to return the submit view.
+    // Hold the target open until after we observe a non-terminal submission.
+    let (release_tx, release_rx) = mpsc::channel();
+    let held = ResponseTemplate::new(200).set_body_json(json!({
+        "id": "chatcmpl-daemon-acceptance",
+        "model": "test-model",
+        "choices": [{
+            "message": { "role": "assistant", "content": "daemon answer" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 3, "completion_tokens": 2 }
+    }));
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(TARGET_DELAY)
-                .set_body_json(json!({
-                    "id": "chatcmpl-daemon-acceptance",
-                    "model": "test-model",
-                    "choices": [{
-                        "message": { "role": "assistant", "content": "daemon answer" },
-                        "finish_reason": "stop"
-                    }],
-                    "usage": { "prompt_tokens": 3, "completion_tokens": 2 }
-                })),
-        )
+        .respond_with(HoldUntilRelease {
+            release: Mutex::new(Some(release_rx)),
+            template: held,
+        })
         .expect(1)
         .mount(&server)
         .await;
@@ -283,7 +301,7 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
             submitted["task"]["state"].as_str(),
             Some("queued" | "running")
         ),
-        "submission CLI must exit while the delayed workflow remains active: {submitted}"
+        "submission CLI must exit while the held workflow remains active: {submitted}"
     );
     assert_eq!(submitted["journal"]["id"], EXPLICIT_RUN_ID);
     assert!(
@@ -294,30 +312,17 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
         "initial journal must be non-terminal: {submitted}"
     );
 
-    // Fail closed early if the instrumented daemon never reaches the mock.
-    // That distinguishes wire starvation from a later settlement hang.
-    let wire_deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let hits = server
-            .received_requests()
-            .await
-            .expect("request recording")
-            .len();
-        if hits >= 1 {
-            break;
-        }
-        assert!(
-            Instant::now() < wire_deadline,
-            "daemon never hit the delayed mock within 30s after submit; last submission = {submitted}; log=\n{}",
-            daemon_log_excerpt(data_dir.path())
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // Release only after the non-terminal admission proof. Do not wait on
+    // `received_requests` while the responder still holds the connection —
+    // Wiremock may only record the request after `respond` returns, which
+    // would deadlock with a pre-release hit wait.
+    release_tx
+        .send(())
+        .expect("release held mock after non-terminal submit");
 
     // Coverage instrumentation can make the detached daemon substantially
-    // slower on shared CI runners. Keep the explicit in-flight proof, but
-    // give the independent resident process enough time to publish terminal
-    // state before treating it as stuck.
+    // slower on shared CI runners. Give the independent resident process
+    // enough time to publish terminal state after the held target completes.
     let terminal = poll_workflow_terminal(data_dir.path(), Duration::from_secs(120)).await;
     assert_eq!(terminal["task"]["id"], EXPLICIT_RUN_ID);
     assert_eq!(terminal["task"]["state"], "succeeded");
