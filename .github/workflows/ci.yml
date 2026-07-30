@@ -132,7 +132,8 @@ jobs:
             --skip native_writable_command_root_reaches_the_real_resident_sandbox \
             --skip native_command_permission_reaches_the_real_resident_sandbox \
             --skip native_agent_submit_uses_the_shared_resident_lane \
-            --skip restart_settles_expired_native_controller_without_replaying_private_input
+            --skip restart_settles_expired_native_controller_without_replaying_private_input \
+            --skip restart_recovers_exact_controller_without_replay
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -165,6 +166,12 @@ jobs:
           # alone on the intentional current-thread runtime.
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             restart_settles_expired_native_controller_without_replaying_private_input \
+            -- --exact
+          # Exact-controller restart recovery was already isolated under
+          # coverage; PR #82 showed the same suite-load deadline miss on the
+          # normal job once neighboring restart fixtures were skipped out.
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            restart_recovers_exact_controller_without_replay \
             -- --exact
           cargo test -p vyane-cli --test daemon_workflow_acceptance \
             submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
