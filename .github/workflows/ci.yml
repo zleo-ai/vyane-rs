@@ -146,7 +146,8 @@ jobs:
             --skip native_write_permission_reaches_the_real_resident_tool_lane \
             --skip native_web_search_uses_the_separate_frozen_responses_target \
             --skip native_agent_submit_fails_over_and_exact_retry_rejects_chain_drift \
-            --skip native_agent_cancel_uses_the_exact_in_process_controller
+            --skip native_agent_cancel_uses_the_exact_in_process_controller \
+            --skip configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -185,6 +186,11 @@ jobs:
             -- --exact
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             native_agent_cancel_uses_the_exact_in_process_controller \
+            -- --exact
+          # Configured tool-ask stop uses the same multi-thread native AgentRun
+          # wiremock + terminal-poll class as the write-permission isolation.
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay \
             -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
@@ -295,7 +301,8 @@ jobs:
             --skip native_write_permission_reaches_the_real_resident_tool_lane \
             --skip native_web_search_uses_the_separate_frozen_responses_target \
             --skip native_agent_submit_fails_over_and_exact_retry_rejects_chain_drift \
-            --skip native_agent_cancel_uses_the_exact_in_process_controller
+            --skip native_agent_cancel_uses_the_exact_in_process_controller \
+            --skip configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -325,6 +332,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- native_agent_cancel_uses_the_exact_in_process_controller \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
+            -- configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \

@@ -161,6 +161,8 @@ a fresh CI process with the other multi-thread native AgentRun isolations.
 in a fresh CI process under suite load.
 [WP-139](plan/WP-139.md) isolates the native in-process cancel controller fixture
 in a fresh CI process with the other multi-thread native AgentRun isolations.
+[WP-140](plan/WP-140.md) isolates the configured tool-ask native AgentRun fixture
+in a fresh CI process with the other multi-thread native AgentRun isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
