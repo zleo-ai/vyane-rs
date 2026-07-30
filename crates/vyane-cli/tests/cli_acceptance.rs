@@ -587,7 +587,9 @@ async fn profile_prefix_disambiguates_a_profile_named_auto() {
     assert!(record["labels"].get("routing.mode").is_none());
 }
 
-#[tokio::test]
+// Multi-mock CLI acceptance fixtures need independent Tokio workers so
+// failover and delayed targets stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_failover_and_history_work_end_to_end() {
     let primary = MockServer::start().await;
     let backup = MockServer::start().await;
@@ -884,7 +886,9 @@ async fn workflow_auto_target_resolves_after_render_and_records_route() {
     assert_eq!(records[1]["labels"]["routing.profile"], "cheap");
 }
 
-#[tokio::test]
+// Multi-mock CLI acceptance fixtures need independent Tokio workers so
+// failover and delayed targets stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_explicit_effort_overrides_profile_and_tier_across_failover() {
     let primary = MockServer::start().await;
     let backup = MockServer::start().await;
@@ -1263,7 +1267,9 @@ async fn dispatch_stream_prints_deltas_and_writes_ledger() {
     assert_eq!(parsed["output"], "streamed answer");
 }
 
-#[tokio::test]
+// Multi-mock CLI acceptance fixtures need independent Tokio workers so
+// failover and delayed targets stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_stream_on_failover_chain_falls_back_and_records_both_attempts() {
     let primary = MockServer::start().await;
     let backup = MockServer::start().await;

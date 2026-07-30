@@ -92,6 +92,8 @@ acceptance fixtures on two-worker Tokio runtimes so suite handoffs cannot
 starve mock targets during status polling.
 [WP-114](plan/WP-114.md) puts Wiremock-backed `native_agent` unit fixtures on
 two-worker Tokio runtimes for the same multi-mock scheduling class.
+[WP-115](plan/WP-115.md) puts multi-mock CLI acceptance failover/stream
+fixtures on two-worker Tokio runtimes.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
