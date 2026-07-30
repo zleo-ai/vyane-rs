@@ -78,6 +78,9 @@ pollers for roughly 90 seconds in the full acceptance-test process.
 [WP-109](plan/WP-109.md) reserves a documented settlement margin on each
 pursuit lease renewal so overall-timeout pause checkpoints can finish after
 the runtime budget elapses, without extending execution timeouts.
+[WP-110](plan/WP-110.md) adds a second, settlement-only lease heartbeat
+immediately before terminal pause writes so pause settlement does not depend
+on residual loop-start lease alone.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

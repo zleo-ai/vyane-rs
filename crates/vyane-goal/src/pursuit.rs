@@ -907,6 +907,19 @@ where
         reason: &str,
         verification: Option<AcceptanceVerification>,
     ) -> Result<PursuitOutcome> {
+        // Settlement-only heartbeat immediately before the pause checkpoint.
+        // Loop-start renew already covers verify/segment work
+        // ([`pursuit_lease_seconds`]); this second renew only reserves
+        // [`PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS`] so terminal pause writes
+        // can finish after the overall execution budget is exhausted. It does
+        // not extend overall_timeout or segment_timeout.
+        self.store.renew_lease(
+            owner,
+            goal_id,
+            &self.config.worker_id,
+            PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS.clamp(1, MAX_LEASE_SECONDS),
+            Utc::now(),
+        )?;
         checkpoint.status = PursuitCheckpointStatus::Paused;
         self.record_checkpoint(owner, goal_id, checkpoint, "pursuit.paused", reason)?;
         let paused = self

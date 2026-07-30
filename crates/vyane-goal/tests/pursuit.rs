@@ -695,6 +695,35 @@ async fn overall_timeout_settles_under_lease_margin_after_budget_elapses() {
         pursuit_lease_seconds(overall_budget),
         overall_budget.as_secs().saturating_add(1) + PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS
     );
+
+    // WP-110: terminal pause performs a second settlement-only lease renew
+    // after work finishes, so the pause checkpoint is not stuck on a nearly
+    // exhausted loop-start lease.
+    let events = store
+        .events(OWNER, "overall-timeout-margin")
+        .expect("events");
+    let lease_renewals = events
+        .iter()
+        .filter(|event| event.kind == GoalEventKind::LeaseRenewed)
+        .count();
+    assert!(
+        lease_renewals >= 2,
+        "overall-timeout pause must renew once for the loop and once for settlement, got {lease_renewals} renewals: {events:?}"
+    );
+    let stages = events
+        .iter()
+        .filter_map(|event| event.stage.as_deref())
+        .collect::<Vec<_>>();
+    let paused_at = stages
+        .iter()
+        .position(|stage| *stage == "pursuit.paused")
+        .expect("pause stage");
+    assert!(
+        stages[..paused_at]
+            .iter()
+            .any(|stage| stage.contains("segment") || *stage == "acceptance.verify"),
+        "pause must follow real pursuit work, stages={stages:?}"
+    );
 }
 
 #[tokio::test]
