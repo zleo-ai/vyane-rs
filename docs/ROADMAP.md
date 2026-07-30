@@ -147,6 +147,9 @@ process, completing the long-delay restart fixture process isolations.
 to two seconds after macOS suite load exceeded the prior one-second bound.
 [WP-133](plan/WP-133.md) isolates the supervisor panic-backoff fixture in a
 fresh CI process after macOS suite handoff left a `supervisor_cont` orphan.
+[WP-134](plan/WP-134.md) puts MockServer-backed protocol client fixtures on
+two-worker Tokio runtimes so complete/stream/retry wire paths stay schedulable
+under suite load.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

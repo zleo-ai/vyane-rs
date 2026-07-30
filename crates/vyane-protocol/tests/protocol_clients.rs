@@ -97,7 +97,9 @@ fn client_options(max_attempts: u32) -> ClientOptions {
     }
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_chat_complete_success_parses_outcome_and_request() {
     let server = MockServer::start().await;
@@ -147,7 +149,9 @@ async fn openai_chat_complete_success_parses_outcome_and_request() {
     assert_eq!(body["reasoning_effort"], "low");
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_chat_complete_rejects_top_level_refusal_in_legacy_text_mode() {
     let server = MockServer::start().await;
@@ -177,7 +181,9 @@ async fn openai_chat_complete_rejects_top_level_refusal_in_legacy_text_mode() {
     );
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_chat_complete_rejects_refusal_content_part_in_legacy_text_mode() {
     let server = MockServer::start().await;
@@ -206,7 +212,9 @@ async fn openai_chat_complete_rejects_refusal_content_part_in_legacy_text_mode()
     );
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_chat_complete_keeps_plain_text_content_parts_working() {
     let server = MockServer::start().await;
@@ -234,7 +242,9 @@ async fn openai_chat_complete_keeps_plain_text_content_parts_working() {
     assert_eq!(outcome.text, "plain answer");
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_wires_definitions_choice_and_exact_history() {
     let server = MockServer::start().await;
@@ -299,7 +309,9 @@ async fn openai_tool_chat_wires_definitions_choice_and_exact_history() {
     assert_eq!(body["reasoning_effort"], "low");
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_parses_text_reasoning_multi_calls_and_invalid_json() {
     let server = MockServer::start().await;
@@ -377,7 +389,9 @@ async fn openai_tool_chat_parses_text_reasoning_multi_calls_and_invalid_json() {
     assert_eq!(outcome.usage.unwrap().input_tokens, 11);
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_rejects_missing_duplicate_and_oversized_call_ids() {
     let invalid_ids = vec![
@@ -433,7 +447,9 @@ async fn openai_tool_chat_rejects_missing_duplicate_and_oversized_call_ids() {
     }
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn invalid_tool_conversation_fails_before_any_http_request() {
     let server = MockServer::start().await;
@@ -453,7 +469,9 @@ async fn invalid_tool_conversation_fails_before_any_http_request() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_preserves_and_replays_structured_refusals() {
     let server = MockServer::start().await;
@@ -528,7 +546,9 @@ async fn openai_tool_chat_preserves_and_replays_structured_refusals() {
     assert_eq!(replay["messages"][1]["refusal"], "top-level refusal");
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_rejects_bounded_sequences_before_normalization() {
     let choices = vec![
@@ -586,7 +606,9 @@ async fn openai_tool_chat_rejects_bounded_sequences_before_normalization() {
     }
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_rejects_oversized_and_deep_arguments() {
     let nesting = ToolChatLimits::JSON_DEPTH + 2;
@@ -628,7 +650,9 @@ async fn openai_tool_chat_rejects_oversized_and_deep_arguments() {
     }
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_shares_the_argument_node_budget_across_calls() {
     let large_array = std::iter::repeat_n("null", 4_200)
@@ -669,7 +693,9 @@ async fn openai_tool_chat_shares_the_argument_node_budget_across_calls() {
     assert!(error.message.contains("structural limits"));
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_reserved_extra_cannot_override_canonical_limits() {
     let server = MockServer::start().await;
@@ -687,7 +713,9 @@ async fn openai_tool_chat_reserved_extra_cannot_override_canonical_limits() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_remote_type_errors_do_not_echo_untrusted_input() {
     let server = MockServer::start().await;
@@ -724,7 +752,9 @@ async fn openai_tool_chat_remote_type_errors_do_not_echo_untrusted_input() {
     assert!(!error.message.contains(untrusted_type));
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_accepts_compatible_missing_tool_call_type() {
     let server = MockServer::start().await;
@@ -758,7 +788,9 @@ async fn openai_tool_chat_accepts_compatible_missing_tool_call_type() {
     assert_eq!(outcome.assistant.tool_calls[0].id, "call-1");
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_tool_chat_rejects_a_present_non_assistant_role() {
     let server = MockServer::start().await;
@@ -785,7 +817,9 @@ async fn openai_tool_chat_rejects_a_present_non_assistant_role() {
     );
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn anthropic_complete_success_parses_outcome_and_request() {
     let server = MockServer::start().await;
@@ -835,7 +869,9 @@ async fn anthropic_complete_success_parses_outcome_and_request() {
     assert_eq!(body["max_tokens"], 8192);
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn anthropic_complete_with_bearer_auth_sends_version_header() {
     let server = MockServer::start().await;
@@ -862,7 +898,9 @@ async fn anthropic_complete_with_bearer_auth_sends_version_header() {
     assert_eq!(outcome.finish_reason.as_deref(), Some("end_turn"));
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_responses_complete_success_parses_outcome() {
     let server = MockServer::start().await;
@@ -913,7 +951,9 @@ async fn openai_responses_complete_success_parses_outcome() {
     assert_eq!(body["reasoning"]["effort"], "low");
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn auth_errors_do_not_retry() {
     let server = MockServer::start().await;
@@ -931,7 +971,9 @@ async fn auth_errors_do_not_retry() {
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn rate_limit_retries_with_retry_after_then_surfaces_rate_limited() {
     let server = MockServer::start().await;
@@ -968,7 +1010,9 @@ async fn rate_limit_retries_with_retry_after_then_surfaces_rate_limited() {
     assert_eq!(sleeps.lock().unwrap().as_slice(), &[Duration::from_secs(1)]);
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn server_errors_retry_then_surface_protocol() {
     let server = MockServer::start().await;
@@ -986,7 +1030,9 @@ async fn server_errors_retry_then_surface_protocol() {
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn openai_chat_stream_normalizes_events() {
     let server = MockServer::start().await;
@@ -1037,7 +1083,9 @@ async fn openai_chat_stream_normalizes_events() {
     assert_eq!(body["stream_options"]["include_usage"], true);
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn anthropic_stream_normalizes_events() {
     let server = MockServer::start().await;
@@ -1090,7 +1138,9 @@ async fn anthropic_stream_normalizes_events() {
     ));
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn malformed_json_maps_to_protocol_for_each_complete_protocol() {
     for path_name in ["/v1/chat/completions", "/v1/messages", "/v1/responses"] {
@@ -1132,7 +1182,9 @@ async fn malformed_json_maps_to_protocol_for_each_complete_protocol() {
     }
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn malformed_stream_json_maps_to_protocol() {
     let server = MockServer::start().await;
@@ -1152,7 +1204,9 @@ async fn malformed_stream_json_maps_to_protocol() {
     assert_eq!(error.kind, ErrorKind::Protocol);
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn responses_stream_normalizes_events_split_across_chunks() {
     let server = MockServer::start().await;
@@ -1197,7 +1251,9 @@ async fn responses_stream_normalizes_events_split_across_chunks() {
     assert_eq!(body["stream"], true);
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn responses_stream_has_no_reasoning_events_but_still_completes() {
     let server = MockServer::start().await;
@@ -1246,7 +1302,9 @@ async fn responses_stream_has_no_reasoning_events_but_still_completes() {
     ));
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn responses_stream_reasoning_delta_is_normalized_when_present() {
     let server = MockServer::start().await;
@@ -1288,7 +1346,9 @@ async fn responses_stream_reasoning_delta_is_normalized_when_present() {
     ));
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn responses_stream_incomplete_carries_finish_reason() {
     let server = MockServer::start().await;
@@ -1325,7 +1385,9 @@ async fn responses_stream_incomplete_carries_finish_reason() {
     ));
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn responses_stream_malformed_event_maps_to_protocol_error() {
     let server = MockServer::start().await;
@@ -1346,7 +1408,9 @@ async fn responses_stream_malformed_event_maps_to_protocol_error() {
     assert_eq!(error.kind, ErrorKind::Protocol);
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn responses_stream_failed_event_maps_to_protocol_error() {
     let server = MockServer::start().await;
@@ -1373,7 +1437,9 @@ async fn responses_stream_failed_event_maps_to_protocol_error() {
     assert_eq!(error.kind, ErrorKind::Protocol);
 }
 
-#[tokio::test]
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
 async fn responses_stream_eof_without_completed_synthesizes_done() {
     let server = MockServer::start().await;
