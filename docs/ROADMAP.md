@@ -57,6 +57,9 @@ ambiguous under suite load.
 [WP-102](plan/WP-102.md) gives the pursuit overall-timeout fixture enough room
 for its real verifier while still proving the segment receives only the
 remaining total budget.
+[WP-103](plan/WP-103.md) isolates the macOS broker-maintenance runtime and the
+instrumented daemon-restart fixture in fresh test processes after exact
+main-branch failures, without changing production lifecycle budgets.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
