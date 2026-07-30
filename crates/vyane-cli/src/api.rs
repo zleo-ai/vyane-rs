@@ -4309,6 +4309,7 @@ mod tests {
         supervisor
             .live_tokens
             .insert(key.clone(), CancellationToken::new());
+        let dispatch_finished = supervisor.dispatch_finished.notified();
         assert!(supervisor.spawn_supervised_dispatch(
             attached.id.clone(),
             attached.executor_epoch,
@@ -4320,17 +4321,10 @@ mod tests {
             },
         ));
 
-        let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let record = supervisor.get("panic").await.unwrap().unwrap();
-                if record.state.is_terminal() && !supervisor.live_tokens.contains_key(&key) {
-                    break record;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), dispatch_finished)
+            .await
+            .unwrap();
+        let settled = supervisor.get("panic").await.unwrap().unwrap();
         assert_eq!(settled.state, TaskState::Failed);
         assert_eq!(settled.failure_code, Some(FailureCode::Internal));
         assert!(settled.ledger_run_id.is_none());
