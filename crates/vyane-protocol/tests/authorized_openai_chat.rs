@@ -138,7 +138,9 @@ fn success_response() -> ResponseTemplate {
     }))
 }
 
-#[tokio::test]
+// MockServer-backed authorized OpenAI Chat unit fixtures use two workers so
+// wiremock and the client path stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_wire_retry_is_revalidated_before_it_is_sent() {
     let server = MockServer::start().await;
     let responses = Arc::new(AtomicUsize::new(0));
@@ -221,7 +223,9 @@ async fn redirects_never_create_an_unvalidated_physical_request() {
     );
 }
 
-#[tokio::test]
+// MockServer-backed authorized OpenAI Chat unit fixtures use two workers so
+// wiremock and the client path stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revocation_before_a_retry_prevents_the_second_http_request() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -254,7 +258,9 @@ async fn revocation_before_a_retry_prevents_the_second_http_request() {
     );
 }
 
-#[tokio::test]
+// MockServer-backed authorized OpenAI Chat unit fixtures use two workers so
+// wiremock and the client path stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retryable_authority_error_is_returned_without_http_or_internal_retry() {
     let server = MockServer::start().await;
     let authority = RecordingAuthority::denying_on_with_kind(1, ErrorKind::Transport);
@@ -276,7 +282,9 @@ async fn retryable_authority_error_is_returned_without_http_or_internal_retry() 
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
-#[tokio::test]
+// MockServer-backed authorized OpenAI Chat unit fixtures use two workers so
+// wiremock and the client path stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pre_cancelled_turn_neither_authorizes_nor_sends() {
     let server = MockServer::start().await;
     let authority = RecordingAuthority::default();
@@ -343,7 +351,9 @@ async fn cancellation_interrupts_blocked_revalidation_before_send() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
-#[tokio::test]
+// MockServer-backed authorized OpenAI Chat unit fixtures use two workers so
+// wiremock and the client path stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_typed_request_fails_before_authority_or_http() {
     let server = MockServer::start().await;
     let authority = RecordingAuthority::default();
@@ -454,7 +464,9 @@ async fn cancellation_interrupts_retry_backoff() {
     assert_eq!(authority.effects().len(), 1);
 }
 
-#[tokio::test]
+// MockServer-backed authorized OpenAI Chat unit fixtures use two workers so
+// wiremock and the client path stay independently schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_http_errors_do_not_echo_auth_or_response_secrets() {
     const AUTH_SECRET: &str = "CANARY_AUTH_SECRET";
     const BODY_SECRET: &str = "CANARY_RESPONSE_BODY";
