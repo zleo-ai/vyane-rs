@@ -60,6 +60,9 @@ remaining total budget.
 [WP-103](plan/WP-103.md) isolates the macOS broker-maintenance runtime and the
 instrumented daemon-restart fixture in fresh test processes after exact
 main-branch failures, without changing production lifecycle budgets.
+[WP-104](plan/WP-104.md) moves every CI and publish checkout to the immutable
+official `actions/checkout` v6.0.2 commit and explicitly narrows ordinary CI
+workflow token access to read-only repository contents.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
