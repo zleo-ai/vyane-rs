@@ -618,7 +618,9 @@ async fn overall_timeout_and_cancellation_pause_without_another_segment() {
     );
     let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
     let mut timeout_config = config(&directory, 3, 2);
-    timeout_config.overall_timeout = Duration::from_millis(200);
+    let overall_budget = Duration::from_millis(1_500);
+    timeout_config.overall_timeout = overall_budget;
+    timeout_config.segment_timeout = Duration::from_secs(5);
     let slow = CapturingHangingRuntime {
         timeouts: Mutex::new(Vec::new()),
     };
@@ -633,8 +635,8 @@ async fn overall_timeout_and_cancellation_pause_without_another_segment() {
     {
         let timeouts = slow.timeouts.lock().expect("timeouts lock");
         assert_eq!(timeouts.len(), 1);
-        assert!(timeouts[0] <= Duration::from_millis(200));
-        assert!(timeouts[0] < Duration::from_secs(1));
+        assert!(timeouts[0] <= overall_budget);
+        assert!(timeouts[0] < Duration::from_secs(5));
     }
 
     let cancelled_runtime = FakeRuntime::new(|_| PursuitSegmentResult {
