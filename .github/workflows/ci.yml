@@ -127,16 +127,21 @@ jobs:
             --skip api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             --skip api::tests::dispatch_panic_is_classified_internal_and_cleans_live_token \
             --skip submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
-            --skip process_agent_success_is_idempotent_and_publishes_exact_output
+            --skip process_agent_success_is_idempotent_and_publishes_exact_output \
+            --skip mixed_process_and_native_lanes_run_concurrently_in_one_daemon
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
           cargo test -p vyane-cli --bin vyane \
             api::tests::dispatch_panic_is_classified_internal_and_cleans_live_token \
             -- --exact
-          # Process-lane AgentRun success can stall status polling after heavy
-          # dual-path workflow isolation on the same runner. Run it alone before
-          # the long workflow fixture so submit/status stay responsive.
+          # Concurrent process+native lane and process-lane success fixtures can
+          # miss the first HTTP accept after earlier multi-thread daemon work
+          # even though each body is stable alone. Run them alone before the
+          # long dual-path workflow isolation.
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            mixed_process_and_native_lanes_run_concurrently_in_one_daemon \
+            -- --exact
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             process_agent_success_is_idempotent_and_publishes_exact_output \
             -- --exact
@@ -206,9 +211,13 @@ jobs:
             --test-threads=1 \
             --skip restart_recovers_exact_controller_without_replay \
             --skip submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
-            --skip process_agent_success_is_idempotent_and_publishes_exact_output
+            --skip process_agent_success_is_idempotent_and_publishes_exact_output \
+            --skip mixed_process_and_native_lanes_run_concurrently_in_one_daemon
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
+            -- mixed_process_and_native_lanes_run_concurrently_in_one_daemon \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- process_agent_success_is_idempotent_and_publishes_exact_output \

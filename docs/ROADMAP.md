@@ -105,6 +105,9 @@ cancel paths stay schedulable under suite load.
 [WP-118](plan/WP-118.md) isolates the process-lane AgentRun success fixture in
 a fresh CI process after suite handoff left Ubuntu submission retries with only
 the daemon listen line.
+[WP-119](plan/WP-119.md) isolates the concurrent process/native multi-lane
+fixture the same way after main Ubuntu left its first submit with only the
+daemon listen line inside the serialized suite.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
