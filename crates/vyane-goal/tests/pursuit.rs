@@ -11,9 +11,10 @@ use chrono::Utc;
 use tempfile::TempDir;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerifier, GoalEventKind, GoalPursuer, GoalPursuitCheckpoint,
-    GoalSegmentRuntime, GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus,
-    PursuitConfig, PursuitSegmentRequest, PursuitSegmentResult, PursuitSegmentStatus,
-    PursuitStatus, SqliteGoalStore,
+    GoalSegmentRuntime, GoalStatus, GoalStore, GoalStoreError, NewGoal,
+    PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS, PursuitCheckpointStatus, PursuitConfig,
+    PursuitSegmentRequest, PursuitSegmentResult, PursuitSegmentStatus, PursuitStatus,
+    SqliteGoalStore, pursuit_lease_seconds,
 };
 
 const OWNER: &str = "owner-a";
@@ -114,6 +115,46 @@ impl GoalSegmentRuntime for CapturingHangingRuntime {
             .lock()
             .expect("timeouts lock")
             .push(request.timeout);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        PursuitSegmentResult {
+            status: PursuitSegmentStatus::Success,
+            run_id: None,
+        }
+    }
+}
+
+/// Hangs like [`CapturingHangingRuntime`], but records the active lease remaining
+/// when the segment starts so settlement-margin coverage is observable.
+struct LeaseProbingHangingRuntime<'a> {
+    store: &'a SqliteGoalStore,
+    goal_id: &'static str,
+    /// `(segment_timeout, lease_remaining_at_segment_start)`
+    observations: Mutex<Vec<(Duration, Duration)>>,
+}
+
+#[async_trait]
+impl GoalSegmentRuntime for LeaseProbingHangingRuntime<'_> {
+    async fn run_segment(
+        &self,
+        request: PursuitSegmentRequest,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> PursuitSegmentResult {
+        let goal = self
+            .store
+            .get(OWNER, self.goal_id)
+            .expect("goal")
+            .expect("goal present");
+        let expires = goal
+            .claim_expires_at
+            .expect("pursuit must hold an active lease at segment start");
+        let lease_remaining = expires
+            .signed_duration_since(Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO);
+        self.observations
+            .lock()
+            .expect("observations lock")
+            .push((request.timeout, lease_remaining));
         tokio::time::sleep(Duration::from_secs(5)).await;
         PursuitSegmentResult {
             status: PursuitSegmentStatus::Success,
@@ -601,6 +642,59 @@ async fn success_resets_only_runtime_failures_not_verifier_errors() {
     assert_eq!(retained.reason, "pursuit max failures reached");
     assert_eq!(retained.consecutive_failures, 2);
     assert_eq!(successful.call_count(), 1);
+}
+
+#[tokio::test]
+async fn overall_timeout_settles_under_lease_margin_after_budget_elapses() {
+    let (directory, store) = fixture();
+    running_goal(
+        &store,
+        "overall-timeout-margin",
+        vec![AcceptanceCriterion::new("custom", "cmd:false")],
+    );
+    let verifier = AcceptanceVerifier::new(directory.path(), Duration::from_secs(1)).unwrap();
+    let overall_budget = Duration::from_millis(1_500);
+    let mut timeout_config = config(&directory, 3, 2);
+    timeout_config.overall_timeout = overall_budget;
+    timeout_config.segment_timeout = Duration::from_secs(5);
+    let probing = LeaseProbingHangingRuntime {
+        store: &store,
+        goal_id: "overall-timeout-margin",
+        observations: Mutex::new(Vec::new()),
+    };
+    let started = std::time::Instant::now();
+    let timed_out = GoalPursuer::new(&store, &probing, &verifier, timeout_config)
+        .unwrap()
+        .pursue(OWNER, "overall-timeout-margin")
+        .await
+        .expect("overall timeout must settle under the lease margin, not LeaseExpired");
+    let wall = started.elapsed();
+
+    assert_eq!(timed_out.status, PursuitStatus::Paused);
+    assert_eq!(timed_out.reason, "pursuit overall timeout");
+    assert_eq!(timed_out.segments_started, 1);
+    assert!(
+        wall > overall_budget,
+        "fixture must overrun the overall deadline on the wall clock, got {wall:?}"
+    );
+
+    let observations = probing.observations.lock().expect("observations lock");
+    assert_eq!(observations.len(), 1);
+    let (segment_timeout, lease_remaining) = observations[0];
+    assert!(segment_timeout <= overall_budget);
+    // Without the settlement margin the pre-WP-109 lease was only
+    // `ceil(remaining)` (~2s for a 1.5s budget). After the segment consumes the
+    // remaining overall budget, pause settlement still needs a live lease; the
+    // margin is exactly that reserved window.
+    let min_margin = Duration::from_secs(PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS.saturating_sub(1));
+    assert!(
+        lease_remaining >= segment_timeout.saturating_add(min_margin),
+        "lease remaining {lease_remaining:?} must outlast segment budget {segment_timeout:?} by the settlement margin"
+    );
+    assert_eq!(
+        pursuit_lease_seconds(overall_budget),
+        overall_budget.as_secs().saturating_add(1) + PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS
+    );
 }
 
 #[tokio::test]

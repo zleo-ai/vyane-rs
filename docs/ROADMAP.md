@@ -75,6 +75,9 @@ process consumed the whole job timeout during shutdown.
 [WP-108](plan/WP-108.md) gives the mixed process/native daemon fixture
 independent Tokio workers after Ubuntu delayed its two 15-second terminal
 pollers for roughly 90 seconds in the full acceptance-test process.
+[WP-109](plan/WP-109.md) reserves a documented settlement margin on each
+pursuit lease renewal so overall-timeout pause checkpoints can finish after
+the runtime budget elapses, without extending execution timeouts.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

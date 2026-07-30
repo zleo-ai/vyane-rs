@@ -23,6 +23,30 @@ pub const MAX_PURSUIT_FAILURES: u16 = 16;
 pub const MAX_PURSUIT_TIMEOUT: Duration = Duration::from_secs(86_400);
 pub const MAX_SEGMENT_TIMEOUT: Duration = Duration::from_secs(3_600);
 
+/// Whole seconds kept on the pursuit lease after the remaining overall budget.
+///
+/// The margin lets the pursuer finish terminal pause/checkpoint writes after
+/// the runtime overall deadline elapses. It does **not** extend
+/// [`PursuitConfig::overall_timeout`] or [`PursuitConfig::segment_timeout`].
+pub const PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS: u64 = 5;
+
+/// Lease duration for one pursuit loop iteration.
+///
+/// Returns `ceil(remaining)` plus [`PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS`],
+/// clamped into `[1, MAX_LEASE_SECONDS]`. The ceiling covers partial seconds of
+/// remaining budget; the margin covers durable settlement after the budget is
+/// exhausted under scheduling delay.
+pub fn pursuit_lease_seconds(remaining: Duration) -> u64 {
+    let ceil_remaining_secs = if remaining.subsec_nanos() == 0 {
+        remaining.as_secs()
+    } else {
+        remaining.as_secs().saturating_add(1)
+    };
+    ceil_remaining_secs
+        .saturating_add(PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS)
+        .clamp(1, MAX_LEASE_SECONDS)
+}
+
 #[derive(Debug, Clone)]
 pub struct PursuitConfig {
     pub workdir: PathBuf,
@@ -412,10 +436,7 @@ where
                 owner,
                 goal_id,
                 &self.config.worker_id,
-                remaining
-                    .as_secs()
-                    .saturating_add(1)
-                    .clamp(1, MAX_LEASE_SECONDS),
+                pursuit_lease_seconds(remaining),
                 Utc::now(),
             )?;
             let verifier = self.verifier.clone();
@@ -1024,5 +1045,44 @@ fn outcome(
         summary: summary.to_string(),
         reason: reason.to_string(),
         last_verification,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pursuit_lease_seconds_ceils_remaining_and_adds_settlement_margin() {
+        assert_eq!(
+            pursuit_lease_seconds(Duration::from_millis(1_500)),
+            2 + PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS
+        );
+        assert_eq!(
+            pursuit_lease_seconds(Duration::from_secs(1)),
+            1 + PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS
+        );
+        assert_eq!(
+            pursuit_lease_seconds(Duration::from_nanos(1)),
+            1 + PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS
+        );
+        assert_eq!(
+            pursuit_lease_seconds(Duration::ZERO),
+            PURSUIT_LEASE_SETTLEMENT_MARGIN_SECONDS.clamp(1, MAX_LEASE_SECONDS)
+        );
+    }
+
+    #[test]
+    fn pursuit_lease_seconds_clamps_to_store_lease_bounds() {
+        assert_eq!(
+            pursuit_lease_seconds(Duration::from_secs(MAX_LEASE_SECONDS)),
+            MAX_LEASE_SECONDS
+        );
+        assert_eq!(
+            pursuit_lease_seconds(Duration::from_secs(MAX_LEASE_SECONDS.saturating_sub(1))),
+            MAX_LEASE_SECONDS
+        );
+        assert!(pursuit_lease_seconds(Duration::from_secs(1)) >= 1);
+        assert!(pursuit_lease_seconds(Duration::from_secs(1)) <= MAX_LEASE_SECONDS);
     }
 }
