@@ -3,6 +3,8 @@ set -euo pipefail
 
 readonly SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/release-gate.py"
 readonly PUBLISH_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/publish-workspace.sh"
+readonly WORKFLOW_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../workflows" && pwd)"
+readonly CHECKOUT_SHA="de0fac2e4500dabe0009e67214ff5f5447ce83dd"
 readonly TEMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEMP_ROOT"' EXIT
 
@@ -13,10 +15,48 @@ expect_rejected() {
   fi
 }
 
+validate_checkout_references() {
+  local workflow_root="$1"
+  local checkout_references
+  checkout_references="$(
+    grep -R -h -o --include='*.yml' --include='*.yaml' \
+      "actions/checkout@[^'\"[:space:]]*" "$workflow_root" || true
+  )"
+  test -n "$checkout_references" || {
+    echo "release gate test: no actions/checkout reference found" >&2
+    return 1
+  }
+  while IFS= read -r reference; do
+    case "$reference" in
+      "actions/checkout@$CHECKOUT_SHA")
+        ;;
+      *)
+        echo "release gate test: actions/checkout must use the approved immutable commit" >&2
+        return 1
+        ;;
+    esac
+  done <<<"$checkout_references"
+}
+
 grep -Fq 'cargo publish --locked --no-verify --package "$crate"' "$PUBLISH_SCRIPT" || {
   echo "release gate test: token-bearing cargo publish must not rebuild package code" >&2
   exit 1
 }
+
+validate_checkout_references "$WORKFLOW_ROOT"
+
+mkdir "$TEMP_ROOT/workflows-valid" "$TEMP_ROOT/workflows-invalid"
+cat >"$TEMP_ROOT/workflows-valid/quoted.yml" <<YAML
+steps:
+  - uses: 'actions/checkout@$CHECKOUT_SHA'
+YAML
+validate_checkout_references "$TEMP_ROOT/workflows-valid"
+cat >"$TEMP_ROOT/workflows-invalid/mixed.yml" <<YAML
+steps:
+  - uses: actions/checkout@$CHECKOUT_SHA
+  - uses: 'actions/checkout@v4'
+YAML
+expect_rejected validate_checkout_references "$TEMP_ROOT/workflows-invalid"
 
 cat >"$TEMP_ROOT/environment-valid.json" <<'JSON'
 {
