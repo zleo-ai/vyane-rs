@@ -224,6 +224,9 @@ fresh CI process with other multi_thread CLI unit isolations.
 [WP-168](plan/WP-168.md) isolates the daemon-client 5xx submission fixture in a
 fresh CI process with other multi_thread CLI unit isolations.
 
+[WP-169](plan/WP-169.md) isolates the daemon-client malformed-accepted
+response fixture in a fresh CI process (suite skip + `--exact`).
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
