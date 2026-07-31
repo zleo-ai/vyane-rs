@@ -184,6 +184,9 @@ CI process with the other multi_thread Wiremock control-plane isolations.
 fresh CI process with the other multi_thread multi-mock native isolations.
 [WP-150](plan/WP-150.md) isolates the resident native chain-drift unit fixture in
 a fresh CI process with the other multi_thread multi-mock native isolations.
+[WP-151](plan/WP-151.md) isolates the resident native post-tool no-failover unit
+fixture in a fresh CI process, completing that multi_thread multi-mock unit
+trio.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
