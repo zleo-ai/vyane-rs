@@ -152,7 +152,8 @@ jobs:
             --skip configured_native_ceiling_rejects_an_optional_axis_before_the_model \
             --skip exit_zero_without_terminal_result_fails_without_completion \
             --skip cancel_stops_the_exact_process_group_and_settles_cancelled \
-            --skip restart_cleans_terminal_controller_left_after_database_commit
+            --skip restart_cleans_terminal_controller_left_after_database_commit \
+            --skip mcp_workflow_tools_use_the_authenticated_resident_daemon
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -221,6 +222,11 @@ jobs:
           # process-lane restart-class fixture still sharing the suite.
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             restart_cleans_terminal_controller_left_after_database_commit \
+            -- --exact
+          # MCP workflow tools drive a multi-thread resident-daemon + Wiremock
+          # fixture class already partially isolated for long dual-path workflow.
+          cargo test -p vyane-cli --test daemon_workflow_acceptance \
+            mcp_workflow_tools_use_the_authenticated_resident_daemon \
             -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
@@ -337,7 +343,8 @@ jobs:
             --skip configured_native_ceiling_rejects_an_optional_axis_before_the_model \
             --skip exit_zero_without_terminal_result_fails_without_completion \
             --skip cancel_stops_the_exact_process_group_and_settles_cancelled \
-            --skip restart_cleans_terminal_controller_left_after_database_commit
+            --skip restart_cleans_terminal_controller_left_after_database_commit \
+            --skip mcp_workflow_tools_use_the_authenticated_resident_daemon
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -385,6 +392,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_cleans_terminal_controller_left_after_database_commit \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_workflow_acceptance \
+            -- mcp_workflow_tools_use_the_authenticated_resident_daemon \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \

@@ -174,6 +174,8 @@ in a fresh CI process with the other process-lane AgentRun isolations.
 a fresh CI process with the other process-lane AgentRun isolations.
 [WP-145](plan/WP-145.md) isolates the restart terminal-controller cleanup
 fixture in a fresh CI process with the other process-lane AgentRun isolations.
+[WP-146](plan/WP-146.md) isolates the MCP workflow resident-daemon fixture in a
+fresh CI process with the other multi-thread daemon workflow isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
