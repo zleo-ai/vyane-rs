@@ -213,6 +213,8 @@ fresh CI process with the other multi_thread detach control-plane isolations.
 fresh CI process with the other multi_thread detach control-plane isolations.
 [WP-163](plan/WP-163.md) isolates the task-list ordering fixture in a
 fresh CI process with the other multi_thread detach control-plane isolations.
+[WP-164](plan/WP-164.md) raises CI test and coverage job timeout headroom from
+20 to 30 minutes after sequential isolation suite growth.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
