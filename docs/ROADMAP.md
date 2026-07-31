@@ -205,6 +205,8 @@ fresh CI process with the other multi_thread detach control-plane isolations.
 fresh CI process with the other multi_thread detach control-plane isolations.
 [WP-159](plan/WP-159.md) isolates the detach bad-label fixture in a
 fresh CI process with the other multi_thread detach control-plane isolations.
+[WP-160](plan/WP-160.md) isolates the detached direct-HTTP write reject fixture in a
+fresh CI process with the other multi_thread detach control-plane isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
