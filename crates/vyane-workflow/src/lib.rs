@@ -17,8 +17,10 @@ mod validate;
 pub use engine::{StepEvent, WorkflowEngine, WorkflowObserver};
 pub use error::{ValidationReport, WorkflowError, WorkflowResult};
 pub use journal::{
-    JournalStep, JournalStepStatus, JournalTargetOutput, WorkflowJournal, WorkflowJournalSummary,
-    WorkflowReplayProvenance, WorkflowRunId, WorkflowRunIdError, list_journals, read_journal,
+    JournalStep, JournalStepStatus, JournalTargetOutput, WORKFLOW_VIEW_OUTPUT_MAX_BYTES,
+    WorkflowJournal, WorkflowJournalSummary, WorkflowReplayProvenance, WorkflowRunId,
+    WorkflowRunIdError, WorkflowViewOutputProjection, list_journals, project_workflow_view_output,
+    read_journal,
 };
 pub use model::{
     OnError, StepTargets, Workflow, WorkflowOutcome, WorkflowRouteHints, WorkflowRunStatus,

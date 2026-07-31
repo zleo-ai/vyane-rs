@@ -80,7 +80,8 @@ impl WorkflowControl for AuthenticatedWorkflowControl {
                 .cancel_for_control(&caller_id)
                 .await
                 .map_err(map_control_error)?;
-            map_task_record(&caller_id, &task)
+            // Cancel returns lifecycle only; answer bodies are not required.
+            map_task_record(&caller_id, &task, None, false)
         })
     }
 }
@@ -130,28 +131,36 @@ fn map_task_view(
     caller_id: &WorkflowRunId,
     view: WorkflowTaskView,
 ) -> Result<WorkflowView, WorkflowControlError> {
-    map_task_record(caller_id, &view.task)
+    map_task_record(caller_id, &view.task, view.output, view.output_omitted)
 }
 
 fn map_task_record(
     caller_id: &WorkflowRunId,
     task: &TaskRecord,
+    output: Option<String>,
+    output_omitted: bool,
 ) -> Result<WorkflowView, WorkflowControlError> {
     if task.id != caller_id.as_str() {
         return Err(WorkflowControlError::Internal);
     }
+    let state = match task.state {
+        TaskState::Queued => WorkflowState::Queued,
+        TaskState::Running => WorkflowState::Running,
+        TaskState::Cancelling => WorkflowState::Cancelling,
+        TaskState::Succeeded => WorkflowState::Succeeded,
+        TaskState::Failed => WorkflowState::Failed,
+        TaskState::TimedOut => WorkflowState::TimedOut,
+        TaskState::Cancelled => WorkflowState::Cancelled,
+        TaskState::Interrupted => WorkflowState::Interrupted,
+    };
+    let (output, output_omitted) = if state == WorkflowState::Succeeded {
+        (output, output_omitted)
+    } else {
+        (None, false)
+    };
     Ok(WorkflowView {
         caller_id: caller_id.clone(),
-        state: match task.state {
-            TaskState::Queued => WorkflowState::Queued,
-            TaskState::Running => WorkflowState::Running,
-            TaskState::Cancelling => WorkflowState::Cancelling,
-            TaskState::Succeeded => WorkflowState::Succeeded,
-            TaskState::Failed => WorkflowState::Failed,
-            TaskState::TimedOut => WorkflowState::TimedOut,
-            TaskState::Cancelled => WorkflowState::Cancelled,
-            TaskState::Interrupted => WorkflowState::Interrupted,
-        },
+        state,
         failure_code: task.failure_code.map(|code| match code {
             FailureCode::DispatchFailed => WorkflowFailureCode::DispatchFailed,
             FailureCode::SpawnFailed => WorkflowFailureCode::SpawnFailed,
@@ -163,6 +172,8 @@ fn map_task_record(
             FailureCode::TimedOut => WorkflowFailureCode::TimedOut,
             FailureCode::Internal => WorkflowFailureCode::Internal,
         }),
+        output,
+        output_omitted,
     })
 }
 
@@ -231,7 +242,7 @@ prompt = "hello"
             failure_code: None,
         };
         assert_eq!(
-            map_task_record(&caller_id, &task),
+            map_task_record(&caller_id, &task, None, false),
             Err(WorkflowControlError::Internal)
         );
     }
