@@ -154,7 +154,8 @@ jobs:
             --skip cancel_stops_the_exact_process_group_and_settles_cancelled \
             --skip restart_cleans_terminal_controller_left_after_database_commit \
             --skip mcp_workflow_tools_use_the_authenticated_resident_daemon \
-            --skip terminal_polling_never_crosses_total_budget
+            --skip terminal_polling_never_crosses_total_budget \
+            --skip submission_retries_an_ambiguous_timeout_within_one_total_budget
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -233,6 +234,11 @@ jobs:
           # and stays schedulable alone after suite handoffs.
           cargo test -p vyane-cli --test daemon_agent_acceptance \
             terminal_polling_never_crosses_total_budget \
+            -- --exact
+          # Submission retry budget fixture is multi_thread Wiremock client-side
+          # and stays schedulable alone after suite handoffs.
+          cargo test -p vyane-cli --test daemon_agent_acceptance \
+            submission_retries_an_ambiguous_timeout_within_one_total_budget \
             -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
@@ -351,7 +357,8 @@ jobs:
             --skip cancel_stops_the_exact_process_group_and_settles_cancelled \
             --skip restart_cleans_terminal_controller_left_after_database_commit \
             --skip mcp_workflow_tools_use_the_authenticated_resident_daemon \
-            --skip terminal_polling_never_crosses_total_budget
+            --skip terminal_polling_never_crosses_total_budget \
+            --skip submission_retries_an_ambiguous_timeout_within_one_total_budget
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -405,6 +412,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- terminal_polling_never_crosses_total_budget \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
+            -- submission_retries_an_ambiguous_timeout_within_one_total_budget \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \
