@@ -170,7 +170,8 @@ jobs:
             --skip legacy_job_reader_preserves_target_snapshot_drift_check \
             --skip legacy_job_json_still_executes_with_empty_stdin \
             --skip task_list_orders_recent_first_and_json_parses \
-            --skip client_sends_bearer_and_never_follows_redirects
+            --skip client_sends_bearer_and_never_follows_redirects \
+            --skip client_rejects_oversized_response_before_json_parsing
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -270,6 +271,11 @@ jobs:
           # shares suite-handoff sensitivity with neighboring CLI unit fixtures.
           cargo test -p vyane-cli --bin vyane \
             daemon_client::tests::client_sends_bearer_and_never_follows_redirects \
+            -- --exact
+          # Daemon client oversized-response reject is multi_thread Wiremock
+          # sharing suite-handoff class with neighboring CLI unit isolations.
+          cargo test -p vyane-cli --bin vyane \
+            daemon_client::tests::client_rejects_oversized_response_before_json_parsing \
             -- --exact
           # Detach success fixture drives multi_thread Wiremock + worker process
           # after earlier suite work; run alone like other control-plane cases.
@@ -453,7 +459,8 @@ jobs:
             --skip legacy_job_reader_preserves_target_snapshot_drift_check \
             --skip legacy_job_json_still_executes_with_empty_stdin \
             --skip task_list_orders_recent_first_and_json_parses \
-            --skip client_sends_bearer_and_never_follows_redirects
+            --skip client_sends_bearer_and_never_follows_redirects \
+            --skip client_rejects_oversized_response_before_json_parsing
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -522,6 +529,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --bin vyane -- \
             daemon_client::tests::client_sends_bearer_and_never_follows_redirects \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --bin vyane -- \
+            daemon_client::tests::client_rejects_oversized_response_before_json_parsing \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
             -- detach_returns_fast_then_completes_success \
