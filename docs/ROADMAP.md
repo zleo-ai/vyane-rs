@@ -219,6 +219,8 @@ fresh CI process with the other multi_thread detach control-plane isolations.
 fresh CI process with other multi_thread CLI unit isolations.
 [WP-166](plan/WP-166.md) isolates the daemon-client oversized-response fixture in a
 fresh CI process with other multi_thread CLI unit isolations.
+[WP-167](plan/WP-167.md) isolates the daemon-client 4xx submission fixture in a
+fresh CI process with other multi_thread CLI unit isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

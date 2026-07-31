@@ -171,7 +171,8 @@ jobs:
             --skip legacy_job_json_still_executes_with_empty_stdin \
             --skip task_list_orders_recent_first_and_json_parses \
             --skip client_sends_bearer_and_never_follows_redirects \
-            --skip client_rejects_oversized_response_before_json_parsing
+            --skip client_rejects_oversized_response_before_json_parsing \
+            --skip submission_sends_client_id_and_canonical_cwd_and_bounds_4xx_error
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -276,6 +277,11 @@ jobs:
           # sharing suite-handoff class with neighboring CLI unit isolations.
           cargo test -p vyane-cli --bin vyane \
             daemon_client::tests::client_rejects_oversized_response_before_json_parsing \
+            -- --exact
+          # Daemon client 4xx-bound submission unit is multi_thread Wiremock
+          # sharing suite-handoff class with neighboring CLI unit isolations.
+          cargo test -p vyane-cli --bin vyane \
+            daemon_client::tests::submission_sends_client_id_and_canonical_cwd_and_bounds_4xx_error \
             -- --exact
           # Detach success fixture drives multi_thread Wiremock + worker process
           # after earlier suite work; run alone like other control-plane cases.
@@ -460,7 +466,8 @@ jobs:
             --skip legacy_job_json_still_executes_with_empty_stdin \
             --skip task_list_orders_recent_first_and_json_parses \
             --skip client_sends_bearer_and_never_follows_redirects \
-            --skip client_rejects_oversized_response_before_json_parsing
+            --skip client_rejects_oversized_response_before_json_parsing \
+            --skip submission_sends_client_id_and_canonical_cwd_and_bounds_4xx_error
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -532,6 +539,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --bin vyane -- \
             daemon_client::tests::client_rejects_oversized_response_before_json_parsing \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --bin vyane -- \
+            daemon_client::tests::submission_sends_client_id_and_canonical_cwd_and_bounds_4xx_error \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
             -- detach_returns_fast_then_completes_success \
