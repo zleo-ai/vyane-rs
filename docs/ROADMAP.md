@@ -197,6 +197,8 @@ fresh CI process with the other multi_thread Wiremock control-plane isolations.
 CI process with the other multi_thread detach control-plane isolations.
 [WP-155](plan/WP-155.md) isolates the detach fingerprint-cancel fixture in a
 fresh CI process with the other multi_thread detach control-plane isolations.
+[WP-156](plan/WP-156.md) isolates the detached auto-route freeze fixture in a
+fresh CI process with the other multi_thread detach control-plane isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

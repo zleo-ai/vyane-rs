@@ -161,7 +161,8 @@ jobs:
             --skip resident_native_run_never_fails_over_after_tool_activity \
             --skip detach_returns_fast_then_completes_success \
             --skip cancel_finalizes_cancelled_and_kills_group \
-            --skip fingerprint_cancel_does_not_depend_on_ps_or_path
+            --skip fingerprint_cancel_does_not_depend_on_ps_or_path \
+            --skip detached_auto_route_freezes_profile_effort_and_labels
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -269,6 +270,9 @@ jobs:
             -- --exact
           cargo test -p vyane-cli --test detach_acceptance \
             fingerprint_cancel_does_not_depend_on_ps_or_path \
+            -- --exact
+          cargo test -p vyane-cli --test detach_acceptance \
+            detached_auto_route_freezes_profile_effort_and_labels \
             -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
@@ -394,7 +398,8 @@ jobs:
             --skip resident_native_run_never_fails_over_after_tool_activity \
             --skip detach_returns_fast_then_completes_success \
             --skip cancel_finalizes_cancelled_and_kills_group \
-            --skip fingerprint_cancel_does_not_depend_on_ps_or_path
+            --skip fingerprint_cancel_does_not_depend_on_ps_or_path \
+            --skip detached_auto_route_freezes_profile_effort_and_labels
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -469,6 +474,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
             -- fingerprint_cancel_does_not_depend_on_ps_or_path \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
+            -- detached_auto_route_freezes_profile_effort_and_labels \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \
