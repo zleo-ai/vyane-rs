@@ -2671,11 +2671,17 @@ async fn cancel_daemon_workflow(args: WorkflowCancelArgs) -> Result<ExitCode> {
 }
 
 fn print_daemon_workflow_view(view: &WorkflowTaskView) {
-    println!("workflow {} {}", view.task.id, view.task.state);
+    print!("{}", format_daemon_workflow_view(view));
+}
+
+/// Human-readable daemon workflow status/submit lines, including the WP-152
+/// bounded success projection already present on [`WorkflowTaskView`].
+fn format_daemon_workflow_view(view: &WorkflowTaskView) -> String {
+    let mut out = format!("workflow {} {}\n", view.task.id, view.task.state);
     if let Some(journal) = view.journal.as_ref() {
         let counts = &journal.steps;
-        println!(
-            "journal {} {}: {}/{} ok, {} failed, {} skipped, {} cancelled",
+        out.push_str(&format!(
+            "journal {} {}: {}/{} ok, {} failed, {} skipped, {} cancelled\n",
             journal.name,
             crate::output::workflow_status_name(journal.status),
             counts.success,
@@ -2688,8 +2694,18 @@ fn print_daemon_workflow_view(view: &WorkflowTaskView) {
             counts.failed,
             counts.skipped,
             counts.cancelled
-        );
+        ));
     }
+    if let Some(output) = view.output.as_ref() {
+        out.push_str("output\n");
+        out.push_str(output);
+        if !output.ends_with('\n') {
+            out.push('\n');
+        }
+    } else if view.output_omitted {
+        out.push_str("output omitted\n");
+    }
+    out
 }
 
 async fn run_workflow(config_path: Option<PathBuf>, args: WorkflowRunArgs) -> Result<ExitCode> {
@@ -3282,8 +3298,78 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::daemon_workflow::WorkflowTaskView;
     #[cfg(target_os = "linux")]
     use crate::task::spawn::SpawnedWorker;
+    use vyane_task::{TaskKind, TaskOrigin, TaskRecord, TaskState};
+
+    fn sample_workflow_task(state: TaskState) -> TaskRecord {
+        TaskRecord {
+            id: "01999999-9999-7999-8999-999999999999".to_string(),
+            owner: "local".to_string(),
+            kind: TaskKind::Workflow,
+            origin: TaskOrigin::Daemon,
+            state,
+            task_digest: "a".repeat(64),
+            target_key: "workflow".to_string(),
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            updated_at: chrono::Utc::now(),
+            finished_at: None,
+            revision: 0,
+            executor_epoch: 0,
+            controller: None,
+            lease: None,
+            ledger_run_id: None,
+            failure_code: None,
+        }
+    }
+
+    #[test]
+    fn human_daemon_workflow_view_prints_bounded_success_output() {
+        let view = WorkflowTaskView {
+            task: sample_workflow_task(TaskState::Succeeded),
+            journal: None,
+            output: Some("bounded answer".to_string()),
+            output_omitted: false,
+        };
+        let text = format_daemon_workflow_view(&view);
+        assert!(
+            text.contains("workflow 01999999-9999-7999-8999-999999999999 succeeded"),
+            "{text}"
+        );
+        assert!(
+            text.contains("output\nbounded answer\n"),
+            "expected WP-152 projection body in human status:\n{text}"
+        );
+        assert!(!text.contains("output omitted"), "{text}");
+    }
+
+    #[test]
+    fn human_daemon_workflow_view_prints_output_omitted_without_body() {
+        let view = WorkflowTaskView {
+            task: sample_workflow_task(TaskState::Succeeded),
+            journal: None,
+            output: None,
+            output_omitted: true,
+        };
+        let text = format_daemon_workflow_view(&view);
+        assert!(text.contains("output omitted\n"), "{text}");
+        assert!(!text.contains("output\n"), "{text}");
+    }
+
+    #[test]
+    fn human_daemon_workflow_view_hides_output_on_non_success() {
+        let view = WorkflowTaskView {
+            task: sample_workflow_task(TaskState::Running),
+            journal: None,
+            output: None,
+            output_omitted: false,
+        };
+        let text = format_daemon_workflow_view(&view);
+        assert!(text.contains("running"), "{text}");
+        assert!(!text.contains("output"), "{text}");
+    }
 
     fn session_test_service(directory: &TempDir) -> VyaneService {
         VyaneService::from_loaded_with_paths(
