@@ -157,7 +157,8 @@ jobs:
             --skip terminal_polling_never_crosses_total_budget \
             --skip submission_retries_an_ambiguous_timeout_within_one_total_budget \
             --skip resident_native_run_fails_over_before_tool_activity \
-            --skip resident_native_run_rejects_frozen_chain_drift_before_wire
+            --skip resident_native_run_rejects_frozen_chain_drift_before_wire \
+            --skip resident_native_run_never_fails_over_after_tool_activity
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -249,6 +250,9 @@ jobs:
             -- --exact
           cargo test -p vyane-cli --bin vyane \
             native_agent::tests::resident_native_run_rejects_frozen_chain_drift_before_wire \
+            -- --exact
+          cargo test -p vyane-cli --bin vyane \
+            native_agent::tests::resident_native_run_never_fails_over_after_tool_activity \
             -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
@@ -370,7 +374,8 @@ jobs:
             --skip terminal_polling_never_crosses_total_budget \
             --skip submission_retries_an_ambiguous_timeout_within_one_total_budget \
             --skip resident_native_run_fails_over_before_tool_activity \
-            --skip resident_native_run_rejects_frozen_chain_drift_before_wire
+            --skip resident_native_run_rejects_frozen_chain_drift_before_wire \
+            --skip resident_native_run_never_fails_over_after_tool_activity
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -433,6 +438,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --bin vyane -- \
             native_agent::tests::resident_native_run_rejects_frozen_chain_drift_before_wire \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --bin vyane -- \
+            native_agent::tests::resident_native_run_never_fails_over_after_tool_activity \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \
