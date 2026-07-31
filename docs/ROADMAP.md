@@ -176,6 +176,8 @@ a fresh CI process with the other process-lane AgentRun isolations.
 fixture in a fresh CI process with the other process-lane AgentRun isolations.
 [WP-146](plan/WP-146.md) isolates the MCP workflow resident-daemon fixture in a
 fresh CI process with the other multi-thread daemon workflow isolations.
+[WP-147](plan/WP-147.md) isolates the terminal polling budget fixture in a fresh
+CI process with the other multi_thread Wiremock control-plane isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
