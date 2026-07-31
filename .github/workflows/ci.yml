@@ -164,7 +164,8 @@ jobs:
             --skip fingerprint_cancel_does_not_depend_on_ps_or_path \
             --skip detached_auto_route_freezes_profile_effort_and_labels \
             --skip detached_no_frontier_replays_parent_failover_filter \
-            --skip detach_config_error_exits_two_and_creates_no_task_dir
+            --skip detach_config_error_exits_two_and_creates_no_task_dir \
+            --skip detach_bad_label_exits_two_and_creates_no_task_dir
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -283,6 +284,11 @@ jobs:
           # the same suite-handoff class as other detach control-plane cases.
           cargo test -p vyane-cli --test detach_acceptance \
             detach_config_error_exits_two_and_creates_no_task_dir \
+            -- --exact
+          # Detach bad-label early-exit shares multi_thread Wiremock suite-handoff
+          # class with other detach control-plane isolations.
+          cargo test -p vyane-cli --test detach_acceptance \
+            detach_bad_label_exits_two_and_creates_no_task_dir \
             -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
@@ -411,7 +417,8 @@ jobs:
             --skip fingerprint_cancel_does_not_depend_on_ps_or_path \
             --skip detached_auto_route_freezes_profile_effort_and_labels \
             --skip detached_no_frontier_replays_parent_failover_filter \
-            --skip detach_config_error_exits_two_and_creates_no_task_dir
+            --skip detach_config_error_exits_two_and_creates_no_task_dir \
+            --skip detach_bad_label_exits_two_and_creates_no_task_dir
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -495,6 +502,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
             -- detach_config_error_exits_two_and_creates_no_task_dir \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
+            -- detach_bad_label_exits_two_and_creates_no_task_dir \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \
