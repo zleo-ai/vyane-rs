@@ -239,6 +239,9 @@ fixture in a fresh CI process (suite skip + `--exact`).
 [WP-173](plan/WP-173.md) isolates the daemon-client workflow-status-missing
 fixture in a fresh CI process (suite skip + `--exact`).
 
+[WP-174](plan/WP-174.md) isolates the daemon-client workflow-cancel-malformed
+fixture in a fresh CI process (suite skip + `--exact`).
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
