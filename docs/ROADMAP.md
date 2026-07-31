@@ -233,6 +233,9 @@ response fixture in a fresh CI process (suite skip + `--exact`).
 [WP-171](plan/WP-171.md) isolates the daemon-client accepted-another-id
 response fixture in a fresh CI process (suite skip + `--exact`).
 
+[WP-172](plan/WP-172.md) isolates the daemon-client submission-timeout
+fixture in a fresh CI process (suite skip + `--exact`).
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
