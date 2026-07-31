@@ -180,6 +180,8 @@ fresh CI process with the other multi-thread daemon workflow isolations.
 CI process with the other multi_thread Wiremock control-plane isolations.
 [WP-148](plan/WP-148.md) isolates the submission retry budget fixture in a fresh
 CI process with the other multi_thread Wiremock control-plane isolations.
+[WP-149](plan/WP-149.md) isolates the resident native unit failover fixture in a
+fresh CI process with the other multi_thread multi-mock native isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
