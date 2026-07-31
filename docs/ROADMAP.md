@@ -245,6 +245,9 @@ fixture in a fresh CI process (suite skip + `--exact`).
 [WP-175](plan/WP-175.md) isolates the daemon-client workflow-auth-drift
 fixture in a fresh CI process (suite skip + `--exact`).
 
+[WP-176](plan/WP-176.md) isolates the daemon-workflow concurrent-creates
+fixture in a fresh CI process (suite skip + `--exact`).
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live

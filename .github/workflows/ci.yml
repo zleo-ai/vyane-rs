@@ -180,7 +180,8 @@ jobs:
             --skip submission_timeout_is_outcome_unknown_with_no_http_status \
             --skip workflow_control_status_maps_missing_without_echoing_daemon_body \
             --skip workflow_control_cancel_rejects_malformed_success_as_internal \
-            --skip workflow_control_treats_authentication_drift_as_unavailable
+            --skip workflow_control_treats_authentication_drift_as_unavailable \
+            --skip concurrent_identical_creates_have_one_creator_and_one_idempotent_reader
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -330,6 +331,11 @@ jobs:
           # sharing suite-handoff class with neighboring CLI unit isolations.
           cargo test -p vyane-cli --bin vyane \
             daemon_client::tests::workflow_control_treats_authentication_drift_as_unavailable \
+            -- --exact
+          # Daemon workflow concurrent-create unit is multi_thread and
+          # shares suite-handoff class with neighboring CLI unit isolations.
+          cargo test -p vyane-cli --bin vyane \
+            daemon_workflow::tests::concurrent_identical_creates_have_one_creator_and_one_idempotent_reader \
             -- --exact
           # Detach success fixture drives multi_thread Wiremock + worker process
           # after earlier suite work; run alone like other control-plane cases.
@@ -523,7 +529,8 @@ jobs:
             --skip submission_timeout_is_outcome_unknown_with_no_http_status \
             --skip workflow_control_status_maps_missing_without_echoing_daemon_body \
             --skip workflow_control_cancel_rejects_malformed_success_as_internal \
-            --skip workflow_control_treats_authentication_drift_as_unavailable
+            --skip workflow_control_treats_authentication_drift_as_unavailable \
+            --skip concurrent_identical_creates_have_one_creator_and_one_idempotent_reader
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -622,6 +629,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --bin vyane -- \
             daemon_client::tests::workflow_control_treats_authentication_drift_as_unavailable \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --bin vyane -- \
+            daemon_workflow::tests::concurrent_identical_creates_have_one_creator_and_one_idempotent_reader \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
             -- detach_returns_fast_then_completes_success \
