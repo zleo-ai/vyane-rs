@@ -170,6 +170,8 @@ only the daemon listen line.
 in a fresh CI process with the other multi-thread native AgentRun isolations.
 [WP-143](plan/WP-143.md) isolates the exit-zero-without-terminal process fixture
 in a fresh CI process with the other process-lane AgentRun isolations.
+[WP-144](plan/WP-144.md) isolates the process-group cancel settlement fixture in
+a fresh CI process with the other process-lane AgentRun isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
