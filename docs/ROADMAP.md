@@ -172,6 +172,8 @@ in a fresh CI process with the other multi-thread native AgentRun isolations.
 in a fresh CI process with the other process-lane AgentRun isolations.
 [WP-144](plan/WP-144.md) isolates the process-group cancel settlement fixture in
 a fresh CI process with the other process-lane AgentRun isolations.
+[WP-145](plan/WP-145.md) isolates the restart terminal-controller cleanup
+fixture in a fresh CI process with the other process-lane AgentRun isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
