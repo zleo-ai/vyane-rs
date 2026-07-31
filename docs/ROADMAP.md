@@ -201,6 +201,8 @@ fresh CI process with the other multi_thread detach control-plane isolations.
 fresh CI process with the other multi_thread detach control-plane isolations.
 [WP-157](plan/WP-157.md) isolates the detached no-frontier failover fixture in a
 fresh CI process with the other multi_thread detach control-plane isolations.
+[WP-158](plan/WP-158.md) isolates the detach config-error fixture in a
+fresh CI process with the other multi_thread detach control-plane isolations.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
