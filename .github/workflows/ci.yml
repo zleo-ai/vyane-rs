@@ -169,7 +169,8 @@ jobs:
             --skip detached_direct_http_write_is_rejected_before_task_or_process \
             --skip legacy_job_reader_preserves_target_snapshot_drift_check \
             --skip legacy_job_json_still_executes_with_empty_stdin \
-            --skip task_list_orders_recent_first_and_json_parses
+            --skip task_list_orders_recent_first_and_json_parses \
+            --skip client_sends_bearer_and_never_follows_redirects
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -264,6 +265,11 @@ jobs:
             -- --exact
           cargo test -p vyane-cli --bin vyane \
             native_agent::tests::resident_native_run_never_fails_over_after_tool_activity \
+            -- --exact
+          # Daemon client bearer/redirect unit is multi_thread Wiremock and
+          # shares suite-handoff sensitivity with neighboring CLI unit fixtures.
+          cargo test -p vyane-cli --bin vyane \
+            daemon_client::tests::client_sends_bearer_and_never_follows_redirects \
             -- --exact
           # Detach success fixture drives multi_thread Wiremock + worker process
           # after earlier suite work; run alone like other control-plane cases.
@@ -446,7 +452,8 @@ jobs:
             --skip detached_direct_http_write_is_rejected_before_task_or_process \
             --skip legacy_job_reader_preserves_target_snapshot_drift_check \
             --skip legacy_job_json_still_executes_with_empty_stdin \
-            --skip task_list_orders_recent_first_and_json_parses
+            --skip task_list_orders_recent_first_and_json_parses \
+            --skip client_sends_bearer_and_never_follows_redirects
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -512,6 +519,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --bin vyane -- \
             native_agent::tests::resident_native_run_never_fails_over_after_tool_activity \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --bin vyane -- \
+            daemon_client::tests::client_sends_bearer_and_never_follows_redirects \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
             -- detach_returns_fast_then_completes_success \
