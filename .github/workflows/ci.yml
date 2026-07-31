@@ -168,7 +168,8 @@ jobs:
             --skip detach_bad_label_exits_two_and_creates_no_task_dir \
             --skip detached_direct_http_write_is_rejected_before_task_or_process \
             --skip legacy_job_reader_preserves_target_snapshot_drift_check \
-            --skip legacy_job_json_still_executes_with_empty_stdin
+            --skip legacy_job_json_still_executes_with_empty_stdin \
+            --skip task_list_orders_recent_first_and_json_parses
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -308,6 +309,11 @@ jobs:
           cargo test -p vyane-cli --test detach_acceptance \
             legacy_job_json_still_executes_with_empty_stdin \
             -- --exact
+          # Task-list ordering is multi_thread Wiremock detach suite-handoff
+          # class with other detach control-plane isolations.
+          cargo test -p vyane-cli --test detach_acceptance \
+            task_list_orders_recent_first_and_json_parses \
+            -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
           # alone on the intentional current-thread runtime.
@@ -439,7 +445,8 @@ jobs:
             --skip detach_bad_label_exits_two_and_creates_no_task_dir \
             --skip detached_direct_http_write_is_rejected_before_task_or_process \
             --skip legacy_job_reader_preserves_target_snapshot_drift_check \
-            --skip legacy_job_json_still_executes_with_empty_stdin
+            --skip legacy_job_json_still_executes_with_empty_stdin \
+            --skip task_list_orders_recent_first_and_json_parses
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -535,6 +542,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
             -- legacy_job_json_still_executes_with_empty_stdin \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
+            -- task_list_orders_recent_first_and_json_parses \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \
