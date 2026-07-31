@@ -159,7 +159,8 @@ jobs:
             --skip resident_native_run_fails_over_before_tool_activity \
             --skip resident_native_run_rejects_frozen_chain_drift_before_wire \
             --skip resident_native_run_never_fails_over_after_tool_activity \
-            --skip detach_returns_fast_then_completes_success
+            --skip detach_returns_fast_then_completes_success \
+            --skip cancel_finalizes_cancelled_and_kills_group
           cargo test -p vyane-cli --bin vyane \
             api::tests::completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds \
             -- --exact
@@ -259,6 +260,11 @@ jobs:
           # after earlier suite work; run alone like other control-plane cases.
           cargo test -p vyane-cli --test detach_acceptance \
             detach_returns_fast_then_completes_success \
+            -- --exact
+          # Detach cancel kills the worker group and finalizes cancelled state;
+          # process-isolate like other multi_thread detach control-plane cases.
+          cargo test -p vyane-cli --test detach_acceptance \
+            cancel_finalizes_cancelled_and_kills_group \
             -- --exact
           # Expired-controller restart settlement can still observe `running`
           # under suite load after earlier daemon fixtures; the body is stable
@@ -382,7 +388,8 @@ jobs:
             --skip resident_native_run_fails_over_before_tool_activity \
             --skip resident_native_run_rejects_frozen_chain_drift_before_wire \
             --skip resident_native_run_never_fails_over_after_tool_activity \
-            --skip detach_returns_fast_then_completes_success
+            --skip detach_returns_fast_then_completes_success \
+            --skip cancel_finalizes_cancelled_and_kills_group
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_recovers_exact_controller_without_replay \
             --exact
@@ -451,6 +458,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
             -- detach_returns_fast_then_completes_success \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test detach_acceptance \
+            -- cancel_finalizes_cancelled_and_kills_group \
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_agent_acceptance \
             -- restart_settles_expired_native_controller_without_replaying_private_input \
