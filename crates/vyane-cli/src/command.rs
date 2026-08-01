@@ -2675,9 +2675,13 @@ fn print_daemon_workflow_view(view: &WorkflowTaskView) {
 }
 
 /// Human-readable daemon workflow status/submit lines, including the WP-152
-/// bounded success projection already present on [`WorkflowTaskView`].
+/// bounded success projection and durable `failure_code` already present on
+/// [`WorkflowTaskView`].
 fn format_daemon_workflow_view(view: &WorkflowTaskView) -> String {
     let mut out = format!("workflow {} {}\n", view.task.id, view.task.state);
+    if let Some(code) = view.task.failure_code {
+        out.push_str(&format!("failure {code}\n"));
+    }
     if let Some(journal) = view.journal.as_ref() {
         let counts = &journal.steps;
         out.push_str(&format!(
@@ -3301,7 +3305,7 @@ mod tests {
     use crate::daemon_workflow::WorkflowTaskView;
     #[cfg(target_os = "linux")]
     use crate::task::spawn::SpawnedWorker;
-    use vyane_task::{TaskKind, TaskOrigin, TaskRecord, TaskState};
+    use vyane_task::{FailureCode, TaskKind, TaskOrigin, TaskRecord, TaskState};
 
     fn sample_workflow_task(state: TaskState) -> TaskRecord {
         TaskRecord {
@@ -3343,6 +3347,7 @@ mod tests {
             "expected WP-152 projection body in human status:\n{text}"
         );
         assert!(!text.contains("output omitted"), "{text}");
+        assert!(!text.contains("failure "), "{text}");
     }
 
     #[test]
@@ -3356,6 +3361,7 @@ mod tests {
         let text = format_daemon_workflow_view(&view);
         assert!(text.contains("output omitted\n"), "{text}");
         assert!(!text.contains("output\n"), "{text}");
+        assert!(!text.contains("failure "), "{text}");
     }
 
     #[test]
@@ -3369,6 +3375,54 @@ mod tests {
         let text = format_daemon_workflow_view(&view);
         assert!(text.contains("running"), "{text}");
         assert!(!text.contains("output"), "{text}");
+        assert!(!text.contains("failure "), "{text}");
+    }
+
+    #[test]
+    fn human_daemon_workflow_view_prints_failure_code() {
+        let mut task = sample_workflow_task(TaskState::Failed);
+        task.failure_code = Some(FailureCode::WorkerLost);
+        let view = WorkflowTaskView {
+            task,
+            journal: None,
+            output: None,
+            output_omitted: false,
+        };
+        let text = format_daemon_workflow_view(&view);
+        assert!(
+            text.contains("workflow 01999999-9999-7999-8999-999999999999 failed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("failure worker_lost\n"),
+            "expected durable failure_code in human status:\n{text}"
+        );
+        assert!(!text.contains("output"), "{text}");
+    }
+
+    #[test]
+    fn human_daemon_workflow_view_prints_timed_out_failure_code() {
+        let mut task = sample_workflow_task(TaskState::TimedOut);
+        task.failure_code = Some(FailureCode::TimedOut);
+        let view = WorkflowTaskView {
+            task,
+            journal: None,
+            output: None,
+            output_omitted: false,
+        };
+        let text = format_daemon_workflow_view(&view);
+        assert!(text.contains("timed_out"), "{text}");
+        assert!(
+            text.contains("failure timed_out\n"),
+            "expected timed_out failure_code in human status:\n{text}"
+        );
+        // State line first, then failure line.
+        let state_at = text.find("workflow ").expect("state line");
+        let failure_at = text.find("failure timed_out\n").expect("failure line");
+        assert!(
+            state_at < failure_at,
+            "state should precede failure:\n{text}"
+        );
     }
 
     fn session_test_service(directory: &TempDir) -> VyaneService {
