@@ -251,6 +251,9 @@ fixture in a fresh CI process (suite skip + `--exact`).
 [WP-177](plan/WP-177.md) prints the WP-152 bounded success `output` (or
 `output omitted`) on human-mode daemon `workflow status` / submit responses.
 
+[WP-178](plan/WP-178.md) prints the durable `failure_code` already on the
+daemon workflow task record in the same human-mode status / submit responses.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
