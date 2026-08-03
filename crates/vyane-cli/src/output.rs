@@ -1524,6 +1524,14 @@ pub fn format_goal_signal_kind_line(kind: vyane_service::GoalSignalKind) -> Stri
     format!("goal signal: {}", terminal_safe(kind.as_str()))
 }
 
+/// Pure human line for closed allowlisted [`vyane_service::GoalNextActionKind`] kinds.
+///
+/// Live on REST continuity-next success (WP-448). Tokens match domain
+/// `GoalContinuityNextActionKind::as_str`.
+pub fn format_goal_next_action_kind_line(action: vyane_service::GoalNextActionKind) -> String {
+    format!("goal next action: {}", terminal_safe(action.as_str()))
+}
+
 /// Pure human line for closed [`vyane_goal::GoalContinuityOperatorCommand`] kinds.
 ///
 /// Live on CLI continuity-next when a command is projected (WP-409).
@@ -2417,7 +2425,7 @@ mod tests {
         format_goal_continuity_next_action_kind_line, format_goal_continuity_operator_command_line,
         format_goal_continuity_runner_error_kind_line, format_goal_continuity_signal_kind_line,
         format_goal_continuity_status_line, format_goal_continuity_step_status_line,
-        format_goal_error_line, format_goal_event_kind_line,
+        format_goal_error_line, format_goal_event_kind_line, format_goal_next_action_kind_line,
         format_goal_observation_ingress_error_kind_line, format_goal_observation_kind_line,
         format_goal_observation_runner_error_kind_line, format_goal_observation_signal_kind_line,
         format_goal_observation_status_line, format_goal_observation_watch_status_line,
@@ -4581,6 +4589,21 @@ mod tests {
         assert_eq!(
             format_goal_signal_kind_line(vyane_service::GoalSignalKind::ReviewChecksFailed),
             "goal signal: review_checks_failed"
+        );
+        // Allowlisted REST next-action tokens on continuity-next success (WP-448).
+        assert_eq!(
+            format_goal_next_action_kind_line(vyane_service::GoalNextActionKind::QueueApproval),
+            "goal next action: queue_approval"
+        );
+        assert_eq!(
+            format_goal_next_action_kind_line(vyane_service::GoalNextActionKind::RecordSignal),
+            "goal next action: record_signal"
+        );
+        assert_eq!(
+            format_goal_next_action_kind_line(
+                vyane_service::GoalNextActionKind::ContinuityComplete
+            ),
+            "goal next action: continuity_complete"
         );
         assert_eq!(
             format_goal_continuity_operator_command_line(
