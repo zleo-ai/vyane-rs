@@ -2023,6 +2023,14 @@ pub fn format_workflow_list(rows: &[WorkflowJournalSummary]) -> String {
 }
 
 pub fn print_workflow_list(rows: &[WorkflowJournalSummary]) {
+    // Kind-only pure workflow run status per list row (WP-436).
+    for row in rows {
+        tracing::info!(
+            status = row.status.as_str(),
+            "{}",
+            format_workflow_run_status_line(row.status)
+        );
+    }
     print!("{}", format_workflow_list(rows));
 }
 
