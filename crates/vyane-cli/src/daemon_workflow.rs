@@ -779,17 +779,21 @@ impl DaemonWorkflowSupervisor {
                     }
                 }
             }
-            // Kind-only pure failure code on lease-loss Forced Failed settle (WP-421).
-            tracing::error!(
-                task_id = %id,
-                failure_code = code.as_str(),
-                "{}",
-                crate::output::format_task_failure_code_line(code)
-            );
-            CompletionAction::Settle(TaskSettlement::Failed {
+            // Kind-only pure settlement + failure code on lease-loss Forced
+            // Failed settle (WP-421/430).
+            let settlement = TaskSettlement::Failed {
                 code,
                 ledger_run_id: None,
-            })
+            };
+            tracing::error!(
+                task_id = %id,
+                settlement = settlement.as_str(),
+                failure_code = code.as_str(),
+                "{}; {}",
+                crate::output::format_task_settlement_line(&settlement),
+                crate::output::format_task_failure_code_line(code)
+            );
+            CompletionAction::Settle(settlement)
         } else {
             self.finish_worker(&id, result)
         };
