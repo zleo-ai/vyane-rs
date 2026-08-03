@@ -1447,8 +1447,8 @@ pub fn format_takeover_approval_status_line(status: vyane_goal::TakeoverApproval
 
 /// Pure human line for closed [`vyane_workflow::JournalStepStatus`] kinds.
 ///
-/// Live wire is on daemon workflow worker finish last-step observation; CLI
-/// pure surface for tests and operator diagnostics (WP-356/389).
+/// Live on daemon workflow worker finish last-step observation (WP-356/389) and
+/// local workflow summary print (WP-455).
 pub fn format_journal_step_status_line(status: vyane_workflow::JournalStepStatus) -> String {
     format!("journal step: {}", terminal_safe(status.as_str()))
 }
@@ -2076,6 +2076,14 @@ pub fn print_workflow_summary(outcome: &WorkflowOutcome) {
         "{}",
         format_workflow_run_status_line(outcome.status)
     );
+    // Kind-only pure journal step status per step on local summary print (WP-455).
+    for step in outcome.journal.steps.values() {
+        tracing::info!(
+            status = step.status.as_str(),
+            "{}",
+            format_journal_step_status_line(step.status)
+        );
+    }
     print!("{}", format_workflow_summary(outcome));
 }
 
