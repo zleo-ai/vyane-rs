@@ -254,6 +254,744 @@ fixture in a fresh CI process (suite skip + `--exact`).
 [WP-178](plan/WP-178.md) prints the durable `failure_code` already on the
 daemon workflow task record in the same human-mode status / submit responses.
 
+[WP-179](plan/WP-179.md) prints each detached `TaskRow.failure_code` on human
+`task list` when present (JSON already serialized the field).
+
+[WP-180](plan/WP-180.md) extracts a pure human durable `task status` formatter
+and unit-tests `failure_code` snake_case lines on the shipped path.
+
+[WP-181](plan/WP-181.md) extracts a pure human `workflow list` formatter and
+unit-tests status names plus step-count totals on real journal summaries.
+
+[WP-182](plan/WP-182.md) extracts a pure human broadcast result table formatter
+and unit-tests success and error row projection.
+
+[WP-183](plan/WP-183.md) extracts a pure human run-record line formatter and
+unit-tests status, target, duration, and optional cost projection.
+
+[WP-184](plan/WP-184.md) extracts a pure human session-view line formatter and
+unit-tests native state / resume flags with terminal-safe fields.
+
+[WP-185](plan/WP-185.md) extracts a pure human legacy session line formatter and
+unit-tests id / target / run_count / updated_at projection.
+
+[WP-186](plan/WP-186.md) extracts a pure human legacy `task status` formatter and
+unit-tests displayed state vs file state plus optional error/log lines.
+
+[WP-187](plan/WP-187.md) extracts a pure human workflow run summary formatter and
+unit-tests status, path, optional replay, and step first-line output.
+
+[WP-188](plan/WP-188.md) extracts a pure human goal list line formatter and
+unit-tests status Display, priority, and terminal-safe id/title fields.
+
+[WP-189](plan/WP-189.md) extracts a pure human continuity next-action formatter
+with snake_case action/command tokens (no Debug) and optional durable field
+lines for the WP-79 operator projection.
+
+[WP-190](plan/WP-190.md) extracts a pure human `vyane route` result formatter
+and unit-tests profile + RouteDecision fields (tier/effort as_str, score, safe
+free text).
+
+[WP-191](plan/WP-191.md) extracts a pure human takeover approval line formatter
+for continuity queue/decide responses (safe id/goal/step + status Display).
+
+[WP-192](plan/WP-192.md) extracts a pure human continuity-signal result line
+formatter (safe goal id, recorded|unchanged, next_ready_step).
+
+[WP-193](plan/WP-193.md) extracts a pure human `vyane check` permission summary
+formatter over the redacted harness + native ceiling axes (P1 permission
+operator surface).
+
+[WP-194](plan/WP-194.md) extracts a pure human goal pursue outcome formatter
+(status Display, segment counters, terminal-safe summary/reason).
+
+[WP-195](plan/WP-195.md) extracts a pure human goal verify result formatter
+(success|inconclusive, terminal-safe goal id and acceptance summary).
+
+[WP-196](plan/WP-196.md) extracts a pure human goal progress event line formatter
+(safe event/goal ids, kind Display, revision).
+
+[WP-197](plan/WP-197.md) routes human `goal get` event rows through pure
+`format_goal_event_line` and drops the private CLI `event_kind_text` table in
+favor of domain `GoalEventKind` Display.
+
+[WP-198](plan/WP-198.md) extracts the pure daemon workflow status/submit human
+formatter into `output.rs` with the existing WP-152/WP-178 unit coverage.
+
+[WP-199](plan/WP-199.md) extracts pure human local A2A send/inbox/read formatters
+with terminal-safe ids, codes, kind, delivery status, and body.
+
+[WP-200](plan/WP-200.md) extracts pure human cancel final-state lines for
+detached tasks and daemon workflow cancel.
+
+[WP-201](plan/WP-201.md) extracts pure human `vyane check` section formatters
+for config files, providers, profiles, harnesses, and profile environment rows.
+
+[WP-202](plan/WP-202.md) extracts pure human cancel idempotency lines
+(`{id} already {state}`) for legacy and durable terminal cancel paths.
+
+[WP-203](plan/WP-203.md) extracts pure human daemon lifecycle lines (already
+running / started / running status / stopped).
+
+[WP-204](plan/WP-204.md) extracts pure session-control error classification plus
+empty task-list and detached run-id human lines.
+
+[WP-205](plan/WP-205.md) extracts pure native ask-surface model outputs
+(`approval_required_output` / `missing_approval_plan_output`) with safe plan
+hash prefixes.
+
+[WP-206](plan/WP-206.md) extracts pure deny / unknown / invalid native tool
+model outputs used on the prepare path.
+
+[WP-207](plan/WP-207.md) extracts pure cancel / timeout / panic / unavailable /
+failed native tool execution outputs on ordinary and authorized paths.
+
+[WP-208](plan/WP-208.md) extracts pure workflow error human prefix lines
+(`config error:` vs `error:`).
+
+[WP-209](plan/WP-209.md) extracts pure detached-task diagnostic lines (no such
+run / no output / not local dispatch) with terminal-safe ids.
+
+[WP-210](plan/WP-210.md) extracts pure `vyane serve` loopback/start lines and a
+shared config-error prefix helper.
+
+[WP-211](plan/WP-211.md) routes remaining CLI `config error:` stderr through
+`format_config_error_line` (no residual ad-hoc literals in command.rs).
+
+[WP-212](plan/WP-212.md) extracts pure generic `error:` and `worker error:`
+CLI stderr prefix helpers for command/main paths.
+
+[WP-213](plan/WP-213.md) composes workflow error human lines from the shared
+config-error and error prefix helpers.
+
+[WP-214](plan/WP-214.md) composes session-control error human lines from the
+shared `format_error_line` helper.
+
+[WP-215](plan/WP-215.md) extracts pure daemon listen/not-running banners and
+goal CLI error prefix lines.
+
+[WP-216](plan/WP-216.md) extracts pure A2A error / inbox-more and cancel
+diagnostic lines (kill unfinalized, not-local frontend cancel).
+
+[WP-217](plan/WP-217.md) extracts pure cancel ownership/diagnostic lines and
+workflow observer step event lines.
+
+[WP-218](plan/WP-218.md) extracts pure legacy cancel identity / nested-harness
+cleanup diagnostics (pid-reuse refuse, incomplete process groups, and related
+operator lines).
+
+[WP-219](plan/WP-219.md) extracts pure durable cancel refuse-control and terminal
+cleanup-failed diagnostics (process identity unavailable; reuse cleanup helper).
+
+[WP-220](plan/WP-220.md) extracts pure worker/stale-detached diagnostics (stale
+status, metadata settlement, output write, nested harness controller
+write/cleanup).
+
+[WP-221](plan/WP-221.md) extracts pure dispatch stream notices (unsupported /
+not-applicable fallback) and tool-use progress lines with terminal-safe free
+text.
+
+[WP-222](plan/WP-222.md) extracts pure REST task-supervisor lifecycle operator
+logs (init cleanup, duplicate runtime, dispatch fail/panic, output artifact).
+
+[WP-223](plan/WP-223.md) extracts pure REST metadata settlement, goal-read,
+task output read, and serve listening operator logs.
+
+[WP-224](plan/WP-224.md) extracts pure REST handler label/stream/broadcast and
+ledger/session query operator logs (remaining serve stderr ad-hoc paths).
+
+[WP-225](plan/WP-225.md) extracts pure `vyane check` section header lines
+(providers / profiles / harnesses / profile environment).
+
+[WP-226](plan/WP-226.md) extracts pure check profile resolve-warning body and
+dispatch run-failure stderr (no `error:` prefix contract frozen).
+
+[WP-227](plan/WP-227.md) consolidates native turn-driver invalid-JSON tool
+arguments into the pure tool ERROR helper surface (WP-205–207).
+
+[WP-228](plan/WP-228.md) publishes domain `as_str`/`Display` for continuity
+signal kinds, criterion status, and pursuit checkpoint/segment status; CLI
+signal evidence uses domain tokens.
+
+[WP-229](plan/WP-229.md) publishes domain `as_str`/`Display` for continuity
+mode/status/step status and takeover decision tokens.
+
+[WP-230](plan/WP-230.md) makes `GoalStatus::as_str` public (Display already
+existed), aligning the goal status token API with sibling domain enums.
+
+[WP-231](plan/WP-231.md) adds `Display` for `TakeoverRunStatus` (via existing
+`as_str`), finishing the takeover status token surface.
+
+[WP-232](plan/WP-232.md) publishes domain `as_str`/`Display` for
+`WorkflowRunStatus` and `JournalStepStatus`; CLI `workflow_status_name` uses
+domain tokens only.
+
+[WP-233](plan/WP-233.md) routes workflow summary step status through domain
+`JournalStepStatus::as_str` (no Debug + to_lowercase).
+
+[WP-234](plan/WP-234.md) adds `Display` for `SessionNativeState` (via existing
+`as_str`), matching the domain token train for session human lines.
+
+[WP-235](plan/WP-235.md) publishes domain `as_str`/`Display` for
+`NativePermissionAxisStatus`; CLI permission-check axis labels use domain
+tokens only.
+
+[WP-236](plan/WP-236.md) publishes domain `as_str`/`Display` for `RunStatus`
+(snake_case) and `Sandbox` (kebab-case); CLI `status_name` / `sandbox_name`
+use domain tokens only.
+
+[WP-237](plan/WP-237.md) routes CLI `SandboxArg` Display through domain
+`Sandbox::as_str` (no private kebab-case match table).
+
+[WP-238](plan/WP-238.md) adds CLI `RunStatusArg` Display through domain
+`RunStatus::as_str`.
+
+[WP-239](plan/WP-239.md) adds CLI `GoalStatusArg` Display through domain
+`GoalStatus::as_str` (including `in_progress`).
+
+[WP-240](plan/WP-240.md) adds CLI takeover-decision and continuity-signal arg
+Display through domain tokens; decide/signal command paths use `From`.
+
+[WP-241](plan/WP-241.md) publishes `as_str` on all `vyane-task` string enums
+via the shared macro (`TaskState`, origin, kind, failure code, event kind).
+
+[WP-242](plan/WP-242.md) adds `Display` for `Effort` (via existing `as_str`),
+matching the domain token train for routing human lines.
+
+[WP-243](plan/WP-243.md) adds `Display` for `RouteTier` and `RouteEffort`
+(via existing `as_str`).
+
+[WP-244](plan/WP-244.md) adds `Display` for router `IntentCategory` (via
+existing `as_str`, including multi-word `code_gen`).
+
+[WP-245](plan/WP-245.md) publishes domain `as_str`/`Display` for configuration
+diagnostic enums (check/credential/profile status and issue codes).
+
+[WP-246](plan/WP-246.md) publishes domain `as_str`/`Display` for kernel
+`ErrorKind` (including multi-word tokens and `other` for unknown serde kinds).
+
+[WP-247](plan/WP-247.md) routes session-control error `kind_code` through
+`ErrorKind::as_str` where the operator contract already matches domain tokens.
+
+[WP-248](plan/WP-248.md) publishes domain `as_str`/`Display` for
+`RouteSelectionBasis` on route-preview diagnostics.
+
+[WP-249](plan/WP-249.md) publishes domain `as_str`/`Display` for goal
+observation closed enums (`GoalObservationSignalKind`,
+`GoalObservationStatus`, `GoalObservationWatcherErrorCode`,
+`GoalObservationWatchStatus`).
+
+[WP-250](plan/WP-250.md) publishes domain `as_str`/`Display` for quota closed
+enums (`QuotaStatus`, `QuotaUnit`, `QuotaConnectorErrorCode`,
+`QuotaSnapshotStatus`).
+
+[WP-251](plan/WP-251.md) publishes domain `as_str`/`Display` for goal
+next-action view enums (`GoalNextActionKind`, `GoalOperatorCommand`,
+`GoalSignalKind`, `GoalNextReasonCode`), single-sourcing action/command/signal
+tokens from the core projection enums.
+
+[WP-252](plan/WP-252.md) publishes domain `as_str`/`Display` for
+`GoalContinuityRunStatus` on the bounded continuity runner redacted result.
+
+[WP-253](plan/WP-253.md) publishes public `as_str` for `vyane-message`
+`string_enum!` tokens (`MessageDirection`, `EndpointKind`, `DeliveryStatus`,
+`MessageEventKind`, `MessagePublicationStatus`), matching WP-241 for tasks.
+
+[WP-254](plan/WP-254.md) publishes public `as_str` for `vyane-agent`
+`string_enum!` tokens (`RunState`, `ExecutionBackend`, `AgentEventKind`, and
+siblings), completing the store string-enum public token train with WP-241/253.
+
+[WP-255](plan/WP-255.md) publishes domain `as_str`/`Display` for kernel
+`AuthStyle` and `InheritMode` (`bearer` / `x_api_key`, `scrub` / `full`).
+
+[WP-256](plan/WP-256.md) publishes domain `as_str`/`Display` for
+`EnvInjectSource` and ledger event enums (`EventCategory`, `EventSource`,
+`EventDurability`).
+
+[WP-257](plan/WP-257.md) publishes domain `as_str`/`Display` for kernel
+capability enums (`FilesystemCapability`, `IsolationStrength`,
+`CapabilityRejectionReason`).
+
+[WP-258](plan/WP-258.md) publishes domain `as_str`/`Display` for MCP workflow
+projection enums (`WorkflowState`, `WorkflowFailureCode`).
+
+[WP-259](plan/WP-259.md) publishes domain `as_str`/`Display` for config native
+policy enums (`NativeToolPermissionEffectConfig`,
+`NativeCommandNetworkRouteConfig`).
+
+[WP-260](plan/WP-260.md) publishes public `as_str` for harness
+`PermissionEffect` and domain tokens for `NativeCommandNetworkRoute`, aligning
+runtime vocabulary with WP-259 config enums.
+
+[WP-261](plan/WP-261.md) publishes domain `as_str`/`Display` for native
+`ToolInvocationStatus`, including the permission-ask terminal
+`approval_required`.
+
+[WP-262](plan/WP-262.md) publishes domain `as_str`/`Display` for
+`GoalContinuityPortResult` and completes `Display` for
+`WebSearchContextSize`.
+
+[WP-263](plan/WP-263.md) publishes domain kind tokens for `NativeTurnStop`
+(`approval_required`, `budget_exhausted`, …) without leaking reply or
+approval payloads.
+
+[WP-264](plan/WP-264.md) wires native status tokens on shipped paths:
+`ToolInvocationStatus::is_executed` drives turn-driver `is_error`, and native
+agent settlement maps `NativeTurnStop::as_str` kinds onto durable failure codes.
+
+[WP-265](plan/WP-265.md) locks config↔harness native permission/network token
+parity on the service adapter path that composes permission ceilings.
+
+[WP-266](plan/WP-266.md) adds pure human `format_tool_invocation_status_line`
+over `ToolInvocationStatus` tokens (`approval_required`, `timed_out`, …).
+
+[WP-267](plan/WP-267.md) wires that pure status line onto the CLI stream
+`ToolUse` path (progress uses `executed`).
+
+[WP-268](plan/WP-268.md) adds pure human `format_native_turn_stop_line` over
+`NativeTurnStop` kind tokens and keeps it reachable from native settlement.
+
+[WP-269](plan/WP-269.md) emits that pure stop line on the native settlement
+failure path via `tracing::info!` (`stop_kind` / `failure_code` tokens only).
+
+[WP-270](plan/WP-270.md) wires `PursuitStatus` / `GoalStatus` `as_str` tokens
+onto the resident goal pursuit settlement diagnostic (replacing Debug `?`).
+
+[WP-271](plan/WP-271.md) publishes `LifecycleObservation` kind tokens and wires
+them onto Process AgentRun dispatch diagnostics (replacing Debug `?state`).
+
+[WP-272](plan/WP-272.md) publishes completion-stage and controller-cleanup kind
+tokens and replaces Debug `?staged` / `?report` daemon warn dumps with
+`stage_error` / `unresolved` counts.
+
+[WP-273](plan/WP-273.md) publishes `AgentExecutionItemStatus` /
+`AgentExecutionError` kind tokens and logs the first degraded execution item
+kind on supervisor backoff.
+
+[WP-274](plan/WP-274.md) publishes recovery/completion projection status tokens
+and logs first degraded kinds on those supervisor backoff paths.
+
+[WP-275](plan/WP-275.md) publishes recovery/completion/supervisor error kind
+tokens and logs them on failed AgentRun supervisor cycles (replacing discarded
+`Err(_)`).
+
+[WP-276](plan/WP-276.md) logs execution/recovery driver construction failures
+with the same `as_str` error kind tokens (closing the WP-275 residual).
+
+[WP-277](plan/WP-277.md) publishes goal-read / continuity-runner error kind
+tokens and pure `format_goal_read_error_kind_line`, wired onto REST
+continuity-next diagnostics.
+
+[WP-278](plan/WP-278.md) adds pure continuity runner/authority error kind lines
+and logs underlying `GoalReadError` kinds when the continuity runner cannot
+open its goal reader.
+
+[WP-279](plan/WP-279.md) publishes `GoalObservationIngressError` /
+`GoalObservationRunnerError` kind tokens for the observation mutation seam.
+
+[WP-280](plan/WP-280.md) adds pure observation ingress/runner error kind lines
+and logs ingress open failures with those tokens.
+
+[WP-281](plan/WP-281.md) logs body-free `reason = "panic"` on AgentRun
+supervisor catch_unwind arms that increment `panicked_cycles`.
+
+[WP-282](plan/WP-282.md) publishes `NativePermissionSetError` kind tokens for
+native permission ceiling validation failures.
+
+[WP-283](plan/WP-283.md) adds pure `format_native_permission_set_error_kind_line`
+and logs that kind when daemon native permission ceiling application fails.
+
+[WP-284](plan/WP-284.md) publishes in-process authority/completion/native-bind
+error kind tokens for the P1 native execution authority seam.
+
+[WP-285](plan/WP-285.md) publishes `InProcessAssemblyError` kind tokens for
+assembly registry construction failures.
+
+[WP-286](plan/WP-286.md) publishes `OwnerContextError` kind tokens for
+principal-to-owner binding failures.
+
+[WP-287](plan/WP-287.md) adds pure `format_owner_context_error_kind_line` and
+logs authentication failure kinds on `OwnerContextFactory::authenticate`.
+
+[WP-288](plan/WP-288.md) logs remaining owner-context construction kinds
+(`invalid_principal`, `resolution_failed`, `invalid_owner`, `reserved_owner`).
+
+[WP-289](plan/WP-289.md) publishes `AgentMessageCompletionReadError` and
+`DiagnosticErrorKind` tokens.
+
+[WP-290](plan/WP-290.md) publishes kind-only tokens for
+`PermissionRuleError` / `ToolRegistryError` on the native ask registration
+surface.
+
+[WP-291](plan/WP-291.md) publishes kind-only tokens for `ToolContextError`,
+`NativeCommandPolicyError`, and `NativeReadPolicyError`.
+
+[WP-292](plan/WP-292.md) publishes kind tokens for write/filesystem/network/
+web-fetch/web-search native policy errors.
+
+[WP-293](plan/WP-293.md) publishes kind-only tokens for
+`ToolChatValidationError` on the bounded typed tool-chat boundary.
+
+[WP-294](plan/WP-294.md) publishes kind-only tokens for `EditError` on the
+bounded trusted text-edit tool surface.
+
+[WP-295](plan/WP-295.md) adds pure `format_tool_chat_validation_error_kind_line`
+and logs validation kinds on the native turn driver request/response boundary.
+
+[WP-296](plan/WP-296.md) logs preflight next-request validation kinds before
+tool side effects (closing the WP-295 residual).
+
+[WP-297](plan/WP-297.md) publishes kind tokens for `NativeTurnLimitError`,
+host Unsupported, and `RegisterCommandToolError`.
+
+[WP-298](plan/WP-298.md) publishes kind-only tokens for `AgentStoreError` on
+the AgentRun durable store surface.
+
+[WP-299](plan/WP-299.md) adds pure `format_agent_store_error_kind_line` and
+logs store kinds when native authority maps store failures.
+
+[WP-300](plan/WP-300.md) publishes kind-only tokens for web-fetch/web-search
+tool registration errors.
+
+[WP-301](plan/WP-301.md) publishes kind-only tokens for `GoalStoreError` on the
+owner-scoped goal durable store surface.
+
+[WP-302](plan/WP-302.md) adds pure `format_goal_store_error_kind_line` and logs
+goal-store kinds on the resident goal daemon paths.
+
+[WP-303](plan/WP-303.md) publishes kind-only tokens for `MessageStoreError` on
+the owner-scoped message durable store surface.
+
+[WP-304](plan/WP-304.md) publishes kind-only tokens for `TaskStoreError` on the
+owner-scoped task durable store surface.
+
+[WP-305](plan/WP-305.md) publishes kind-only tokens for quota validation, runner,
+and transport error surfaces.
+
+[WP-306](plan/WP-306.md) publishes kind-only tokens for `BrokerError` on the
+local message/agent projection broker surface.
+
+[WP-307](plan/WP-307.md) publishes kind-only tokens for `EventLogError` on the
+durable event-log surface.
+
+[WP-308](plan/WP-308.md) publishes kind-only tokens for `WorkflowError` on the
+workflow engine / journal surface.
+
+[WP-309](plan/WP-309.md) adds pure `format_workflow_error_kind_line` and logs
+workflow kinds on the resident workflow daemon failure paths.
+
+[WP-310](plan/WP-310.md) publishes kind-only tokens for `WorkflowControlError`
+on the MCP/daemon workflow control adapter surface.
+
+[WP-311](plan/WP-311.md) adds pure task/message store error lines and logs
+task-store kinds on workflow lease renewal and completion retry.
+
+[WP-312](plan/WP-312.md) adds pure event-log and workflow-control error kind
+lines for operator diagnostics.
+
+[WP-313](plan/WP-313.md) adds pure register web-fetch/web-search tool error kind
+lines for operator diagnostics.
+
+[WP-314](plan/WP-314.md) logs kind-only tokens when the resident goal supervisor
+fails or shutdown handlers cannot be installed.
+
+[WP-315](plan/WP-315.md) logs kind-only tokens on workflow controller open,
+cleanup, join, and invalid-task recovery paths.
+
+[WP-316](plan/WP-316.md) logs a fixed kind when harness lifecycle stop reporting
+fails (closing the last workspace `error = %error` structured-log site).
+
+[WP-317](plan/WP-317.md) publishes lowercase kind tokens for workflow step
+`OnError` policy (`abort` / `continue`).
+
+[WP-318](plan/WP-318.md) logs `ErrorKind` tokens on kernel post-run ledger
+append and session update best-effort warnings.
+
+[WP-319](plan/WP-319.md) publishes kind-only tokens for daemon workflow submit
+and control client errors.
+
+[WP-320](plan/WP-320.md) adds pure workflow submit and control-client error kind
+lines for operator diagnostics.
+
+[WP-321](plan/WP-321.md) adds pure `on_error` policy lines for workflow step
+failure policy tokens.
+
+[WP-322](plan/WP-322.md) adds pure `ErrorKind` lines for the kernel failover
+taxonomy tokens.
+
+[WP-323](plan/WP-323.md) adds pure `BrokerError` lines after wiring a direct
+CLI dependency on `vyane-broker`.
+
+[WP-324](plan/WP-324.md) adds pure quota validation/runner/transport error
+lines after wiring a direct CLI dependency on `vyane-quota`.
+
+[WP-325](plan/WP-325.md) publishes kind-only tokens for broker `PumpItemStatus`
+and logs degraded pump items with those kinds.
+
+[WP-326](plan/WP-326.md) publishes kind-only tokens for `NativeSideEffect` and
+`InProcessAgentEffect` on the native revalidation surface.
+
+[WP-327](plan/WP-327.md) adds pure native-side-effect and in-process-effect
+lines for operator diagnostics.
+
+[WP-328](plan/WP-328.md) publishes kind-only tokens for `GoalObservationKind`
+and `NativeSessionState`.
+
+[WP-329](plan/WP-329.md) adds pure goal-observation-kind and native-session-state
+lines for operator diagnostics.
+
+[WP-330](plan/WP-330.md) publishes kind-only tokens for message `NackDisposition`
+and a pure nack diagnostic line.
+
+[WP-331](plan/WP-331.md) logs kind-only nack disposition and pump status on
+broker nack settlement.
+
+[WP-332](plan/WP-332.md) logs workflow submit and control-client kinds when
+mapping MCP control errors.
+
+[WP-333](plan/WP-333.md) logs kind-only native side-effect rejections on
+model/tool authority revalidation.
+
+[WP-334](plan/WP-334.md) logs kind-only observation kind and status on goal
+observation ingest.
+
+[WP-335](plan/WP-335.md) logs kind-only workflow-control errors when MCP maps
+them to public tool errors.
+
+[WP-336](plan/WP-336.md) publishes kind-only tokens for agent `CancelOutcome`
+and a pure CLI cancel-outcome line.
+
+[WP-337](plan/WP-337.md) logs kind-only cancel outcomes after durable agent
+cancel settlement.
+
+[WP-338](plan/WP-338.md) publishes kind-only tokens for broker
+`AdapterOutcome` / `AdapterFailure` and pure CLI adapter lines.
+
+[WP-339](plan/WP-339.md) logs kind-only adapter outcomes and failures on the
+broker pump delivery path.
+
+[WP-340](plan/WP-340.md) publishes kind-only tokens for dispatch
+`AttemptOutcome` and a pure CLI attempt-outcome line.
+
+[WP-341](plan/WP-341.md) publishes kind-only tokens for
+`ControllerRecoveryObservation` and a pure CLI recovery-observation line.
+
+[WP-342](plan/WP-342.md) logs kind-only controller recovery observations on the
+daemon agent cancel path.
+
+[WP-343](plan/WP-343.md) publishes kind-only tokens for `AgentExecutorOutcome`
+and `ReplaySafety`, plus pure CLI lines.
+
+[WP-344](plan/WP-344.md) publishes kind-only tokens for agent `RunSettlement`
+and task `TaskSettlement`, plus pure CLI settlement lines.
+
+[WP-345](plan/WP-345.md) publishes kind-only tokens for
+`AgentExecutionSettlement` and a pure CLI execution-settlement line.
+
+[WP-346](plan/WP-346.md) publishes kind-only tokens for
+`NativeSessionTransition` and a pure CLI session-transition line.
+
+[WP-347](plan/WP-347.md) publishes kind-only tokens for
+`AgentCompletionSinkObservation` / `AgentCompletionSinkTransition` and pure CLI
+completion-sink lines.
+
+[WP-348](plan/WP-348.md) logs kind-only completion-sink observations on the
+agent recovery path.
+
+[WP-349](plan/WP-349.md) publishes kind-only tokens for public
+`RunAttemptOutcomeView` and a pure CLI run-attempt line.
+
+[WP-350](plan/WP-350.md) logs kind-only agent recovery item statuses after each
+recovered ticket, plus a pure CLI recovery-item line.
+
+[WP-351](plan/WP-351.md) logs kind-only agent execution item statuses after each
+executed claim, plus a pure CLI execution-item line.
+
+[WP-352](plan/WP-352.md) logs kind-only agent completion projection item
+statuses after each projected event, plus a pure CLI projection-status line.
+
+[WP-353](plan/WP-353.md) adds pure CLI kind-only lines for lifecycle
+`RunState` / `TaskState` / `GoalStatus` / `WorkflowRunStatus`.
+
+[WP-354](plan/WP-354.md) adds pure CLI kind-only lines for
+`DeliveryStatus` / `MessagePublicationStatus` / `RunCompletionStatus`.
+
+[WP-355](plan/WP-355.md) adds pure CLI kind-only lines for goal
+`PursuitStatus` / `CriterionStatus` / `GoalContinuityStatus` /
+`TakeoverApprovalStatus`.
+
+[WP-356](plan/WP-356.md) adds pure CLI kind-only lines for
+`JournalStepStatus` / `WorkflowState` / `GoalContinuityStepStatus`.
+
+[WP-357](plan/WP-357.md) adds pure CLI kind-only lines for
+`MessageEventKind` / `RunStatus` / `GoalContinuityMode`.
+
+[WP-358](plan/WP-358.md) adds pure CLI kind-only lines for
+`TakeoverDecision` / `TakeoverRunStatus` / `PursuitCheckpointStatus` /
+`PursuitSegmentStatus`.
+
+[WP-359](plan/WP-359.md) adds pure CLI kind-only lines for goal observation
+signal/status/watch kinds.
+
+[WP-360](plan/WP-360.md) adds pure CLI kind-only lines for diagnostics
+config/credential/profile/permission-axis statuses.
+
+[WP-361](plan/WP-361.md) wires pure cancel-outcome and controller-recovery
+observation lines onto daemon agent cancel logs.
+
+[WP-362](plan/WP-362.md) wires pure pursuit and goal status lines onto resident
+goal pursuit settlement logs.
+
+[WP-363](plan/WP-363.md) wires pure goal/task store and workflow error lines onto
+daemon and MCP mapping logs.
+
+[WP-364](plan/WP-364.md) clears leftover `dead_code` allows on pure store/workflow
+error lines wired by WP-363.
+
+[WP-365](plan/WP-365.md) wires pure register web_fetch/web_search error lines onto
+native AgentRun tool registration failures.
+
+[WP-366](plan/WP-366.md) adds pure register run_command error lines and wires them
+onto native AgentRun command-tool registration failures.
+
+[WP-367](plan/WP-367.md) adds pure permission-rule error lines and wires them onto
+native AgentRun permission-policy assembly failures.
+
+[WP-368](plan/WP-368.md) adds pure native filesystem policy error lines and wires
+them onto native AgentRun workspace registry assembly failures.
+
+[WP-369](plan/WP-369.md) wires pure goal-store error lines onto soft-handled
+resident goal quarantine pause failures.
+
+[WP-370](plan/WP-370.md) wires pure goal-store error lines onto resident pursuit
+config/construct/stop error logs.
+
+[WP-371](plan/WP-371.md) adds pure completion-stage error lines and wires them
+onto Process AgentRun completion staging failures.
+
+[WP-372](plan/WP-372.md) adds pure lifecycle observation lines and wires them
+onto Process AgentRun dispatch/stop-proof diagnostics.
+
+[WP-373](plan/WP-373.md) wires pure run-status lines onto Process AgentRun
+non-quiesced terminal status diagnostics.
+
+[WP-374](plan/WP-374.md) wires pure executor/settlement lines onto Process
+AgentRun final settle paths.
+
+[WP-375](plan/WP-375.md) wires pure executor/settlement lines onto native
+AgentRun settle paths (failure helper + completion stage).
+
+[WP-376](plan/WP-376.md) wires pure agent-store error lines onto daemon AgentRun
+create failures that cannot exact-retry.
+
+[WP-377](plan/WP-377.md) wires pure agent-store error lines onto Process AgentRun
+create failures that cannot exact-retry.
+
+[WP-378](plan/WP-378.md) wires pure ErrorKind lines onto native AgentRun turn
+failure and outer timeout mapping.
+
+[WP-379](plan/WP-379.md) adds pure RunFailureCode lines and wires them onto native
+and Process AgentRun quiesced failure settlements.
+
+[WP-380](plan/WP-380.md) wires pure goal-store error lines onto resident goal
+supervisor task failure.
+
+[WP-381](plan/WP-381.md) wires pure MCP workflow-control error lines onto submit
+and control error mapping.
+
+[WP-382](plan/WP-382.md) wires pure workflow/task-store error lines onto daemon
+workflow API failure mapping.
+
+[WP-383](plan/WP-383.md) wires pure workflow-run status and task settlement lines
+onto daemon workflow worker finish.
+
+[WP-384](plan/WP-384.md) wires pure task settlement lines onto workflow finish
+error and non-shutdown join settles.
+
+[WP-385](plan/WP-385.md) wires pure run-state lines onto daemon AgentRun cancel
+observation of terminal and cancelling states.
+
+[WP-386](plan/WP-386.md) wires pure task-state lines onto daemon workflow cancel
+observation of terminal and cancelling states.
+
+[WP-387](plan/WP-387.md) wires pure MCP workflow-state lines onto successful
+workflow cancel lifecycle observation.
+
+[WP-388](plan/WP-388.md) wires pure run-completion status lines onto terminal
+AgentRun view assembly when a completion record is present.
+
+[WP-389](plan/WP-389.md) wires pure journal-step status lines onto daemon workflow
+worker finish last-step observation.
+
+[WP-390](plan/WP-390.md) wires pure attempt-outcome lines onto Process AgentRun
+quiesced Error settlement when a last attempt is present.
+
+[WP-391](plan/WP-391.md) wires pure delivery-status lines onto local A2A message
+projection.
+
+[WP-392](plan/WP-392.md) wires pure message-store error lines onto local A2A store
+open failures.
+
+[WP-393](plan/WP-393.md) wires pure takeover decision and approval status lines
+onto goal continuity decide.
+
+[WP-394](plan/WP-394.md) wires pure criterion status lines onto goal satisfy and
+verify paths.
+
+[WP-395](plan/WP-395.md) wires pure takeover-run status lines onto goal continuity
+execute finish.
+
+[WP-396](plan/WP-396.md) wires pure goal-status lines onto CLI goal human
+projection.
+
+[WP-397](plan/WP-397.md) wires pure takeover-approval status lines onto shared
+takeover result projection and uses `as_str` in the human tab column.
+
+[WP-398](plan/WP-398.md) wires pure pursuit-checkpoint status lines onto goal
+CLI get when a durable checkpoint is present.
+
+[WP-399](plan/WP-399.md) wires pure pursuit-status lines onto CLI goal pursue
+settle (daemon already had them via WP-362).
+
+[WP-400](plan/WP-400.md) makes goal human tab/status columns use explicit
+`as_str` kind tokens instead of Display formatting.
+
+[WP-401](plan/WP-401.md) wires pure continuity status/mode lines onto CLI
+continuity-next and uses `as_str` for next-action/command human columns.
+
+[WP-402](plan/WP-402.md) wires pure config-check, credential, profile, issue,
+and native-permission-axis lines onto `vyane check`.
+
+[WP-403](plan/WP-403.md) wires pure continuity step-status lines onto CLI
+continuity-next for next-ready and projected plan steps.
+
+[WP-404](plan/WP-404.md) wires pure pursuit-segment status lines onto the shared
+DispatchGoalRuntime segment settle used by CLI pursue and daemon pursuit.
+
+[WP-405](plan/WP-405.md) wires pure OnError policy lines onto review workflow
+build for each frozen step policy.
+
+[WP-406](plan/WP-406.md) wires pure continuity next-action kind lines onto CLI
+continuity-next projection.
+
+[WP-407](plan/WP-407.md) wires pure goal-event kind lines onto CLI goal get
+event rows and progress settlement.
+
+[WP-408](plan/WP-408.md) wires pure continuity signal-kind lines onto CLI
+continuity-signal settle.
+
+[WP-409](plan/WP-409.md) wires pure continuity operator-command lines onto CLI
+continuity-next when a command is projected.
+
+[WP-410](plan/WP-410.md) wires pure takeover-sandbox lines onto CLI continuity
+queue after the approval freeze.
+
+[WP-411](plan/WP-411.md) wires pure core sandbox lines onto CLI goal pursue
+runtime freeze.
+
+[WP-412](plan/WP-412.md) wires pure final goal-status lines onto CLI pursue
+settle from the durable outcome field.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
