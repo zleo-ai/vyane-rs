@@ -1705,7 +1705,17 @@ async fn goal_continuity_next(
     let goals = Arc::clone(&state.goals);
     let result = tokio::task::spawn_blocking(move || goals.continuity_next(&id)).await;
     let response = match result {
-        Ok(Ok(next_action)) => Json(GoalNextActionResponse { next_action }).into_response(),
+        Ok(Ok(next_action)) => {
+            // Kind-only pure accepted signal kinds on REST success (WP-447).
+            for kind in &next_action.accepted_signals {
+                tracing::info!(
+                    kind = kind.as_str(),
+                    "{}",
+                    crate::output::format_goal_signal_kind_line(*kind)
+                );
+            }
+            Json(GoalNextActionResponse { next_action }).into_response()
+        }
         Ok(Err(GoalReadError::InvalidGoalId)) => {
             eprintln!(
                 "{}",
