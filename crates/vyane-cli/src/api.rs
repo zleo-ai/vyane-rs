@@ -1712,6 +1712,14 @@ async fn goal_continuity_next(
                 "{}",
                 crate::output::format_goal_next_action_kind_line(next_action.action)
             );
+            // Kind-only pure operator command when projected (WP-449).
+            if let Some(command) = next_action.command {
+                tracing::info!(
+                    command = command.as_str(),
+                    "{}",
+                    crate::output::format_goal_operator_command_line(command)
+                );
+            }
             // Kind-only pure accepted signal kinds on REST success (WP-447).
             for kind in &next_action.accepted_signals {
                 tracing::info!(
