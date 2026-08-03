@@ -1114,6 +1114,9 @@ continuity-queue for the selected ready approval-required step.
 [WP-453](plan/WP-453.md) reuses pure takeover run-status lines on CLI
 continuity-queue when upstream predecessor evidence is present.
 
+[WP-454](plan/WP-454.md) reuses pure continuity signal-kind lines on CLI
+continuity-execute when ready signals are assembled into prompt evidence.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
