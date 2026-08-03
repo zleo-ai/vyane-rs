@@ -1075,6 +1075,9 @@ for successful rows.
 [WP-440](plan/WP-440.md) wires pure legacy detached task-state lines on task
 status print.
 
+[WP-441](plan/WP-441.md) wires pure route-tier and route-effort lines on
+`vyane route` human print.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
