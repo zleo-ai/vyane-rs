@@ -1067,6 +1067,8 @@ print.
 [WP-437](plan/WP-437.md) reuses pure workflow-run-status lines on local workflow
 summary print.
 
+[WP-438](plan/WP-438.md) reuses pure run-status lines on history record print.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live

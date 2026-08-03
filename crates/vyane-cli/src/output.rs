@@ -72,6 +72,12 @@ pub fn format_record_line(record: &RunRecord) -> String {
 }
 
 pub fn print_record_line(record: &RunRecord) {
+    // Kind-only pure run status on history/record print (WP-438).
+    tracing::info!(
+        status = record.status.as_str(),
+        "{}",
+        format_run_status_line(record.status)
+    );
     println!("{}", format_record_line(record));
 }
 
