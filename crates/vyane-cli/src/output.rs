@@ -1935,6 +1935,16 @@ pub fn format_broadcast_table(rows: &[BroadcastRow]) -> String {
 }
 
 pub fn print_broadcast_table(rows: &[BroadcastRow]) {
+    // Kind-only pure run status for successful broadcast rows (WP-439).
+    for row in rows {
+        if let Some(record) = row.record.as_ref() {
+            tracing::info!(
+                status = record.status.as_str(),
+                "{}",
+                format_run_status_line(record.status)
+            );
+        }
+    }
     print!("{}", format_broadcast_table(rows));
 }
 
