@@ -1540,6 +1540,12 @@ fn append_approval_evidence(prompt: &mut String, label: &str, approval: &Takeove
 
 fn append_signal_evidence(prompt: &mut String, approval: &TakeoverApproval) {
     for signal in &approval.plan_snapshot.ready_signals {
+        // Kind-only pure ready signal kinds frozen into execute prompt evidence (WP-454).
+        tracing::info!(
+            kind = signal.kind.as_str(),
+            "{}",
+            crate::output::format_goal_continuity_signal_kind_line(signal.kind)
+        );
         prompt.push_str(&format!(
             "- signal.{}: observed at {} by {}\n",
             signal.kind.as_str(),

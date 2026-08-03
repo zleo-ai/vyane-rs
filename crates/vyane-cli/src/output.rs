@@ -1510,7 +1510,8 @@ pub fn format_goal_continuity_next_action_kind_line(
 /// Pure human line for closed [`vyane_goal::GoalContinuitySignalKind`] kinds.
 ///
 /// Live on CLI continuity-signal settle (WP-408), continuity-next accepted
-/// signals projection (WP-446), and continuity-next ready signals (WP-451).
+/// signals projection (WP-446), continuity-next ready signals (WP-451), and
+/// continuity-execute prompt evidence assembly (WP-454).
 pub fn format_goal_continuity_signal_kind_line(
     kind: vyane_goal::GoalContinuitySignalKind,
 ) -> String {
