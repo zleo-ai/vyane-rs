@@ -1055,6 +1055,12 @@ status print.
 [WP-433](plan/WP-433.md) reuses pure task failure-code lines on durable task
 status print when a code is present.
 
+[WP-434](plan/WP-434.md) reuses pure task state/origin/kind/failure lines on
+daemon workflow status print.
+
+[WP-435](plan/WP-435.md) reuses pure workflow-run-status lines on daemon
+workflow status print when a journal is present.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
