@@ -93,6 +93,12 @@ pub fn format_legacy_session_line(record: &SessionRecord) -> String {
 }
 
 pub fn print_legacy_session_line(record: &SessionRecord) {
+    // Kind-only pure protocol on legacy session list print (WP-443).
+    tracing::info!(
+        protocol = record.target.protocol.as_str(),
+        "{}",
+        format_protocol_line(record.target.protocol)
+    );
     println!("{}", format_legacy_session_line(record));
 }
 
