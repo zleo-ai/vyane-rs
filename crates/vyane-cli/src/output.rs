@@ -1532,6 +1532,14 @@ pub fn format_goal_next_action_kind_line(action: vyane_service::GoalNextActionKi
     format!("goal next action: {}", terminal_safe(action.as_str()))
 }
 
+/// Pure human line for closed allowlisted [`vyane_service::GoalOperatorCommand`] kinds.
+///
+/// Live on REST continuity-next success when a command is projected (WP-449).
+/// Tokens match domain `GoalContinuityOperatorCommand::as_str`.
+pub fn format_goal_operator_command_line(command: vyane_service::GoalOperatorCommand) -> String {
+    format!("goal operator command: {}", terminal_safe(command.as_str()))
+}
+
 /// Pure human line for closed [`vyane_goal::GoalContinuityOperatorCommand`] kinds.
 ///
 /// Live on CLI continuity-next when a command is projected (WP-409).
@@ -2429,10 +2437,11 @@ mod tests {
         format_goal_observation_ingress_error_kind_line, format_goal_observation_kind_line,
         format_goal_observation_runner_error_kind_line, format_goal_observation_signal_kind_line,
         format_goal_observation_status_line, format_goal_observation_watch_status_line,
-        format_goal_observation_watcher_error_code_line, format_goal_read_error_kind_line,
-        format_goal_read_unavailable_line, format_goal_read_worker_failed_line,
-        format_goal_signal_kind_line, format_goal_status_line, format_goal_store_error_kind_line,
-        format_harness_kind_line, format_identity_changed_before_sigkill_line,
+        format_goal_observation_watcher_error_code_line, format_goal_operator_command_line,
+        format_goal_read_error_kind_line, format_goal_read_unavailable_line,
+        format_goal_read_worker_failed_line, format_goal_signal_kind_line, format_goal_status_line,
+        format_goal_store_error_kind_line, format_harness_kind_line,
+        format_identity_changed_before_sigkill_line,
         format_identity_mismatch_nested_cleanup_failed_line,
         format_identity_mismatch_refuse_signal_line, format_inprocess_agent_effect_line,
         format_journal_step_status_line, format_kill_delivered_unfinalized_line,
@@ -4604,6 +4613,15 @@ mod tests {
                 vyane_service::GoalNextActionKind::ContinuityComplete
             ),
             "goal next action: continuity_complete"
+        );
+        // Allowlisted REST operator-command tokens (WP-449).
+        assert_eq!(
+            format_goal_operator_command_line(vyane_service::GoalOperatorCommand::ContinuityQueue),
+            "goal operator command: continuity_queue"
+        );
+        assert_eq!(
+            format_goal_operator_command_line(vyane_service::GoalOperatorCommand::ContinuitySignal),
+            "goal operator command: continuity_signal"
         );
         assert_eq!(
             format_goal_continuity_operator_command_line(
