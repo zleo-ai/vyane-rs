@@ -81,7 +81,14 @@ impl WorkflowControl for AuthenticatedWorkflowControl {
                 .await
                 .map_err(map_control_error)?;
             // Cancel returns lifecycle only; answer bodies are not required.
-            map_task_record(&caller_id, &task, None, false)
+            let view = map_task_record(&caller_id, &task, None, false)?;
+            // Kind-only pure line for post-cancel lifecycle observation (WP-387).
+            tracing::info!(
+                state = view.state.as_str(),
+                "{}",
+                crate::output::format_workflow_state_line(view.state)
+            );
+            Ok(view)
         })
     }
 }
@@ -101,7 +108,13 @@ fn validate_submission_policy(bundle: &WorkflowSourceBundle) -> Result<(), Workf
 }
 
 fn map_submit_error(error: WorkflowSubmitError) -> WorkflowControlError {
-    match error {
+    // Kind-only pure lines; run ids stay out of structured logs (WP-332/363/381).
+    tracing::warn!(
+        error = error.as_str(),
+        "{}",
+        crate::output::format_workflow_submit_error_kind_line(&error)
+    );
+    let mapped = match error {
         WorkflowSubmitError::NotSubmitted { .. } => WorkflowControlError::Unavailable,
         WorkflowSubmitError::OutcomeUnknown { .. } => WorkflowControlError::OutcomeUnknown,
         WorkflowSubmitError::Rejected {
@@ -114,17 +127,35 @@ fn map_submit_error(error: WorkflowSubmitError) -> WorkflowControlError {
             "conflict" => WorkflowControlError::Conflict,
             _ => WorkflowControlError::Unavailable,
         },
-    }
+    };
+    tracing::warn!(
+        error = mapped.as_str(),
+        "{}",
+        crate::output::format_workflow_control_error_kind_line(mapped)
+    );
+    mapped
 }
 
 fn map_control_error(error: DaemonWorkflowControlError) -> WorkflowControlError {
-    match error {
+    // Kind-only pure lines for control-client mapping (WP-332/363/381).
+    tracing::warn!(
+        error = error.as_str(),
+        "{}",
+        crate::output::format_daemon_workflow_control_error_kind_line(error)
+    );
+    let mapped = match error {
         DaemonWorkflowControlError::InvalidRequest => WorkflowControlError::InvalidRequest,
         DaemonWorkflowControlError::NotFound => WorkflowControlError::NotFound,
         DaemonWorkflowControlError::Conflict => WorkflowControlError::Conflict,
         DaemonWorkflowControlError::Unavailable => WorkflowControlError::Unavailable,
         DaemonWorkflowControlError::Internal => WorkflowControlError::Internal,
-    }
+    };
+    tracing::warn!(
+        error = mapped.as_str(),
+        "{}",
+        crate::output::format_workflow_control_error_kind_line(mapped)
+    );
+    mapped
 }
 
 fn map_task_view(

@@ -125,6 +125,17 @@ pub enum RunAttemptOutcomeView {
     },
 }
 
+impl RunAttemptOutcomeView {
+    /// Stable snake_case *kind* token; error kind/message/failed_over stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Err { .. } => "err",
+        }
+    }
+}
+
 /// Allowlisted attempt metadata. Provider/harness error text is intentionally
 /// omitted because it may contain endpoints, local paths, or response bodies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -240,6 +251,7 @@ pub enum SessionNativeState {
 }
 
 impl SessionNativeState {
+    /// Stable snake_case token matching the serde rename for this native state.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -248,6 +260,12 @@ impl SessionNativeState {
             Self::Bound => "bound",
             Self::Unknown => "unknown",
         }
+    }
+}
+
+impl std::fmt::Display for SessionNativeState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -407,7 +425,15 @@ impl VyaneService {
         context: OwnerContext,
     ) -> std::result::Result<crate::GoalObservationIngress, crate::GoalObservationIngressError>
     {
-        crate::GoalObservationIngress::open(self.storage_paths(), context.owner())
+        crate::GoalObservationIngress::open(self.storage_paths(), context.owner()).inspect_err(
+            |error| {
+                // Kind-only construction diagnostic (WP-279/WP-280).
+                tracing::warn!(
+                    error = error.as_str(),
+                    "goal observation ingress open failed"
+                );
+            },
+        )
     }
 
     /// Assemble an opt-in, one-shot continuity runner from purpose-separated
@@ -424,9 +450,15 @@ impl VyaneService {
             queue: queue_context,
             execute: execute_context,
         } = authority;
-        let reader = self
-            .goal_reader(read)
-            .map_err(|_| crate::GoalContinuityRunnerError::Unavailable)?;
+        let reader = self.goal_reader(read).map_err(|error| {
+            // Surface the closed GoalReadError kind before collapsing to runner
+            // Unavailable (WP-277/WP-278).
+            tracing::warn!(
+                goal_read = error.as_str(),
+                "continuity runner could not open goal reader"
+            );
+            crate::GoalContinuityRunnerError::Unavailable
+        })?;
         let reader = crate::goal_continuity_runner::BlockingGoalProjectionReader::new(
             reader,
             options.max_concurrency,
@@ -1615,5 +1647,36 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn session_native_state_display_matches_as_str() {
+        assert_eq!(SessionNativeState::Absent.to_string(), "absent");
+        assert_eq!(SessionNativeState::LegacyUnbound.as_str(), "legacy_unbound");
+        assert_eq!(SessionNativeState::Bound.to_string(), "bound");
+        assert_eq!(SessionNativeState::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn run_attempt_outcome_view_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(RunAttemptOutcomeView::Ok.as_str(), "ok");
+        assert_eq!(
+            RunAttemptOutcomeView::Err {
+                kind: ErrorKind::Other,
+                message: "secret-message",
+                failed_over: true,
+            }
+            .as_str(),
+            "err"
+        );
+        assert!(
+            !RunAttemptOutcomeView::Err {
+                kind: ErrorKind::Other,
+                message: "secret-message",
+                failed_over: true,
+            }
+            .as_str()
+            .contains("secret")
+        );
     }
 }

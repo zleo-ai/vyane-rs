@@ -572,7 +572,13 @@ impl TaskSupervisor {
                 Ok(Some(record)) => record,
                 Ok(None) => return,
                 Err(error) => {
-                    eprintln!("task {id} initialization cleanup read failed: {error}");
+                    eprintln!(
+                        "{}",
+                        crate::output::format_task_init_cleanup_read_failed_line(
+                            id,
+                            &format!("{error}")
+                        )
+                    );
                     return;
                 }
             };
@@ -611,12 +617,21 @@ impl TaskSupervisor {
                 Err(TaskCallError::Store(TaskStoreError::Conflict { .. })) => continue,
                 Err(TaskCallError::Store(TaskStoreError::InvalidState { .. })) => continue,
                 Err(error) => {
-                    eprintln!("task {id} initialization cleanup failed: {error}");
+                    eprintln!(
+                        "{}",
+                        crate::output::format_task_init_cleanup_failed_line(
+                            id,
+                            &format!("{error}")
+                        )
+                    );
                     return;
                 }
             }
         }
-        eprintln!("task {id} initialization cleanup remained contended");
+        eprintln!(
+            "{}",
+            crate::output::format_task_init_cleanup_contended_line(id)
+        );
     }
 
     fn spawn_supervised_dispatch<F>(
@@ -642,8 +657,8 @@ impl TaskSupervisor {
             }
             dashmap::mapref::entry::Entry::Occupied(_) => {
                 eprintln!(
-                    "task {} epoch {} rejected duplicate runtime dispatch",
-                    key.0, key.1
+                    "{}",
+                    crate::output::format_task_duplicate_runtime_dispatch_line(&key.0, key.1)
                 );
                 return false;
             }
@@ -663,7 +678,13 @@ impl TaskSupervisor {
                 Ok(result) => {
                     if let Err(error) = &result {
                         // Raw errors are diagnostic output only; never durable task data.
-                        eprintln!("task {dispatch_id} failed: {error:#}");
+                        eprintln!(
+                            "{}",
+                            crate::output::format_task_dispatch_failed_line(
+                                &dispatch_id,
+                                &format!("{error:#}")
+                            )
+                        );
                     }
                     let output = result
                         .as_ref()
@@ -673,7 +694,10 @@ impl TaskSupervisor {
                     (settlement_from_dispatch_result(result), output)
                 }
                 Err(_) => {
-                    eprintln!("task {dispatch_id} dispatch future panicked");
+                    eprintln!(
+                        "{}",
+                        crate::output::format_task_dispatch_panicked_line(&dispatch_id)
+                    );
                     (
                         TaskSettlement::Failed {
                             code: FailureCode::Internal,
@@ -686,7 +710,13 @@ impl TaskSupervisor {
             if let (Some(path), Some(output)) = (output_path, output)
                 && let Err(error) = write_private_task_output(path, output).await
             {
-                eprintln!("task {dispatch_id} output artifact failed: {error:#}");
+                eprintln!(
+                    "{}",
+                    crate::output::format_task_output_artifact_failed_line(
+                        &dispatch_id,
+                        &format!("{error:#}")
+                    )
+                );
             }
             supervisor
                 .settle_with_retry(&dispatch_id, epoch, settlement)
@@ -812,7 +842,13 @@ impl TaskSupervisor {
             {
                 Ok(_) => return,
                 Err(error) => {
-                    eprintln!("task {id} metadata settlement retry: {error}");
+                    eprintln!(
+                        "{}",
+                        crate::output::format_task_metadata_settlement_retry_line(
+                            id,
+                            &format!("{error}")
+                        )
+                    );
                 }
             }
             tokio::time::sleep(delay).await;
@@ -1475,7 +1511,10 @@ impl ApiError {
                 message: "task supervisor is shutting down".into(),
             };
         }
-        eprintln!("task metadata error: {error}");
+        eprintln!(
+            "{}",
+            crate::output::format_task_metadata_error_line(&format!("{error}"))
+        );
         Self::internal("task metadata unavailable")
     }
 
@@ -1488,7 +1527,10 @@ impl ApiError {
     fn from_service_error(e: anyhow::Error) -> Self {
         let msg = e.to_string();
         let display = format!("{e:#}");
-        eprintln!("dispatch/broadcast error: {display}");
+        eprintln!(
+            "{}",
+            crate::output::format_dispatch_broadcast_error_line(&display)
+        );
         if e.downcast_ref::<VyaneError>()
             .is_some_and(|error| error.kind == ErrorKind::Config)
             || is_caller_fault(&msg)
@@ -1665,28 +1707,53 @@ async fn goal_continuity_next(
     let response = match result {
         Ok(Ok(next_action)) => Json(GoalNextActionResponse { next_action }).into_response(),
         Ok(Err(GoalReadError::InvalidGoalId)) => {
+            eprintln!(
+                "{}",
+                crate::output::format_goal_read_error_kind_line(GoalReadError::InvalidGoalId)
+            );
             ApiError::bad_request("invalid goal id").into_response()
         }
-        Ok(Err(GoalReadError::NotFound)) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: "goal not found".into(),
-            }),
-        )
-            .into_response(),
-        Ok(Err(GoalReadError::ContinuityUnavailable)) => (
-            StatusCode::CONFLICT,
-            Json(ErrorBody {
-                error: "goal continuity is unavailable".into(),
-            }),
-        )
-            .into_response(),
+        Ok(Err(GoalReadError::NotFound)) => {
+            eprintln!(
+                "{}",
+                crate::output::format_goal_read_error_kind_line(GoalReadError::NotFound)
+            );
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: "goal not found".into(),
+                }),
+            )
+                .into_response()
+        }
+        Ok(Err(GoalReadError::ContinuityUnavailable)) => {
+            eprintln!(
+                "{}",
+                crate::output::format_goal_read_error_kind_line(
+                    GoalReadError::ContinuityUnavailable
+                )
+            );
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorBody {
+                    error: "goal continuity is unavailable".into(),
+                }),
+            )
+                .into_response()
+        }
         Ok(Err(GoalReadError::Unavailable)) => {
-            eprintln!("goal read service unavailable");
+            eprintln!("{}", crate::output::format_goal_read_unavailable_line());
+            eprintln!(
+                "{}",
+                crate::output::format_goal_read_error_kind_line(GoalReadError::Unavailable)
+            );
             ApiError::internal("goal read unavailable").into_response()
         }
         Err(error) => {
-            eprintln!("goal read worker failed: {error}");
+            eprintln!(
+                "{}",
+                crate::output::format_goal_read_worker_failed_line(&format!("{error}"))
+            );
             ApiError::internal("goal read unavailable").into_response()
         }
     };
@@ -1830,8 +1897,8 @@ pub async fn run_server(service: VyaneService, addr: SocketAddr) -> Result<()> {
     }
     let router = router_from_parts(service, tasks.clone(), &token)?;
     eprintln!(
-        "vyane serve listening on {addr}; bearer token file: {}",
-        token_path.display()
+        "{}",
+        crate::output::format_serve_listening_line(addr, token_path.display())
     );
     let serve_result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
@@ -1858,7 +1925,10 @@ async fn dispatch(
     // Validate label shape up front (mirrors the CLI's input-phase check) so a
     // malformed `key=value` is rejected before any dispatch work begins.
     let _ = parse_labels(labels.clone()).map_err(|error| {
-        eprintln!("dispatch label error: {error:#}");
+        eprintln!(
+            "{}",
+            crate::output::format_dispatch_label_error_line(&format!("{error:#}"))
+        );
         ApiError::bad_request("invalid dispatch request")
     })?;
 
@@ -1927,7 +1997,10 @@ async fn dispatch_stream(
     let sandbox = parse_sandbox(req.sandbox.as_deref())?;
     let labels = req.labels.unwrap_or_default();
     let _ = parse_labels(labels.clone()).map_err(|error| {
-        eprintln!("stream dispatch label error: {error:#}");
+        eprintln!(
+            "{}",
+            crate::output::format_stream_dispatch_label_error_line(&format!("{error:#}"))
+        );
         ApiError::bad_request("invalid dispatch request")
     })?;
 
@@ -1957,7 +2030,10 @@ async fn dispatch_stream(
         labels,
     )
     .map_err(|error| {
-        eprintln!("stream dispatch request error: {error:#}");
+        eprintln!(
+            "{}",
+            crate::output::format_stream_dispatch_request_error_line(&format!("{error:#}"))
+        );
         ApiError::bad_request("invalid dispatch request")
     })?;
     validate_external_task_labels(&task)?;
@@ -1965,7 +2041,10 @@ async fn dispatch_stream(
         .service
         .plan_dispatch(&selector, &mut task)
         .map_err(|error| {
-            eprintln!("stream route error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_stream_route_error_line(&format!("{error:#}"))
+            );
             ApiError::bad_request("invalid dispatch request")
         })?;
     let bound = streamable_bound(&plan.chain, false)?;
@@ -2004,7 +2083,10 @@ async fn dispatch_stream(
                 output: outcome.output,
             },
             Err(e) => {
-                eprintln!("dispatch_stream error: {e:#}");
+                eprintln!(
+                    "{}",
+                    crate::output::format_dispatch_stream_error_line(&format!("{e:#}"))
+                );
                 SsePayload::Finished {
                     record: Box::new(RunView::from(vyane_core::RunRecord {
                         run_id: String::new(),
@@ -2051,7 +2133,10 @@ async fn dispatch_stream(
 
 fn validate_external_task_labels(task: &vyane_core::TaskSpec) -> Result<(), ApiError> {
     vyane_service::validate_user_routing_labels(&task.labels).map_err(|error| {
-        eprintln!("external task label error: {error:#}");
+        eprintln!(
+            "{}",
+            crate::output::format_external_task_label_error_line(&format!("{error:#}"))
+        );
         ApiError::bad_request("invalid dispatch request")
     })
 }
@@ -2090,7 +2175,10 @@ async fn broadcast(
     let sandbox = parse_sandbox(req.sandbox.as_deref())?;
     let labels = req.labels.unwrap_or_default();
     let _ = parse_labels(labels.clone()).map_err(|error| {
-        eprintln!("broadcast label error: {error:#}");
+        eprintln!(
+            "{}",
+            crate::output::format_broadcast_label_error_line(&format!("{error:#}"))
+        );
         ApiError::bad_request("invalid broadcast request")
     })?;
 
@@ -2109,7 +2197,10 @@ async fn broadcast(
         // Only caller-fault errors (bad targets list, bad labels, bad task
         // spec) reach here — per-target resolution errors are already in
         // the per-item results.
-        eprintln!("broadcast setup error: {e:#}");
+        eprintln!(
+            "{}",
+            crate::output::format_broadcast_setup_error_line(&format!("{e:#}"))
+        );
         ApiError::bad_request("invalid broadcast request")
     })?;
 
@@ -2125,7 +2216,10 @@ async fn broadcast(
             Err(e) => {
                 // Per-target error: log the full chain server-side, surface a
                 // concise message to the client.
-                eprintln!("broadcast target `{target}` error: {e:#}");
+                eprintln!(
+                    "{}",
+                    crate::output::format_broadcast_target_error_line(&target, &format!("{e:#}"))
+                );
                 BroadcastItem {
                     target,
                     record: None,
@@ -2170,7 +2264,10 @@ async fn runs(
     };
 
     let records = state.service.history_views(filter).await.map_err(|error| {
-        eprintln!("run ledger query error: {error:#}");
+        eprintln!(
+            "{}",
+            crate::output::format_run_ledger_query_error_line(&format!("{error:#}"))
+        );
         ApiError::internal("run ledger unavailable")
     })?;
     Ok(Json(ItemsEnvelope { items: records }))
@@ -2180,7 +2277,10 @@ async fn sessions(
     State(state): State<ApiState>,
 ) -> Result<Json<ItemsEnvelope<SessionView>>, ApiError> {
     let records = state.service.session_views().await.map_err(|error| {
-        eprintln!("session snapshot query error: {error:#}");
+        eprintln!(
+            "{}",
+            crate::output::format_session_snapshot_query_error_line(&format!("{error:#}"))
+        );
         ApiError::internal("session storage unavailable")
     })?;
     Ok(Json(ItemsEnvelope { items: records }))
@@ -2196,7 +2296,10 @@ async fn submit_task(
     let sandbox = parse_sandbox(req.sandbox.as_deref())?;
     let labels = req.labels.unwrap_or_default();
     let _ = parse_labels(labels.clone()).map_err(|error| {
-        eprintln!("async dispatch label error: {error:#}");
+        eprintln!(
+            "{}",
+            crate::output::format_async_dispatch_label_error_line(&format!("{error:#}"))
+        );
         ApiError::bad_request("invalid dispatch request")
     })?;
 
@@ -2301,7 +2404,10 @@ async fn get_task_output(
         .output_path(&id)
         .ok_or_else(|| ApiError::internal("task output storage is unavailable for this server"))?;
     let mut output = read_task_output(path).await.map_err(|error| {
-        eprintln!("task {id} output read failed: {error:#}");
+        eprintln!(
+            "{}",
+            crate::output::format_task_output_read_failed_line(&id, &format!("{error:#}"))
+        );
         ApiError::internal("task output unavailable")
     })?;
     // Pre-owner-namespace REST artifacts were always local and used generated
@@ -2311,7 +2417,13 @@ async fn get_task_output(
         && let Some(legacy) = tasks.legacy_local_output_path(&id)
     {
         output = read_task_output(legacy).await.map_err(|error| {
-            eprintln!("task {id} legacy output read failed: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_task_legacy_output_read_failed_line(
+                    &id,
+                    &format!("{error:#}")
+                )
+            );
             ApiError::internal("task output unavailable")
         })?;
     }

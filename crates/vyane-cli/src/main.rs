@@ -44,7 +44,7 @@ async fn main() -> ExitCode {
     match command::run(cli::Cli::parse()).await {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err:#}");
+            eprintln!("{}", crate::output::format_error_line(&format!("{err:#}")));
             ExitCode::from(1)
         }
     }

@@ -54,6 +54,32 @@ pub enum GoalNextActionKind {
     ContinuityComplete,
 }
 
+impl GoalNextActionKind {
+    /// Stable snake_case token matching the serde rename and domain projection.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QueueApproval => GoalContinuityNextActionKind::QueueApproval.as_str(),
+            Self::DecideApproval => GoalContinuityNextActionKind::DecideApproval.as_str(),
+            Self::ExecuteApproval => GoalContinuityNextActionKind::ExecuteApproval.as_str(),
+            Self::RecordSignal => GoalContinuityNextActionKind::RecordSignal.as_str(),
+            Self::WaitForDependency => GoalContinuityNextActionKind::WaitForDependency.as_str(),
+            Self::WaitForExecution => GoalContinuityNextActionKind::WaitForExecution.as_str(),
+            Self::ResolveBlockedExecution => {
+                GoalContinuityNextActionKind::ResolveBlockedExecution.as_str()
+            }
+            Self::ManualDecision => GoalContinuityNextActionKind::ManualDecision.as_str(),
+            Self::ContinuityComplete => GoalContinuityNextActionKind::ContinuityComplete.as_str(),
+        }
+    }
+}
+
+impl fmt::Display for GoalNextActionKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalOperatorCommand {
@@ -63,12 +89,49 @@ pub enum GoalOperatorCommand {
     ContinuitySignal,
 }
 
+impl GoalOperatorCommand {
+    /// Stable snake_case token matching the serde rename and domain projection.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ContinuityQueue => GoalContinuityOperatorCommand::ContinuityQueue.as_str(),
+            Self::ContinuityDecide => GoalContinuityOperatorCommand::ContinuityDecide.as_str(),
+            Self::ContinuityExecute => GoalContinuityOperatorCommand::ContinuityExecute.as_str(),
+            Self::ContinuitySignal => GoalContinuityOperatorCommand::ContinuitySignal.as_str(),
+        }
+    }
+}
+
+impl fmt::Display for GoalOperatorCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalSignalKind {
     QuotaReset,
     ReviewChecksPassed,
     ReviewChecksFailed,
+}
+
+impl GoalSignalKind {
+    /// Stable snake_case token matching the serde rename and domain projection.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QuotaReset => GoalContinuitySignalKind::QuotaReset.as_str(),
+            Self::ReviewChecksPassed => GoalContinuitySignalKind::ReviewChecksPassed.as_str(),
+            Self::ReviewChecksFailed => GoalContinuitySignalKind::ReviewChecksFailed.as_str(),
+        }
+    }
+}
+
+impl fmt::Display for GoalSignalKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Closed explanation taxonomy. Unlike the core projection's local-operator
@@ -87,6 +150,30 @@ pub enum GoalNextReasonCode {
     ContinuityComplete,
 }
 
+impl GoalNextReasonCode {
+    /// Stable snake_case token matching the serde rename for this reason code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApprovalRequired => "approval_required",
+            Self::ApprovalDecisionRequired => "approval_decision_required",
+            Self::ApprovedExecutionReady => "approved_execution_ready",
+            Self::ExternalSignalRequired => "external_signal_required",
+            Self::DependencyPending => "dependency_pending",
+            Self::ExecutionInFlight => "execution_in_flight",
+            Self::ExecutionBlocked => "execution_blocked",
+            Self::ManualDecisionRequired => "manual_decision_required",
+            Self::ContinuityComplete => "continuity_complete",
+        }
+    }
+}
+
+impl fmt::Display for GoalNextReasonCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Closed failure taxonomy suitable for protocol mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalReadError {
@@ -94,6 +181,19 @@ pub enum GoalReadError {
     NotFound,
     ContinuityUnavailable,
     Unavailable,
+}
+
+impl GoalReadError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidGoalId => "invalid_goal_id",
+            Self::NotFound => "not_found",
+            Self::ContinuityUnavailable => "continuity_unavailable",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 impl fmt::Display for GoalReadError {
@@ -525,6 +625,58 @@ mod tests {
         assert_eq!(
             reader.continuity_next("plain"),
             Err(GoalReadError::ContinuityUnavailable)
+        );
+    }
+
+    #[test]
+    fn goal_read_error_kind_tokens_are_snake_case() {
+        assert_eq!(GoalReadError::InvalidGoalId.as_str(), "invalid_goal_id");
+        assert_eq!(GoalReadError::NotFound.as_str(), "not_found");
+        assert_eq!(
+            GoalReadError::ContinuityUnavailable.as_str(),
+            "continuity_unavailable"
+        );
+        assert_eq!(GoalReadError::Unavailable.as_str(), "unavailable");
+    }
+
+    #[test]
+    fn goal_next_action_view_enum_tokens_match_serde_snake_case() {
+        assert_eq!(
+            GoalNextActionKind::ResolveBlockedExecution.as_str(),
+            "resolve_blocked_execution"
+        );
+        assert_eq!(
+            GoalNextActionKind::WaitForDependency.to_string(),
+            "wait_for_dependency"
+        );
+        assert_eq!(
+            GoalOperatorCommand::ContinuityQueue.as_str(),
+            "continuity_queue"
+        );
+        assert_eq!(
+            GoalOperatorCommand::ContinuitySignal.to_string(),
+            "continuity_signal"
+        );
+        assert_eq!(
+            GoalSignalKind::ReviewChecksPassed.as_str(),
+            "review_checks_passed"
+        );
+        assert_eq!(GoalSignalKind::QuotaReset.to_string(), "quota_reset");
+        assert_eq!(
+            GoalNextReasonCode::ApprovalDecisionRequired.as_str(),
+            "approval_decision_required"
+        );
+        assert_eq!(
+            GoalNextReasonCode::ApprovedExecutionReady.to_string(),
+            "approved_execution_ready"
+        );
+        assert_eq!(
+            GoalNextReasonCode::ExecutionInFlight.as_str(),
+            "execution_in_flight"
+        );
+        assert_eq!(
+            GoalNextReasonCode::ManualDecisionRequired.to_string(),
+            "manual_decision_required"
         );
     }
 }

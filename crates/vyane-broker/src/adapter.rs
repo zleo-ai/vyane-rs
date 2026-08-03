@@ -20,6 +20,18 @@ pub enum ReplaySafety {
     Unsupported,
 }
 
+impl ReplaySafety {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idempotent => "idempotent",
+            Self::Reconciles => "reconciles",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AdapterContext {
     owner: String,
@@ -133,6 +145,18 @@ pub enum AdapterOutcome {
     TransportDelivered(NewTransportReceipt),
 }
 
+impl AdapterOutcome {
+    /// Stable snake_case *kind* token; message/receipt payloads stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::LocalHandled => "local_handled",
+            Self::Reply(_) => "reply",
+            Self::TransportDelivered(_) => "transport_delivered",
+        }
+    }
+}
+
 impl fmt::Debug for AdapterOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -161,6 +185,18 @@ pub enum AdapterFailure {
     Uncertain { reason_code: String },
 }
 
+impl AdapterFailure {
+    /// Stable snake_case *kind* token; reason/failure codes and delays stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retry { .. } => "retry",
+            Self::Permanent { .. } => "permanent",
+            Self::Uncertain { .. } => "uncertain",
+        }
+    }
+}
+
 #[async_trait]
 pub trait DeliveryAdapter: Send + Sync {
     /// Return a stable, non-secret adapter identity.
@@ -184,4 +220,105 @@ pub trait DeliveryAdapter: Send + Sync {
         context: AdapterContext,
         delivery: DeliveryEnvelope,
     ) -> std::result::Result<AdapterOutcome, AdapterFailure>;
+}
+
+#[cfg(test)]
+mod adapter_kind_tests {
+    use super::{AdapterFailure, AdapterOutcome, ReplaySafety};
+    use vyane_message::{
+        EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewMessage,
+        NewTransportReceipt,
+    };
+
+    fn sample_message() -> NewMessage {
+        NewMessage {
+            conversation_id: "conversation".into(),
+            session_id: None,
+            direction: MessageDirection::Internal,
+            kind: "message".into(),
+            sender: EndpointRef {
+                kind: EndpointKind::Agent,
+                id: "sender".into(),
+            },
+            body: "secret-body".into(),
+            payload: serde_json::json!({"secret": "payload"}),
+            reply_to: None,
+            trace_id: None,
+            correlation_id: None,
+            idempotency: IdempotencyKey {
+                producer: "adapter-kind-test".into(),
+                key: "k1".into(),
+            },
+            deliveries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn adapter_outcome_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(AdapterOutcome::LocalHandled.as_str(), "local_handled");
+        assert_eq!(
+            AdapterOutcome::Reply(Box::new(sample_message())).as_str(),
+            "reply"
+        );
+        assert_eq!(
+            AdapterOutcome::TransportDelivered(NewTransportReceipt {
+                transport: "fake".into(),
+                account_scope: "secret-account".into(),
+                destination_scope: "secret-destination".into(),
+                external_ids: vec!["secret-ext".into()],
+            })
+            .as_str(),
+            "transport_delivered"
+        );
+        assert!(
+            !AdapterOutcome::TransportDelivered(NewTransportReceipt {
+                transport: "fake".into(),
+                account_scope: "secret-account".into(),
+                destination_scope: "secret-destination".into(),
+                external_ids: vec!["secret-ext".into()],
+            })
+            .as_str()
+            .contains("secret")
+        );
+    }
+
+    #[test]
+    fn replay_safety_kind_tokens_are_snake_case() {
+        assert_eq!(ReplaySafety::Idempotent.as_str(), "idempotent");
+        assert_eq!(ReplaySafety::Reconciles.as_str(), "reconciles");
+        assert_eq!(ReplaySafety::Unsupported.as_str(), "unsupported");
+    }
+
+    #[test]
+    fn adapter_failure_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            AdapterFailure::Retry {
+                reason_code: "secret-reason".into(),
+                delay_seconds: 99,
+            }
+            .as_str(),
+            "retry"
+        );
+        assert_eq!(
+            AdapterFailure::Permanent {
+                failure_code: "secret-code".into(),
+            }
+            .as_str(),
+            "permanent"
+        );
+        assert_eq!(
+            AdapterFailure::Uncertain {
+                reason_code: "secret-uncertain".into(),
+            }
+            .as_str(),
+            "uncertain"
+        );
+        assert!(
+            !AdapterFailure::Permanent {
+                failure_code: "secret-code".into(),
+            }
+            .as_str()
+            .contains("secret")
+        );
+    }
 }

@@ -83,6 +83,20 @@ pub enum NativeWebSearchPolicyError {
     InvalidSearchLimit,
 }
 
+impl NativeWebSearchPolicyError {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyAllowlist => "empty_allowlist",
+            Self::TooManyDomains => "too_many_domains",
+            Self::InvalidDomain => "invalid_domain",
+            Self::DuplicateDomain => "duplicate_domain",
+            Self::InvalidSearchLimit => "invalid_search_limit",
+        }
+    }
+}
+
 pub fn validate_search_domain(domain: &str) -> Result<(), NativeWebSearchPolicyError> {
     if domain.is_empty()
         || domain.len() > MAX_DOMAIN_BYTES
@@ -167,6 +181,17 @@ pub enum RegisterWebSearchToolError {
     Policy(#[from] NativeWebSearchPolicyError),
     #[error(transparent)]
     Registry(#[from] ToolRegistryError),
+}
+
+impl RegisterWebSearchToolError {
+    /// Stable snake_case *kind* token; nested details stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Policy(_) => "policy",
+            Self::Registry(_) => "registry",
+        }
+    }
 }
 
 struct WebSearchTool {
@@ -367,6 +392,39 @@ fn truncate_chars(value: String, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn register_web_search_tool_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            RegisterWebSearchToolError::Policy(NativeWebSearchPolicyError::EmptyAllowlist).as_str(),
+            "policy"
+        );
+        assert_eq!(
+            RegisterWebSearchToolError::Registry(crate::native::ToolRegistryError::EmptyName)
+                .as_str(),
+            "registry"
+        );
+    }
+
+    #[test]
+    fn native_web_search_policy_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            NativeWebSearchPolicyError::EmptyAllowlist.as_str(),
+            "empty_allowlist"
+        );
+        assert_eq!(
+            NativeWebSearchPolicyError::TooManyDomains.as_str(),
+            "too_many_domains"
+        );
+        assert_eq!(
+            NativeWebSearchPolicyError::DuplicateDomain.as_str(),
+            "duplicate_domain"
+        );
+        assert_eq!(
+            NativeWebSearchPolicyError::InvalidSearchLimit.as_str(),
+            "invalid_search_limit"
+        );
+    }
 
     #[test]
     fn domains_are_plain_lowercase_dns_names() {

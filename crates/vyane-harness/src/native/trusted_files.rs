@@ -84,10 +84,31 @@ pub enum NativeReadPolicyError {
     InvalidPattern,
 }
 
+impl NativeReadPolicyError {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TooManyPatterns => "too_many_patterns",
+            Self::InvalidPattern => "invalid_pattern",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum NativeReadHostError {
     #[error("native read tools require Linux openat2 confinement")]
     Unsupported,
+}
+
+impl NativeReadHostError {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+        }
+    }
 }
 
 /// Explicit, independently configurable write boundary inside the admitted
@@ -123,6 +144,17 @@ pub enum NativeWritePolicyError {
     InvalidPattern,
 }
 
+impl NativeWritePolicyError {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TooManyPatterns => "too_many_patterns",
+            Self::InvalidPattern => "invalid_pattern",
+        }
+    }
+}
+
 impl From<NativeReadPolicyError> for NativeWritePolicyError {
     fn from(error: NativeReadPolicyError) -> Self {
         match error {
@@ -140,6 +172,18 @@ pub enum NativeFilesystemPolicyError {
     InvalidWritePolicy,
     #[error("native filesystem tool registry could not be assembled")]
     Registry,
+}
+
+impl NativeFilesystemPolicyError {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidReadPolicy => "invalid_read_policy",
+            Self::InvalidWritePolicy => "invalid_write_policy",
+            Self::Registry => "registry",
+        }
+    }
 }
 
 /// Prove that the admitted workdir supports the exact `openat2` confinement
@@ -1916,13 +1960,48 @@ fn read_utf8_bounded_blocking(file: &mut File) -> Result<String, ToolError> {
 mod tests {
     use super::{
         CompiledPathPolicy, FilePreservation, MAX_PATH_COMPONENTS, MAX_TOOL_OUTPUT_CHARS,
-        NativeReadPolicy, SEARCH_OUTPUT_LIMIT_MARKER, append_search_match, checked_components,
-        directory_entries, stage_content_blocking,
+        NativeFilesystemPolicyError, NativeReadHostError, NativeReadPolicy, NativeReadPolicyError,
+        NativeWritePolicyError, SEARCH_OUTPUT_LIMIT_MARKER, append_search_match,
+        checked_components, directory_entries, stage_content_blocking,
     };
     use crate::native::ToolContext;
     use std::ffi::OsString;
     use std::fs::File;
     use std::os::unix::fs::MetadataExt as _;
+
+    #[test]
+    fn native_read_host_error_kind_token_is_snake_case() {
+        assert_eq!(NativeReadHostError::Unsupported.as_str(), "unsupported");
+    }
+
+    #[test]
+    fn native_read_policy_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            NativeReadPolicyError::TooManyPatterns.as_str(),
+            "too_many_patterns"
+        );
+        assert_eq!(
+            NativeReadPolicyError::InvalidPattern.as_str(),
+            "invalid_pattern"
+        );
+        assert_eq!(
+            NativeWritePolicyError::TooManyPatterns.as_str(),
+            "too_many_patterns"
+        );
+        assert_eq!(
+            NativeWritePolicyError::InvalidPattern.as_str(),
+            "invalid_pattern"
+        );
+        assert_eq!(
+            NativeFilesystemPolicyError::InvalidReadPolicy.as_str(),
+            "invalid_read_policy"
+        );
+        assert_eq!(
+            NativeFilesystemPolicyError::InvalidWritePolicy.as_str(),
+            "invalid_write_policy"
+        );
+        assert_eq!(NativeFilesystemPolicyError::Registry.as_str(), "registry");
+    }
 
     #[tokio::test]
     async fn directory_enumeration_enforces_the_raw_entry_budget() {

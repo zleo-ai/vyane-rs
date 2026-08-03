@@ -19,8 +19,8 @@ pub use error::{ValidationReport, WorkflowError, WorkflowResult};
 pub use journal::{
     JournalStep, JournalStepStatus, JournalTargetOutput, WORKFLOW_VIEW_OUTPUT_MAX_BYTES,
     WorkflowJournal, WorkflowJournalSummary, WorkflowReplayProvenance, WorkflowRunId,
-    WorkflowRunIdError, WorkflowViewOutputProjection, list_journals, project_workflow_view_output,
-    read_journal,
+    WorkflowRunIdError, WorkflowStepCounts, WorkflowViewOutputProjection, list_journals,
+    project_workflow_view_output, read_journal,
 };
 pub use model::{
     OnError, StepTargets, Workflow, WorkflowOutcome, WorkflowRouteHints, WorkflowRunStatus,

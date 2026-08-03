@@ -20,7 +20,9 @@ pub enum PermissionEffect {
 }
 
 impl PermissionEffect {
-    fn as_str(self) -> &'static str {
+    /// Stable snake_case token matching the serde rename for this effect.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Allow => "allow",
             Self::Ask => "ask",
@@ -53,6 +55,21 @@ pub enum PermissionRuleError {
     PolicyTooLarge,
     #[error("native tool permission policy contains invalid text")]
     InvalidPolicyText,
+}
+
+impl PermissionRuleError {
+    /// Stable snake_case *kind* token; free-form argument names stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::EmptyToolPattern => "empty_tool_pattern",
+            Self::EmptyArgumentName => "empty_argument_name",
+            Self::InvalidArgumentRegex { .. } => "invalid_argument_regex",
+            Self::FloorRuleMustDeny => "floor_rule_must_deny",
+            Self::PolicyTooLarge => "policy_too_large",
+            Self::InvalidPolicyText => "invalid_policy_text",
+        }
+    }
 }
 
 const MAX_CONFIGURED_RULES: usize = 64;
@@ -928,6 +945,37 @@ mod tests {
     }
 
     #[test]
+    fn permission_rule_error_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            PermissionRuleError::EmptyToolPattern.as_str(),
+            "empty_tool_pattern"
+        );
+        assert_eq!(
+            PermissionRuleError::EmptyArgumentName.as_str(),
+            "empty_argument_name"
+        );
+        assert_eq!(
+            PermissionRuleError::FloorRuleMustDeny.as_str(),
+            "floor_rule_must_deny"
+        );
+        assert_eq!(
+            PermissionRuleError::PolicyTooLarge.as_str(),
+            "policy_too_large"
+        );
+        assert_eq!(
+            PermissionRuleError::InvalidPolicyText.as_str(),
+            "invalid_policy_text"
+        );
+        let err = PermissionRuleError::InvalidArgumentRegex {
+            argument: "secret-arg-name".into(),
+            source: regex::Error::Syntax("(".into()),
+        };
+        assert_eq!(err.as_str(), "invalid_argument_regex");
+        assert!(!err.as_str().contains("secret"));
+        assert!(!err.as_str().contains("secret-arg-name"));
+    }
+
+    #[test]
     fn later_matching_rule_overrides_broad_baseline() {
         let ask_push = PermissionRule::new("run_*", PermissionEffect::Ask)
             .unwrap()
@@ -1423,5 +1471,12 @@ mod tests {
             PermissionPolicy::new(PermissionEffect::Ask).decide(&call(BTreeMap::new()), &context);
         assert_eq!(decision.effect, PermissionEffect::Ask);
         assert!(decision.approval.is_none());
+    }
+
+    #[test]
+    fn permission_effect_tokens_are_public_snake_case() {
+        assert_eq!(PermissionEffect::Allow.as_str(), "allow");
+        assert_eq!(PermissionEffect::Ask.to_string(), "ask");
+        assert_eq!(PermissionEffect::Deny.as_str(), "deny");
     }
 }

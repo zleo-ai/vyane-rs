@@ -34,6 +34,19 @@ pub enum AgentCompletionSinkObservation {
     Unavailable,
 }
 
+impl AgentCompletionSinkObservation {
+    /// Stable snake_case kind token for diagnostics (no free-form payload).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Absent => "absent",
+            Self::Conflict => "conflict",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 /// Result of one idempotent completion-sink mutation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentCompletionSinkTransition {
@@ -45,6 +58,19 @@ pub enum AgentCompletionSinkTransition {
     Conflict,
     /// The sink could not prove any of the other states.
     Unavailable,
+}
+
+impl AgentCompletionSinkTransition {
+    /// Stable snake_case kind token for diagnostics (no free-form payload).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Absent => "absent",
+            Self::Conflict => "conflict",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 /// Trusted, idempotent sink boundary for completion recovery and projection.
@@ -540,5 +566,35 @@ impl MessageAgentCompletionSink {
                 _ => AgentCompletionSinkObservation::Conflict,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_completion_sink_kind_tests {
+    use super::{AgentCompletionSinkObservation, AgentCompletionSinkTransition};
+
+    #[test]
+    fn agent_completion_sink_observation_kind_tokens_are_snake_case() {
+        assert_eq!(AgentCompletionSinkObservation::Exact.as_str(), "exact");
+        assert_eq!(AgentCompletionSinkObservation::Absent.as_str(), "absent");
+        assert_eq!(
+            AgentCompletionSinkObservation::Conflict.as_str(),
+            "conflict"
+        );
+        assert_eq!(
+            AgentCompletionSinkObservation::Unavailable.as_str(),
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn agent_completion_sink_transition_kind_tokens_are_snake_case() {
+        assert_eq!(AgentCompletionSinkTransition::Complete.as_str(), "complete");
+        assert_eq!(AgentCompletionSinkTransition::Absent.as_str(), "absent");
+        assert_eq!(AgentCompletionSinkTransition::Conflict.as_str(), "conflict");
+        assert_eq!(
+            AgentCompletionSinkTransition::Unavailable.as_str(),
+            "unavailable"
+        );
     }
 }

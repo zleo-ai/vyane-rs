@@ -249,13 +249,22 @@ pub(crate) async fn run_daemon(
             let cancel = goal_cancel.clone();
             tokio::spawn(async move {
                 if let Err(error) = supervisor.run(cancel).await {
-                    tracing::error!(error = %error, "resident goal supervisor failed");
+                    // Kind-only pure line when store-shaped; never log free-form (WP-380).
+                    if let Some(store_error) = error.downcast_ref::<vyane_goal::GoalStoreError>() {
+                        tracing::error!(
+                            error = store_error.as_str(),
+                            "{}",
+                            crate::output::format_goal_store_error_kind_line(store_error)
+                        );
+                    } else {
+                        tracing::error!(error = "internal", "resident goal supervisor failed");
+                    }
                 }
             })
         })
     })?;
 
-    eprintln!("vyane daemon listening on {addr}");
+    eprintln!("{}", crate::output::format_daemon_listening_line(addr));
     let (signal_seen_tx, signal_seen_rx) = tokio::sync::oneshot::channel();
     let shutdown_workflows = workflows.clone();
     #[cfg(target_os = "linux")]
@@ -367,7 +376,10 @@ pub(crate) async fn start_daemon(
                 "a daemon is already running; stop it before changing or reasserting automatic goal pursuit"
             );
         }
-        println!("vyane daemon already running at {}", existing.addr);
+        println!(
+            "{}",
+            crate::output::format_daemon_already_running_line(existing.addr)
+        );
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -435,7 +447,10 @@ pub(crate) async fn start_daemon(
     match readiness {
         Ok((addr, child_pid)) => {
             starting.disarm();
-            println!("vyane daemon started at {addr} (pid {child_pid})");
+            println!(
+                "{}",
+                crate::output::format_daemon_started_line(addr, child_pid)
+            );
             Ok(ExitCode::SUCCESS)
         }
         Err(error) => {
@@ -490,7 +505,7 @@ pub(crate) async fn status_daemon(args: DaemonStatusArgs) -> Result<ExitCode> {
     let storage = StoragePaths::resolve()?;
     let paths = DaemonPaths::from_storage(&storage);
     let Some((descriptor, token)) = read_live_control(&paths)? else {
-        eprintln!("vyane daemon is not running");
+        eprintln!("{}", crate::output::format_daemon_not_running_line());
         return Ok(ExitCode::from(1));
     };
     authenticated_health(&descriptor, &token).await?;
@@ -504,8 +519,8 @@ pub(crate) async fn status_daemon(args: DaemonStatusArgs) -> Result<ExitCode> {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
         println!(
-            "vyane daemon running at {} (pid {})",
-            descriptor.addr, descriptor.pid
+            "{}",
+            crate::output::format_daemon_running_line(descriptor.addr, descriptor.pid)
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -528,14 +543,14 @@ pub(crate) async fn stop_daemon() -> Result<ExitCode> {
     let storage = StoragePaths::resolve()?;
     let paths = DaemonPaths::from_storage(&storage);
     let Some(descriptor) = read_descriptor_optional(&paths)? else {
-        eprintln!("vyane daemon is not running");
+        eprintln!("{}", crate::output::format_daemon_not_running_line());
         return Ok(ExitCode::from(1));
     };
     match classify_descriptor_identity(&descriptor) {
         DescriptorIdentity::Exact => {}
         DescriptorIdentity::Gone => {
             remove_control_if_matches(&paths, &descriptor.instance_id);
-            eprintln!("vyane daemon is not running (stale descriptor removed)");
+            eprintln!("{}", crate::output::format_daemon_not_running_stale_line());
             return Ok(ExitCode::from(1));
         }
         DescriptorIdentity::Unverifiable(reason) => {
@@ -549,7 +564,7 @@ pub(crate) async fn stop_daemon() -> Result<ExitCode> {
     signal_process(descriptor.pid, SIGTERM);
     if wait_for_descriptor_exit(&descriptor, TERM_GRACE).await? {
         remove_control_if_matches(&paths, &descriptor.instance_id);
-        println!("vyane daemon stopped");
+        println!("{}", crate::output::format_daemon_stopped_line());
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -559,7 +574,7 @@ pub(crate) async fn stop_daemon() -> Result<ExitCode> {
         DescriptorIdentity::Exact => signal_process(descriptor.pid, SIGKILL),
         DescriptorIdentity::Gone => {
             remove_control_if_matches(&paths, &descriptor.instance_id);
-            println!("vyane daemon stopped");
+            println!("{}", crate::output::format_daemon_stopped_line());
             return Ok(ExitCode::SUCCESS);
         }
         DescriptorIdentity::Unverifiable(reason) => {
@@ -570,7 +585,7 @@ pub(crate) async fn stop_daemon() -> Result<ExitCode> {
         bail!("daemon {} remained alive after SIGKILL", descriptor.pid);
     }
     remove_control_if_matches(&paths, &descriptor.instance_id);
-    println!("vyane daemon stopped");
+    println!("{}", crate::output::format_daemon_stopped_line());
     Ok(ExitCode::SUCCESS)
 }
 

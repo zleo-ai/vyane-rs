@@ -138,6 +138,22 @@ pub enum TakeoverDecision {
     Reject,
 }
 
+impl TakeoverDecision {
+    /// Stable snake_case token for human/CLI surfaces.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+impl fmt::Display for TakeoverDecision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TakeoverRunStatus {
@@ -148,6 +164,7 @@ pub enum TakeoverRunStatus {
 }
 
 impl TakeoverRunStatus {
+    /// Stable snake_case token matching the serde rename for this run status.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Success => "success",
@@ -171,6 +188,12 @@ impl TakeoverRunStatus {
                 "unknown takeover run status `{other}`"
             ))),
         }
+    }
+}
+
+impl fmt::Display for TakeoverRunStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -375,5 +398,23 @@ impl TakeoverFinish {
         } else {
             GoalContinuityStepStatus::Blocked
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TakeoverDecision, TakeoverRunStatus};
+
+    #[test]
+    fn takeover_decision_tokens_match_snake_case() {
+        assert_eq!(TakeoverDecision::Approve.as_str(), "approve");
+        assert_eq!(TakeoverDecision::Reject.to_string(), "reject");
+    }
+
+    #[test]
+    fn takeover_run_status_display_matches_as_str() {
+        assert_eq!(TakeoverRunStatus::Success.to_string(), "success");
+        assert_eq!(TakeoverRunStatus::Timeout.as_str(), "timeout");
+        assert_eq!(TakeoverRunStatus::Cancelled.to_string(), "cancelled");
     }
 }

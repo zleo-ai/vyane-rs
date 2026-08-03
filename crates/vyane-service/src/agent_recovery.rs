@@ -127,6 +127,36 @@ pub enum ControllerRecoveryObservation {
     Unavailable,
 }
 
+impl ControllerRecoveryObservation {
+    /// Stable snake_case kind token for diagnostics (no free-form payload).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gone => "gone",
+            Self::StillPresent => "still_present",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[cfg(test)]
+mod controller_recovery_observation_tests {
+    use super::ControllerRecoveryObservation;
+
+    #[test]
+    fn controller_recovery_observation_kind_tokens_are_snake_case() {
+        assert_eq!(ControllerRecoveryObservation::Gone.as_str(), "gone");
+        assert_eq!(
+            ControllerRecoveryObservation::StillPresent.as_str(),
+            "still_present"
+        );
+        assert_eq!(
+            ControllerRecoveryObservation::Unavailable.as_str(),
+            "unavailable"
+        );
+    }
+}
+
 /// Hard bounds for one recovery pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRecoveryOptions {
@@ -167,6 +197,29 @@ pub enum AgentRecoveryError {
     ClaimTaskFailed,
     ClaimStoreFailed,
     InvalidStoreResult,
+}
+
+impl AgentRecoveryError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidOwner => "invalid_owner",
+            Self::InvalidReconciler => "invalid_reconciler",
+            Self::InvalidOptions => "invalid_options",
+            Self::InvalidAdapter => "invalid_adapter",
+            Self::DuplicateAdapterKind => "duplicate_adapter_kind",
+            Self::DuplicateAdapterName => "duplicate_adapter_name",
+            Self::AdapterMetadataPanicked => "adapter_metadata_panicked",
+            Self::InvalidCompletionSink => "invalid_completion_sink",
+            Self::DuplicateCompletionSinkKind => "duplicate_completion_sink_kind",
+            Self::CompletionSinkMetadataPanicked => "completion_sink_metadata_panicked",
+            Self::RuntimeUnavailable => "runtime_unavailable",
+            Self::ClaimTaskFailed => "claim_task_failed",
+            Self::ClaimStoreFailed => "claim_store_failed",
+            Self::InvalidStoreResult => "invalid_store_result",
+        }
+    }
 }
 
 impl fmt::Display for AgentRecoveryError {
@@ -213,6 +266,30 @@ pub enum AgentRecoveryItemStatus {
     CompletionAbsent,
     CompletionConflict,
     CompletionUnavailable,
+}
+
+impl AgentRecoveryItemStatus {
+    /// Stable snake_case kind token for diagnostics (no run/controller ids).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RecoveredWithoutController => "recovered_without_controller",
+            Self::RecoveredAfterControllerGone => "recovered_after_controller_gone",
+            Self::ControllerStillPresent => "controller_still_present",
+            Self::ControllerUnavailable => "controller_unavailable",
+            Self::MissingAdapter => "missing_adapter",
+            Self::InvalidController => "invalid_controller",
+            Self::InsufficientLeaseWindow => "insufficient_lease_window",
+            Self::CancelledBeforeAdapter => "cancelled_before_adapter",
+            Self::AdapterTimedOut => "adapter_timed_out",
+            Self::AdapterPanicked => "adapter_panicked",
+            Self::SettlementFailed => "settlement_failed",
+            Self::CompletionRecovered => "completion_recovered",
+            Self::CompletionAbsent => "completion_absent",
+            Self::CompletionConflict => "completion_conflict",
+            Self::CompletionUnavailable => "completion_unavailable",
+        }
+    }
 }
 
 /// Bounded, body-free report for one pass.
@@ -452,7 +529,7 @@ impl AgentRunRecoveryDriver {
             });
             let completion_sinks = Arc::clone(&completion_sinks);
             async move {
-                recover_one(
+                let status = recover_one(
                     owner,
                     store,
                     adapter,
@@ -461,7 +538,10 @@ impl AgentRunRecoveryDriver {
                     cancellation,
                     window,
                 )
-                .await
+                .await;
+                // Kind-only; no run/controller ids in structured fields (WP-350).
+                tracing::info!(status = status.as_str(), "agent recovery item settled");
+                status
             }
         }))
         .buffer_unordered(max_in_flight)
@@ -702,6 +782,11 @@ async fn reconcile_completion_after_gone(
             Ok(Ok(observation)) => observation,
             Ok(Err(_)) | Err(_) => AgentCompletionSinkObservation::Unavailable,
         };
+    // Kind-only; digests/publication keys stay out of structured logs (WP-348).
+    tracing::info!(
+        observation = observation.as_str(),
+        "agent recovery completion sink observed"
+    );
     match observation {
         AgentCompletionSinkObservation::Exact => {
             commit_recovered(owner, store, ticket, completion, confirmation).await
@@ -858,6 +943,54 @@ mod tests {
     assert_impl_all!(AgentRunRecoveryDriver: Send, Sync);
     assert_not_impl_any!(AgentRunRecoveryDriver: Clone, serde::Serialize, serde::de::DeserializeOwned);
     assert_not_impl_any!(ControllerRecoveryContext: Clone, serde::Serialize, serde::de::DeserializeOwned);
+
+    #[test]
+    fn recovery_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            AgentRecoveryError::DuplicateAdapterKind.as_str(),
+            "duplicate_adapter_kind"
+        );
+        assert_eq!(
+            AgentRecoveryError::CompletionSinkMetadataPanicked.as_str(),
+            "completion_sink_metadata_panicked"
+        );
+        assert_eq!(
+            AgentRecoveryError::ClaimStoreFailed.as_str(),
+            "claim_store_failed"
+        );
+        assert_eq!(
+            AgentRecoveryError::InvalidReconciler.as_str(),
+            "invalid_reconciler"
+        );
+    }
+
+    #[test]
+    fn recovery_item_status_kind_tokens_are_snake_case() {
+        assert_eq!(
+            AgentRecoveryItemStatus::RecoveredWithoutController.as_str(),
+            "recovered_without_controller"
+        );
+        assert_eq!(
+            AgentRecoveryItemStatus::RecoveredAfterControllerGone.as_str(),
+            "recovered_after_controller_gone"
+        );
+        assert_eq!(
+            AgentRecoveryItemStatus::InsufficientLeaseWindow.as_str(),
+            "insufficient_lease_window"
+        );
+        assert_eq!(
+            AgentRecoveryItemStatus::CancelledBeforeAdapter.as_str(),
+            "cancelled_before_adapter"
+        );
+        assert_eq!(
+            AgentRecoveryItemStatus::CompletionUnavailable.as_str(),
+            "completion_unavailable"
+        );
+        assert_eq!(
+            AgentRecoveryItemStatus::AdapterTimedOut.as_str(),
+            "adapter_timed_out"
+        );
+    }
 
     #[derive(Debug)]
     struct TestClock(Mutex<DateTime<Utc>>);

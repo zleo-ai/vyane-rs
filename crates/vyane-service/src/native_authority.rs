@@ -224,6 +224,12 @@ pub(crate) async fn revalidate_model_tool_effect(
         NativeSideEffect::ModelSend { turn, wire_attempt } if turn > 0 && wire_attempt > 0 => {}
         NativeSideEffect::ToolOperation { turn, ordinal } if turn > 0 && ordinal > 0 => {}
         NativeSideEffect::ModelSend { .. } | NativeSideEffect::ToolOperation { .. } => {
+            // Kind-only; turn/ordinal counters stay out of structured logs (WP-333).
+            tracing::warn!(
+                effect = effect.as_str(),
+                reason = "invalid_coordinates",
+                "native effect revalidation rejected"
+            );
             return Err(VyaneError::new(
                 ErrorKind::Config,
                 "native model/tool effect coordinates must be one-based",
@@ -232,12 +238,22 @@ pub(crate) async fn revalidate_model_tool_effect(
         NativeSideEffect::CheckpointPrepare { .. }
         | NativeSideEffect::CheckpointPublish { .. }
         | NativeSideEffect::SessionCommit { .. } => {
+            tracing::warn!(
+                effect = effect.as_str(),
+                reason = "unsupported_effect",
+                "native effect revalidation rejected"
+            );
             return Err(VyaneError::new(
                 ErrorKind::Unsupported,
                 "checkpoint and session-commit authority is not assembled",
             ));
         }
         _ => {
+            tracing::warn!(
+                effect = effect.as_str(),
+                reason = "unsupported_effect",
+                "native effect revalidation rejected"
+            );
             return Err(VyaneError::new(
                 ErrorKind::Unsupported,
                 "native side-effect authority is not assembled for this operation",
@@ -262,6 +278,11 @@ fn stale_authority_error() -> VyaneError {
 }
 
 fn map_store_error(error: AgentStoreError) -> VyaneError {
+    // Kind-only; never log free-form store ids/reasons (WP-298/WP-299).
+    tracing::warn!(
+        error = error.as_str(),
+        "native authority store operation failed"
+    );
     match error {
         AgentStoreError::InvalidExecutionPermit { .. }
         | AgentStoreError::InvalidCompletionPermit { .. }

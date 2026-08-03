@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,8 +53,28 @@ pub enum QuotaConnectorErrorCode {
     Internal,
 }
 
+impl QuotaConnectorErrorCode {
+    /// Stable snake_case token matching the serde rename for this error code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Authentication => "authentication",
+            Self::RateLimited => "rate_limited",
+            Self::InvalidResponse => "invalid_response",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+impl fmt::Display for QuotaConnectorErrorCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("quota connector failed with {code:?}")]
+#[error("quota connector failed with {code}")]
 pub struct QuotaConnectorError {
     pub code: QuotaConnectorErrorCode,
 }
@@ -84,6 +105,24 @@ pub enum QuotaSnapshotStatus {
     Ok,
     Error,
     Timeout,
+}
+
+impl QuotaSnapshotStatus {
+    /// Stable snake_case token matching the serde rename for this snapshot status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+impl fmt::Display for QuotaSnapshotStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,4 +238,56 @@ pub enum QuotaRunnerError {
     DuplicateConnector,
     #[error("invalid quota read policy")]
     InvalidPolicy,
+}
+
+impl QuotaRunnerError {
+    /// Stable snake_case *kind* token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration => "invalid_configuration",
+            Self::DuplicateConnector => "duplicate_connector",
+            Self::InvalidPolicy => "invalid_policy",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_runner_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            QuotaRunnerError::InvalidConfiguration.as_str(),
+            "invalid_configuration"
+        );
+        assert_eq!(
+            QuotaRunnerError::DuplicateConnector.as_str(),
+            "duplicate_connector"
+        );
+        assert_eq!(QuotaRunnerError::InvalidPolicy.as_str(), "invalid_policy");
+    }
+
+    #[test]
+    fn quota_runner_closed_enum_tokens_match_serde_snake_case() {
+        assert_eq!(QuotaConnectorErrorCode::Unavailable.as_str(), "unavailable");
+        assert_eq!(
+            QuotaConnectorErrorCode::Authentication.to_string(),
+            "authentication"
+        );
+        assert_eq!(
+            QuotaConnectorErrorCode::RateLimited.as_str(),
+            "rate_limited"
+        );
+        assert_eq!(
+            QuotaConnectorErrorCode::InvalidResponse.to_string(),
+            "invalid_response"
+        );
+        assert_eq!(QuotaConnectorErrorCode::Internal.as_str(), "internal");
+
+        assert_eq!(QuotaSnapshotStatus::Ok.as_str(), "ok");
+        assert_eq!(QuotaSnapshotStatus::Error.to_string(), "error");
+        assert_eq!(QuotaSnapshotStatus::Timeout.as_str(), "timeout");
+    }
 }

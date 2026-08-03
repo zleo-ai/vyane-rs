@@ -207,6 +207,22 @@ pub enum EditError {
     },
 }
 
+impl EditError {
+    /// Stable snake_case *kind* token; counts and limits stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoMatch => "no_match",
+            Self::NotUnique { .. } => "not_unique",
+            Self::Ambiguous => "ambiguous",
+            Self::EmptyOldStringOnNonEmptyContent => "empty_old_string_on_non_empty_content",
+            Self::NoOpEdit => "no_op_edit",
+            Self::OutputTooLarge { .. } => "output_too_large",
+            Self::TooManyMatches { .. } => "too_many_matches",
+        }
+    }
+}
+
 /// Resolve one search/replace edit into new content, or a structured error.
 ///
 /// This is the primary entry point. It handles the empty-`old_string` sentinel
@@ -669,5 +685,30 @@ fn fold_character(character: char) -> Option<&'static str> {
         // No-break, en/em and other exotic spaces fold to an ASCII space.
         '\u{00A0}' | '\u{2002}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => Some(" "),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EditError;
+
+    #[test]
+    fn edit_error_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(EditError::NoMatch.as_str(), "no_match");
+        assert_eq!(EditError::NotUnique { count: 3 }.as_str(), "not_unique");
+        assert_eq!(EditError::Ambiguous.as_str(), "ambiguous");
+        assert_eq!(
+            EditError::EmptyOldStringOnNonEmptyContent.as_str(),
+            "empty_old_string_on_non_empty_content"
+        );
+        assert_eq!(EditError::NoOpEdit.as_str(), "no_op_edit");
+        assert_eq!(
+            EditError::OutputTooLarge { limit: 99 }.as_str(),
+            "output_too_large"
+        );
+        assert_eq!(
+            EditError::TooManyMatches { limit: 7 }.as_str(),
+            "too_many_matches"
+        );
     }
 }

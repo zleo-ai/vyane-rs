@@ -15,6 +15,21 @@ pub enum GoalContinuityMode {
     QuotaHandoff,
 }
 
+impl GoalContinuityMode {
+    /// Stable snake_case token matching the serde rename for this mode.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QuotaHandoff => "quota_handoff",
+        }
+    }
+}
+
+impl std::fmt::Display for GoalContinuityMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalExecutionTarget {
@@ -156,6 +171,22 @@ pub enum GoalContinuityStatus {
     BlockedNoTakeover,
 }
 
+impl GoalContinuityStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TakeoverReady => "takeover_ready",
+            Self::BlockedNoTakeover => "blocked_no_takeover",
+        }
+    }
+}
+
+impl std::fmt::Display for GoalContinuityStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalContinuityStepStatus {
@@ -171,6 +202,29 @@ pub enum GoalContinuityStepStatus {
     Done,
     /// The takeover step was blocked by a failed one-shot execution.
     Blocked,
+}
+
+impl GoalContinuityStepStatus {
+    /// Stable snake_case token matching the serde rename for this step status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::WaitingForTakeover => "waiting_for_takeover",
+            Self::WaitingForQuotaReset => "waiting_for_quota_reset",
+            Self::WaitingForQuotaResetAndReview => "waiting_for_quota_reset_and_review",
+            Self::WaitingForReview => "waiting_for_review",
+            Self::WaitingForReviewChecks => "waiting_for_review_checks",
+            Self::InFlight => "in_flight",
+            Self::Done => "done",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+impl std::fmt::Display for GoalContinuityStepStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +270,23 @@ pub enum GoalContinuitySignalKind {
     QuotaReset,
     ReviewChecksPassed,
     ReviewChecksFailed,
+}
+
+impl GoalContinuitySignalKind {
+    /// Stable snake_case token matching the serde rename for this signal kind.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QuotaReset => "quota_reset",
+            Self::ReviewChecksPassed => "review_checks_passed",
+            Self::ReviewChecksFailed => "review_checks_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for GoalContinuitySignalKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1105,5 +1176,40 @@ fn release_ready_dependents(state: &mut GoalContinuityState) {
         if !changed {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GoalContinuityMode, GoalContinuitySignalKind, GoalContinuityStatus,
+        GoalContinuityStepStatus,
+    };
+
+    #[test]
+    fn continuity_signal_kind_tokens_match_serde_snake_case() {
+        assert_eq!(GoalContinuitySignalKind::QuotaReset.as_str(), "quota_reset");
+        assert_eq!(
+            GoalContinuitySignalKind::ReviewChecksPassed.to_string(),
+            "review_checks_passed"
+        );
+        assert_eq!(
+            GoalContinuitySignalKind::ReviewChecksFailed.as_str(),
+            "review_checks_failed"
+        );
+    }
+
+    #[test]
+    fn continuity_mode_status_step_tokens_match_serde_snake_case() {
+        assert_eq!(GoalContinuityMode::QuotaHandoff.as_str(), "quota_handoff");
+        assert_eq!(
+            GoalContinuityStatus::BlockedNoTakeover.to_string(),
+            "blocked_no_takeover"
+        );
+        assert_eq!(
+            GoalContinuityStepStatus::WaitingForQuotaResetAndReview.as_str(),
+            "waiting_for_quota_reset_and_review"
+        );
+        assert_eq!(GoalContinuityStepStatus::InFlight.to_string(), "in_flight");
     }
 }

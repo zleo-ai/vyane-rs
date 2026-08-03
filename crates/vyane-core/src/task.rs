@@ -123,13 +123,21 @@ pub enum Effort {
 }
 
 impl Effort {
-    pub fn as_str(&self) -> &str {
+    /// Stable lowercase token matching the serde rename for this effort.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
         match self {
             Effort::Low => "low",
             Effort::Medium => "medium",
             Effort::High => "high",
             Effort::Xhigh => "xhigh",
         }
+    }
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -205,5 +213,18 @@ impl TaskSpec {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Effort;
+
+    #[test]
+    fn effort_tokens_match_serde_lowercase() {
+        assert_eq!(Effort::Low.as_str(), "low");
+        assert_eq!(Effort::Medium.to_string(), "medium");
+        assert_eq!(Effort::High.as_str(), "high");
+        assert_eq!(Effort::Xhigh.to_string(), "xhigh");
     }
 }

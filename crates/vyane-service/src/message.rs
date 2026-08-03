@@ -299,6 +299,18 @@ pub enum AgentMessageCompletionReadError {
     Unavailable,
 }
 
+impl AgentMessageCompletionReadError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RuntimeUnavailable => "runtime_unavailable",
+            Self::TaskFailed => "task_failed",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 impl std::fmt::Display for AgentMessageCompletionReadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
@@ -319,6 +331,20 @@ pub enum AgentMessageCompletionStageError {
     TaskFailed,
     SinkUnavailable,
     Rejected,
+}
+
+impl AgentMessageCompletionStageError {
+    /// Stable snake_case kind token for diagnostics (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidMessage => "invalid_message",
+            Self::RuntimeUnavailable => "runtime_unavailable",
+            Self::TaskFailed => "task_failed",
+            Self::SinkUnavailable => "sink_unavailable",
+            Self::Rejected => "rejected",
+        }
+    }
 }
 
 impl std::fmt::Display for AgentMessageCompletionStageError {
@@ -349,6 +375,46 @@ mod tests {
         EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, MessagePublicationStatus,
         NewDelivery,
     };
+
+    #[test]
+    fn completion_read_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            AgentMessageCompletionReadError::RuntimeUnavailable.as_str(),
+            "runtime_unavailable"
+        );
+        assert_eq!(
+            AgentMessageCompletionReadError::TaskFailed.as_str(),
+            "task_failed"
+        );
+        assert_eq!(
+            AgentMessageCompletionReadError::Unavailable.as_str(),
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn completion_stage_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            AgentMessageCompletionStageError::InvalidMessage.as_str(),
+            "invalid_message"
+        );
+        assert_eq!(
+            AgentMessageCompletionStageError::RuntimeUnavailable.as_str(),
+            "runtime_unavailable"
+        );
+        assert_eq!(
+            AgentMessageCompletionStageError::TaskFailed.as_str(),
+            "task_failed"
+        );
+        assert_eq!(
+            AgentMessageCompletionStageError::SinkUnavailable.as_str(),
+            "sink_unavailable"
+        );
+        assert_eq!(
+            AgentMessageCompletionStageError::Rejected.as_str(),
+            "rejected"
+        );
+    }
 
     #[test]
     fn construction_is_explicit_owner_bound_and_validates_before_writing() {

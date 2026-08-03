@@ -19,12 +19,12 @@ use vyane_core::{
 use vyane_harness::native::{
     NativeCommandNetworkPolicy, NativeCommandPolicy, NativeReadPolicy, NativeToolPermissionPolicy,
     NativeTurnDriver, NativeTurnLimits, NativeTurnStop, NativeWebFetchPolicy,
-    NativeWebSearchPolicy, NativeWritePolicy, ToolContext, command_permission_policy,
-    command_tool_definition, register_command_tool, register_command_tool_with_network,
-    register_web_fetch_tool, register_web_search_tool, validate_read_only_host,
-    web_fetch_permission_policy, web_fetch_tool_definition, web_search_permission_policy,
-    web_search_tool_definition, workspace_permission_policy, workspace_tool_definitions,
-    workspace_tool_registry_with_policy,
+    NativeWebSearchPolicy, NativeWritePolicy, RegisterCommandToolError, ToolContext,
+    command_permission_policy, command_tool_definition, register_command_tool,
+    register_command_tool_with_network, register_web_fetch_tool, register_web_search_tool,
+    validate_read_only_host, web_fetch_permission_policy, web_fetch_tool_definition,
+    web_search_permission_policy, web_search_tool_definition, workspace_permission_policy,
+    workspace_tool_definitions, workspace_tool_registry_with_policy,
 };
 use vyane_message::{
     EndpointKind, EndpointRef, IdempotencyKey, MessageDirection, NewDelivery, NewMessage,
@@ -222,14 +222,48 @@ impl FreshNativeAgentOperation {
         code: RunFailureCode,
     ) -> AgentExecutorOutcome {
         if !self.remove_quiesced(controller, input) {
-            return AgentExecutorOutcome::Unknown;
+            return log_native_executor_outcome(AgentExecutorOutcome::Unknown);
         }
-        if code == RunFailureCode::TimedOut {
-            AgentExecutorOutcome::Quiesced(AgentExecutionSettlement::TimedOut)
+        let settlement = if code == RunFailureCode::TimedOut {
+            AgentExecutionSettlement::TimedOut
         } else {
-            AgentExecutorOutcome::Quiesced(AgentExecutionSettlement::Failed { code })
+            AgentExecutionSettlement::Failed { code }
+        };
+        log_native_executor_outcome(AgentExecutorOutcome::Quiesced(settlement))
+    }
+}
+
+/// Kind-only pure lines for native AgentRun settle paths (WP-375/379).
+fn log_native_executor_outcome(outcome: AgentExecutorOutcome) -> AgentExecutorOutcome {
+    match &outcome {
+        AgentExecutorOutcome::Quiesced(settlement) => {
+            tracing::info!(
+                settlement = outcome.as_str(),
+                "{}",
+                crate::output::format_agent_executor_outcome_line(&outcome)
+            );
+            tracing::info!(
+                settlement = settlement.as_str(),
+                "{}",
+                crate::output::format_agent_execution_settlement_line(settlement)
+            );
+            if let AgentExecutionSettlement::Failed { code } = settlement {
+                tracing::info!(
+                    failure_code = code.as_str(),
+                    "{}",
+                    crate::output::format_run_failure_code_line(*code)
+                );
+            }
+        }
+        AgentExecutorOutcome::Unknown => {
+            tracing::warn!(
+                settlement = outcome.as_str(),
+                "{}",
+                crate::output::format_agent_executor_outcome_line(&outcome)
+            );
         }
     }
+    outcome
 }
 
 /// Freeze one public native submission into the private, fresh-only input
@@ -460,21 +494,37 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             .with_timeout(Duration::from_secs(input.policy.timeout_seconds))
             .with_deadline(context.deadline());
         let write_enabled = input.policy.filesystem_write.is_some();
-        let Ok(mut registry) = workspace_tool_registry_with_policy(
+        // Kind-only; never log path policy payloads (WP-368).
+        let mut registry = match workspace_tool_registry_with_policy(
             input.policy.filesystem_read.clone(),
             input.policy.filesystem_write.clone(),
-        ) else {
-            return AgentExecutorOutcome::Unknown;
+        ) {
+            Ok(registry) => registry,
+            Err(error) => {
+                tracing::warn!(
+                    error = error.as_str(),
+                    "{}",
+                    crate::output::format_native_filesystem_policy_error_kind_line(error)
+                );
+                return AgentExecutorOutcome::Unknown;
+            }
         };
         if let Some(command_policy) = input.policy.command_execution.clone() {
-            let registration = match input.policy.command_network.clone() {
-                Some(network) => {
-                    register_command_tool_with_network(&mut registry, command_policy, network)
-                        .map_err(|_| ())
-                }
-                None => register_command_tool(&mut registry, command_policy).map_err(|_| ()),
-            };
-            if registration.is_err() {
+            // Kind-only; never log program/args/mount payloads (WP-366).
+            let registration: Result<(), RegisterCommandToolError> =
+                match input.policy.command_network.clone() {
+                    Some(network) => {
+                        register_command_tool_with_network(&mut registry, command_policy, network)
+                    }
+                    None => register_command_tool(&mut registry, command_policy)
+                        .map_err(RegisterCommandToolError::Command),
+                };
+            if let Err(error) = registration {
+                tracing::warn!(
+                    error = error.as_str(),
+                    "{}",
+                    crate::output::format_register_command_tool_error_kind_line(&error)
+                );
                 return AgentExecutorOutcome::Unknown;
             }
         }
@@ -482,46 +532,94 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             input.policy.web_search.as_ref(),
             search_bound.as_ref(),
             search_client,
-        ) && register_web_search_tool(
-            &mut registry,
-            search.policy.clone(),
-            search_client,
-            search_bound.target.model.clone(),
-            search_bound.params.clone(),
-        )
-        .is_err()
-        {
-            return AgentExecutorOutcome::Unknown;
+        ) {
+            // Kind-only; never log policy/model/params payloads (WP-313/365).
+            if let Err(error) = register_web_search_tool(
+                &mut registry,
+                search.policy.clone(),
+                search_client,
+                search_bound.target.model.clone(),
+                search_bound.params.clone(),
+            ) {
+                tracing::warn!(
+                    error = error.as_str(),
+                    "{}",
+                    crate::output::format_register_web_search_tool_error_kind_line(&error)
+                );
+                return AgentExecutorOutcome::Unknown;
+            }
         }
-        if let Some(fetch_policy) = input.policy.web_fetch.clone()
-            && register_web_fetch_tool(&mut registry, fetch_policy, authorized_web_fetch_client())
-                .is_err()
-        {
-            return AgentExecutorOutcome::Unknown;
+        if let Some(fetch_policy) = input.policy.web_fetch.clone() {
+            // Kind-only; never log allowlist/client payloads (WP-313/365).
+            if let Err(error) =
+                register_web_fetch_tool(&mut registry, fetch_policy, authorized_web_fetch_client())
+            {
+                tracing::warn!(
+                    error = error.as_str(),
+                    "{}",
+                    crate::output::format_register_web_fetch_tool_error_kind_line(&error)
+                );
+                return AgentExecutorOutcome::Unknown;
+            }
         }
-        let Ok(mut permission_policy) = workspace_permission_policy(write_enabled) else {
-            return AgentExecutorOutcome::Unknown;
+        // Kind-only; never log tool patterns / regex / layer payloads (WP-367).
+        let mut permission_policy = match workspace_permission_policy(write_enabled) {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(
+                    error = error.as_str(),
+                    "{}",
+                    crate::output::format_permission_rule_error_kind_line(&error)
+                );
+                return AgentExecutorOutcome::Unknown;
+            }
         };
         if input.policy.command_execution.is_some() {
-            let Ok(with_command) = command_permission_policy(permission_policy) else {
-                return AgentExecutorOutcome::Unknown;
-            };
-            permission_policy = with_command;
+            match command_permission_policy(permission_policy) {
+                Ok(with_command) => permission_policy = with_command,
+                Err(error) => {
+                    tracing::warn!(
+                        error = error.as_str(),
+                        "{}",
+                        crate::output::format_permission_rule_error_kind_line(&error)
+                    );
+                    return AgentExecutorOutcome::Unknown;
+                }
+            }
         }
         if input.policy.web_search.is_some() {
-            let Ok(with_search) = web_search_permission_policy(permission_policy) else {
-                return AgentExecutorOutcome::Unknown;
-            };
-            permission_policy = with_search;
+            match web_search_permission_policy(permission_policy) {
+                Ok(with_search) => permission_policy = with_search,
+                Err(error) => {
+                    tracing::warn!(
+                        error = error.as_str(),
+                        "{}",
+                        crate::output::format_permission_rule_error_kind_line(&error)
+                    );
+                    return AgentExecutorOutcome::Unknown;
+                }
+            }
         }
         if input.policy.web_fetch.is_some() {
-            let Ok(with_fetch) = web_fetch_permission_policy(permission_policy) else {
-                return AgentExecutorOutcome::Unknown;
-            };
-            permission_policy = with_fetch;
+            match web_fetch_permission_policy(permission_policy) {
+                Ok(with_fetch) => permission_policy = with_fetch,
+                Err(error) => {
+                    tracing::warn!(
+                        error = error.as_str(),
+                        "{}",
+                        crate::output::format_permission_rule_error_kind_line(&error)
+                    );
+                    return AgentExecutorOutcome::Unknown;
+                }
+            }
         }
         for layer in &input.policy.tool_permission_layers {
-            if permission_policy.push_restriction(layer).is_err() {
+            if let Err(error) = permission_policy.push_restriction(layer) {
+                tracing::warn!(
+                    error = error.as_str(),
+                    "{}",
+                    crate::output::format_permission_rule_error_kind_line(&error)
+                );
                 return AgentExecutorOutcome::Unknown;
             }
         }
@@ -564,39 +662,49 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
         let reply = match turn {
             Ok(Ok(outcome)) => match outcome.stop {
                 NativeTurnStop::Completed(reply) => reply,
-                NativeTurnStop::Cancelled => {
-                    // The operation knows its futures are quiesced, but only
-                    // the durable cancellation path may settle cancellation.
-                    // Retain the spool and leave reconciliation in charge.
-                    return AgentExecutorOutcome::Unknown;
-                }
-                NativeTurnStop::TimedOut => {
-                    return self.quiesced_failure(&controller, &input, RunFailureCode::TimedOut);
-                }
-                NativeTurnStop::ApprovalRequired(_) | NativeTurnStop::ToolChoiceViolation => {
-                    return self.quiesced_failure(
-                        &controller,
-                        &input,
-                        RunFailureCode::PolicyDenied,
-                    );
-                }
-                NativeTurnStop::Refused(_)
-                | NativeTurnStop::BudgetExhausted
-                | NativeTurnStop::UnsupportedParallelCalls
-                | NativeTurnStop::AbortedAfterToolActivity { .. } => {
-                    return self.quiesced_failure(&controller, &input, RunFailureCode::Internal);
-                }
-                _ => {
-                    return self.quiesced_failure(&controller, &input, RunFailureCode::Internal);
+                stop => {
+                    // Map closed stop kind tokens onto durable failure codes.
+                    // Kind vocabulary is NativeTurnStop::as_str (WP-263/264).
+                    match settlement_for_native_turn_stop(&stop) {
+                        None => {
+                            // Cancelled / completed-without-reply: leave
+                            // reconciliation in charge without a false failure.
+                            return AgentExecutorOutcome::Unknown;
+                        }
+                        Some(code) => {
+                            // Emit pure human stop kind on the settlement
+                            // diagnostic path (WP-268/WP-269). Payloads never
+                            // enter the line — only stop.as_str().
+                            tracing::info!(
+                                stop_kind = stop.as_str(),
+                                failure_code = code.as_str(),
+                                "{}",
+                                crate::output::format_native_turn_stop_line(&stop)
+                            );
+                            return self.quiesced_failure(&controller, &input, code);
+                        }
+                    }
                 }
             },
             Ok(Err(error)) => {
                 if error.kind == ErrorKind::Cancelled {
                     return AgentExecutorOutcome::Unknown;
                 }
+                // Kind-only pure line; never log free-form error bodies (WP-378).
+                tracing::warn!(
+                    error = error.kind.as_str(),
+                    "{}",
+                    crate::output::format_error_kind_line_token(error.kind)
+                );
                 return self.quiesced_failure(&controller, &input, failure_code(error.kind));
             }
             Err(_) => {
+                // Outer timeout is wall-clock budget; map as timeout kind (WP-378).
+                tracing::warn!(
+                    error = ErrorKind::Timeout.as_str(),
+                    "{}",
+                    crate::output::format_error_kind_line_token(ErrorKind::Timeout)
+                );
                 return self.quiesced_failure(&controller, &input, RunFailureCode::TimedOut);
             }
         };
@@ -627,9 +735,11 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             })
             .await
         else {
-            return AgentExecutorOutcome::Unknown;
+            return log_native_executor_outcome(AgentExecutorOutcome::Unknown);
         };
-        AgentExecutorOutcome::Quiesced(AgentExecutionSettlement::CompletionStaged(staged))
+        log_native_executor_outcome(AgentExecutorOutcome::Quiesced(
+            AgentExecutionSettlement::CompletionStaged(staged),
+        ))
     }
 }
 
@@ -761,6 +871,25 @@ fn completion_message(input: &NativeAgentInput, key: &str, body: String) -> NewM
             expires_at: None,
             max_attempts: 3,
         }],
+    }
+}
+
+/// Map a native turn stop kind token onto a durable run failure code.
+///
+/// Returns `None` when the stop must not settle a failure (cancelled leave
+/// reconciliation in charge). Kind strings come from
+/// [`NativeTurnStop::as_str`].
+fn settlement_for_native_turn_stop(stop: &NativeTurnStop) -> Option<RunFailureCode> {
+    match stop.as_str() {
+        "cancelled" => None,
+        "timed_out" => Some(RunFailureCode::TimedOut),
+        "approval_required" | "tool_choice_violation" => Some(RunFailureCode::PolicyDenied),
+        "refused"
+        | "budget_exhausted"
+        | "unsupported_parallel_calls"
+        | "aborted_after_tool_activity" => Some(RunFailureCode::Internal),
+        // completed is handled separately; unknown future kinds fail closed.
+        _ => Some(RunFailureCode::Internal),
     }
 }
 
@@ -1826,5 +1955,35 @@ mod tests {
         operation.confirmed_gone(&controller);
         assert!(operation.pending_cleanup.lock().unwrap().is_empty());
         assert_eq!(spool.read(RUN_ID, WORKER_ID).unwrap(), replacement);
+    }
+
+    #[test]
+    fn settlement_maps_native_turn_stop_kind_tokens() {
+        assert_eq!(
+            settlement_for_native_turn_stop(&NativeTurnStop::Cancelled),
+            None
+        );
+        assert_eq!(
+            settlement_for_native_turn_stop(&NativeTurnStop::TimedOut),
+            Some(RunFailureCode::TimedOut)
+        );
+        assert_eq!(
+            settlement_for_native_turn_stop(&NativeTurnStop::ToolChoiceViolation),
+            Some(RunFailureCode::PolicyDenied)
+        );
+        assert_eq!(
+            settlement_for_native_turn_stop(&NativeTurnStop::BudgetExhausted),
+            Some(RunFailureCode::Internal)
+        );
+        assert_eq!(
+            settlement_for_native_turn_stop(&NativeTurnStop::UnsupportedParallelCalls),
+            Some(RunFailureCode::Internal)
+        );
+        // Kind token contract: multi-word tokens stay stable for operator maps.
+        assert_eq!(NativeTurnStop::BudgetExhausted.as_str(), "budget_exhausted");
+        assert_eq!(
+            NativeTurnStop::ToolChoiceViolation.as_str(),
+            "tool_choice_violation"
+        );
     }
 }

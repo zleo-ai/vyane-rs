@@ -127,6 +127,24 @@ pub enum PursuitSegmentStatus {
     Cancelled,
 }
 
+impl PursuitSegmentStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::fmt::Display for PursuitSegmentStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PursuitSegmentResult {
     pub status: PursuitSegmentStatus,
@@ -154,12 +172,46 @@ pub enum PursuitStatus {
     Stopped,
 }
 
+impl PursuitStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Achieved => "achieved",
+            Self::Paused => "paused",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+impl std::fmt::Display for PursuitStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PursuitCheckpointStatus {
     Running,
     Paused,
     Achieved,
+}
+
+impl PursuitCheckpointStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Achieved => "achieved",
+        }
+    }
+}
+
+impl std::fmt::Display for PursuitCheckpointStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Mutable restart checkpoint for one explicit pursuit. Store writes are CAS
@@ -1097,5 +1149,15 @@ mod tests {
         );
         assert!(pursuit_lease_seconds(Duration::from_secs(1)) >= 1);
         assert!(pursuit_lease_seconds(Duration::from_secs(1)) <= MAX_LEASE_SECONDS);
+    }
+
+    #[test]
+    fn pursuit_status_tokens_match_serde_snake_case() {
+        assert_eq!(PursuitStatus::Achieved.as_str(), "achieved");
+        assert_eq!(PursuitStatus::Paused.to_string(), "paused");
+        assert_eq!(PursuitSegmentStatus::Timeout.as_str(), "timeout");
+        assert_eq!(PursuitSegmentStatus::Cancelled.to_string(), "cancelled");
+        assert_eq!(PursuitCheckpointStatus::Running.as_str(), "running");
+        assert_eq!(PursuitCheckpointStatus::Achieved.to_string(), "achieved");
     }
 }

@@ -288,10 +288,36 @@ pub enum NativeCommandPolicyError {
     InvalidWritableRoot,
 }
 
+impl NativeCommandPolicyError {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyAllowlist => "empty_allowlist",
+            Self::TooManyRules => "too_many_rules",
+            Self::TooManyWritableRoots => "too_many_writable_roots",
+            Self::InvalidProgram => "invalid_program",
+            Self::InvalidArguments => "invalid_arguments",
+            Self::InvalidTimeout => "invalid_timeout",
+            Self::InvalidWritableRoot => "invalid_writable_root",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum NativeCommandHostError {
     #[error("native command tools require x86_64 or aarch64 Linux bubblewrap confinement")]
     Unsupported,
+}
+
+impl NativeCommandHostError {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -465,6 +491,18 @@ pub enum RegisterCommandToolError {
     Network(#[from] NativeCommandNetworkPolicyError),
     #[error("native command tool registration failed")]
     Registry,
+}
+
+impl RegisterCommandToolError {
+    /// Stable snake_case *kind* token; nested policy details stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Command(_) => "command_policy",
+            Self::Network(_) => "network_policy",
+            Self::Registry => "registry",
+        }
+    }
 }
 
 pub fn command_permission_policy(
@@ -1565,6 +1603,45 @@ mod tests {
             writable_roots: Vec::new(),
             max_seconds: 30,
         }
+    }
+
+    #[test]
+    fn native_command_host_and_register_error_kind_tokens_are_snake_case() {
+        assert_eq!(NativeCommandHostError::Unsupported.as_str(), "unsupported");
+        assert_eq!(
+            RegisterCommandToolError::Command(NativeCommandPolicyError::EmptyAllowlist).as_str(),
+            "command_policy"
+        );
+        assert_eq!(
+            RegisterCommandToolError::Network(vyane_harness_native_network_error_placeholder())
+                .as_str(),
+            "network_policy"
+        );
+        assert_eq!(RegisterCommandToolError::Registry.as_str(), "registry");
+    }
+
+    fn vyane_harness_native_network_error_placeholder() -> NativeCommandNetworkPolicyError {
+        NativeCommandNetworkPolicyError::EmptyAllowlist
+    }
+
+    #[test]
+    fn native_command_policy_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            NativeCommandPolicyError::EmptyAllowlist.as_str(),
+            "empty_allowlist"
+        );
+        assert_eq!(
+            NativeCommandPolicyError::TooManyWritableRoots.as_str(),
+            "too_many_writable_roots"
+        );
+        assert_eq!(
+            NativeCommandPolicyError::InvalidWritableRoot.as_str(),
+            "invalid_writable_root"
+        );
+        assert_eq!(
+            NativeCommandPolicyError::InvalidTimeout.as_str(),
+            "invalid_timeout"
+        );
     }
 
     #[test]

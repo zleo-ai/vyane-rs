@@ -69,6 +69,23 @@ pub enum FilesystemCapability {
     CallerWorkdirEditing,
 }
 
+impl FilesystemCapability {
+    /// Stable snake_case token matching the serde rename for this capability.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::CallerWorkdirEditing => "caller_workdir_editing",
+        }
+    }
+}
+
+impl fmt::Display for FilesystemCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Strength of isolation provided by the adapter itself.
 ///
 /// This is kept separate from filesystem capability: being able to edit a
@@ -81,6 +98,24 @@ pub enum IsolationStrength {
     AdapterDelegated,
     /// Reserved for executors backed by an OS-enforced sandbox.
     OsEnforced,
+}
+
+impl IsolationStrength {
+    /// Stable snake_case token matching the serde rename for this isolation strength.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::AdapterDelegated => "adapter_delegated",
+            Self::OsEnforced => "os_enforced",
+        }
+    }
+}
+
+impl fmt::Display for IsolationStrength {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Trusted declaration returned by [`crate::ExecutorFactory`].
@@ -130,17 +165,24 @@ pub enum CapabilityRejectionReason {
     IsolationUnavailable,
 }
 
-impl fmt::Display for CapabilityRejectionReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
+impl CapabilityRejectionReason {
+    /// Stable snake_case token matching the serde rename for this rejection reason.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
             Self::MissingWorkdir => "missing_workdir",
             Self::WorkdirCanonicalizationFailed => "workdir_canonicalization_failed",
             Self::WorkdirNotDirectory => "workdir_not_directory",
             Self::WorkdirPinningUnavailable => "workdir_pinning_unavailable",
             Self::LocalEditingUnavailable => "local_editing_unavailable",
             Self::IsolationUnavailable => "isolation_unavailable",
-        };
-        f.write_str(value)
+        }
+    }
+}
+
+impl fmt::Display for CapabilityRejectionReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -247,5 +289,36 @@ impl std::error::Error for CapabilityAdmissionError {}
 impl CapabilityAdmissionError {
     pub(crate) fn into_vyane_error(self) -> VyaneError {
         VyaneError::with_source(ErrorKind::Unsupported, self.to_string(), self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CapabilityRejectionReason, FilesystemCapability, IsolationStrength};
+
+    #[test]
+    fn capability_closed_enum_tokens_match_serde_snake_case() {
+        assert_eq!(FilesystemCapability::None.as_str(), "none");
+        assert_eq!(
+            FilesystemCapability::CallerWorkdirEditing.to_string(),
+            "caller_workdir_editing"
+        );
+        assert_eq!(
+            IsolationStrength::AdapterDelegated.as_str(),
+            "adapter_delegated"
+        );
+        assert_eq!(IsolationStrength::OsEnforced.to_string(), "os_enforced");
+        assert_eq!(
+            CapabilityRejectionReason::WorkdirCanonicalizationFailed.as_str(),
+            "workdir_canonicalization_failed"
+        );
+        assert_eq!(
+            CapabilityRejectionReason::LocalEditingUnavailable.to_string(),
+            "local_editing_unavailable"
+        );
+        assert_eq!(
+            CapabilityRejectionReason::MissingWorkdir.as_str(),
+            "missing_workdir"
+        );
     }
 }

@@ -64,6 +64,19 @@ pub enum NativePermissionSetError {
     ExceedsCeiling,
 }
 
+impl NativePermissionSetError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidPolicy => "invalid_policy",
+            Self::NetworkWithoutCommand => "network_without_command",
+            Self::WriteOutsideSandbox => "write_outside_sandbox",
+            Self::ExceedsCeiling => "exceeds_ceiling",
+        }
+    }
+}
+
 impl NativePermissionSet {
     pub fn validate(&self) -> Result<(), NativePermissionSetError> {
         if self.tool_policy_ceilings.len() + usize::from(self.tool_policy.is_some())
@@ -540,6 +553,26 @@ mod tests {
     }
 
     #[test]
+    fn native_permission_set_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            NativePermissionSetError::InvalidPolicy.as_str(),
+            "invalid_policy"
+        );
+        assert_eq!(
+            NativePermissionSetError::NetworkWithoutCommand.as_str(),
+            "network_without_command"
+        );
+        assert_eq!(
+            NativePermissionSetError::WriteOutsideSandbox.as_str(),
+            "write_outside_sandbox"
+        );
+        assert_eq!(
+            NativePermissionSetError::ExceedsCeiling.as_str(),
+            "exceeds_ceiling"
+        );
+    }
+
+    #[test]
     fn config_ceiling_never_grants_an_omitted_axis() {
         let mut request = NativePermissionSet::default();
         let ceiling = NativePermissionSet {
@@ -800,5 +833,44 @@ mod tests {
         request.restrict_by(&ceiling).unwrap();
         assert_eq!(request.filesystem_read.exclude, [".env*", "private/**"]);
         assert_eq!(request.filesystem_write.unwrap().exclude, [".git/**"]);
+    }
+
+    #[test]
+    fn config_and_harness_permission_tokens_stay_aligned() {
+        use vyane_config::{NativeCommandNetworkRouteConfig, NativeToolPermissionEffectConfig};
+        use vyane_harness::native::{NativeCommandNetworkRoute, PermissionEffect};
+
+        for (config, harness) in [
+            (
+                NativeToolPermissionEffectConfig::Allow,
+                PermissionEffect::Allow,
+            ),
+            (NativeToolPermissionEffectConfig::Ask, PermissionEffect::Ask),
+            (
+                NativeToolPermissionEffectConfig::Deny,
+                PermissionEffect::Deny,
+            ),
+        ] {
+            assert_eq!(
+                config.as_str(),
+                harness.as_str(),
+                "effect token drift between config and harness"
+            );
+            assert_eq!(permission_effect(config), harness);
+            assert_eq!(permission_effect(config).as_str(), config.as_str());
+        }
+
+        assert_eq!(
+            NativeCommandNetworkRouteConfig::Direct.as_str(),
+            NativeCommandNetworkRoute::Direct.as_str()
+        );
+        assert_eq!(
+            NativeCommandNetworkRouteConfig::EnvironmentProxy.as_str(),
+            NativeCommandNetworkRoute::EnvironmentProxy.as_str()
+        );
+        assert_eq!(
+            NativeCommandNetworkRouteConfig::EnvironmentProxy.to_string(),
+            "environment_proxy"
+        );
     }
 }

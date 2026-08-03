@@ -54,6 +54,30 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    /// Stable snake_case token matching the serde rename for this kind.
+    ///
+    /// `Other` (including future unknown serde kinds) is always `"other"`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Auth => "auth",
+            Self::RateLimited => "rate_limited",
+            Self::Timeout => "timeout",
+            Self::Transport => "transport",
+            Self::Protocol => "protocol",
+            Self::SpawnFailed => "spawn_failed",
+            Self::HarnessFailed => "harness_failed",
+            Self::Cancelled => "cancelled",
+            Self::Unsupported => "unsupported",
+            Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
+            Self::Io => "io",
+            Self::Indeterminate => "indeterminate",
+            Self::Other => "other",
+        }
+    }
+
     /// Whether an error of this kind should trigger failover to the next
     /// target in the chain.
     ///
@@ -79,6 +103,12 @@ impl ErrorKind {
             | ErrorKind::Indeterminate
             | ErrorKind::Other => false,
         }
+    }
+}
+
+impl std::fmt::Display for ErrorKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -151,5 +181,15 @@ mod tests {
             .expect("unknown unit variant should use the Other fallback");
         assert_eq!(kind, ErrorKind::Other);
         assert!(!kind.failover_eligible());
+        assert_eq!(kind.as_str(), "other");
+    }
+
+    #[test]
+    fn error_kind_tokens_match_serde_snake_case() {
+        assert_eq!(ErrorKind::RateLimited.as_str(), "rate_limited");
+        assert_eq!(ErrorKind::SpawnFailed.to_string(), "spawn_failed");
+        assert_eq!(ErrorKind::NotFound.as_str(), "not_found");
+        assert_eq!(ErrorKind::HarnessFailed.to_string(), "harness_failed");
+        assert_eq!(ErrorKind::Other.to_string(), "other");
     }
 }

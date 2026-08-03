@@ -49,6 +49,18 @@ pub enum InProcessAgentEffect {
     Other,
 }
 
+impl InProcessAgentEffect {
+    /// Stable snake_case *kind* token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelSend => "model_send",
+            Self::ToolOperation => "tool_operation",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// A single-use proof that the durable execution permit was live immediately
 /// before an in-process effect.
 ///
@@ -177,6 +189,17 @@ pub enum InProcessAuthorityError {
     PermitRejected,
 }
 
+impl InProcessAuthorityError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ValidationTaskFailed => "validation_task_failed",
+            Self::PermitRejected => "permit_rejected",
+        }
+    }
+}
+
 impl fmt::Display for InProcessAuthorityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -243,6 +266,17 @@ pub enum InProcessCompletionError {
     Unavailable,
 }
 
+impl InProcessCompletionError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rejected => "rejected",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 impl fmt::Display for InProcessCompletionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -258,6 +292,17 @@ impl std::error::Error for InProcessCompletionError {}
 pub enum InProcessCompletionStageError {
     TaskFailed,
     Rejected,
+}
+
+impl InProcessCompletionStageError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskFailed => "task_failed",
+            Self::Rejected => "rejected",
+        }
+    }
 }
 
 impl fmt::Display for InProcessCompletionStageError {
@@ -312,6 +357,18 @@ pub enum InProcessNativeBindError {
     UnsupportedScope,
     ScopeRejected,
     ValidationUnavailable,
+}
+
+impl InProcessNativeBindError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedScope => "unsupported_scope",
+            Self::ScopeRejected => "scope_rejected",
+            Self::ValidationUnavailable => "validation_unavailable",
+        }
+    }
 }
 
 impl fmt::Display for InProcessNativeBindError {
@@ -918,6 +975,21 @@ pub enum InProcessAssemblyError {
     InvalidCompletionSinks,
 }
 
+impl InProcessAssemblyError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidOwner => "invalid_owner",
+            Self::InvalidOperationMetadata => "invalid_operation_metadata",
+            Self::OperationMetadataPanicked => "operation_metadata_panicked",
+            Self::DuplicateAssembly => "duplicate_assembly",
+            Self::AssemblyRegistryUnavailable => "assembly_registry_unavailable",
+            Self::InvalidCompletionSinks => "invalid_completion_sinks",
+        }
+    }
+}
+
 impl fmt::Display for InProcessAssemblyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -969,6 +1041,70 @@ mod tests {
     };
 
     const OWNER: &str = "owner-test";
+
+    #[test]
+    fn inprocess_error_kind_tokens_are_snake_case() {
+        assert_eq!(InProcessAgentEffect::ModelSend.as_str(), "model_send");
+        assert_eq!(
+            InProcessAgentEffect::ToolOperation.as_str(),
+            "tool_operation"
+        );
+        assert_eq!(InProcessAgentEffect::Other.as_str(), "other");
+        assert_eq!(
+            InProcessAuthorityError::ValidationTaskFailed.as_str(),
+            "validation_task_failed"
+        );
+        assert_eq!(
+            InProcessAuthorityError::PermitRejected.as_str(),
+            "permit_rejected"
+        );
+        assert_eq!(InProcessCompletionError::Rejected.as_str(), "rejected");
+        assert_eq!(
+            InProcessCompletionError::Unavailable.as_str(),
+            "unavailable"
+        );
+        assert_eq!(
+            InProcessCompletionStageError::TaskFailed.as_str(),
+            "task_failed"
+        );
+        assert_eq!(InProcessCompletionStageError::Rejected.as_str(), "rejected");
+        assert_eq!(
+            InProcessNativeBindError::UnsupportedScope.as_str(),
+            "unsupported_scope"
+        );
+        assert_eq!(
+            InProcessNativeBindError::ScopeRejected.as_str(),
+            "scope_rejected"
+        );
+        assert_eq!(
+            InProcessNativeBindError::ValidationUnavailable.as_str(),
+            "validation_unavailable"
+        );
+        assert_eq!(
+            InProcessAssemblyError::InvalidOperationMetadata.as_str(),
+            "invalid_operation_metadata"
+        );
+        assert_eq!(
+            InProcessAssemblyError::OperationMetadataPanicked.as_str(),
+            "operation_metadata_panicked"
+        );
+        assert_eq!(
+            InProcessAssemblyError::AssemblyRegistryUnavailable.as_str(),
+            "assembly_registry_unavailable"
+        );
+        assert_eq!(
+            InProcessAssemblyError::InvalidCompletionSinks.as_str(),
+            "invalid_completion_sinks"
+        );
+        assert_eq!(
+            InProcessAssemblyError::DuplicateAssembly.as_str(),
+            "duplicate_assembly"
+        );
+        assert_eq!(
+            InProcessAssemblyError::InvalidOwner.as_str(),
+            "invalid_owner"
+        );
+    }
 
     #[derive(Debug)]
     struct TestClock(Mutex<DateTime<Utc>>);

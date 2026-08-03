@@ -106,6 +106,23 @@ pub enum OnError {
     Continue,
 }
 
+impl OnError {
+    /// Stable lowercase token matching the serde rename for this policy.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Abort => "abort",
+            Self::Continue => "continue",
+        }
+    }
+}
+
+impl std::fmt::Display for OnError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowRunStatus {
@@ -117,8 +134,25 @@ pub enum WorkflowRunStatus {
 }
 
 impl WorkflowRunStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::CompletedWithFailures => "completed_with_failures",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
     pub fn is_success(self) -> bool {
         self == WorkflowRunStatus::Completed
+    }
+}
+
+impl std::fmt::Display for WorkflowRunStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -210,5 +244,23 @@ prompt_file = "prompt.txt"
             second.steps[0].prompt_template.as_deref(),
             Some("second prompt")
         );
+    }
+
+    #[test]
+    fn workflow_run_status_tokens_match_serde_snake_case() {
+        assert_eq!(WorkflowRunStatus::Running.as_str(), "running");
+        assert_eq!(
+            WorkflowRunStatus::CompletedWithFailures.to_string(),
+            "completed_with_failures"
+        );
+        assert_eq!(WorkflowRunStatus::Failed.as_str(), "failed");
+    }
+
+    #[test]
+    fn on_error_tokens_match_serde_lowercase() {
+        assert_eq!(OnError::Abort.as_str(), "abort");
+        assert_eq!(OnError::Continue.as_str(), "continue");
+        assert_eq!(OnError::Abort.to_string(), "abort");
+        assert_eq!(OnError::Continue.to_string(), "continue");
     }
 }

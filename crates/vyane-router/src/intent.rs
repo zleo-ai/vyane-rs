@@ -22,6 +22,8 @@ pub enum IntentCategory {
 }
 
 impl IntentCategory {
+    /// Stable snake_case token matching the serde rename for this category.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             IntentCategory::CodeGen => "code_gen",
@@ -33,6 +35,12 @@ impl IntentCategory {
             IntentCategory::Refactor => "refactor",
             IntentCategory::Test => "test",
         }
+    }
+}
+
+impl std::fmt::Display for IntentCategory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -214,5 +222,12 @@ mod tests {
         assert_eq!(result.primary, IntentCategory::Review);
         assert_eq!(result.confidence, 0.5);
         assert_eq!(result.secondary, None);
+    }
+
+    #[test]
+    fn intent_category_display_match_as_str() {
+        assert_eq!(IntentCategory::CodeGen.to_string(), "code_gen");
+        assert_eq!(IntentCategory::Review.as_str(), "review");
+        assert_eq!(IntentCategory::Refactor.to_string(), "refactor");
     }
 }

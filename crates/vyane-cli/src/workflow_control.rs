@@ -113,6 +113,20 @@ pub(crate) enum ControllerCleanupStatus {
 }
 
 impl ControllerCleanupStatus {
+    /// Stable snake_case kind token; free-form reason/message stay out.
+    #[must_use]
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::AlreadyGone => "already_gone",
+            Self::Terminated => "terminated",
+            Self::Killed => "killed",
+            Self::RefusedDeadSentinelLiveGroup => "refused_dead_sentinel_live_group",
+            Self::RefusedIdentityMismatch { .. } => "refused_identity_mismatch",
+            Self::StillAliveAfterKill => "still_alive_after_kill",
+            Self::StorageError { .. } => "storage_error",
+        }
+    }
+
     #[must_use]
     pub(crate) fn resolved(&self) -> bool {
         matches!(self, Self::AlreadyGone | Self::Terminated | Self::Killed)
@@ -141,6 +155,24 @@ impl ControllerCleanupReport {
     #[must_use]
     pub(crate) fn all_resolved(&self) -> bool {
         self.controllers.iter().all(|entry| entry.status.resolved())
+    }
+
+    /// Count of controllers that did not reach a resolved cleanup status.
+    #[must_use]
+    pub(crate) fn unresolved_count(&self) -> usize {
+        self.controllers
+            .iter()
+            .filter(|entry| !entry.status.resolved())
+            .count()
+    }
+
+    /// Kind token for the first unresolved controller status, if any.
+    #[must_use]
+    pub(crate) fn first_unresolved_status(&self) -> Option<&'static str> {
+        self.controllers
+            .iter()
+            .find(|entry| !entry.status.resolved())
+            .map(|entry| entry.status.as_str())
     }
 }
 
@@ -916,6 +948,58 @@ mod tests {
         assert!(elapsed >= Duration::from_millis(400));
         assert!(elapsed < Duration::from_secs(2));
         fs4::fs_std::FileExt::unlock(&lock).unwrap();
+    }
+
+    #[test]
+    fn controller_cleanup_status_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            ControllerCleanupStatus::AlreadyGone.as_str(),
+            "already_gone"
+        );
+        assert_eq!(
+            ControllerCleanupStatus::RefusedDeadSentinelLiveGroup.as_str(),
+            "refused_dead_sentinel_live_group"
+        );
+        assert_eq!(
+            ControllerCleanupStatus::RefusedIdentityMismatch {
+                reason: "secret-should-not-appear".into(),
+            }
+            .as_str(),
+            "refused_identity_mismatch"
+        );
+        assert_eq!(
+            ControllerCleanupStatus::StillAliveAfterKill.as_str(),
+            "still_alive_after_kill"
+        );
+        assert_eq!(
+            ControllerCleanupStatus::StorageError {
+                message: "secret-should-not-appear".into(),
+            }
+            .as_str(),
+            "storage_error"
+        );
+        let report = ControllerCleanupReport {
+            controllers: vec![
+                ControllerCleanupEntry {
+                    sidecar: "a".into(),
+                    pid: None,
+                    pgid: None,
+                    status: ControllerCleanupStatus::Terminated,
+                },
+                ControllerCleanupEntry {
+                    sidecar: "b".into(),
+                    pid: None,
+                    pgid: None,
+                    status: ControllerCleanupStatus::StillAliveAfterKill,
+                },
+            ],
+        };
+        assert!(!report.all_resolved());
+        assert_eq!(report.unresolved_count(), 1);
+        assert_eq!(
+            report.first_unresolved_status(),
+            Some("still_alive_after_kill")
+        );
     }
 
     #[cfg(unix)]

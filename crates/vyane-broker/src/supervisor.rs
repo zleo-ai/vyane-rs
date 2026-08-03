@@ -331,6 +331,12 @@ async fn run_delivery_loop(
                     .filter(|item| is_degraded(&item.status))
                     .count();
                 stats.degraded_items = add_usize(stats.degraded_items, degraded);
+                // Kind-only; never log delivery ids or free-form payloads (WP-325).
+                for item in &report.items {
+                    if is_degraded(&item.status) {
+                        tracing::warn!(status = item.status.as_str(), "broker pump item degraded");
+                    }
+                }
                 if degraded == 0 {
                     backoff.reset();
                     if report.claimed == 0 {

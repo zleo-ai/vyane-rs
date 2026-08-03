@@ -93,3 +93,47 @@ pub enum QuotaTransportError {
     #[error("quota HTTP request failed")]
     RequestFailed,
 }
+
+impl QuotaTransportError {
+    /// Stable snake_case *kind* token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientUnavailable => "client_unavailable",
+            Self::InvalidUrl => "invalid_url",
+            Self::InvalidPolicy => "invalid_policy",
+            Self::Timeout => "timeout",
+            Self::RedirectRejected => "redirect_rejected",
+            Self::BodyTooLarge => "body_too_large",
+            Self::RequestFailed => "request_failed",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QuotaTransportError;
+
+    #[test]
+    fn quota_transport_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            QuotaTransportError::ClientUnavailable.as_str(),
+            "client_unavailable"
+        );
+        assert_eq!(QuotaTransportError::InvalidUrl.as_str(), "invalid_url");
+        assert_eq!(
+            QuotaTransportError::InvalidPolicy.as_str(),
+            "invalid_policy"
+        );
+        assert_eq!(QuotaTransportError::Timeout.as_str(), "timeout");
+        assert_eq!(
+            QuotaTransportError::RedirectRejected.as_str(),
+            "redirect_rejected"
+        );
+        assert_eq!(QuotaTransportError::BodyTooLarge.as_str(), "body_too_large");
+        assert_eq!(
+            QuotaTransportError::RequestFailed.as_str(),
+            "request_failed"
+        );
+    }
+}

@@ -60,6 +60,27 @@ pub enum TaskStoreError {
     Io(#[from] std::io::Error),
 }
 
+impl TaskStoreError {
+    /// Stable snake_case *kind* token; task ids/owners/payloads stay out.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AlreadyExists { .. } => "already_exists",
+            Self::NotFound { .. } => "not_found",
+            Self::Conflict { .. } => "conflict",
+            Self::InvalidState { .. } => "invalid_state",
+            Self::InvalidInput(_) => "invalid_input",
+            Self::LeaseNotExpired { .. } => "lease_not_expired",
+            Self::LeaseAlreadyExpired { .. } => "lease_already_expired",
+            Self::LeaseOwnerMismatch { .. } => "lease_owner_mismatch",
+            Self::UnsupportedSchema { .. } => "unsupported_schema",
+            Self::CorruptData(_) => "corrupt_data",
+            Self::Sqlite(_) => "sqlite",
+            Self::Io(_) => "io",
+        }
+    }
+}
+
 impl From<rusqlite::Error> for TaskStoreError {
     fn from(error: rusqlite::Error) -> Self {
         match error {
@@ -82,5 +103,97 @@ impl From<rusqlite::Error> for TaskStoreError {
             ),
             other => Self::Sqlite(other),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskStoreError;
+    use crate::TaskState;
+
+    #[test]
+    fn task_store_error_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            TaskStoreError::AlreadyExists {
+                id: "secret-task".into()
+            }
+            .as_str(),
+            "already_exists"
+        );
+        assert_eq!(
+            TaskStoreError::NotFound {
+                id: "secret-task".into()
+            }
+            .as_str(),
+            "not_found"
+        );
+        assert_eq!(
+            TaskStoreError::Conflict {
+                id: "secret-task".into(),
+                expected_revision: 1,
+                actual_revision: 2,
+                expected_executor_epoch: 3,
+                actual_executor_epoch: 4,
+            }
+            .as_str(),
+            "conflict"
+        );
+        assert_eq!(
+            TaskStoreError::InvalidState {
+                id: "secret-task".into(),
+                operation: "cancel",
+                state: TaskState::Succeeded,
+            }
+            .as_str(),
+            "invalid_state"
+        );
+        assert_eq!(
+            TaskStoreError::InvalidInput("secret-meta".into()).as_str(),
+            "invalid_input"
+        );
+        assert_eq!(
+            TaskStoreError::LeaseNotExpired {
+                id: "secret-task".into()
+            }
+            .as_str(),
+            "lease_not_expired"
+        );
+        assert_eq!(
+            TaskStoreError::LeaseAlreadyExpired {
+                id: "secret-task".into()
+            }
+            .as_str(),
+            "lease_already_expired"
+        );
+        assert_eq!(
+            TaskStoreError::LeaseOwnerMismatch {
+                id: "secret-task".into(),
+                expected: "worker-a".into(),
+                actual: "worker-b".into(),
+            }
+            .as_str(),
+            "lease_owner_mismatch"
+        );
+        assert_eq!(
+            TaskStoreError::UnsupportedSchema {
+                found: 9,
+                supported: 3
+            }
+            .as_str(),
+            "unsupported_schema"
+        );
+        assert_eq!(
+            TaskStoreError::CorruptData("secret-blob".into()).as_str(),
+            "corrupt_data"
+        );
+        assert!(
+            !TaskStoreError::CorruptData("secret-blob".into())
+                .as_str()
+                .contains("secret")
+        );
+        assert_eq!(
+            TaskStoreError::Io(std::io::Error::other("secret-io")).as_str(),
+            "io"
+        );
     }
 }

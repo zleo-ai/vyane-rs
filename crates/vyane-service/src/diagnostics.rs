@@ -51,6 +51,18 @@ pub enum DiagnosticErrorKind {
     BudgetExceeded,
 }
 
+impl DiagnosticErrorKind {
+    /// Stable snake_case kind token for diagnostics mapping.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidInput => "invalid_input",
+            Self::ConfigInvalid => "config_invalid",
+            Self::BudgetExceeded => "budget_exceeded",
+        }
+    }
+}
+
 /// Typed static error used by both diagnostics operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiagnosticError {
@@ -127,6 +139,23 @@ pub enum RouteSelectionBasis {
     Default,
 }
 
+impl RouteSelectionBasis {
+    /// Stable snake_case token matching the serde rename for this basis.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Preference => "preference",
+            Self::Default => "default",
+        }
+    }
+}
+
+impl std::fmt::Display for RouteSelectionBasis {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Redacted route result. The source task, matched raw tag, and free-form
 /// router reason are deliberately absent.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -150,6 +179,23 @@ pub enum ConfigCheckStatus {
     Partial,
 }
 
+impl ConfigCheckStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+impl std::fmt::Display for ConfigCheckStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Credential readiness without the environment-variable name or value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -157,6 +203,24 @@ pub enum CredentialStatus {
     NotRequired,
     Present,
     Missing,
+}
+
+impl CredentialStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::Present => "present",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+impl std::fmt::Display for CredentialStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Static resolution status for one configured profile. These names avoid an
@@ -168,6 +232,23 @@ pub enum ProfileCheckStatus {
     Unresolvable,
 }
 
+impl ProfileCheckStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolvable => "resolvable",
+            Self::Unresolvable => "unresolvable",
+        }
+    }
+}
+
+impl std::fmt::Display for ProfileCheckStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Closed issue taxonomy for configuration diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -177,6 +258,26 @@ pub enum ConfigIssueCode {
     CredentialMissing,
     ProfileUnresolvable,
     TargetUnsupported,
+}
+
+impl ConfigIssueCode {
+    /// Stable snake_case token matching the serde rename for this issue code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoProviders => "no_providers",
+            Self::NoProfiles => "no_profiles",
+            Self::CredentialMissing => "credential_missing",
+            Self::ProfileUnresolvable => "profile_unresolvable",
+            Self::TargetUnsupported => "target_unsupported",
+        }
+    }
+}
+
+impl std::fmt::Display for ConfigIssueCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// One issue whose message is selected from compile-time constants.
@@ -217,6 +318,24 @@ pub enum NativePermissionAxisStatus {
     UnrestrictedByConfig,
     Bounded,
     Disabled,
+}
+
+impl NativePermissionAxisStatus {
+    /// Stable snake_case token matching the serde rename for this axis status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnrestrictedByConfig => "unrestricted_by_config",
+            Self::Bounded => "bounded",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl std::fmt::Display for NativePermissionAxisStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Redacted summary of the effective CLI-harness sandbox ceiling.
@@ -1346,5 +1465,49 @@ mod tests {
             diagnostic_error(&error).kind,
             DiagnosticErrorKind::BudgetExceeded
         );
+    }
+
+    #[test]
+    fn native_permission_axis_status_tokens_match_serde_snake_case() {
+        assert_eq!(
+            NativePermissionAxisStatus::UnrestrictedByConfig.as_str(),
+            "unrestricted_by_config"
+        );
+        assert_eq!(NativePermissionAxisStatus::Bounded.to_string(), "bounded");
+        assert_eq!(NativePermissionAxisStatus::Disabled.as_str(), "disabled");
+    }
+
+    #[test]
+    fn config_diagnostic_enum_tokens_match_serde_snake_case() {
+        assert_eq!(ConfigCheckStatus::Partial.to_string(), "partial");
+        assert_eq!(CredentialStatus::NotRequired.as_str(), "not_required");
+        assert_eq!(ProfileCheckStatus::Unresolvable.to_string(), "unresolvable");
+        assert_eq!(
+            ConfigIssueCode::CredentialMissing.as_str(),
+            "credential_missing"
+        );
+        assert_eq!(
+            ConfigIssueCode::ProfileUnresolvable.to_string(),
+            "profile_unresolvable"
+        );
+    }
+
+    #[test]
+    fn diagnostic_error_kind_tokens_are_snake_case() {
+        assert_eq!(DiagnosticErrorKind::InvalidInput.as_str(), "invalid_input");
+        assert_eq!(
+            DiagnosticErrorKind::ConfigInvalid.as_str(),
+            "config_invalid"
+        );
+        assert_eq!(
+            DiagnosticErrorKind::BudgetExceeded.as_str(),
+            "budget_exceeded"
+        );
+    }
+
+    #[test]
+    fn route_selection_basis_tokens_match_serde_snake_case() {
+        assert_eq!(RouteSelectionBasis::Preference.as_str(), "preference");
+        assert_eq!(RouteSelectionBasis::Default.to_string(), "default");
     }
 }

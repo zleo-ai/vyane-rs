@@ -14,6 +14,8 @@ pub enum RouteTier {
 }
 
 impl RouteTier {
+    /// Stable lowercase token matching the serde rename for this tier.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             RouteTier::Economy => "economy",
@@ -34,6 +36,12 @@ impl RouteTier {
     }
 }
 
+impl std::fmt::Display for RouteTier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Generic effort hint. Adapters translate this to harness-specific knobs (e.g.
 /// Codex `reasoning_effort`, Claude thinking budget).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -46,6 +54,8 @@ pub enum RouteEffort {
 }
 
 impl RouteEffort {
+    /// Stable lowercase token matching the serde rename for this effort.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             RouteEffort::Low => "low",
@@ -53,6 +63,12 @@ impl RouteEffort {
             RouteEffort::High => "high",
             RouteEffort::Xhigh => "xhigh",
         }
+    }
+}
+
+impl std::fmt::Display for RouteEffort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -110,5 +126,13 @@ mod tests {
         )
         .unwrap();
         assert!(decision.selection_key.is_empty());
+    }
+
+    #[test]
+    fn route_tier_and_effort_display_match_as_str() {
+        assert_eq!(RouteTier::Economy.to_string(), "economy");
+        assert_eq!(RouteTier::Frontier.as_str(), "frontier");
+        assert_eq!(RouteEffort::Medium.to_string(), "medium");
+        assert_eq!(RouteEffort::Xhigh.as_str(), "xhigh");
     }
 }

@@ -19,7 +19,7 @@ use vyane_core::{
 
 use super::{
     ApprovalPlan, MAX_TOOL_OUTPUT_CHARS, PermissionEffect, PermissionPolicy, ToolCall, ToolContext,
-    ToolInvocationStatus, ToolRegistry,
+    ToolInvocationStatus, ToolRegistry, invalid_json_tool_arguments_output,
 };
 
 /// Default number of logical model turns in one native run.
@@ -28,7 +28,6 @@ pub const DEFAULT_NATIVE_MODEL_TURNS: u32 = 8;
 /// Absolute logical-turn ceiling for the first bounded native driver.
 pub const MAX_NATIVE_MODEL_TURNS: u32 = 32;
 
-const INVALID_JSON_TOOL_RESULT: &str = "ERROR: tool arguments were not valid JSON";
 const SAFE_RESULT_HEADROOM_CHARS: usize = 512;
 
 /// Validated native-loop limits.
@@ -68,6 +67,17 @@ pub enum NativeTurnLimitError {
     Zero,
     #[error("native model turn limit exceeds the hard maximum")]
     AboveHardMaximum,
+}
+
+impl NativeTurnLimitError {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Zero => "zero",
+            Self::AboveHardMaximum => "above_hard_maximum",
+        }
+    }
 }
 
 /// Final assistant material retained by a completed or refused run.
@@ -126,6 +136,23 @@ pub enum NativeTurnStop {
 }
 
 impl NativeTurnStop {
+    /// Stable snake_case *kind* token; payloads (reply text, approval plan) are
+    /// never included.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed(_) => "completed",
+            Self::Refused(_) => "refused",
+            Self::ApprovalRequired(_) => "approval_required",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::UnsupportedParallelCalls => "unsupported_parallel_calls",
+            Self::ToolChoiceViolation => "tool_choice_violation",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::AbortedAfterToolActivity { .. } => "aborted_after_tool_activity",
+        }
+    }
+
     pub fn assistant_reply(&self) -> Option<&NativeAssistantReply> {
         match self {
             Self::Completed(reply) | Self::Refused(reply) => Some(reply),
@@ -138,6 +165,12 @@ impl NativeTurnStop {
             Self::ApprovalRequired(plan) => Some(plan),
             _ => None,
         }
+    }
+}
+
+impl fmt::Display for NativeTurnStop {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -235,7 +268,14 @@ impl NativeTurnDriver {
         context: &ToolContext,
         authority: &dyn NativeExecutionAuthority,
     ) -> vyane_core::Result<NativeTurnOutcome> {
-        request.validate().map_err(|_| invalid_initial_request())?;
+        request.validate().map_err(|error| {
+            // Kind-only; never log free-form call ids/fields (WP-293/WP-295).
+            tracing::warn!(
+                error = error.as_str(),
+                "native turn initial request validation failed"
+            );
+            invalid_initial_request()
+        })?;
         if !advertised_tool_names_match_registry(&request, &self.registry) {
             return Err(VyaneError::new(
                 ErrorKind::Config,
@@ -248,7 +288,11 @@ impl NativeTurnDriver {
             if context.cancellation_token().is_cancelled() {
                 return Ok(state.finish(NativeTurnStop::Cancelled));
             }
-            if request.validate().is_err() {
+            if let Err(error) = request.validate() {
+                tracing::warn!(
+                    error = error.as_str(),
+                    "native turn request validation failed"
+                );
                 return state.invalid_request_boundary();
             }
 
@@ -269,7 +313,11 @@ impl NativeTurnDriver {
             if context.cancellation_token().is_cancelled() {
                 return Ok(state.finish(NativeTurnStop::Cancelled));
             }
-            if response.validate().is_err() {
+            if let Err(error) = response.validate() {
+                tracing::warn!(
+                    error = error.as_str(),
+                    "native turn model response validation failed"
+                );
                 return state.invalid_model_response();
             }
             add_usage_saturating(&mut state.usage, response.usage.as_ref());
@@ -293,18 +341,27 @@ impl NativeTurnDriver {
             // represented in the next request. This catches duplicate call
             // ids and conversation/envelope exhaustion before side effects.
             let placeholder = worst_case_tool_result(&model_call.id);
-            if next_request_with_result(&request, &assistant, placeholder)
-                .and_then(|next| next.validate().map(|()| next).map_err(|_| ()))
-                .is_err()
-            {
-                return state.invalid_model_response();
+            match next_request_with_result(&request, &assistant, placeholder) {
+                Ok(next) => {
+                    if let Err(error) = next.validate() {
+                        // Kind-only preflight before tool side effects (WP-295/WP-296).
+                        tracing::warn!(
+                            error = error.as_str(),
+                            "native turn preflight next-request validation failed"
+                        );
+                        return state.invalid_model_response();
+                    }
+                }
+                Err(()) => {
+                    return state.invalid_model_response();
+                }
             }
 
             let (result, stop) = match model_call.arguments.clone() {
                 ToolCallArguments::InvalidJson { .. } => (
                     ToolResultMessage {
                         tool_call_id: model_call.id.clone(),
-                        content: INVALID_JSON_TOOL_RESULT.to_string(),
+                        content: invalid_json_tool_arguments_output().to_string(),
                         is_error: true,
                     },
                     None,
@@ -354,7 +411,7 @@ impl NativeTurnDriver {
                     let result = ToolResultMessage {
                         tool_call_id: invocation.call.id,
                         content: invocation.output,
-                        is_error: invocation.status != ToolInvocationStatus::Executed,
+                        is_error: !invocation.status.is_executed(),
                     };
                     (result, stop)
                 }
@@ -543,5 +600,64 @@ fn add_usage_saturating(total: &mut Option<Usage>, next: Option<&Usage>) {
                 .unwrap_or_default()
                 .saturating_add(cached),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use serde_json::Value;
+
+    #[test]
+    fn native_turn_limit_error_kind_tokens_are_snake_case() {
+        assert_eq!(NativeTurnLimitError::Zero.as_str(), "zero");
+        assert_eq!(
+            NativeTurnLimitError::AboveHardMaximum.as_str(),
+            "above_hard_maximum"
+        );
+    }
+
+    #[test]
+    fn native_turn_stop_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(NativeTurnStop::BudgetExhausted.as_str(), "budget_exhausted");
+        assert_eq!(
+            NativeTurnStop::UnsupportedParallelCalls.to_string(),
+            "unsupported_parallel_calls"
+        );
+        assert_eq!(
+            NativeTurnStop::ToolChoiceViolation.as_str(),
+            "tool_choice_violation"
+        );
+        assert_eq!(NativeTurnStop::Cancelled.to_string(), "cancelled");
+        assert_eq!(NativeTurnStop::TimedOut.as_str(), "timed_out");
+        assert_eq!(
+            NativeTurnStop::AbortedAfterToolActivity {
+                kind: ErrorKind::Protocol,
+            }
+            .to_string(),
+            "aborted_after_tool_activity"
+        );
+
+        let plan = ApprovalPlan {
+            schema: 1,
+            tool: "run_bash".into(),
+            arguments: BTreeMap::from([(
+                "command".into(),
+                Value::String("echo secret-should-not-appear".into()),
+            )]),
+            cwd: "/tmp".into(),
+            tool_call_id: "call".into(),
+            matched_rule: None,
+            canonical_plan_hash: "aa".into(),
+            approval_binding_hash: "bb".into(),
+        };
+        let stop = NativeTurnStop::ApprovalRequired(plan);
+        assert_eq!(stop.as_str(), "approval_required");
+        assert_eq!(stop.to_string(), "approval_required");
+        let debug = format!("{stop:?}");
+        assert!(debug.contains("redacted"));
+        assert!(!debug.contains("secret-should-not-appear"));
     }
 }

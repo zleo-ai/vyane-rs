@@ -62,6 +62,16 @@ pub(crate) enum WorkflowSubmitError {
 }
 
 impl WorkflowSubmitError {
+    /// Stable snake_case *kind* token; run ids and free-form reasons stay out.
+    #[must_use]
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotSubmitted { .. } => "not_submitted",
+            Self::Rejected { .. } => "rejected",
+            Self::OutcomeUnknown { .. } => "outcome_unknown",
+        }
+    }
+
     pub(crate) fn exit_code(&self) -> u8 {
         match self {
             Self::Rejected { .. } => 2,
@@ -165,6 +175,20 @@ pub(crate) enum DaemonWorkflowControlError {
     Conflict,
     Unavailable,
     Internal,
+}
+
+impl DaemonWorkflowControlError {
+    /// Stable snake_case *kind* token matching the control surface.
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
+            Self::Unavailable => "unavailable",
+            Self::Internal => "internal",
+        }
+    }
 }
 
 impl DaemonWorkflowClient {
@@ -924,5 +948,55 @@ prompt = "{PRIVATE_PROMPT}"
             client.status_for_control(&id).await.unwrap_err(),
             DaemonWorkflowControlError::Unavailable
         );
+    }
+
+    #[test]
+    fn workflow_submit_and_control_error_kind_tokens_are_snake_case_without_payload() {
+        let run_id: WorkflowRunId = RUN_ID.parse().unwrap();
+        assert_eq!(
+            WorkflowSubmitError::NotSubmitted {
+                run_id: run_id.clone(),
+                reason: "secret-reason",
+            }
+            .as_str(),
+            "not_submitted"
+        );
+        assert_eq!(
+            WorkflowSubmitError::Rejected {
+                run_id: run_id.clone(),
+                status: 409,
+                code: "conflict",
+            }
+            .as_str(),
+            "rejected"
+        );
+        assert_eq!(
+            WorkflowSubmitError::OutcomeUnknown {
+                run_id,
+                status: Some(500),
+                reason: "secret-reason",
+            }
+            .as_str(),
+            "outcome_unknown"
+        );
+        assert!(
+            !WorkflowSubmitError::NotSubmitted {
+                run_id: RUN_ID.parse().unwrap(),
+                reason: "secret-reason",
+            }
+            .as_str()
+            .contains("secret")
+        );
+        assert_eq!(
+            DaemonWorkflowControlError::InvalidRequest.as_str(),
+            "invalid_request"
+        );
+        assert_eq!(DaemonWorkflowControlError::NotFound.as_str(), "not_found");
+        assert_eq!(DaemonWorkflowControlError::Conflict.as_str(), "conflict");
+        assert_eq!(
+            DaemonWorkflowControlError::Unavailable.as_str(),
+            "unavailable"
+        );
+        assert_eq!(DaemonWorkflowControlError::Internal.as_str(), "internal");
     }
 }

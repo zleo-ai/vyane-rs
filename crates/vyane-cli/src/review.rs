@@ -134,6 +134,15 @@ pub fn build_review_workflow(args: &ReviewArgs) -> Workflow {
         },
     ];
 
+    // Kind-only pure OnError policy for each frozen review step (WP-405).
+    for step in &steps {
+        tracing::info!(
+            policy = step.on_error.as_str(),
+            "{}",
+            crate::output::format_on_error_policy_line(step.on_error)
+        );
+    }
+
     Workflow {
         name: "review-pipeline".into(),
         description: Some("Multi-model review: implement → fan-out review → synthesize".into()),

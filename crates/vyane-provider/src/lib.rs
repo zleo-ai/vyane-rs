@@ -9,6 +9,7 @@
 //! `docs/plan/WP-01.md` for the work-package plan.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use vyane_core::{
@@ -30,6 +31,24 @@ pub enum EnvInjectSource {
     ApiKey,
     /// The resolved model id.
     Model,
+}
+
+impl EnvInjectSource {
+    /// Stable snake_case token matching the serde rename for this inject source.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BaseUrl => "base_url",
+            Self::ApiKey => "api_key",
+            Self::Model => "model",
+        }
+    }
+}
+
+impl fmt::Display for EnvInjectSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// One entry in a provider's `[providers.<id>].env_inject` table: an
@@ -527,5 +546,12 @@ mod tests {
         let serialized = toml::to_string(&provider).unwrap();
         let back: Provider = toml::from_str(&serialized).unwrap();
         assert_eq!(provider, back);
+    }
+
+    #[test]
+    fn env_inject_source_tokens_match_serde_snake_case() {
+        assert_eq!(EnvInjectSource::BaseUrl.as_str(), "base_url");
+        assert_eq!(EnvInjectSource::ApiKey.to_string(), "api_key");
+        assert_eq!(EnvInjectSource::Model.as_str(), "model");
     }
 }

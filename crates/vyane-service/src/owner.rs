@@ -85,11 +85,21 @@ impl OwnerContextFactory {
         &self,
         credential: &[u8],
     ) -> std::result::Result<OwnerContext, OwnerContextError> {
-        let subject = self
-            .authenticator
-            .authenticate(credential)
-            .map_err(|_| OwnerContextError::AuthenticationFailed)?;
-        let principal = AuthenticatedPrincipal::new(subject)?;
+        let subject = self.authenticator.authenticate(credential).map_err(|_| {
+            // Kind-only diagnostic; never log the credential (WP-286/WP-287).
+            let error = OwnerContextError::AuthenticationFailed;
+            tracing::warn!(
+                error = error.as_str(),
+                "owner context authentication failed"
+            );
+            error
+        })?;
+        let principal = AuthenticatedPrincipal::new(subject).inspect_err(|error| {
+            tracing::warn!(
+                error = error.as_str(),
+                "owner context principal mint failed"
+            );
+        })?;
         OwnerContext::from_authenticated(&principal, self.resolver.as_ref())
     }
 }
@@ -116,12 +126,27 @@ impl OwnerContext {
         principal: &AuthenticatedPrincipal,
         resolver: &dyn PrincipalOwnerResolver,
     ) -> std::result::Result<Self, OwnerContextError> {
-        let owner = resolver
-            .resolve_owner(principal)
-            .map_err(|_| OwnerContextError::ResolutionFailed)?;
-        validate_identity(&owner).map_err(|()| OwnerContextError::InvalidOwner)?;
+        let owner = resolver.resolve_owner(principal).map_err(|_| {
+            let error = OwnerContextError::ResolutionFailed;
+            // Kind only — never log principal subject or resolved owner values.
+            tracing::warn!(error = error.as_str(), "owner context resolution failed");
+            error
+        })?;
+        validate_identity(&owner).map_err(|()| {
+            let error = OwnerContextError::InvalidOwner;
+            tracing::warn!(
+                error = error.as_str(),
+                "owner context resolved owner invalid"
+            );
+            error
+        })?;
         if owner == LOCAL_OWNER {
-            return Err(OwnerContextError::ReservedOwner);
+            let error = OwnerContextError::ReservedOwner;
+            tracing::warn!(
+                error = error.as_str(),
+                "owner context resolved owner reserved"
+            );
+            return Err(error);
         }
         Ok(Self {
             owner: Arc::from(owner),
@@ -160,6 +185,20 @@ pub enum OwnerContextError {
     ReservedOwner,
 }
 
+impl OwnerContextError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthenticationFailed => "authentication_failed",
+            Self::InvalidPrincipal => "invalid_principal",
+            Self::ResolutionFailed => "resolution_failed",
+            Self::InvalidOwner => "invalid_owner",
+            Self::ReservedOwner => "reserved_owner",
+        }
+    }
+}
+
 impl fmt::Display for OwnerContextError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
@@ -194,6 +233,24 @@ mod tests {
     assert_not_impl_any!(AuthenticatedPrincipal: serde::Serialize, serde::de::DeserializeOwned);
     assert_not_impl_any!(OwnerContext: serde::Serialize, serde::de::DeserializeOwned);
     assert_not_impl_any!(OwnerContextError: serde::Serialize, serde::de::DeserializeOwned);
+
+    #[test]
+    fn owner_context_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            OwnerContextError::AuthenticationFailed.as_str(),
+            "authentication_failed"
+        );
+        assert_eq!(
+            OwnerContextError::InvalidPrincipal.as_str(),
+            "invalid_principal"
+        );
+        assert_eq!(
+            OwnerContextError::ResolutionFailed.as_str(),
+            "resolution_failed"
+        );
+        assert_eq!(OwnerContextError::InvalidOwner.as_str(), "invalid_owner");
+        assert_eq!(OwnerContextError::ReservedOwner.as_str(), "reserved_owner");
+    }
 
     struct Authenticator;
 
