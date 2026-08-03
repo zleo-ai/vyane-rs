@@ -1105,6 +1105,9 @@ continuity-next success when a command is projected.
 [WP-450](plan/WP-450.md) adds pure allowlisted next-reason-code lines on REST
 continuity-next success for the projected reason taxonomy.
 
+[WP-451](plan/WP-451.md) reuses pure continuity signal-kind lines on CLI
+continuity-next for each durable ready signal on the continuity state.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
