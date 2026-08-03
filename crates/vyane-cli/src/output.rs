@@ -989,6 +989,8 @@ pub fn format_task_kind_line(kind: vyane_task::TaskKind) -> String {
 /// Pure human line for closed [`vyane_agent::ExecutionBackend`] kinds.
 ///
 /// Live on daemon AgentRun submit freeze (process + native) (WP-422).
+/// Wire is Linux-only (`daemon_agent` cfg); allow on other OS for clippy.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_execution_backend_line(backend: vyane_agent::ExecutionBackend) -> String {
     format!("execution backend: {}", terminal_safe(backend.as_str()))
 }
@@ -996,6 +998,8 @@ pub fn format_execution_backend_line(backend: vyane_agent::ExecutionBackend) -> 
 /// Pure human line for closed [`vyane_agent::RunMode`] kinds.
 ///
 /// Live on daemon AgentRun submit freeze (process + native) (WP-423).
+/// Wire is Linux-only (`daemon_agent` cfg); allow on other OS for clippy.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_run_mode_line(mode: vyane_agent::RunMode) -> String {
     format!("run mode: {}", terminal_safe(mode.as_str()))
 }
@@ -1003,6 +1007,8 @@ pub fn format_run_mode_line(mode: vyane_agent::RunMode) -> String {
 /// Pure human line for closed [`vyane_agent::ControllerKind`] kinds.
 ///
 /// Live on daemon AgentRun cancel dispatch (WP-424).
+/// Wire is Linux-only (`daemon_agent` cfg); allow on other OS for clippy.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_controller_kind_line(kind: vyane_agent::ControllerKind) -> String {
     format!("controller kind: {}", terminal_safe(kind.as_str()))
 }
