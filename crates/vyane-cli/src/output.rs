@@ -1586,8 +1586,8 @@ pub fn format_takeover_decision_line(decision: vyane_goal::TakeoverDecision) -> 
 
 /// Pure human line for closed [`vyane_goal::TakeoverRunStatus`] kinds.
 ///
-/// Live wire is on goal continuity execute finish; CLI pure surface for tests
-/// and operator diagnostics (WP-358/395).
+/// Live on goal continuity execute finish (WP-358/395) and continuity-queue
+/// upstream predecessor evidence (WP-453).
 pub fn format_takeover_run_status_line(status: vyane_goal::TakeoverRunStatus) -> String {
     format!("takeover run: {}", terminal_safe(status.as_str()))
 }

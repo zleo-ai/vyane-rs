@@ -455,6 +455,14 @@ fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
         "{}",
         crate::output::format_goal_continuity_step_status_line(step.status)
     );
+    // Kind-only pure upstream run status when predecessor evidence is present (WP-453).
+    if let Some(run_status) = upstream_run_status {
+        tracing::info!(
+            status = run_status.as_str(),
+            "{}",
+            crate::output::format_takeover_run_status_line(run_status)
+        );
+    }
     let approval = store
         .queue_takeover_approval(&args.common.owner, &request, Utc::now())
         .context("queue takeover approval")?;
