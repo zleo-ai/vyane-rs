@@ -2127,6 +2127,23 @@ pub struct TaskRow {
 
 impl TaskRow {
     pub fn from_record(record: &TaskRecord) -> Self {
+        // Kind-only pure task kinds on durable list projection (WP-444).
+        tracing::info!(
+            state = record.state.as_str(),
+            origin = record.origin.as_str(),
+            kind = record.kind.as_str(),
+            "{}; {}; {}",
+            format_task_state_line(record.state),
+            format_task_origin_line(record.origin),
+            format_task_kind_line(record.kind)
+        );
+        if let Some(code) = record.failure_code {
+            tracing::info!(
+                failure_code = code.as_str(),
+                "{}",
+                format_task_failure_code_line(code)
+            );
+        }
         let duration_ms = record
             .started_at
             .zip(record.finished_at)

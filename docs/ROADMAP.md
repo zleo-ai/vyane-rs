@@ -1084,6 +1084,9 @@ for the harness max sandbox.
 [WP-443](plan/WP-443.md) reuses pure protocol lines on legacy session list
 print.
 
+[WP-444](plan/WP-444.md) reuses pure task state/origin/kind/failure lines when
+projecting durable records into task-list rows.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
