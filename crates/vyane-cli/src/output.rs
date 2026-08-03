@@ -197,6 +197,12 @@ pub fn format_permission_check(permissions: &PermissionCheck) -> String {
 }
 
 pub fn print_permission_check(permissions: &PermissionCheck) {
+    // Kind-only pure harness max sandbox on permissions print (WP-442).
+    tracing::info!(
+        sandbox = permissions.harness.max_sandbox.as_str(),
+        "{}",
+        format_sandbox_line(permissions.harness.max_sandbox)
+    );
     // Kind-only pure native axis statuses alongside human permissions block (WP-402).
     for status in [
         permissions.native.filesystem_read,

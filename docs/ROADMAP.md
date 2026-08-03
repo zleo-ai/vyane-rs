@@ -1078,6 +1078,9 @@ status print.
 [WP-441](plan/WP-441.md) wires pure route-tier and route-effort lines on
 `vyane route` human print.
 
+[WP-442](plan/WP-442.md) reuses pure sandbox lines on permission-check print
+for the harness max sandbox.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
