@@ -22,8 +22,12 @@ pub const MAX_RETRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal,)+ }) => {
         impl $name {
-            pub(crate) const fn as_str(self) -> &'static str {
-                match self { $(Self::$variant => $value,)+ }
+            /// Stable snake_case token matching the serde rename for this enum.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value,)+
+                }
             }
         }
 
@@ -808,6 +812,15 @@ pub enum NackDisposition {
 }
 
 impl NackDisposition {
+    /// Stable snake_case *kind* token; delays and failure codes stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::RetryAfter { .. } => "retry_after",
+            Self::Permanent { .. } => "permanent",
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         match self {
             Self::RetryAfter { delay_seconds } => {
@@ -820,6 +833,33 @@ impl NackDisposition {
             }
             Self::Permanent { failure_code } => validate_text("failure code", failure_code, 128),
         }
+    }
+}
+
+#[cfg(test)]
+mod nack_disposition_tests {
+    use super::NackDisposition;
+
+    #[test]
+    fn nack_disposition_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            NackDisposition::RetryAfter { delay_seconds: 99 }.as_str(),
+            "retry_after"
+        );
+        assert_eq!(
+            NackDisposition::Permanent {
+                failure_code: "secret-code".into()
+            }
+            .as_str(),
+            "permanent"
+        );
+        assert!(
+            !NackDisposition::Permanent {
+                failure_code: "secret-code".into()
+            }
+            .as_str()
+            .contains("secret")
+        );
     }
 }
 
@@ -1036,4 +1076,25 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
 
 fn is_lower_hex_byte(byte: u8) -> bool {
     byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DeliveryStatus, EndpointKind, MessageDirection, MessageEventKind, MessagePublicationStatus,
+    };
+
+    #[test]
+    fn message_string_enum_tokens_are_public_snake_case() {
+        assert_eq!(MessageDirection::Ingress.as_str(), "ingress");
+        assert_eq!(MessageDirection::Internal.to_string(), "internal");
+        assert_eq!(EndpointKind::Channel.as_str(), "channel");
+        assert_eq!(EndpointKind::External.to_string(), "external");
+        assert_eq!(DeliveryStatus::DeadLettered.as_str(), "dead_lettered");
+        assert_eq!(DeliveryStatus::Acknowledged.to_string(), "acknowledged");
+        assert_eq!(MessageEventKind::LeaseRenewed.as_str(), "lease_renewed");
+        assert_eq!(MessageEventKind::DeadLettered.to_string(), "dead_lettered");
+        assert_eq!(MessagePublicationStatus::Staged.as_str(), "staged");
+        assert_eq!(MessagePublicationStatus::Published.to_string(), "published");
+    }
 }

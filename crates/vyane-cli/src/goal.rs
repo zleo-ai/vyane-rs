@@ -22,10 +22,10 @@ use vyane_service::{DispatchParams, VyaneService};
 use crate::app::StoragePaths;
 use crate::cli::{
     GoalClaimArgs, GoalClaimNextArgs, GoalCommand, GoalCommonArgs, GoalContinuityDecisionArgs,
-    GoalContinuityExecuteArgs, GoalContinuityQueueArgs, GoalContinuitySignalArg,
-    GoalContinuitySignalArgs, GoalCreateArgs, GoalDoneArgs, GoalFailArgs, GoalGetArgs, GoalIdArgs,
-    GoalListArgs, GoalNextArgs, GoalProgressArgs, GoalPursueArgs, GoalReasonArgs, GoalResumeArgs,
-    GoalSatisfyArgs, GoalStatusArg, GoalTakeoverDecisionArg, GoalVerifyArgs, SandboxArg,
+    GoalContinuityExecuteArgs, GoalContinuityQueueArgs, GoalContinuitySignalArgs, GoalCreateArgs,
+    GoalDoneArgs, GoalFailArgs, GoalGetArgs, GoalIdArgs, GoalListArgs, GoalNextArgs,
+    GoalProgressArgs, GoalPursueArgs, GoalReasonArgs, GoalResumeArgs, GoalSatisfyArgs,
+    GoalStatusArg, GoalVerifyArgs, SandboxArg,
 };
 use crate::goal_runtime::DispatchGoalRuntime;
 
@@ -183,10 +183,15 @@ pub async fn run(config_path: Option<PathBuf>, command: GoalCommand) -> Result<E
                     status: "error",
                     error: &message,
                 }) {
-                    eprintln!("goal error: {message}; could not write JSON error: {write_error:#}");
+                    eprintln!(
+                        "{}",
+                        crate::output::format_goal_error_line(&format!(
+                            "{message}; could not write JSON error: {write_error:#}"
+                        ))
+                    );
                 }
             } else {
-                eprintln!("goal error: {message}");
+                eprintln!("{}", crate::output::format_goal_error_line(&message));
             }
             Ok(ExitCode::from(2))
         }
@@ -201,6 +206,59 @@ fn continuity_next(args: GoalIdArgs) -> Result<ExitCode> {
         .ok_or_else(|| anyhow!("goal `{}` was not found", args.id))?;
     let next_action = project_continuity_next_action(&snapshot.goal, &snapshot.approvals)
         .context("project continuity next action")?;
+    // Kind-only pure continuity status/mode on next-action projection (WP-401).
+    if let Some(state) = snapshot.goal.continuity_state.as_ref() {
+        tracing::info!(
+            status = state.state.as_str(),
+            "{}",
+            crate::output::format_goal_continuity_status_line(state.state)
+        );
+        // Step-level pure status for next-ready and projected step (WP-403).
+        let plan = &state.handoff_plan;
+        if !plan.next_ready_step.is_empty()
+            && let Some(step) = plan
+                .steps
+                .iter()
+                .find(|step| step.id == plan.next_ready_step)
+        {
+            tracing::info!(
+                status = step.status.as_str(),
+                "{}",
+                crate::output::format_goal_continuity_step_status_line(step.status)
+            );
+        }
+        if let Some(step_id) = next_action.step_id.as_deref()
+            && step_id != plan.next_ready_step
+            && let Some(step) = plan.steps.iter().find(|step| step.id == step_id)
+        {
+            tracing::info!(
+                status = step.status.as_str(),
+                "{}",
+                crate::output::format_goal_continuity_step_status_line(step.status)
+            );
+        }
+    }
+    if let Some(policy) = snapshot.goal.continuity_policy.as_ref() {
+        tracing::info!(
+            mode = policy.mode.as_str(),
+            "{}",
+            crate::output::format_goal_continuity_mode_line(policy.mode)
+        );
+    }
+    // Kind-only pure projected next-action kind (WP-406).
+    tracing::info!(
+        action = next_action.action.as_str(),
+        "{}",
+        crate::output::format_goal_continuity_next_action_kind_line(next_action.action)
+    );
+    // Kind-only pure operator command when projected (WP-409).
+    if let Some(command) = next_action.command {
+        tracing::info!(
+            command = command.as_str(),
+            "{}",
+            crate::output::format_goal_continuity_operator_command_line(command)
+        );
+    }
     if args.common.json {
         print_json(&ContinuityNextOutput {
             status: "success",
@@ -208,23 +266,14 @@ fn continuity_next(args: GoalIdArgs) -> Result<ExitCode> {
             db: path_text(&db),
         })?;
     } else {
-        println!(
-            "{}\t{:?}\t{}",
-            terminal_safe(&next_action.goal_id),
-            next_action.action,
-            terminal_safe(&next_action.reason)
-        );
+        print!("{}", format_continuity_next_action(&next_action));
     }
     Ok(ExitCode::SUCCESS)
 }
 
 fn continuity_signal(args: GoalContinuitySignalArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
-    let kind = match args.signal {
-        GoalContinuitySignalArg::QuotaReset => GoalContinuitySignalKind::QuotaReset,
-        GoalContinuitySignalArg::ReviewChecksPassed => GoalContinuitySignalKind::ReviewChecksPassed,
-        GoalContinuitySignalArg::ReviewChecksFailed => GoalContinuitySignalKind::ReviewChecksFailed,
-    };
+    let kind = GoalContinuitySignalKind::from(args.signal);
     let review_check = match (
         args.repository,
         args.pull_request,
@@ -260,6 +309,12 @@ fn continuity_signal(args: GoalContinuitySignalArgs) -> Result<ExitCode> {
     let result = store
         .record_continuity_signal(&args.common.owner, &args.id, &signal, Utc::now())
         .context("record continuity signal")?;
+    // Kind-only pure signal kind on continuity-signal settle (WP-408).
+    tracing::info!(
+        kind = kind.as_str(),
+        "{}",
+        crate::output::format_goal_continuity_signal_kind_line(kind)
+    );
     if args.common.json {
         print_json(&ContinuitySignalOutput {
             status: "success",
@@ -269,14 +324,12 @@ fn continuity_signal(args: GoalContinuitySignalArgs) -> Result<ExitCode> {
         })?;
     } else {
         println!(
-            "{}\t{}\t{}",
-            args.id,
-            if result.changed {
-                "recorded"
-            } else {
-                "unchanged"
-            },
-            result.state.handoff_plan.next_ready_step
+            "{}",
+            format_continuity_signal_line(
+                &args.id,
+                result.changed,
+                &result.state.handoff_plan.next_ready_step,
+            )
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -381,16 +434,19 @@ fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
     let approval = store
         .queue_takeover_approval(&args.common.owner, &request, Utc::now())
         .context("queue takeover approval")?;
+    // Kind-only pure sandbox frozen on queue (WP-410).
+    tracing::info!(
+        sandbox = approval.sandbox.as_str(),
+        "{}",
+        crate::output::format_takeover_sandbox_line(approval.sandbox)
+    );
     let status = approval.status.as_str();
     print_takeover_result(&args.common, &db, status, approval)
 }
 
 fn continuity_decide(args: GoalContinuityDecisionArgs) -> Result<ExitCode> {
     let (store, db) = open_store(&args.common)?;
-    let decision = match args.decision {
-        GoalTakeoverDecisionArg::Approve => TakeoverDecision::Approve,
-        GoalTakeoverDecisionArg::Reject => TakeoverDecision::Reject,
-    };
+    let decision = TakeoverDecision::from(args.decision);
     let approval = store
         .decide_takeover_approval(
             &args.common.owner,
@@ -401,6 +457,14 @@ fn continuity_decide(args: GoalContinuityDecisionArgs) -> Result<ExitCode> {
             Utc::now(),
         )
         .context("decide takeover approval")?;
+    // Kind-only pure lines for decision + approval status (WP-393).
+    tracing::info!(
+        decision = decision.as_str(),
+        status = approval.status.as_str(),
+        "{}; {}",
+        crate::output::format_takeover_decision_line(decision),
+        crate::output::format_takeover_approval_status_line(approval.status)
+    );
     let status = match approval.status {
         TakeoverApprovalStatus::Approved => "approved",
         TakeoverApprovalStatus::Rejected => "rejected",
@@ -481,6 +545,12 @@ async fn continuity_execute(
             } else {
                 ExitCode::from(4)
             };
+            // Kind-only pure line for takeover run status (WP-395).
+            tracing::info!(
+                status = run_status.as_str(),
+                "{}",
+                crate::output::format_takeover_run_status_line(run_status)
+            );
             (
                 TakeoverFinish {
                     run_id: Some(outcome.record.run_id),
@@ -494,14 +564,22 @@ async fn continuity_execute(
                 exit,
             )
         }
-        Err(error) => (
-            TakeoverFinish {
-                run_id: None,
-                run_status: TakeoverRunStatus::Error,
-                detail: format!("continuity {} dispatch failed: {error:#}", approval.step_id),
-            },
-            ExitCode::from(4),
-        ),
+        Err(error) => {
+            // Kind-only pure line; free-form detail remains for operator envelope (WP-395).
+            tracing::info!(
+                status = TakeoverRunStatus::Error.as_str(),
+                "{}",
+                crate::output::format_takeover_run_status_line(TakeoverRunStatus::Error)
+            );
+            (
+                TakeoverFinish {
+                    run_id: None,
+                    run_status: TakeoverRunStatus::Error,
+                    detail: format!("continuity {} dispatch failed: {error:#}", approval.step_id),
+                },
+                ExitCode::from(4),
+            )
+        }
     };
     let settled = store
         .finish_takeover_approval(&args.common.owner, &args.approval_id, &finish, Utc::now())
@@ -517,7 +595,15 @@ async fn continuity_execute(
             db: path_text(&db),
         })?;
     } else {
-        println!("{}\t{}", settled.approval_id, settled.status);
+        println!(
+            "{}",
+            format_takeover_approval_line(
+                &settled.approval_id,
+                settled.status,
+                &settled.goal_id,
+                &settled.step_id,
+            )
+        );
     }
     Ok(exit)
 }
@@ -576,7 +662,14 @@ async fn pursue(config_path: Option<PathBuf>, args: GoalPursueArgs) -> Result<Ex
             .context("resolve pursuit target")?;
     }
     let (cancel, signal_task) = cancellation_token();
-    let runtime = DispatchGoalRuntime::new(service, args.target.clone(), args.sandbox.into());
+    let sandbox: Sandbox = args.sandbox.into();
+    // Kind-only pure sandbox frozen for pursuit segments (WP-411).
+    tracing::info!(
+        sandbox = sandbox.as_str(),
+        "{}",
+        crate::output::format_sandbox_line(sandbox)
+    );
+    let runtime = DispatchGoalRuntime::new(service, args.target.clone(), sandbox);
     let pursuer =
         GoalPursuer::new(&store, &runtime, &verifier, config).context("construct goal pursuer")?;
     let outcome = pursuer
@@ -591,6 +684,18 @@ async fn pursue(config_path: Option<PathBuf>, args: GoalPursueArgs) -> Result<Ex
         PursuitStatus::Paused => ("paused", ExitCode::from(3)),
         PursuitStatus::Stopped => ("stopped", ExitCode::from(4)),
     };
+    // Kind-only pure pursuit status on CLI pursue settle (WP-399).
+    tracing::info!(
+        status = outcome.status.as_str(),
+        "{}",
+        crate::output::format_pursuit_status_line(outcome.status)
+    );
+    // Kind-only pure final goal status from the durable outcome (WP-412).
+    tracing::info!(
+        status = outcome.final_goal_status.as_str(),
+        "{}",
+        crate::output::format_goal_status_line(outcome.final_goal_status)
+    );
     if args.common.json {
         print_json(&PursueOutput {
             status: response_status,
@@ -599,7 +704,7 @@ async fn pursue(config_path: Option<PathBuf>, args: GoalPursueArgs) -> Result<Ex
             db: path_text(&db),
         })?;
     } else {
-        println!("{}", terminal_safe(&outcome.summary));
+        print!("{}", format_pursue_outcome(&outcome));
     }
     Ok(code)
 }
@@ -644,28 +749,38 @@ fn get(args: GoalGetArgs) -> Result<ExitCode> {
     let verifications = store
         .verifications(&args.common.owner, &args.id)
         .context("read goal verification artifacts")?;
+    let pursuit_checkpoint = store
+        .pursuit_checkpoint(&args.common.owner, &args.id)
+        .context("read goal pursuit checkpoint")?;
+    // Kind-only pure checkpoint status when a durable checkpoint exists (WP-398).
+    if let Some(checkpoint) = pursuit_checkpoint.as_ref() {
+        tracing::info!(
+            status = checkpoint.status.as_str(),
+            "{}",
+            crate::output::format_pursuit_checkpoint_status_line(checkpoint.status)
+        );
+    }
+    // Kind-only pure event kinds for each durable event (WP-407).
+    for event in &events {
+        tracing::info!(
+            kind = event.kind.as_str(),
+            "{}",
+            crate::output::format_goal_event_kind_line(event.kind)
+        );
+    }
     if args.common.json {
-        let pursuit_checkpoint = store
-            .pursuit_checkpoint(&args.common.owner, &args.id)
-            .context("read goal pursuit checkpoint")?
-            .map(PursuitCheckpointView::from);
         print_json(&GoalDetailOutput {
             status: "success",
             goal,
             events,
             verifications,
-            pursuit_checkpoint,
+            pursuit_checkpoint: pursuit_checkpoint.map(PursuitCheckpointView::from),
             db: path_text(&db),
         })?;
     } else {
         print_goal_line(&goal)?;
         for event in events {
-            println!(
-                "{}\t{}\t{}",
-                event.revision,
-                event.occurred_at.to_rfc3339(),
-                event_kind_text(event.kind)
-            );
+            println!("{}", format_goal_event_line(&event));
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -807,6 +922,12 @@ fn satisfy(args: GoalSatisfyArgs) -> Result<ExitCode> {
             Utc::now(),
         )
         .context("satisfy acceptance criterion")?;
+    // Kind-only pure line for explicit satisfy (WP-394).
+    tracing::info!(
+        status = CriterionStatus::Satisfied.as_str(),
+        "{}",
+        crate::output::format_criterion_status_line(CriterionStatus::Satisfied)
+    );
     print_goal_result(&args.common, &db, goal)
 }
 
@@ -848,6 +969,12 @@ fn verify(args: GoalVerifyArgs) -> Result<ExitCode> {
         )
         .context("persist verification artifact")?;
     for result in &verification.results {
+        // Kind-only pure line per criterion result (WP-394).
+        tracing::info!(
+            status = result.status.as_str(),
+            "{}",
+            crate::output::format_criterion_status_line(result.status)
+        );
         if result.status == CriterionStatus::Satisfied
             && goal
                 .acceptance_criteria
@@ -883,7 +1010,7 @@ fn verify(args: GoalVerifyArgs) -> Result<ExitCode> {
             db: path_text(&db),
         })?;
     } else {
-        println!("{}", terminal_safe(&verification.summary));
+        print!("{}", format_verify_result(&verification));
     }
     Ok(if all_satisfied {
         ExitCode::SUCCESS
@@ -904,6 +1031,12 @@ fn progress(args: GoalProgressArgs) -> Result<ExitCode> {
         )
         .context("record goal progress")?;
     let goal = require_goal(&store, &args.common.owner, &args.id)?;
+    // Kind-only pure progress event kind (WP-407).
+    tracing::info!(
+        kind = event.kind.as_str(),
+        "{}",
+        crate::output::format_goal_event_kind_line(event.kind)
+    );
     if args.common.json {
         print_json(&ProgressOutput {
             status: "success",
@@ -912,7 +1045,7 @@ fn progress(args: GoalProgressArgs) -> Result<ExitCode> {
             db: path_text(&db),
         })?;
     } else {
-        println!("{}", terminal_safe(&event.event_id));
+        println!("{}", format_progress_event_line(&event));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1024,19 +1157,144 @@ fn print_goal_result(common: &GoalCommonArgs, db: &Path, goal: GoalRecord) -> Re
     Ok(ExitCode::SUCCESS)
 }
 
-fn print_goal_line(goal: &GoalRecord) -> Result<()> {
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
-    writeln!(
-        stdout,
+/// Human one-line goal projection (id, status, priority, title).
+/// Status column is the domain kind token via `as_str` (WP-400).
+fn format_goal_line(goal: &GoalRecord) -> String {
+    format!(
         "{}\t{}\t{}\t{}",
         terminal_safe(&goal.id),
-        goal.status,
+        goal.status.as_str(),
         goal.priority,
         terminal_safe(&goal.title)
     )
-    .context("write goal response")?;
+}
+
+/// Human one-line goal progress event: event id, kind token, goal id,
+/// revision.
+fn format_progress_event_line(event: &GoalEvent) -> String {
+    format!(
+        "{}\t{}\t{}\t{}",
+        terminal_safe(&event.event_id),
+        event.kind.as_str(),
+        terminal_safe(&event.goal_id),
+        event.revision
+    )
+}
+
+/// Human one-line goal detail event row (revision, timestamp, kind token).
+/// Kind tokens come from domain `GoalEventKind::as_str` — no private CLI match
+/// table (WP-400).
+fn format_goal_event_line(event: &GoalEvent) -> String {
+    format!(
+        "{}\t{}\t{}",
+        event.revision,
+        event.occurred_at.to_rfc3339(),
+        event.kind.as_str()
+    )
+}
+
+/// Human multi-line goal verify result: success|inconclusive, goal id, and
+/// terminal-safe acceptance summary.
+fn format_verify_result(verification: &AcceptanceVerification) -> String {
+    format!(
+        "result:    {}\ngoal:      {}\nsummary:   {}\n",
+        if verification.all_satisfied {
+            "success"
+        } else {
+            "inconclusive"
+        },
+        terminal_safe(&verification.goal_id),
+        terminal_safe(&verification.summary),
+    )
+}
+
+/// Human multi-line goal pursue outcome: status, goal id, segment counters,
+/// and terminal-safe summary (reason only when non-empty and distinct).
+/// Status field is the domain kind token via `as_str` (WP-400).
+fn format_pursue_outcome(outcome: &PursuitOutcome) -> String {
+    let mut out = format!(
+        "status:    {}\ngoal:      {}\nsegments:  started={} completed={} failures={}\nsummary:   {}\n",
+        outcome.status.as_str(),
+        terminal_safe(&outcome.goal_id),
+        outcome.segments_started,
+        outcome.segments_completed,
+        outcome.consecutive_failures,
+        terminal_safe(&outcome.summary),
+    );
+    if !outcome.reason.is_empty() && outcome.reason != outcome.summary {
+        out.push_str(&format!("reason:    {}\n", terminal_safe(&outcome.reason)));
+    }
+    out
+}
+
+/// Human one-line continuity-signal result: goal id, recorded|unchanged,
+/// and the durable next_ready_step token from the handoff plan.
+fn format_continuity_signal_line(goal_id: &str, changed: bool, next_ready_step: &str) -> String {
+    format!(
+        "{}\t{}\t{}",
+        terminal_safe(goal_id),
+        if changed { "recorded" } else { "unchanged" },
+        terminal_safe(next_ready_step)
+    )
+}
+
+/// Human multi-line projection of the WP-79 continuity next-action contract.
+///
+/// Always prints goal / revision / quota / action / reason with snake_case
+/// action tokens via `as_str` (WP-401). Optional command, step, and approval
+/// lines are included only when the projection carries those durable fields.
+fn format_continuity_next_action(next: &GoalContinuityNextAction) -> String {
+    let mut out = format!(
+        "goal:      {}\nrevision:  {}\nquota:     {}\naction:    {}\n",
+        terminal_safe(&next.goal_id),
+        next.goal_revision,
+        terminal_safe(&next.quota_event_id),
+        next.action.as_str()
+    );
+    if let Some(command) = next.command {
+        out.push_str(&format!("command:   {}\n", command.as_str()));
+    }
+    if let Some(step_id) = next.step_id.as_deref() {
+        out.push_str(&format!("step:      {}\n", terminal_safe(step_id)));
+    }
+    if let Some(approval_id) = next.approval_id.as_deref() {
+        out.push_str(&format!("approval:  {}\n", terminal_safe(approval_id)));
+    }
+    out.push_str(&format!("reason:    {}\n", terminal_safe(&next.reason)));
+    out
+}
+
+fn print_goal_line(goal: &GoalRecord) -> Result<()> {
+    // Kind-only pure status line alongside human projection (WP-396).
+    tracing::info!(
+        status = goal.status.as_str(),
+        "{}",
+        crate::output::format_goal_status_line(goal.status)
+    );
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    writeln!(stdout, "{}", format_goal_line(goal)).context("write goal response")?;
     stdout.flush().context("flush goal response")
+}
+
+/// Human one-line takeover/continuity approval projection used by queue/decide
+/// (and any other path that settles an approval without a multi-line body).
+///
+/// Fields: approval_id, status (snake_case Display), goal_id, step_id — free
+/// text is terminal-safe so operators can parse tab columns safely.
+fn format_takeover_approval_line(
+    approval_id: &str,
+    status: TakeoverApprovalStatus,
+    goal_id: &str,
+    step_id: &str,
+) -> String {
+    format!(
+        "{}\t{}\t{}\t{}",
+        terminal_safe(approval_id),
+        terminal_safe(status.as_str()),
+        terminal_safe(goal_id),
+        terminal_safe(step_id)
+    )
 }
 
 fn print_takeover_result(
@@ -1045,6 +1303,12 @@ fn print_takeover_result(
     status: &'static str,
     approval: TakeoverApproval,
 ) -> Result<ExitCode> {
+    // Kind-only pure approval status on human/json settle paths (WP-397).
+    tracing::info!(
+        status = approval.status.as_str(),
+        "{}",
+        crate::output::format_takeover_approval_status_line(approval.status)
+    );
     if common.json {
         print_json(&TakeoverApprovalOutput {
             status,
@@ -1052,7 +1316,15 @@ fn print_takeover_result(
             db: path_text(db),
         })?;
     } else {
-        println!("{}\t{}", approval.approval_id, approval.status);
+        println!(
+            "{}",
+            format_takeover_approval_line(
+                &approval.approval_id,
+                approval.status,
+                &approval.goal_id,
+                &approval.step_id,
+            )
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1236,14 +1508,9 @@ fn append_approval_evidence(prompt: &mut String, label: &str, approval: &Takeove
 
 fn append_signal_evidence(prompt: &mut String, approval: &TakeoverApproval) {
     for signal in &approval.plan_snapshot.ready_signals {
-        let signal_name = match signal.kind {
-            GoalContinuitySignalKind::QuotaReset => "quota_reset",
-            GoalContinuitySignalKind::ReviewChecksPassed => "review_checks_passed",
-            GoalContinuitySignalKind::ReviewChecksFailed => "review_checks_failed",
-        };
         prompt.push_str(&format!(
             "- signal.{}: observed at {} by {}\n",
-            signal_name,
+            signal.kind.as_str(),
             signal.observed_at.to_rfc3339(),
             signal.source
         ));
@@ -1310,24 +1577,6 @@ fn terminal_safe(value: &str) -> String {
     value.chars().flat_map(char::escape_default).collect()
 }
 
-const fn event_kind_text(kind: vyane_goal::GoalEventKind) -> &'static str {
-    match kind {
-        vyane_goal::GoalEventKind::Created => "created",
-        vyane_goal::GoalEventKind::Started => "started",
-        vyane_goal::GoalEventKind::Claimed => "claimed",
-        vyane_goal::GoalEventKind::LeaseRenewed => "lease_renewed",
-        vyane_goal::GoalEventKind::Reclaimed => "reclaimed",
-        vyane_goal::GoalEventKind::Progress => "progress",
-        vyane_goal::GoalEventKind::CriterionSatisfied => "criterion_satisfied",
-        vyane_goal::GoalEventKind::CriteriaWaived => "criteria_waived",
-        vyane_goal::GoalEventKind::Paused => "paused",
-        vyane_goal::GoalEventKind::Resumed => "resumed",
-        vyane_goal::GoalEventKind::Completed => "completed",
-        vyane_goal::GoalEventKind::Failed => "failed",
-        vyane_goal::GoalEventKind::Cancelled => "cancelled",
-    }
-}
-
 impl From<GoalStatusArg> for GoalStatus {
     fn from(value: GoalStatusArg) -> Self {
         match value {
@@ -1343,9 +1592,19 @@ impl From<GoalStatusArg> for GoalStatus {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
     use vyane_core::RunStatus;
-    use vyane_goal::PursuitSegmentStatus;
+    use vyane_goal::{
+        AcceptanceVerification, GoalContinuityNextAction, GoalContinuityNextActionKind,
+        GoalContinuityOperatorCommand, GoalEvent, GoalEventKind, GoalRecord, GoalStatus,
+        PursuitOutcome, PursuitSegmentStatus, PursuitStatus, TakeoverApprovalStatus,
+    };
 
+    use super::{
+        format_continuity_next_action, format_continuity_signal_line, format_goal_event_line,
+        format_goal_line, format_progress_event_line, format_pursue_outcome,
+        format_takeover_approval_line, format_verify_result,
+    };
     use crate::goal_runtime::pursuit_segment_status;
 
     #[test]
@@ -1358,5 +1617,317 @@ mod tests {
         ] {
             assert_eq!(pursuit_segment_status(run), pursuit);
         }
+    }
+
+    fn sample_goal(id: &str, title: &str, status: GoalStatus, priority: u8) -> GoalRecord {
+        let at = Utc.with_ymd_and_hms(2026, 8, 2, 14, 0, 0).unwrap();
+        GoalRecord {
+            id: id.into(),
+            owner: "local".into(),
+            title: title.into(),
+            description: String::new(),
+            status,
+            priority,
+            parent_goal_id: None,
+            acceptance_criteria: vec![],
+            continuity_policy: None,
+            continuity_state: None,
+            created_at: at,
+            started_at: None,
+            updated_at: at,
+            finished_at: None,
+            revision: 1,
+            completion_summary: None,
+            failure_reason: None,
+            pause_reason: None,
+            cancel_reason: None,
+            claimed_by: None,
+            claim_expires_at: None,
+            claim_generation: 0,
+        }
+    }
+
+    #[test]
+    fn human_goal_line_prints_status_priority_and_terminal_safe_fields() {
+        let goal = sample_goal(
+            "g1\n\u{1b}[31m",
+            "title\twith\ttabs",
+            GoalStatus::InProgress,
+            2,
+        );
+        let text = format_goal_line(&goal);
+        assert!(text.contains("in_progress"), "{text}");
+        assert!(text.contains('\t'), "tab-separated fields:\n{text}");
+        assert!(text.contains("2"), "{text}");
+        // control sequences escaped
+        assert!(!text.contains('\u{1b}'), "no raw ESC:\n{text}");
+        assert!(text.contains("\\n") || text.contains("\\u{1b}"), "{text}");
+        let parts: Vec<&str> = text.split('\t').collect();
+        assert_eq!(parts.len(), 4, "id status priority title:\n{text}");
+        assert_eq!(parts[2], "2", "{text}");
+    }
+
+    #[test]
+    fn human_goal_line_uses_status_as_str() {
+        let goal = sample_goal("goal-a", "plain", GoalStatus::Paused, 0);
+        let text = format_goal_line(&goal);
+        assert!(text.starts_with("goal-a\tpaused\t0\t"), "{text}");
+        assert!(text.ends_with("plain"), "{text}");
+    }
+
+    fn sample_next_action(
+        action: GoalContinuityNextActionKind,
+        command: Option<GoalContinuityOperatorCommand>,
+        step_id: Option<&str>,
+        approval_id: Option<&str>,
+    ) -> GoalContinuityNextAction {
+        GoalContinuityNextAction {
+            goal_id: "goal-1\n\u{1b}[31m".into(),
+            goal_revision: 7,
+            quota_event_id: "quota-evt\t1".into(),
+            action,
+            command,
+            step_id: step_id.map(str::to_string),
+            step_kind: None,
+            approval_id: approval_id.map(str::to_string),
+            accepted_signals: vec![],
+            required_inputs: vec![],
+            reason: "needs decision\tnow".into(),
+        }
+    }
+
+    #[test]
+    fn human_continuity_next_uses_snake_case_action_not_debug() {
+        let next = sample_next_action(
+            GoalContinuityNextActionKind::DecideApproval,
+            Some(GoalContinuityOperatorCommand::ContinuityDecide),
+            Some("takeover"),
+            Some("appr-9"),
+        );
+        let text = format_continuity_next_action(&next);
+        assert!(text.contains("action:    decide_approval"), "{text}");
+        assert!(
+            !text.contains("DecideApproval"),
+            "must not use Debug:\n{text}"
+        );
+        assert!(text.contains("command:   continuity_decide"), "{text}");
+        assert!(text.contains("step:      takeover"), "{text}");
+        assert!(text.contains("approval:  appr-9"), "{text}");
+        assert!(text.contains("revision:  7"), "{text}");
+        assert!(!text.contains('\u{1b}'), "no raw ESC:\n{text}");
+        assert!(text.contains("\\n") || text.contains("\\u{1b}"), "{text}");
+        assert!(text.contains("needs decision"), "{text}");
+    }
+
+    #[test]
+    fn human_continuity_next_omits_optional_fields_when_absent() {
+        let next = sample_next_action(
+            GoalContinuityNextActionKind::WaitForDependency,
+            None,
+            None,
+            None,
+        );
+        let text = format_continuity_next_action(&next);
+        assert!(text.contains("action:    wait_for_dependency"), "{text}");
+        assert!(!text.contains("command:"), "{text}");
+        assert!(!text.contains("step:"), "{text}");
+        assert!(!text.contains("approval:"), "{text}");
+        assert!(text.contains("quota:"), "{text}");
+        assert!(text.contains("reason:"), "{text}");
+    }
+
+    #[test]
+    fn human_takeover_approval_line_prints_status_goal_and_step() {
+        let text = format_takeover_approval_line(
+            "appr-1\n\u{1b}[31m",
+            TakeoverApprovalStatus::Pending,
+            "goal-9",
+            "takeover",
+        );
+        assert!(text.contains("pending"), "{text}");
+        assert!(text.contains("goal-9"), "{text}");
+        assert!(text.contains("takeover"), "{text}");
+        assert!(!text.contains('\u{1b}'), "no raw ESC:\n{text}");
+        let parts: Vec<&str> = text.split('\t').collect();
+        assert_eq!(
+            parts.len(),
+            4,
+            "approval_id status goal_id step_id:\n{text}"
+        );
+        assert_eq!(parts[1], "pending", "{text}");
+        assert_eq!(parts[2], "goal-9", "{text}");
+        assert_eq!(parts[3], "takeover", "{text}");
+    }
+
+    #[test]
+    fn human_takeover_approval_line_uses_status_display() {
+        let text = format_takeover_approval_line(
+            "appr-ok",
+            TakeoverApprovalStatus::InFlight,
+            "g",
+            "resume_primary",
+        );
+        assert_eq!(text, "appr-ok\tin_flight\tg\tresume_primary", "{text}");
+    }
+
+    #[test]
+    fn human_continuity_signal_line_marks_recorded_and_next_step() {
+        let text = format_continuity_signal_line("goal-1\n\u{1b}[31m", true, "resume_primary\tnow");
+        assert!(text.contains("recorded"), "{text}");
+        assert!(!text.contains("unchanged"), "{text}");
+        assert!(!text.contains('\u{1b}'), "no raw ESC:\n{text}");
+        let parts: Vec<&str> = text.split('\t').collect();
+        assert_eq!(parts.len(), 3, "goal changed next_step:\n{text}");
+        assert_eq!(parts[1], "recorded", "{text}");
+        assert!(parts[2].contains("resume_primary"), "{text}");
+    }
+
+    #[test]
+    fn human_continuity_signal_line_marks_unchanged() {
+        let text = format_continuity_signal_line("goal-a", false, "takeover");
+        assert_eq!(text, "goal-a\tunchanged\ttakeover", "{text}");
+    }
+
+    #[test]
+    fn human_pursue_outcome_prints_status_segments_and_safe_summary() {
+        let outcome = PursuitOutcome {
+            goal_id: "goal-9\n\u{1b}[31m".into(),
+            status: PursuitStatus::Paused,
+            final_goal_status: GoalStatus::Paused,
+            segments_started: 2,
+            segments_completed: 1,
+            consecutive_failures: 1,
+            summary: "paused after segment\tfail".into(),
+            reason: "quota blocked".into(),
+            last_verification: None,
+        };
+        let text = format_pursue_outcome(&outcome);
+        assert!(text.contains("status:    paused"), "{text}");
+        assert!(
+            text.contains("segments:  started=2 completed=1 failures=1"),
+            "{text}"
+        );
+        assert!(!text.contains('\u{1b}'), "no raw ESC:\n{text}");
+        assert!(text.contains("summary:"), "{text}");
+        assert!(text.contains("reason:    quota blocked"), "{text}");
+    }
+
+    #[test]
+    fn human_pursue_outcome_omits_reason_when_same_as_summary() {
+        let outcome = PursuitOutcome {
+            goal_id: "g".into(),
+            status: PursuitStatus::Achieved,
+            final_goal_status: GoalStatus::Completed,
+            segments_started: 1,
+            segments_completed: 1,
+            consecutive_failures: 0,
+            summary: "all criteria satisfied".into(),
+            reason: "all criteria satisfied".into(),
+            last_verification: None,
+        };
+        let text = format_pursue_outcome(&outcome);
+        assert!(text.contains("status:    achieved"), "{text}");
+        assert!(!text.contains("reason:"), "{text}");
+        assert!(text.contains("summary:   all criteria satisfied"), "{text}");
+    }
+
+    #[test]
+    fn human_verify_result_marks_success_when_all_satisfied() {
+        let verification = AcceptanceVerification {
+            goal_id: "goal-ok".into(),
+            all_satisfied: true,
+            results: vec![],
+            summary: "1/1 satisfied".into(),
+        };
+        let text = format_verify_result(&verification);
+        assert!(text.contains("result:    success"), "{text}");
+        assert!(text.contains("goal:      goal-ok"), "{text}");
+        assert!(text.contains("summary:   1/1 satisfied"), "{text}");
+    }
+
+    #[test]
+    fn human_verify_result_marks_inconclusive_and_escapes_summary() {
+        let verification = AcceptanceVerification {
+            goal_id: "goal-x\n".into(),
+            all_satisfied: false,
+            results: vec![],
+            summary: "0/2\u{1b}[31m failed".into(),
+        };
+        let text = format_verify_result(&verification);
+        assert!(text.contains("result:    inconclusive"), "{text}");
+        assert!(!text.contains('\u{1b}'), "no raw ESC:\n{text}");
+        assert!(text.contains("summary:"), "{text}");
+    }
+
+    #[test]
+    fn human_progress_event_line_prints_kind_goal_and_revision() {
+        let at = Utc.with_ymd_and_hms(2026, 8, 2, 16, 0, 0).unwrap();
+        let event = GoalEvent {
+            sequence: 3,
+            event_id: "evt-1\n\u{1b}[31m".into(),
+            owner: "local".into(),
+            goal_id: "goal-p".into(),
+            revision: 4,
+            occurred_at: at,
+            kind: GoalEventKind::Progress,
+            from_status: Some(GoalStatus::InProgress),
+            to_status: GoalStatus::InProgress,
+            stage: Some("build".into()),
+            detail: Some("nudge".into()),
+        };
+        let text = format_progress_event_line(&event);
+        assert!(text.contains("progress"), "{text}");
+        assert!(text.contains("goal-p"), "{text}");
+        assert!(text.contains('\t'), "{text}");
+        assert!(!text.contains('\u{1b}'), "no raw ESC:\n{text}");
+        let parts: Vec<&str> = text.split('\t').collect();
+        assert_eq!(parts.len(), 4, "event_id kind goal_id revision:\n{text}");
+        assert_eq!(parts[1], "progress", "{text}");
+        assert_eq!(parts[2], "goal-p", "{text}");
+        assert_eq!(parts[3], "4", "{text}");
+    }
+
+    #[test]
+    fn human_progress_event_line_uses_kind_display() {
+        let at = Utc.with_ymd_and_hms(2026, 8, 2, 16, 0, 0).unwrap();
+        let event = GoalEvent {
+            sequence: 1,
+            event_id: "e".into(),
+            owner: "local".into(),
+            goal_id: "g".into(),
+            revision: 1,
+            occurred_at: at,
+            kind: GoalEventKind::CriterionSatisfied,
+            from_status: None,
+            to_status: GoalStatus::InProgress,
+            stage: None,
+            detail: None,
+        };
+        let text = format_progress_event_line(&event);
+        assert_eq!(text, "e\tcriterion_satisfied\tg\t1", "{text}");
+    }
+
+    #[test]
+    fn human_goal_event_line_uses_domain_kind_display() {
+        let at = Utc.with_ymd_and_hms(2026, 8, 2, 16, 30, 0).unwrap();
+        let event = GoalEvent {
+            sequence: 2,
+            event_id: "evt".into(),
+            owner: "local".into(),
+            goal_id: "g1".into(),
+            revision: 9,
+            occurred_at: at,
+            kind: GoalEventKind::LeaseRenewed,
+            from_status: Some(GoalStatus::InProgress),
+            to_status: GoalStatus::InProgress,
+            stage: None,
+            detail: None,
+        };
+        let text = format_goal_event_line(&event);
+        assert!(text.starts_with("9\t"), "{text}");
+        assert!(text.contains(at.to_rfc3339().as_str()), "{text}");
+        assert!(text.ends_with("\tlease_renewed"), "{text}");
+        // Domain as_str is the single source of kind tokens (no CLI match table).
+        assert_eq!(event.kind.as_str(), "lease_renewed");
     }
 }

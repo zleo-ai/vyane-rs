@@ -76,6 +76,24 @@ pub enum PumpItemStatus {
     SettlementFailed,
 }
 
+impl PumpItemStatus {
+    /// Stable snake_case *kind* token; message ids stay out of the token.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Acknowledged => "acknowledged",
+            Self::ReplyEnqueued { .. } => "reply_enqueued",
+            Self::RetryScheduled => "retry_scheduled",
+            Self::DeadLettered => "dead_lettered",
+            Self::InsufficientLeaseWindow => "insufficient_lease_window",
+            Self::Uncertain => "uncertain",
+            Self::TimedOut => "timed_out",
+            Self::AdapterPanicked => "adapter_panicked",
+            Self::SettlementFailed => "settlement_failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PumpItemResult {
     pub delivery_id: String,
@@ -341,28 +359,38 @@ async fn process_one(
     let status = match timeout(adapter_timeout, delivered).await {
         Err(_) => PumpItemStatus::TimedOut,
         Ok(Err(_)) => PumpItemStatus::AdapterPanicked,
-        Ok(Ok(Err(AdapterFailure::Uncertain { .. }))) => PumpItemStatus::Uncertain,
-        Ok(Ok(Err(AdapterFailure::Retry { delay_seconds, .. }))) => {
-            settle_nack(
-                store,
-                owner,
-                leased.receipt.mailbox.clone(),
-                leased.receipt,
-                NackDisposition::RetryAfter { delay_seconds },
-            )
-            .await
+        Ok(Ok(Err(failure))) => {
+            // Kind-only; reason codes and delays stay out of structured logs (WP-339).
+            tracing::info!(failure = failure.as_str(), "broker adapter failure");
+            match failure {
+                AdapterFailure::Uncertain { .. } => PumpItemStatus::Uncertain,
+                AdapterFailure::Retry { delay_seconds, .. } => {
+                    settle_nack(
+                        store,
+                        owner,
+                        leased.receipt.mailbox.clone(),
+                        leased.receipt,
+                        NackDisposition::RetryAfter { delay_seconds },
+                    )
+                    .await
+                }
+                AdapterFailure::Permanent { failure_code } => {
+                    settle_nack(
+                        store,
+                        owner,
+                        leased.receipt.mailbox.clone(),
+                        leased.receipt,
+                        NackDisposition::Permanent { failure_code },
+                    )
+                    .await
+                }
+            }
         }
-        Ok(Ok(Err(AdapterFailure::Permanent { failure_code }))) => {
-            settle_nack(
-                store,
-                owner,
-                leased.receipt.mailbox.clone(),
-                leased.receipt,
-                NackDisposition::Permanent { failure_code },
-            )
-            .await
+        Ok(Ok(Ok(outcome))) => {
+            // Kind-only; reply/receipt payloads stay out of structured logs (WP-339).
+            tracing::info!(outcome = outcome.as_str(), "broker adapter outcome");
+            settle_success(owner, store, &adapter_name, leased, outcome).await
         }
-        Ok(Ok(Ok(outcome))) => settle_success(owner, store, &adapter_name, leased, outcome).await,
     };
     PumpItemResult {
         delivery_id,
@@ -377,8 +405,12 @@ async fn settle_nack(
     receipt: vyane_message::LeaseReceipt,
     disposition: NackDisposition,
 ) -> PumpItemStatus {
-    match tokio::task::spawn_blocking(move || store.nack(&owner, &mailbox, &receipt, &disposition))
-        .await
+    // Kind-only; delays and failure codes stay out of structured logs (WP-331).
+    let disposition_kind = disposition.as_str();
+    let status = match tokio::task::spawn_blocking(move || {
+        store.nack(&owner, &mailbox, &receipt, &disposition)
+    })
+    .await
     {
         Ok(Ok(delivery)) => match delivery.status {
             vyane_message::DeliveryStatus::Pending => PumpItemStatus::RetryScheduled,
@@ -386,7 +418,13 @@ async fn settle_nack(
             _ => PumpItemStatus::SettlementFailed,
         },
         Ok(Err(_)) | Err(_) => PumpItemStatus::SettlementFailed,
-    }
+    };
+    tracing::info!(
+        disposition = disposition_kind,
+        status = status.as_str(),
+        "broker nack settled"
+    );
+    status
 }
 
 async fn settle_success(
@@ -479,5 +517,42 @@ async fn acknowledge(
     match tokio::task::spawn_blocking(move || store.acknowledge(&owner, &mailbox, &receipt)).await {
         Ok(Ok(_)) => PumpItemStatus::Acknowledged,
         Ok(Err(_)) | Err(_) => PumpItemStatus::SettlementFailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PumpItemStatus;
+
+    #[test]
+    fn pump_item_status_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(PumpItemStatus::Acknowledged.as_str(), "acknowledged");
+        assert_eq!(
+            PumpItemStatus::ReplyEnqueued {
+                message_id: "secret-message".into()
+            }
+            .as_str(),
+            "reply_enqueued"
+        );
+        assert!(
+            !PumpItemStatus::ReplyEnqueued {
+                message_id: "secret-message".into()
+            }
+            .as_str()
+            .contains("secret")
+        );
+        assert_eq!(PumpItemStatus::RetryScheduled.as_str(), "retry_scheduled");
+        assert_eq!(PumpItemStatus::DeadLettered.as_str(), "dead_lettered");
+        assert_eq!(
+            PumpItemStatus::InsufficientLeaseWindow.as_str(),
+            "insufficient_lease_window"
+        );
+        assert_eq!(PumpItemStatus::Uncertain.as_str(), "uncertain");
+        assert_eq!(PumpItemStatus::TimedOut.as_str(), "timed_out");
+        assert_eq!(PumpItemStatus::AdapterPanicked.as_str(), "adapter_panicked");
+        assert_eq!(
+            PumpItemStatus::SettlementFailed.as_str(),
+            "settlement_failed"
+        );
     }
 }

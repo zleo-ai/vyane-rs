@@ -47,6 +47,25 @@ pub enum RunStatus {
     Cancelled,
 }
 
+impl RunStatus {
+    /// Stable snake_case token matching the serde rename for this run status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::fmt::Display for RunStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Outcome of a single attempt against one target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "result")]
@@ -58,6 +77,17 @@ pub enum AttemptOutcome {
         /// Whether this error made the kernel move to the next target.
         failed_over: bool,
     },
+}
+
+impl AttemptOutcome {
+    /// Stable snake_case *kind* token; error kind/message/failed_over stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Err { .. } => "err",
+        }
+    }
 }
 
 /// One attempt within a run (the failover chain is `Vec<Attempt>`).
@@ -181,5 +211,36 @@ mod tests {
         }"#;
         let rec: RunRecord = serde_json::from_str(json).unwrap();
         assert_eq!(rec.owner, "local");
+    }
+
+    #[test]
+    fn run_status_tokens_match_serde_snake_case() {
+        assert_eq!(RunStatus::Success.as_str(), "success");
+        assert_eq!(RunStatus::Timeout.to_string(), "timeout");
+        assert_eq!(RunStatus::Cancelled.as_str(), "cancelled");
+        assert_eq!(RunStatus::Error.to_string(), "error");
+    }
+
+    #[test]
+    fn attempt_outcome_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(AttemptOutcome::Ok.as_str(), "ok");
+        assert_eq!(
+            AttemptOutcome::Err {
+                kind: ErrorKind::Other,
+                message: "secret-message".into(),
+                failed_over: true,
+            }
+            .as_str(),
+            "err"
+        );
+        assert!(
+            !AttemptOutcome::Err {
+                kind: ErrorKind::Other,
+                message: "secret-message".into(),
+                failed_over: true,
+            }
+            .as_str()
+            .contains("secret")
+        );
     }
 }

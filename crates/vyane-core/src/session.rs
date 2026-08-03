@@ -113,6 +113,18 @@ pub enum NativeSessionState {
     Bound { binding: Box<NativeSessionBinding> },
 }
 
+impl NativeSessionState {
+    /// Stable snake_case *kind* token; native session ids stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::LegacyUnbound { .. } => "legacy_unbound",
+            Self::Bound { .. } => "bound",
+        }
+    }
+}
+
 /// Revisioned view used by domain-aware session control paths.
 ///
 /// `session_revision` covers every store mutation, including legacy
@@ -187,6 +199,16 @@ pub enum NativeSessionTransition {
 }
 
 impl NativeSessionTransition {
+    /// Stable snake_case *kind* token; revisions, updates, and bindings stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reset { .. } => "reset",
+            Self::ForkFresh { .. } => "fork_fresh",
+            Self::Commit { .. } => "commit",
+        }
+    }
+
     #[must_use]
     pub fn expected_revision(&self) -> u64 {
         match self {
@@ -227,4 +249,135 @@ impl SessionUpdate {
 
 fn default_owner() -> String {
     "local".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        NativeSessionBinding, NativeSessionDomain, NativeSessionState, NativeSessionTransition,
+        SessionUpdate,
+    };
+    use crate::target::{HarnessKind, ModelId, Protocol, ProviderId, Target};
+    use crate::workdir::WorkdirIdentity;
+    use chrono::Utc;
+
+    fn sample_update() -> SessionUpdate {
+        SessionUpdate {
+            owner: "local".into(),
+            session_id: "secret-session".into(),
+            target: Target {
+                provider: ProviderId::new("p"),
+                protocol: Protocol::OpenaiChat,
+                harness: None,
+                model: ModelId::new("m"),
+            },
+            native_session_id: None,
+            transcript_delta: Vec::new(),
+            occurred_at: Utc::now(),
+        }
+    }
+
+    fn sample_binding() -> NativeSessionBinding {
+        NativeSessionBinding {
+            native_session_id: "secret-bound".into(),
+            domain: NativeSessionDomain {
+                runtime: "rt".into(),
+                harness: HarnessKind::ClaudeCode,
+                provider: ProviderId::new("p"),
+                protocol: Protocol::OpenaiChat,
+                model: ModelId::new("m"),
+                endpoint_routing_digest: "d".into(),
+                canonical_workdir: std::path::PathBuf::from("/tmp"),
+                workdir_identity: WorkdirIdentity {
+                    device: 0,
+                    inode: 0,
+                },
+                checkpoint_namespace: "ns".into(),
+                checkpoint_schema: 1,
+                account_scope_digest: "a".into(),
+                runtime_scope_digest: "r".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn native_session_transition_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            NativeSessionTransition::Reset {
+                expected_revision: 9
+            }
+            .as_str(),
+            "reset"
+        );
+        assert_eq!(
+            NativeSessionTransition::ForkFresh {
+                expected_revision: 1,
+                update: sample_update(),
+                binding: sample_binding(),
+            }
+            .as_str(),
+            "fork_fresh"
+        );
+        assert_eq!(
+            NativeSessionTransition::Commit {
+                expected_revision: 2,
+                update: sample_update(),
+                binding: sample_binding(),
+            }
+            .as_str(),
+            "commit"
+        );
+        assert!(
+            !NativeSessionTransition::ForkFresh {
+                expected_revision: 1,
+                update: sample_update(),
+                binding: sample_binding(),
+            }
+            .as_str()
+            .contains("secret")
+        );
+    }
+
+    #[test]
+    fn native_session_state_kind_tokens_are_snake_case_without_ids() {
+        assert_eq!(NativeSessionState::Absent.as_str(), "absent");
+        assert_eq!(
+            NativeSessionState::LegacyUnbound {
+                native_session_id: "secret-session".into()
+            }
+            .as_str(),
+            "legacy_unbound"
+        );
+        assert!(
+            !NativeSessionState::LegacyUnbound {
+                native_session_id: "secret-session".into()
+            }
+            .as_str()
+            .contains("secret")
+        );
+        let bound = NativeSessionState::Bound {
+            binding: Box::new(super::NativeSessionBinding {
+                native_session_id: "secret-bound".into(),
+                domain: super::NativeSessionDomain {
+                    runtime: "rt".into(),
+                    harness: crate::HarnessKind::ClaudeCode,
+                    provider: crate::ProviderId::new("p"),
+                    protocol: crate::Protocol::OpenaiChat,
+                    model: crate::ModelId::new("m"),
+                    endpoint_routing_digest: "d".into(),
+                    canonical_workdir: std::path::PathBuf::from("/tmp"),
+                    workdir_identity: crate::WorkdirIdentity {
+                        device: 0,
+                        inode: 0,
+                    },
+                    checkpoint_namespace: "ns".into(),
+                    checkpoint_schema: 1,
+                    account_scope_digest: "a".into(),
+                    runtime_scope_digest: "r".into(),
+                },
+            }),
+        };
+        assert_eq!(bound.as_str(), "bound");
+        assert!(!bound.as_str().contains("secret"));
+    }
 }

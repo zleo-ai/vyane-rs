@@ -248,6 +248,38 @@ pub enum ToolChatValidationError {
     EnvelopeTooLarge,
 }
 
+impl ToolChatValidationError {
+    /// Stable snake_case *kind* token; free-form fields/ids/counts stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::EmptyConversation => "empty_conversation",
+            Self::TooManyMessages => "too_many_messages",
+            Self::TooManyTools => "too_many_tools",
+            Self::TooManyToolCalls => "too_many_tool_calls",
+            Self::TooManyContentParts => "too_many_content_parts",
+            Self::ContentTextMismatch => "content_text_mismatch",
+            Self::InvalidIdentifier { .. } => "invalid_identifier",
+            Self::TextTooLarge { .. } => "text_too_large",
+            Self::DuplicateToolCall(_) => "duplicate_tool_call",
+            Self::DuplicateToolResult(_) => "duplicate_tool_result",
+            Self::OrphanToolResult(_) => "orphan_tool_result",
+            Self::MessageWhileToolsPending => "message_while_tools_pending",
+            Self::UnresolvedToolCalls(_) => "unresolved_tool_calls",
+            Self::DuplicateToolDefinition(_) => "duplicate_tool_definition",
+            Self::SchemaNotObject => "schema_not_object",
+            Self::ToolChoiceWithoutTools => "tool_choice_without_tools",
+            Self::UnknownNamedTool(_) => "unknown_named_tool",
+            Self::JsonTooDeep => "json_too_deep",
+            Self::TooManyJsonNodes => "too_many_json_nodes",
+            Self::JsonKeyTooLarge => "json_key_too_large",
+            Self::JsonTooLarge { .. } => "json_too_large",
+            Self::NotSerializable { .. } => "not_serializable",
+            Self::EnvelopeTooLarge => "envelope_too_large",
+        }
+    }
+}
+
 impl ToolChatRequest {
     /// Validate limits and exact tool-call/result pairing at a model-request
     /// boundary. An unresolved assistant call is never a valid next request.
@@ -694,6 +726,46 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             params: GenParams::default(),
         }
+    }
+
+    #[test]
+    fn tool_chat_validation_error_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            ToolChatValidationError::EmptyConversation.as_str(),
+            "empty_conversation"
+        );
+        assert_eq!(
+            ToolChatValidationError::TooManyMessages.as_str(),
+            "too_many_messages"
+        );
+        assert_eq!(
+            ToolChatValidationError::MessageWhileToolsPending.as_str(),
+            "message_while_tools_pending"
+        );
+        assert_eq!(
+            ToolChatValidationError::ToolChoiceWithoutTools.as_str(),
+            "tool_choice_without_tools"
+        );
+        assert_eq!(
+            ToolChatValidationError::ContentTextMismatch.as_str(),
+            "content_text_mismatch"
+        );
+        let dup = ToolChatValidationError::DuplicateToolCall("secret-call-id".into());
+        assert_eq!(dup.as_str(), "duplicate_tool_call");
+        assert!(!dup.as_str().contains("secret"));
+        let field = ToolChatValidationError::InvalidIdentifier {
+            field: "secret_field",
+        };
+        assert_eq!(field.as_str(), "invalid_identifier");
+        assert!(!field.as_str().contains("secret"));
+        assert_eq!(
+            ToolChatValidationError::UnresolvedToolCalls(3).as_str(),
+            "unresolved_tool_calls"
+        );
+        assert_eq!(
+            ToolChatValidationError::EnvelopeTooLarge.as_str(),
+            "envelope_too_large"
+        );
     }
 
     #[test]

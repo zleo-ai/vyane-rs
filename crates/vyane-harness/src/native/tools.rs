@@ -270,6 +270,17 @@ pub enum ToolContextError {
     NotDirectory(PathBuf),
 }
 
+impl ToolContextError {
+    /// Stable snake_case *kind* token; workdir paths stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Canonicalize { .. } => "canonicalize",
+            Self::NotDirectory(_) => "not_directory",
+        }
+    }
+}
+
 /// A recoverable, model-facing tool failure.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 #[error("{message}")]
@@ -332,6 +343,19 @@ pub enum ToolRegistryError {
     UnsafeName,
     #[error("tool `{0}` is already registered")]
     Duplicate(String),
+}
+
+impl ToolRegistryError {
+    /// Stable snake_case *kind* token; tool names stay out of the token.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::EmptyName => "empty_name",
+            Self::NameTooLarge => "name_too_large",
+            Self::UnsafeName => "unsafe_name",
+            Self::Duplicate(_) => "duplicate",
+        }
+    }
 }
 
 /// Deterministically ordered collection of executable native tools.
@@ -480,7 +504,7 @@ impl ToolRegistry {
                             ToolInvocation::new(
                                 call,
                                 ToolInvocationStatus::Cancelled,
-                                "ERROR: tool execution cancelled".into(),
+                                tool_execution_cancelled_output().into(),
                                 None,
                             )
                         }
@@ -488,7 +512,7 @@ impl ToolRegistry {
                             ToolInvocation::new(
                                 call,
                                 ToolInvocationStatus::TimedOut,
-                                "ERROR: tool execution timed out".into(),
+                                tool_execution_timed_out_output().into(),
                                 None,
                             )
                         }
@@ -529,7 +553,7 @@ impl ToolRegistry {
             let invocation = ToolInvocation::new(
                 call,
                 ToolInvocationStatus::InvalidCall,
-                format!("ERROR: invalid tool call ({})", error.code()),
+                invalid_tool_call_output(error.code()),
                 None,
             );
             return PreparedToolInvocation::complete(summary, invocation);
@@ -540,10 +564,7 @@ impl ToolRegistry {
             } else {
                 self.names().collect::<Vec<_>>().join(", ")
             };
-            let output = format!(
-                "ERROR: unknown tool `{}`. Available tools: {available}",
-                call.name
-            );
+            let output = unknown_tool_output(&call.name, &available);
             let invocation =
                 ToolInvocation::new(call, ToolInvocationStatus::UnknownTool, output, None);
             return PreparedToolInvocation::complete(summary, invocation);
@@ -565,7 +586,7 @@ impl ToolRegistry {
                     let invocation = ToolInvocation::new(
                         call,
                         ToolInvocationStatus::ToolError,
-                        "ERROR: permission policy did not produce an approval plan".into(),
+                        missing_approval_plan_output().into(),
                         None,
                     );
                     return PreparedToolInvocation::complete(summary, invocation);
@@ -579,26 +600,16 @@ impl ToolRegistry {
                 PreparedToolOutcome::Complete(Box::new(ToolInvocation::new(
                     call,
                     ToolInvocationStatus::ApprovalRequired,
-                    format!(
-                        "ERROR: tool use requires approval: `{}` (plan {})",
-                        approval.tool,
-                        &approval.canonical_plan_hash[..12]
-                    ),
+                    approval_required_output(&approval.tool, &approval.canonical_plan_hash),
                     Some(approval),
                 )))
             }
-            PermissionEffect::Deny => {
-                let output = format!(
-                    "ERROR: tool use denied by permission policy: `{}`",
-                    call.name
-                );
-                PreparedToolOutcome::Complete(Box::new(ToolInvocation::new(
-                    call,
-                    ToolInvocationStatus::Denied,
-                    output,
-                    None,
-                )))
-            }
+            PermissionEffect::Deny => PreparedToolOutcome::Complete(Box::new(ToolInvocation::new(
+                call.clone(),
+                ToolInvocationStatus::Denied,
+                denied_tool_output(&call.name),
+                None,
+            ))),
             PermissionEffect::Allow => PreparedToolOutcome::Allowed { call, deadline },
         };
         PreparedToolInvocation { summary, outcome }
@@ -622,7 +633,7 @@ impl ToolRegistry {
             return ToolInvocation::new(
                 call,
                 ToolInvocationStatus::ToolError,
-                "ERROR: registered tool became unavailable".into(),
+                tool_unavailable_output().into(),
                 None,
             );
         };
@@ -649,23 +660,23 @@ impl ToolRegistry {
             ToolExecution::Failed(error) => ToolInvocation::new(
                 call,
                 ToolInvocationStatus::ToolError,
-                format!("ERROR: {error}"),
+                tool_failed_output(error),
                 None,
             ),
             ToolExecution::Panicked => {
-                let output = format!("ERROR: tool `{}` panicked during execution", call.name);
+                let output = tool_panicked_output(&call.name);
                 ToolInvocation::new(call, ToolInvocationStatus::ToolError, output, None)
             }
             ToolExecution::Cancelled => ToolInvocation::new(
                 call,
                 ToolInvocationStatus::Cancelled,
-                "ERROR: tool execution cancelled".into(),
+                tool_execution_cancelled_output().into(),
                 None,
             ),
             ToolExecution::TimedOut => ToolInvocation::new(
                 call,
                 ToolInvocationStatus::TimedOut,
-                "ERROR: tool execution timed out".into(),
+                tool_execution_timed_out_output().into(),
                 None,
             ),
         }
@@ -686,7 +697,7 @@ impl ToolRegistry {
             return Ok(ToolInvocation::new(
                 call,
                 ToolInvocationStatus::ToolError,
-                "ERROR: registered tool became unavailable".into(),
+                tool_unavailable_output().into(),
                 None,
             ));
         };
@@ -720,23 +731,23 @@ impl ToolRegistry {
             AuthorizedToolExecution::Failed(error) => ToolInvocation::new(
                 call,
                 ToolInvocationStatus::ToolError,
-                format!("ERROR: {error}"),
+                tool_failed_output(error),
                 None,
             ),
             AuthorizedToolExecution::Panicked => {
-                let output = format!("ERROR: tool `{}` panicked during execution", call.name);
+                let output = tool_panicked_output(&call.name);
                 ToolInvocation::new(call, ToolInvocationStatus::ToolError, output, None)
             }
             AuthorizedToolExecution::Cancelled => ToolInvocation::new(
                 call,
                 ToolInvocationStatus::Cancelled,
-                "ERROR: tool execution cancelled".into(),
+                tool_execution_cancelled_output().into(),
                 None,
             ),
             AuthorizedToolExecution::TimedOut => ToolInvocation::new(
                 call,
                 ToolInvocationStatus::TimedOut,
-                "ERROR: tool execution timed out".into(),
+                tool_execution_timed_out_output().into(),
                 None,
             ),
         })
@@ -777,6 +788,35 @@ pub enum ToolInvocationStatus {
     TimedOut,
 }
 
+impl ToolInvocationStatus {
+    /// Stable snake_case token for this invocation status (native ask surface).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Executed => "executed",
+            Self::ApprovalRequired => "approval_required",
+            Self::Denied => "denied",
+            Self::InvalidCall => "invalid_call",
+            Self::UnknownTool => "unknown_tool",
+            Self::ToolError => "tool_error",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    /// Whether this status is a successful tool execution (model `is_error` inverted).
+    #[must_use]
+    pub const fn is_executed(self) -> bool {
+        matches!(self, Self::Executed)
+    }
+}
+
+impl std::fmt::Display for ToolInvocationStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolInvocation {
     pub call: ToolCall,
@@ -791,6 +831,90 @@ pub struct ToolInvocation {
     pub output_sha256: String,
     pub output_truncated: bool,
     pub approval: Option<ApprovalPlan>,
+}
+
+/// Model-facing output when execution is cancelled before completion.
+#[must_use]
+pub fn tool_execution_cancelled_output() -> &'static str {
+    "ERROR: tool execution cancelled"
+}
+
+/// Model-facing output when execution hits the shared deadline.
+#[must_use]
+pub fn tool_execution_timed_out_output() -> &'static str {
+    "ERROR: tool execution timed out"
+}
+
+/// Model-facing output when a pre-checked tool disappears from the registry.
+#[must_use]
+pub fn tool_unavailable_output() -> &'static str {
+    "ERROR: registered tool became unavailable"
+}
+
+/// Model-facing output when a registered tool panics.
+#[must_use]
+pub fn tool_panicked_output(name: &str) -> String {
+    format!("ERROR: tool `{name}` panicked during execution")
+}
+
+/// Model-facing output for a tool-returned error Display.
+#[must_use]
+pub fn tool_failed_output(error: impl std::fmt::Display) -> String {
+    format!("ERROR: {error}")
+}
+
+/// Model-facing output for an invalid tool call envelope.
+#[must_use]
+pub fn invalid_tool_call_output(code: &str) -> String {
+    format!("ERROR: invalid tool call ({code})")
+}
+
+/// Model-facing output when tool-call arguments are not valid JSON.
+#[must_use]
+pub fn invalid_json_tool_arguments_output() -> &'static str {
+    "ERROR: tool arguments were not valid JSON"
+}
+
+/// Model-facing output when the tool name is not in the registry.
+#[must_use]
+pub fn unknown_tool_output(name: &str, available: &str) -> String {
+    format!("ERROR: unknown tool `{name}`. Available tools: {available}")
+}
+
+/// Model-facing output when permission policy denies the tool.
+#[must_use]
+pub fn denied_tool_output(name: &str) -> String {
+    format!("ERROR: tool use denied by permission policy: `{name}`")
+}
+
+/// Model-facing output when `ask` terminates without an approval plan.
+#[must_use]
+pub fn missing_approval_plan_output() -> &'static str {
+    "ERROR: permission policy did not produce an approval plan"
+}
+
+/// Model-facing output when a tool call is stopped for operator approval.
+///
+/// Uses a stable 12-character prefix of the canonical plan hash when available
+/// (shorter hashes are printed in full — never panics on short digests).
+#[must_use]
+pub fn approval_required_output(tool: &str, plan_hash: &str) -> String {
+    let plan_prefix = plan_hash_prefix(plan_hash);
+    format!("ERROR: tool use requires approval: `{tool}` (plan {plan_prefix})")
+}
+
+fn plan_hash_prefix(plan_hash: &str) -> &str {
+    let end = plan_hash
+        .char_indices()
+        .nth(12)
+        .map(|(index, _)| index)
+        .unwrap_or(plan_hash.len());
+    // Prefer exact 12-byte ASCII prefix for hex digests (existing contract).
+    if plan_hash.is_ascii() {
+        &plan_hash[..plan_hash.len().min(12)]
+    } else {
+        &plan_hash[..end]
+    }
 }
 
 impl ToolInvocation {
@@ -973,13 +1097,13 @@ fn terminal_outcome(
     if context.cancellation_token().is_cancelled() {
         return Some((
             ToolInvocationStatus::Cancelled,
-            "ERROR: tool execution cancelled",
+            tool_execution_cancelled_output(),
         ));
     }
     if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
         return Some((
             ToolInvocationStatus::TimedOut,
-            "ERROR: tool execution timed out",
+            tool_execution_timed_out_output(),
         ));
     }
     None
@@ -1099,6 +1223,121 @@ mod tests {
 
     use super::*;
     use crate::native::{PermissionRule, PermissionRuleError};
+
+    #[test]
+    fn tool_registry_error_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(ToolRegistryError::EmptyName.as_str(), "empty_name");
+        assert_eq!(ToolRegistryError::NameTooLarge.as_str(), "name_too_large");
+        assert_eq!(ToolRegistryError::UnsafeName.as_str(), "unsafe_name");
+        let dup = ToolRegistryError::Duplicate("secret-tool".into());
+        assert_eq!(dup.as_str(), "duplicate");
+        assert!(!dup.as_str().contains("secret"));
+    }
+
+    #[test]
+    fn tool_context_error_kind_tokens_are_snake_case_without_path() {
+        let err =
+            ToolContextError::NotDirectory(std::path::PathBuf::from("/secret/private/workdir"));
+        assert_eq!(err.as_str(), "not_directory");
+        assert!(!err.as_str().contains("secret"));
+        assert_eq!(
+            ToolContextError::Canonicalize {
+                path: std::path::PathBuf::from("/secret/path"),
+                source: std::io::Error::other("x"),
+            }
+            .as_str(),
+            "canonicalize"
+        );
+    }
+
+    #[test]
+    fn tool_invocation_status_tokens_match_native_ask_surface() {
+        assert_eq!(ToolInvocationStatus::Executed.as_str(), "executed");
+        assert_eq!(
+            ToolInvocationStatus::ApprovalRequired.to_string(),
+            "approval_required"
+        );
+        assert_eq!(ToolInvocationStatus::Denied.as_str(), "denied");
+        assert_eq!(
+            ToolInvocationStatus::InvalidCall.to_string(),
+            "invalid_call"
+        );
+        assert_eq!(ToolInvocationStatus::UnknownTool.as_str(), "unknown_tool");
+        assert_eq!(ToolInvocationStatus::ToolError.to_string(), "tool_error");
+        assert_eq!(ToolInvocationStatus::Cancelled.as_str(), "cancelled");
+        assert_eq!(ToolInvocationStatus::TimedOut.to_string(), "timed_out");
+        assert!(ToolInvocationStatus::Executed.is_executed());
+        assert!(!ToolInvocationStatus::ApprovalRequired.is_executed());
+        assert!(!ToolInvocationStatus::Denied.is_executed());
+    }
+
+    #[test]
+    fn approval_required_output_uses_stable_plan_prefix() {
+        let hash = "0123456789abcdef0123456789abcdef";
+        let text = approval_required_output("run_bash", hash);
+        assert_eq!(
+            text,
+            "ERROR: tool use requires approval: `run_bash` (plan 0123456789ab)"
+        );
+        assert!(!text.contains("cdef"), "only 12-char prefix:\n{text}");
+    }
+
+    #[test]
+    fn approval_required_output_does_not_panic_on_short_hash() {
+        let text = approval_required_output("write_file", "abc");
+        assert_eq!(
+            text,
+            "ERROR: tool use requires approval: `write_file` (plan abc)"
+        );
+        assert_eq!(
+            missing_approval_plan_output(),
+            "ERROR: permission policy did not produce an approval plan"
+        );
+    }
+
+    #[test]
+    fn deny_unknown_invalid_tool_outputs_match_contract() {
+        assert_eq!(
+            denied_tool_output("run_bash"),
+            "ERROR: tool use denied by permission policy: `run_bash`"
+        );
+        assert_eq!(
+            unknown_tool_output("nope", "a, b"),
+            "ERROR: unknown tool `nope`. Available tools: a, b"
+        );
+        assert_eq!(
+            invalid_tool_call_output("empty_name"),
+            "ERROR: invalid tool call (empty_name)"
+        );
+        assert_eq!(
+            invalid_json_tool_arguments_output(),
+            "ERROR: tool arguments were not valid JSON"
+        );
+    }
+
+    #[test]
+    fn cancel_timeout_panic_unavailable_outputs_match_contract() {
+        assert_eq!(
+            tool_execution_cancelled_output(),
+            "ERROR: tool execution cancelled"
+        );
+        assert_eq!(
+            tool_execution_timed_out_output(),
+            "ERROR: tool execution timed out"
+        );
+        assert_eq!(
+            tool_unavailable_output(),
+            "ERROR: registered tool became unavailable"
+        );
+        assert_eq!(
+            tool_panicked_output("panic_tool"),
+            "ERROR: tool `panic_tool` panicked during execution"
+        );
+        assert_eq!(
+            tool_failed_output("path is outside workdir"),
+            "ERROR: path is outside workdir"
+        );
+    }
 
     struct CountingTool {
         calls: Arc<AtomicUsize>,

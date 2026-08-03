@@ -153,6 +153,16 @@ pub enum Sandbox {
 }
 
 impl Sandbox {
+    /// Stable kebab-case token matching the serde rename for this sandbox.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::Write => "write",
+            Self::Full => "full",
+        }
+    }
+
     /// Whether this requested sandbox stays within `ceiling`.
     ///
     /// Keep the security ordering explicit instead of relying on enum
@@ -171,6 +181,12 @@ impl Sandbox {
     #[must_use]
     pub const fn restrict_with(self, other: Self) -> Self {
         if self.is_within(other) { self } else { other }
+    }
+}
+
+impl std::fmt::Display for Sandbox {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -234,6 +250,23 @@ pub enum AuthStyle {
     XApiKey,
 }
 
+impl AuthStyle {
+    /// Stable snake_case token matching the serde rename for this auth style.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bearer => "bearer",
+            Self::XApiKey => "x_api_key",
+        }
+    }
+}
+
+impl fmt::Display for AuthStyle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Credential material for one endpoint.
 #[derive(Debug, Clone)]
 pub struct AuthMaterial {
@@ -270,6 +303,12 @@ mod tests {
     fn secret_debug_is_redacted() {
         let s = Secret::new("sk-super-secret");
         assert_eq!(format!("{s:?}"), "Secret(***)");
+    }
+
+    #[test]
+    fn auth_style_tokens_match_serde_snake_case() {
+        assert_eq!(AuthStyle::Bearer.as_str(), "bearer");
+        assert_eq!(AuthStyle::XApiKey.to_string(), "x_api_key");
     }
 
     #[test]
@@ -314,5 +353,12 @@ mod tests {
             t.to_string(),
             "anthropic/claude-opus-4-8 via claude-code (anthropic_messages)"
         );
+    }
+
+    #[test]
+    fn sandbox_tokens_match_serde_kebab_case() {
+        assert_eq!(Sandbox::ReadOnly.as_str(), "read-only");
+        assert_eq!(Sandbox::Write.to_string(), "write");
+        assert_eq!(Sandbox::Full.as_str(), "full");
     }
 }

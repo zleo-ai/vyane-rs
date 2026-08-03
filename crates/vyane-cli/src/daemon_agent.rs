@@ -100,8 +100,21 @@ fn apply_native_permission_ceilings(
         .iter()
         .map(NativePermissionSet::try_from)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ())?;
-    permissions.restrict_by_all(&ceilings).map_err(|_| ())
+        .map_err(|error| {
+            // Kind-only diagnostic for ceiling parse/validate failures (WP-282/283).
+            tracing::warn!(
+                error = error.as_str(),
+                "{}",
+                crate::output::format_native_permission_set_error_kind_line(error)
+            );
+        })?;
+    permissions.restrict_by_all(&ceilings).map_err(|error| {
+        tracing::warn!(
+            error = error.as_str(),
+            "{}",
+            crate::output::format_native_permission_set_error_kind_line(error)
+        );
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -458,7 +471,7 @@ impl DaemonAgentHost {
                 .map_err(|_| AgentApiError::unavailable())?;
         match created {
             Ok((_, record)) => self.view(record).await,
-            Err(_) => {
+            Err(create_error) => {
                 let store = Arc::clone(&self.store);
                 let lookup = run_id.clone();
                 let existing =
@@ -473,6 +486,12 @@ impl DaemonAgentHost {
                     if spool_create == AgentSpoolCreate::Created {
                         let _ = self.spool.remove(&run_id, &input.worker_id);
                     }
+                    // Kind-only pure line; never log free-form store ids (WP-377).
+                    tracing::warn!(
+                        error = create_error.as_str(),
+                        "{}",
+                        crate::output::format_agent_store_error_kind_line(&create_error)
+                    );
                     Err(AgentApiError::conflict())
                 }
             }
@@ -682,6 +701,12 @@ impl DaemonAgentHost {
                         let _ = self.native_spool.remove_exact(&input);
                         let _ = self.native_spool.remove_workdir_exact(&input);
                     }
+                    // Kind-only pure line; never log free-form store ids (WP-376).
+                    tracing::warn!(
+                        error = create_error.as_str(),
+                        "{}",
+                        crate::output::format_agent_store_error_kind_line(&create_error)
+                    );
                     if matches!(create_error, AgentStoreError::AlreadyExists { .. }) {
                         Err(AgentApiError::conflict())
                     } else {
@@ -734,6 +759,13 @@ impl DaemonAgentHost {
         let _cancel_guard = self.cancel_gate.lock().await;
         let record = self.get_record(run_id.clone()).await?;
         if record.state.is_terminal() {
+            // Kind-only pure line for already-terminal cancel observation (WP-385).
+            tracing::info!(
+                run_id = %run_id,
+                state = record.state.as_str(),
+                "{}",
+                crate::output::format_run_state_line(record.state)
+            );
             if !self.cleanup_terminal_native_input(&record).await {
                 return Err(AgentApiError::unavailable());
             }
@@ -743,7 +775,13 @@ impl DaemonAgentHost {
             // A detached request or startup recovery owns the durable control
             // ticket. Raw ticket authority is deliberately not recoverable
             // from the store, so observing the durable state is the safe
-            // idempotent response.
+            // idempotent response. Kind-only pure line (WP-385).
+            tracing::info!(
+                run_id = %run_id,
+                state = record.state.as_str(),
+                "{}",
+                crate::output::format_run_state_line(record.state)
+            );
             return self.view(record).await;
         }
         let request = CancelRequest {
@@ -765,11 +803,17 @@ impl DaemonAgentHost {
             let (outcome, confirmed_gone, confirmed_adapter) = match ticket.controller.clone() {
                 None => (CancelOutcome::Cancelled, None, None),
                 Some(controller) if controller.kind == ControllerKind::Process => {
-                    match self
+                    let observation = self
                         .controller
                         .stop_exact(Instant::now() + CANCEL_CONTROL_TIMEOUT, controller.clone())
-                        .await
-                    {
+                        .await;
+                    // Kind-only; no controller ids in structured fields (WP-342/361).
+                    tracing::info!(
+                        observation = observation.as_str(),
+                        "{}",
+                        crate::output::format_controller_recovery_observation_line(observation)
+                    );
+                    match observation {
                         vyane_service::ControllerRecoveryObservation::Gone => (
                             CancelOutcome::Cancelled,
                             Some(controller),
@@ -782,7 +826,7 @@ impl DaemonAgentHost {
                     }
                 }
                 Some(controller) if controller.kind == ControllerKind::InProcess => {
-                    match self
+                    let observation = self
                         .native_controller
                         .observe_gone(
                             ControllerRecoveryContext::with_deadline(
@@ -790,8 +834,14 @@ impl DaemonAgentHost {
                             ),
                             controller.clone(),
                         )
-                        .await
-                    {
+                        .await;
+                    // Kind-only; no controller ids in structured fields (WP-342/361).
+                    tracing::info!(
+                        observation = observation.as_str(),
+                        "{}",
+                        crate::output::format_controller_recovery_observation_line(observation)
+                    );
+                    match observation {
                         vyane_service::ControllerRecoveryObservation::Gone => (
                             CancelOutcome::Cancelled,
                             Some(controller),
@@ -812,6 +862,12 @@ impl DaemonAgentHost {
             .await
             .map_err(|_| AgentApiError::unavailable())?
             .map_err(|_| AgentApiError::unavailable())?;
+            // Kind-only operator signal after durable cancel settlement (WP-337/361).
+            tracing::info!(
+                outcome = outcome.as_str(),
+                "{}",
+                crate::output::format_cancel_outcome_line(outcome)
+            );
             if let (Some(controller), Some(adapter)) = (confirmed_gone, confirmed_adapter) {
                 // Durable cancellation now owns terminal truth, so the exact
                 // no-longer-live controller evidence can be retired.
@@ -893,6 +949,17 @@ impl DaemonAgentHost {
         .await
         .map_err(|_| AgentApiError::unavailable())?
         .map_err(|_| AgentApiError::unavailable())?;
+        // Kind-only pure line when a terminal run already has a completion record (WP-388).
+        if record.state.is_terminal()
+            && let Some(status) = completion_status
+        {
+            tracing::info!(
+                run_id = %record.id,
+                status = status.as_str(),
+                "{}",
+                crate::output::format_run_completion_status_line(status)
+            );
+        }
         Ok(AgentRunView {
             run_id: record.id,
             worker_id: record.worker_id,

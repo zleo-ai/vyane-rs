@@ -140,8 +140,12 @@ impl PreparedShutdownSignal {
 async fn wait_for_prepared_shutdown(signal: Result<PreparedShutdownSignal>) {
     match signal {
         Ok(signal) => signal.wait().await,
-        Err(error) => {
-            tracing::error!(error = %error, "failed to install shutdown handlers");
+        Err(_error) => {
+            // Free-form OS install failures stay out of structured fields.
+            tracing::error!(
+                error = "install_failed",
+                "failed to install shutdown handlers"
+            );
             // Handler installation failure is not a shutdown request. Remaining
             // alive is safer than releasing supervisor ownership immediately.
             std::future::pending::<()>().await;

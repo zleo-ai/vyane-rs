@@ -100,6 +100,22 @@ pub enum NativeWebFetchPolicyError {
     InvalidRedirectLimit,
 }
 
+impl NativeWebFetchPolicyError {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyAllowlist => "empty_allowlist",
+            Self::TooManyDomains => "too_many_domains",
+            Self::InvalidDomain => "invalid_domain",
+            Self::DuplicateDomain => "duplicate_domain",
+            Self::InvalidFetchLimit => "invalid_fetch_limit",
+            Self::InvalidResponseLimit => "invalid_response_limit",
+            Self::InvalidRedirectLimit => "invalid_redirect_limit",
+        }
+    }
+}
+
 pub fn web_fetch_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "web_fetch".into(),
@@ -149,6 +165,17 @@ pub enum RegisterWebFetchToolError {
     Policy(#[from] NativeWebFetchPolicyError),
     #[error(transparent)]
     Registry(#[from] ToolRegistryError),
+}
+
+impl RegisterWebFetchToolError {
+    /// Stable snake_case *kind* token; nested details stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Policy(_) => "policy",
+            Self::Registry(_) => "registry",
+        }
+    }
 }
 
 struct WebFetchTool {
@@ -277,6 +304,39 @@ mod tests {
             max_response_bytes: 4096,
             max_redirects: 1,
         }
+    }
+
+    #[test]
+    fn register_web_fetch_tool_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            RegisterWebFetchToolError::Policy(NativeWebFetchPolicyError::EmptyAllowlist).as_str(),
+            "policy"
+        );
+        assert_eq!(
+            RegisterWebFetchToolError::Registry(crate::native::ToolRegistryError::EmptyName)
+                .as_str(),
+            "registry"
+        );
+    }
+
+    #[test]
+    fn native_web_fetch_policy_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            NativeWebFetchPolicyError::EmptyAllowlist.as_str(),
+            "empty_allowlist"
+        );
+        assert_eq!(
+            NativeWebFetchPolicyError::TooManyDomains.as_str(),
+            "too_many_domains"
+        );
+        assert_eq!(
+            NativeWebFetchPolicyError::DuplicateDomain.as_str(),
+            "duplicate_domain"
+        );
+        assert_eq!(
+            NativeWebFetchPolicyError::InvalidRedirectLimit.as_str(),
+            "invalid_redirect_limit"
+        );
     }
 
     #[test]

@@ -843,9 +843,10 @@ impl Dispatcher {
         // Pre-execution configuration/session failures use `Result::Err`; once
         // an external model call completed, the truthful run is returned.
         if let Err(e) = self.ledger.append(&record).await {
+            // Kind-only; never log free-form ledger messages (WP-318).
             tracing::warn!(
                 run_id = %record.run_id,
-                error = %e,
+                error = e.kind.as_str(),
                 "ledger append failed after run completed; returning run anyway"
             );
         }
@@ -865,7 +866,7 @@ impl Dispatcher {
         {
             tracing::warn!(
                 session_id = sid,
-                error = %e,
+                error = e.kind.as_str(),
                 "session store update failed after run was recorded"
             );
         }
@@ -1388,9 +1389,10 @@ impl Dispatcher {
         };
 
         if let Err(e) = self.ledger.append(&record).await {
+            // Kind-only; never log free-form ledger messages (WP-318).
             tracing::warn!(
                 run_id = %record.run_id,
-                error = %e,
+                error = e.kind.as_str(),
                 "ledger append failed after streaming run completed; returning run anyway"
             );
         }

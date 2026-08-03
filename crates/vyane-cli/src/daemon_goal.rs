@@ -152,7 +152,12 @@ impl DaemonGoalSupervisor {
                 return Ok(());
             }
             if let Err(error) = self.config.pursuit.validate() {
-                tracing::error!(error = %error, "resident goal configuration is temporarily unavailable");
+                // Kind-only pure line; validate Display may carry free-form config (WP-370).
+                tracing::error!(
+                    error = error.as_str(),
+                    "{}",
+                    crate::output::format_goal_store_error_kind_line(&error)
+                );
                 self.wait_or_cancel(&cancel).await;
                 continue;
             }
@@ -163,7 +168,16 @@ impl DaemonGoalSupervisor {
                     continue;
                 }
                 Err(error) => {
-                    tracing::error!(error = %error, "resident goal acquisition failed");
+                    // Acquisition is GoalStoreError-wrapped; never log free-form ids (WP-302/363).
+                    if let Some(store_error) = error.downcast_ref::<GoalStoreError>() {
+                        tracing::error!(
+                            error = store_error.as_str(),
+                            "{}",
+                            crate::output::format_goal_store_error_kind_line(store_error)
+                        );
+                    } else {
+                        tracing::error!(error = "internal", "resident goal acquisition failed");
+                    }
                     self.wait_or_cancel(&cancel).await;
                     continue;
                 }
@@ -185,12 +199,14 @@ impl DaemonGoalSupervisor {
                 Err(error) => {
                     let retry = schedule_retry(&mut self.retry_after, &goal, Instant::now());
                     self.pause_quarantined(&goal, retry)?;
+                    // Kind-only pure line; never log free-form store payloads (WP-370).
                     tracing::warn!(
                         goal_id = %goal.id,
-                        error = %error,
+                        error = error.as_str(),
                         errors = retry.errors,
                         quarantined = retry.eligible_at.is_none(),
-                        "resident goal pursuer construction failed"
+                        "{}",
+                        crate::output::format_goal_store_error_kind_line(&error)
                     );
                     self.wait_or_cancel(&cancel).await;
                     continue;
@@ -206,23 +222,29 @@ impl DaemonGoalSupervisor {
             let retry_after_error = match result {
                 Ok(outcome) => {
                     self.retry_after.remove(&goal.id);
+                    // Kind-only structured fields + pure CLI status lines (WP-270/355/362).
                     tracing::info!(
                         goal_id = %goal.id,
-                        status = ?outcome.status,
+                        status = outcome.status.as_str(),
+                        final_goal_status = outcome.final_goal_status.as_str(),
                         reason = %outcome.reason,
-                        "resident goal pursuit settled"
+                        "{}; {}",
+                        crate::output::format_pursuit_status_line(outcome.status),
+                        crate::output::format_goal_status_line(outcome.final_goal_status)
                     );
                     false
                 }
                 Err(error) => {
                     let retry = schedule_retry(&mut self.retry_after, &goal, Instant::now());
                     self.pause_quarantined(&goal, retry)?;
+                    // Kind-only pure line; never log free-form store payloads (WP-370).
                     tracing::warn!(
                         goal_id = %goal.id,
-                        error = %error,
+                        error = error.as_str(),
                         errors = retry.errors,
                         quarantined = retry.eligible_at.is_none(),
-                        "resident goal pursuit stopped with an error"
+                        "{}",
+                        crate::output::format_goal_store_error_kind_line(&error)
                     );
                     true
                 }
@@ -265,7 +287,13 @@ impl DaemonGoalSupervisor {
                 Ok(())
             }
             Err(error) if self.retry_after.contains_key(&goal.id) => {
-                tracing::error!(goal_id = %goal.id, error = %error, "failed to persist resident goal quarantine");
+                // Kind-only pure line; never log free-form store payloads (WP-369).
+                tracing::error!(
+                    goal_id = %goal.id,
+                    error = error.as_str(),
+                    "{}",
+                    crate::output::format_goal_store_error_kind_line(&error)
+                );
                 Ok(())
             }
             Err(error) => Err(error)

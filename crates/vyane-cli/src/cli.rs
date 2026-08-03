@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use vyane_core::{RunStatus, Sandbox};
+use vyane_goal::{GoalContinuitySignalKind, GoalStatus, TakeoverDecision};
 use vyane_workflow::WorkflowRunId;
 
 /// Dispatch, fan out, and inspect Vyane model runs.
@@ -187,6 +188,21 @@ pub enum GoalTakeoverDecisionArg {
     Reject,
 }
 
+impl From<GoalTakeoverDecisionArg> for TakeoverDecision {
+    fn from(value: GoalTakeoverDecisionArg) -> Self {
+        match value {
+            GoalTakeoverDecisionArg::Approve => Self::Approve,
+            GoalTakeoverDecisionArg::Reject => Self::Reject,
+        }
+    }
+}
+
+impl std::fmt::Display for GoalTakeoverDecisionArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(TakeoverDecision::from(*self).as_str())
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct GoalContinuityDecisionArgs {
     #[command(flatten)]
@@ -220,6 +236,22 @@ pub enum GoalContinuitySignalArg {
     ReviewChecksPassed,
     #[value(name = "review-checks-failed", alias = "review_checks_failed")]
     ReviewChecksFailed,
+}
+
+impl From<GoalContinuitySignalArg> for GoalContinuitySignalKind {
+    fn from(value: GoalContinuitySignalArg) -> Self {
+        match value {
+            GoalContinuitySignalArg::QuotaReset => Self::QuotaReset,
+            GoalContinuitySignalArg::ReviewChecksPassed => Self::ReviewChecksPassed,
+            GoalContinuitySignalArg::ReviewChecksFailed => Self::ReviewChecksFailed,
+        }
+    }
+}
+
+impl std::fmt::Display for GoalContinuitySignalArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(GoalContinuitySignalKind::from(*self).as_str())
+    }
 }
 
 #[derive(Debug, Args)]
@@ -277,6 +309,12 @@ pub enum GoalStatusArg {
     Completed,
     Failed,
     Cancelled,
+}
+
+impl std::fmt::Display for GoalStatusArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(GoalStatus::from(*self).as_str())
+    }
 }
 
 #[derive(Debug, Args)]
@@ -964,12 +1002,7 @@ pub enum SandboxArg {
 
 impl std::fmt::Display for SandboxArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let raw = match self {
-            SandboxArg::ReadOnly => "read-only",
-            SandboxArg::Write => "write",
-            SandboxArg::Full => "full",
-        };
-        f.write_str(raw)
+        f.write_str(Sandbox::from(*self).as_str())
     }
 }
 
@@ -1002,6 +1035,12 @@ impl From<RunStatusArg> for RunStatus {
     }
 }
 
+impl std::fmt::Display for RunStatusArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(RunStatus::from(*self).as_str())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -1010,6 +1049,52 @@ mod tests {
     use super::*;
 
     const RUN_ID: &str = "01890f3e-7b7c-7cc2-98d2-3f9a2b6c7d8e";
+
+    #[test]
+    fn sandbox_arg_display_uses_domain_sandbox_tokens() {
+        assert_eq!(SandboxArg::ReadOnly.to_string(), "read-only");
+        assert_eq!(SandboxArg::Write.to_string(), Sandbox::Write.as_str());
+        assert_eq!(SandboxArg::Full.to_string(), "full");
+    }
+
+    #[test]
+    fn run_status_arg_display_uses_domain_run_status_tokens() {
+        assert_eq!(RunStatusArg::Success.to_string(), "success");
+        assert_eq!(
+            RunStatusArg::Timeout.to_string(),
+            RunStatus::Timeout.as_str()
+        );
+        assert_eq!(RunStatusArg::Cancelled.to_string(), "cancelled");
+        assert_eq!(RunStatusArg::Error.to_string(), "error");
+    }
+
+    #[test]
+    fn goal_status_arg_display_uses_domain_goal_status_tokens() {
+        assert_eq!(GoalStatusArg::Queued.to_string(), "queued");
+        assert_eq!(
+            GoalStatusArg::InProgress.to_string(),
+            GoalStatus::InProgress.as_str()
+        );
+        assert_eq!(GoalStatusArg::InProgress.to_string(), "in_progress");
+        assert_eq!(GoalStatusArg::Completed.to_string(), "completed");
+    }
+
+    #[test]
+    fn goal_decision_and_signal_arg_display_use_domain_tokens() {
+        assert_eq!(GoalTakeoverDecisionArg::Approve.to_string(), "approve");
+        assert_eq!(
+            GoalTakeoverDecisionArg::Reject.to_string(),
+            TakeoverDecision::Reject.as_str()
+        );
+        assert_eq!(
+            GoalContinuitySignalArg::QuotaReset.to_string(),
+            "quota_reset"
+        );
+        assert_eq!(
+            GoalContinuitySignalArg::ReviewChecksPassed.to_string(),
+            GoalContinuitySignalKind::ReviewChecksPassed.as_str()
+        );
+    }
 
     #[test]
     fn workflow_daemon_commands_parse_the_expected_surface() {

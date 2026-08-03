@@ -128,6 +128,36 @@ impl WorkflowError {
         WorkflowError::Validation(ValidationReport::new(problems))
     }
 
+    /// Stable snake_case *kind* token; paths, run ids, and IO payloads stay out.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReadWorkflow { .. } => "read_workflow",
+            Self::ParseWorkflow { .. } => "parse_workflow",
+            Self::InvalidWorkflowPlan { .. } => "invalid_workflow_plan",
+            Self::ReadPrompt { .. } => "read_prompt",
+            Self::WorkflowSourceTooLarge { .. } => "workflow_source_too_large",
+            Self::WorkflowPromptTooLarge { .. } => "workflow_prompt_too_large",
+            Self::WorkflowSourceBundleTooLarge { .. } => "workflow_source_bundle_too_large",
+            Self::WorkflowSourceTooManyEntries { .. } => "workflow_source_too_many_entries",
+            Self::InvalidWorkflowPromptPath { .. } => "invalid_workflow_prompt_path",
+            Self::WorkflowPromptPathEscape { .. } => "workflow_prompt_path_escape",
+            Self::WorkflowPromptNotRegular { .. } => "workflow_prompt_not_regular",
+            Self::DuplicateWorkflowPromptEntry { .. } => "duplicate_workflow_prompt_entry",
+            Self::MissingWorkflowPromptEntry { .. } => "missing_workflow_prompt_entry",
+            Self::ExtraWorkflowPromptEntry { .. } => "extra_workflow_prompt_entry",
+            Self::Validation(_) => "validation",
+            Self::WriteJournal { .. } => "write_journal",
+            Self::ReadJournal { .. } => "read_journal",
+            Self::ParseJournal { .. } => "parse_journal",
+            Self::InvalidRunId { .. } => "invalid_run_id",
+            Self::JournalIdMismatch { .. } => "journal_id_mismatch",
+            Self::InvalidJournalFileName { .. } => "invalid_journal_file_name",
+            Self::JournalAlreadyExists { .. } => "journal_already_exists",
+            Self::WorkflowHashChanged { .. } => "workflow_hash_changed",
+        }
+    }
+
     pub fn is_validation_or_config(&self) -> bool {
         matches!(
             self,
@@ -147,5 +177,192 @@ impl WorkflowError {
                 | WorkflowError::ExtraWorkflowPromptEntry { .. }
                 | WorkflowError::WorkflowHashChanged { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkflowError;
+    use std::path::PathBuf;
+
+    #[test]
+    fn workflow_error_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            WorkflowError::ReadWorkflow {
+                path: PathBuf::from("/secret/path.toml"),
+                source: std::io::Error::other("secret-io"),
+            }
+            .as_str(),
+            "read_workflow"
+        );
+        assert_eq!(
+            WorkflowError::ParseWorkflow {
+                path: PathBuf::from("/secret/path.toml")
+            }
+            .as_str(),
+            "parse_workflow"
+        );
+        assert_eq!(
+            WorkflowError::InvalidWorkflowPlan {
+                reason: "secret-reason".into()
+            }
+            .as_str(),
+            "invalid_workflow_plan"
+        );
+        assert_eq!(
+            WorkflowError::ReadPrompt {
+                path: PathBuf::from("/secret/prompt.md"),
+                source: std::io::Error::other("secret-io"),
+            }
+            .as_str(),
+            "read_prompt"
+        );
+        assert_eq!(
+            WorkflowError::WorkflowSourceTooLarge {
+                path: PathBuf::from("/secret/path.toml"),
+                limit: 1,
+                actual: 2,
+            }
+            .as_str(),
+            "workflow_source_too_large"
+        );
+        assert_eq!(
+            WorkflowError::WorkflowPromptTooLarge {
+                path: "secret.md".into(),
+                limit: 1,
+                actual: 2,
+            }
+            .as_str(),
+            "workflow_prompt_too_large"
+        );
+        assert_eq!(
+            WorkflowError::WorkflowSourceBundleTooLarge {
+                limit: 1,
+                actual: 2
+            }
+            .as_str(),
+            "workflow_source_bundle_too_large"
+        );
+        assert_eq!(
+            WorkflowError::WorkflowSourceTooManyEntries {
+                limit: 1,
+                actual: 2
+            }
+            .as_str(),
+            "workflow_source_too_many_entries"
+        );
+        assert_eq!(
+            WorkflowError::InvalidWorkflowPromptPath { step: 3 }.as_str(),
+            "invalid_workflow_prompt_path"
+        );
+        assert_eq!(
+            WorkflowError::WorkflowPromptPathEscape {
+                path: "../secret".into()
+            }
+            .as_str(),
+            "workflow_prompt_path_escape"
+        );
+        assert_eq!(
+            WorkflowError::WorkflowPromptNotRegular {
+                path: "secret.md".into()
+            }
+            .as_str(),
+            "workflow_prompt_not_regular"
+        );
+        assert_eq!(
+            WorkflowError::DuplicateWorkflowPromptEntry {
+                path: "secret.md".into()
+            }
+            .as_str(),
+            "duplicate_workflow_prompt_entry"
+        );
+        assert_eq!(
+            WorkflowError::MissingWorkflowPromptEntry {
+                path: "secret.md".into()
+            }
+            .as_str(),
+            "missing_workflow_prompt_entry"
+        );
+        assert_eq!(
+            WorkflowError::ExtraWorkflowPromptEntry {
+                path: "secret.md".into()
+            }
+            .as_str(),
+            "extra_workflow_prompt_entry"
+        );
+        assert_eq!(
+            WorkflowError::validation(vec!["secret-problem".into()]).as_str(),
+            "validation"
+        );
+        assert_eq!(
+            WorkflowError::WriteJournal {
+                path: PathBuf::from("/secret/j.json"),
+                source: std::io::Error::other("secret-io"),
+            }
+            .as_str(),
+            "write_journal"
+        );
+        assert_eq!(
+            WorkflowError::ReadJournal {
+                path: PathBuf::from("/secret/j.json"),
+                source: std::io::Error::other("secret-io"),
+            }
+            .as_str(),
+            "read_journal"
+        );
+        assert_eq!(
+            WorkflowError::ParseJournal {
+                path: PathBuf::from("/secret/j.json"),
+                source: serde_json::from_str::<()>("not-json").expect_err("parse"),
+            }
+            .as_str(),
+            "parse_journal"
+        );
+        assert_eq!(
+            WorkflowError::InvalidRunId {
+                value: "secret-run".into()
+            }
+            .as_str(),
+            "invalid_run_id"
+        );
+        assert_eq!(
+            WorkflowError::JournalIdMismatch {
+                path: PathBuf::from("/secret/j.json"),
+                requested: "req".into(),
+                actual: "act".into(),
+            }
+            .as_str(),
+            "journal_id_mismatch"
+        );
+        assert_eq!(
+            WorkflowError::InvalidJournalFileName {
+                path: PathBuf::from("/secret/j.json")
+            }
+            .as_str(),
+            "invalid_journal_file_name"
+        );
+        assert_eq!(
+            WorkflowError::JournalAlreadyExists {
+                path: PathBuf::from("/secret/j.json"),
+                wf_run_id: "secret-run".into(),
+            }
+            .as_str(),
+            "journal_already_exists"
+        );
+        assert_eq!(
+            WorkflowError::WorkflowHashChanged {
+                expected: "a".into(),
+                actual: "b".into(),
+            }
+            .as_str(),
+            "workflow_hash_changed"
+        );
+        assert!(
+            !WorkflowError::InvalidWorkflowPlan {
+                reason: "secret-reason".into()
+            }
+            .as_str()
+            .contains("secret")
+        );
     }
 }

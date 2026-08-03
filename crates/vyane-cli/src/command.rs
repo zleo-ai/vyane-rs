@@ -32,7 +32,7 @@ use crate::cli::{
     WorkflowCommand, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs, WorkflowStatusArgs,
     WorkflowSubmitArgs,
 };
-use crate::daemon_client::{DaemonWorkflowClient, WorkflowTaskView};
+use crate::daemon_client::DaemonWorkflowClient;
 use crate::output::{BroadcastJson, BroadcastRow, DurableTaskStatusJson, RunJson, TaskRow};
 use crate::task::proc::{
     IdentityCheck, SIGKILL, SIGTERM, pgid_of, process_birth_fingerprint, process_group_alive,
@@ -110,11 +110,11 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
 async fn run_serve(config_path: Option<PathBuf>, args: ServeArgs) -> Result<ExitCode> {
     let addr: SocketAddr = args.addr.parse().context("invalid --addr")?;
     if !addr.ip().is_loopback() {
-        eprintln!("config error: vyane serve only accepts loopback listen addresses");
+        eprintln!("{}", crate::output::format_serve_loopback_only_line());
         return Ok(ExitCode::from(2));
     }
     let service = VyaneService::load(config_path.as_deref())?;
-    eprintln!("vyane serve starting on {addr}");
+    eprintln!("{}", crate::output::format_serve_starting_line(addr));
     crate::api::run_server(service, addr).await?;
     Ok(ExitCode::SUCCESS)
 }
@@ -136,113 +136,123 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
     let loaded = match load_config(config_path.as_deref()) {
         Ok(loaded) => loaded,
         Err(error) => {
-            eprintln!("config error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_config_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(2));
         }
     };
 
-    println!("config files:");
-    for path in &loaded.files {
-        let state = if path.exists() { "loaded" } else { "missing" };
-        println!("  {} ({state})", path.display());
-    }
+    let file_entries = loaded
+        .files
+        .iter()
+        .map(|path| (path.display().to_string(), path.exists()))
+        .collect::<Vec<_>>();
+    print!(
+        "{}",
+        crate::output::format_check_config_files(&file_entries)
+    );
 
-    println!("providers:");
+    println!("{}", crate::output::format_check_providers_header());
     for (id, provider) in &loaded.config.providers.providers {
-        println!(
-            "  {id}: {} default_model={}",
-            provider.protocol,
-            provider
-                .default_model
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "-".to_string())
+        let default_model = provider.default_model.as_ref().map(ToString::to_string);
+        print!(
+            "{}",
+            crate::output::format_check_provider_line(
+                id,
+                provider.protocol,
+                default_model.as_deref(),
+            )
         );
     }
 
-    println!("profiles:");
+    println!("{}", crate::output::format_check_profiles_header());
     for name in loaded.config.profiles.keys() {
-        match loaded
+        let body = match loaded
             .config
             .resolve_failover_with(name, &|key| loaded.env_lookup(key))
         {
-            Ok(chain) => {
-                let display = chain
-                    .iter()
-                    .map(|bound| bound.target.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" -> ");
-                println!("  {name}: {display}");
-            }
-            Err(error) => {
-                println!("  {name}: warning: {}", error.message);
-            }
-        }
+            Ok(chain) => chain
+                .iter()
+                .map(|bound| bound.target.to_string())
+                .collect::<Vec<_>>()
+                .join(" -> "),
+            Err(error) => crate::output::format_check_profile_warning_body(&error.message),
+        };
+        print!("{}", crate::output::format_check_profile_line(name, &body));
     }
 
-    println!("harnesses:");
+    println!("{}", crate::output::format_check_harnesses_header());
     for kind in [HarnessKind::ClaudeCode, HarnessKind::CodexCli] {
         let available = harness_available(kind.clone()).await;
-        println!(
-            "  {kind}: {}",
-            if available { "available" } else { "missing" }
+        print!(
+            "{}",
+            crate::output::format_check_harness_line(kind, available)
         );
     }
 
-    println!("profile environment:");
+    println!(
+        "{}",
+        crate::output::format_check_profile_environment_header()
+    );
     for name in loaded.config.profiles.keys() {
         let vars = env_vars_for_profile(&loaded.config, name);
         if vars.is_empty() {
-            println!("  {name}: none");
+            print!("{}", crate::output::format_check_profile_line(name, "none"));
             continue;
         }
         for var in vars {
-            let state = if loaded.env_lookup(&var).is_some() {
-                "present"
-            } else {
-                "missing"
-            };
-            println!("  {name}: {var} {state}");
+            let present = loaded.env_lookup(&var).is_some();
+            print!(
+                "{}",
+                crate::output::format_check_profile_env_line(name, &var, present)
+            );
+        }
+    }
+
+    // Kind-only pure static diagnostics when the bounded report succeeds (WP-402).
+    // Failure of check_config does not change the human check exit path.
+    if let Ok(report) = vyane_service::check_config(&loaded) {
+        tracing::info!(
+            status = report.status.as_str(),
+            "{}",
+            crate::output::format_config_check_status_line(report.status)
+        );
+        for provider in &report.providers {
+            tracing::info!(
+                credential = provider.credential.as_str(),
+                "{}",
+                crate::output::format_credential_status_line(provider.credential)
+            );
+        }
+        for profile in &report.profiles {
+            tracing::info!(
+                status = profile.status.as_str(),
+                "{}",
+                crate::output::format_profile_check_status_line(profile.status)
+            );
+            if let Some(issue) = profile.issue.as_ref() {
+                tracing::info!(
+                    code = issue.code.as_str(),
+                    "{}",
+                    crate::output::format_config_issue_code_line(issue.code)
+                );
+            }
+        }
+        for issue in &report.issues {
+            tracing::info!(
+                code = issue.code.as_str(),
+                "{}",
+                crate::output::format_config_issue_code_line(issue.code)
+            );
         }
     }
 
     let permissions = vyane_service::check_permissions(&loaded.config);
-    println!("permissions:");
-    println!(
-        "  cli-harness: max_sandbox={} ceiling_layers={}",
-        sandbox_name(permissions.harness.max_sandbox),
-        permissions.harness.ceiling_layers
-    );
-    println!(
-        "  native/canto: ceiling_layers={} filesystem_read={} filesystem_write={} command_execution={} command_network={} web_search={} web_fetch={} tool_policy_layers={} tool_policy_rules={}",
-        permissions.native.ceiling_layers,
-        native_axis_name(permissions.native.filesystem_read),
-        native_axis_name(permissions.native.filesystem_write),
-        native_axis_name(permissions.native.command_execution),
-        native_axis_name(permissions.native.command_network),
-        native_axis_name(permissions.native.web_search),
-        native_axis_name(permissions.native.web_fetch),
-        permissions.native.tool_policy_layers,
-        permissions.native.tool_policy_rule_count,
-    );
+    crate::output::print_permission_check(&permissions);
 
     Ok(ExitCode::SUCCESS)
-}
-
-const fn sandbox_name(sandbox: vyane_core::Sandbox) -> &'static str {
-    match sandbox {
-        vyane_core::Sandbox::ReadOnly => "read-only",
-        vyane_core::Sandbox::Write => "write",
-        vyane_core::Sandbox::Full => "full",
-    }
-}
-
-const fn native_axis_name(status: vyane_service::NativePermissionAxisStatus) -> &'static str {
-    match status {
-        vyane_service::NativePermissionAxisStatus::UnrestrictedByConfig => "unrestricted_by_config",
-        vyane_service::NativePermissionAxisStatus::Bounded => "bounded",
-        vyane_service::NativePermissionAxisStatus::Disabled => "disabled",
-    }
 }
 
 async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
@@ -282,7 +292,10 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
     let (loaded, plan, task) = match phase {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("config error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_config_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(2));
         }
     };
@@ -308,7 +321,10 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
-                eprintln!("config error: {error:#}");
+                eprintln!(
+                    "{}",
+                    crate::output::format_config_error_line(&format!("{error:#}"))
+                );
                 return Ok(ExitCode::from(2));
             }
         };
@@ -350,16 +366,14 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
                     // the non-streaming path with the same prepared identity.
                     None => {
                         eprintln!(
-                            "notice: {} does not support streaming; falling back to non-streaming",
-                            bound.target
+                            "{}",
+                            crate::output::format_stream_unsupported_fallback_line(&bound.target)
                         );
                         stream_fallback = Some(prepared);
                     }
                 }
             }
-            None => eprintln!(
-                "notice: --stream only applies to a single target with no --session; falling back to non-streaming"
-            ),
+            None => eprintln!("{}", crate::output::format_stream_not_applicable_line()),
         }
     }
 
@@ -381,7 +395,7 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
     } else if let Some(text) = output.as_deref() {
         println!("{text}");
     } else if let Some(error) = &record.error {
-        eprintln!("{error}");
+        eprintln!("{}", crate::output::format_run_failure_line(error));
     }
 
     Ok(if success {
@@ -442,7 +456,19 @@ async fn run_dispatch_streaming(
             }
             vyane_kernel::StreamDispatchEvent::ToolUse { name, summary } => {
                 if !json {
-                    eprintln!("\n[tool] {name}: {summary}");
+                    eprintln!(
+                        "{}",
+                        crate::output::format_stream_tool_use_line(&name, &summary)
+                    );
+                    // Progress: tool has been admitted to the stream path.
+                    // Terminal ask/deny/error statuses use the same pure line
+                    // with other ToolInvocationStatus tokens (WP-266/WP-267).
+                    eprintln!(
+                        "{}",
+                        crate::output::format_tool_invocation_status_line(
+                            vyane_harness::native::ToolInvocationStatus::Executed
+                        )
+                    );
                 }
             }
         })
@@ -468,7 +494,7 @@ async fn run_dispatch_streaming(
             if json {
                 print_run_json(record, output)?;
             } else if !success && let Some(error) = &record.error {
-                eprintln!("{error}");
+                eprintln!("{}", crate::output::format_run_failure_line(error));
             }
 
             Ok(Some(if success {
@@ -542,7 +568,7 @@ fn spawn_detached_dispatch(
     if args.json {
         println!("{}", serde_json::json!({ "id": run_id }));
     } else {
-        println!("{run_id}");
+        println!("{}", crate::output::format_run_id_line(&run_id));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -664,7 +690,10 @@ async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<Ex
             Err(error) => {
                 // Never borrow the current epoch after a failed attach. This
                 // invocation does not own an already-running controller.
-                eprintln!("worker error: {error:#}");
+                eprintln!(
+                    "{}",
+                    crate::output::format_worker_error_line(&format!("{error:#}"))
+                );
                 return Ok(ExitCode::from(1));
             }
         }
@@ -703,8 +732,11 @@ async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<Ex
                     });
                 if let Err(settlement_error) = settlement {
                     eprintln!(
-                        "worker metadata settlement failed for {}: {settlement_error:#}",
-                        args.id
+                        "{}",
+                        crate::output::format_worker_metadata_settlement_failed_line(
+                            &args.id,
+                            &format!("{settlement_error:#}")
+                        )
                     );
                 }
             } else {
@@ -718,7 +750,10 @@ async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<Ex
                 status.error = Some(format!("{error:#}"));
                 let _ = paths.write_status(&status);
             }
-            eprintln!("worker error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_worker_error_line(&format!("{error:#}"))
+            );
             Ok(ExitCode::from(1))
         }
     }
@@ -843,7 +878,13 @@ async fn worker_body(
     {
         // The ledger/run outcome remains authoritative even if its optional
         // convenience artifact cannot be written.
-        eprintln!("write {}: {error:#}", paths.output().display());
+        eprintln!(
+            "{}",
+            crate::output::format_output_write_failed_line(
+                paths.output().display(),
+                &format!("{error:#}")
+            )
+        );
     }
 
     if durable {
@@ -900,8 +941,11 @@ fn detached_harness_reporter(paths: TaskPaths) -> HarnessLifecycleReporter {
                 .write_harness_controller(&controller)
                 .map_err(|error| {
                     eprintln!(
-                        "nested harness controller write failed at {}: {error:#}",
-                        paths.harness_controller().display()
+                        "{}",
+                        crate::output::format_nested_harness_controller_write_failed_line(
+                            paths.harness_controller().display(),
+                            &format!("{error:#}")
+                        )
                     );
                     VyaneError::new(ErrorKind::Io, "nested harness controller write failed")
                 })?;
@@ -936,8 +980,11 @@ fn detached_harness_reporter(paths: TaskPaths) -> HarnessLifecycleReporter {
                 // The group is already dead. Leave a stale exact-identity
                 // sidecar for the next canceller/read to clear safely.
                 eprintln!(
-                    "nested harness controller cleanup failed at {}: {error:#}",
-                    paths.harness_controller().display()
+                    "{}",
+                    crate::output::format_nested_harness_controller_cleanup_failed_line(
+                        paths.harness_controller().display(),
+                        &format!("{error:#}")
+                    )
                 );
             }
             Ok(())
@@ -1169,7 +1216,7 @@ async fn run_task_list(args: TaskListArgs) -> Result<ExitCode> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
     } else if rows.is_empty() {
-        println!("no detached runs");
+        println!("{}", crate::output::format_empty_task_list_line());
     } else {
         crate::output::print_task_table(&rows);
     }
@@ -1262,7 +1309,10 @@ async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
 
     if let Some(record) = store.get(LOCAL_TASK_OWNER, &args.id)? {
         if !is_local_detached_dispatch(&record) {
-            eprintln!("{} is not a local detached dispatch", args.id);
+            eprintln!(
+                "{}",
+                crate::output::format_not_local_detached_line(&args.id)
+            );
             return Ok(ExitCode::from(1));
         }
         let record = reconcile_detached_process(&store, &paths, record)?;
@@ -1276,7 +1326,10 @@ async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
                     Ok(ExitCode::SUCCESS)
                 }
                 None => {
-                    eprintln!("no output recorded for {}", args.id);
+                    eprintln!(
+                        "{}",
+                        crate::output::format_no_output_recorded_line(&args.id)
+                    );
                     Ok(ExitCode::from(1))
                 }
             };
@@ -1315,13 +1368,18 @@ async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
             // tasks intentionally have no job.json, so use scaffold metadata.
             if paths.scaffold_mtime().is_some() {
                 eprintln!(
-                    "{}: stale — worker never wrote status (spawn or stdin handoff may have failed); see {}",
-                    args.id,
-                    paths.log().display()
+                    "{}",
+                    crate::output::format_stale_detached_status_line(
+                        &args.id,
+                        paths.log().display()
+                    )
                 );
                 return Ok(ExitCode::from(1));
             }
-            eprintln!("no such detached run: {}", args.id);
+            eprintln!(
+                "{}",
+                crate::output::format_no_such_detached_run_line(&args.id)
+            );
             return Ok(ExitCode::from(1));
         }
     };
@@ -1338,7 +1396,10 @@ async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             None => {
-                eprintln!("no output recorded for {}", args.id);
+                eprintln!(
+                    "{}",
+                    crate::output::format_no_output_recorded_line(&args.id)
+                );
                 return Ok(ExitCode::from(1));
             }
         }
@@ -1378,7 +1439,10 @@ async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
     let status = match paths.read_status() {
         Ok(status) => status,
         Err(_) => {
-            eprintln!("no such detached run: {}", args.id);
+            eprintln!(
+                "{}",
+                crate::output::format_no_such_detached_run_line(&args.id)
+            );
             return Ok(ExitCode::from(1));
         }
     };
@@ -1389,13 +1453,19 @@ async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
     if status.state.is_terminal() {
         if let Err(error) = cleanup_terminal_legacy_processes(&status, &paths).await {
             eprintln!(
-                "{}: task is already {}, but process cleanup failed: {error:#}",
-                args.id,
-                status.state.as_str()
+                "{}",
+                crate::output::format_task_already_cleanup_failed_line(
+                    &args.id,
+                    status.state.as_str(),
+                    &format!("{error:#}")
+                )
             );
             return Ok(ExitCode::from(1));
         }
-        println!("{} already {}", args.id, status.state.as_str());
+        println!(
+            "{}",
+            crate::output::format_task_already_state_line(&args.id, status.state.as_str())
+        );
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -1411,28 +1481,35 @@ async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
         IdentityCheck::Dead => {
             if let Err(error) = force_cleanup_orphaned_nested_harness(&paths).await {
                 eprintln!(
-                    "{}: worker is gone and nested harness cleanup failed: {error:#}",
-                    args.id
+                    "{}",
+                    crate::output::format_worker_gone_nested_cleanup_failed_line(
+                        &args.id,
+                        &format!("{error:#}")
+                    )
                 );
                 return Ok(ExitCode::from(1));
             }
             eprintln!(
-                "{}: worker process is gone (died); nested harness cleanup complete",
-                args.id
+                "{}",
+                crate::output::format_worker_gone_nested_cleanup_complete_line(&args.id)
             );
             return Ok(ExitCode::from(1));
         }
         IdentityCheck::Mismatch(reason) => {
             if let Err(error) = force_cleanup_orphaned_nested_harness(&paths).await {
                 eprintln!(
-                    "{}: outer identity mismatch ({reason}) and nested harness cleanup failed: {error:#}",
-                    args.id
+                    "{}",
+                    crate::output::format_identity_mismatch_nested_cleanup_failed_line(
+                        &args.id,
+                        reason,
+                        &format!("{error:#}")
+                    )
                 );
                 return Ok(ExitCode::from(1));
             }
             eprintln!(
-                "{}: process identity mismatch ({reason}; pid likely reused); refusing to signal",
-                args.id
+                "{}",
+                crate::output::format_identity_mismatch_refuse_signal_line(&args.id, reason)
             );
             return Ok(ExitCode::from(1));
         }
@@ -1460,8 +1537,11 @@ async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
         // the outer worker resumes or is force-killed below.
         if let Err(error) = signal_nested_harness(&paths, SIGKILL) {
             eprintln!(
-                "{}: nested harness identity unavailable before SIGKILL: {error:#}",
-                args.id
+                "{}",
+                crate::output::format_nested_harness_identity_unavailable_line(
+                    &args.id,
+                    &format!("{error:#}")
+                )
             );
             return Ok(ExitCode::from(1));
         }
@@ -1481,12 +1561,12 @@ async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
         match verify_identity(status.pid, status.pgid, status.started_at) {
             IdentityCheck::Match => signal_group(pgid, SIGKILL),
             IdentityCheck::Dead => eprintln!(
-                "{}: worker leader exited but its group remains; refusing unsafe SIGKILL escalation",
-                args.id
+                "{}",
+                crate::output::format_worker_leader_exited_group_remains_line(&args.id)
             ),
             IdentityCheck::Mismatch(reason) => eprintln!(
-                "{}: process identity changed before SIGKILL ({reason}); refusing escalation",
-                args.id
+                "{}",
+                crate::output::format_identity_changed_before_sigkill_line(&args.id, reason)
             ),
         }
     }
@@ -1500,8 +1580,8 @@ async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
     .is_none()
     {
         eprintln!(
-            "{}: cancellation did not finish every owned process group",
-            args.id
+            "{}",
+            crate::output::format_cancel_incomplete_process_groups_line(&args.id)
         );
         return Ok(ExitCode::from(1));
     }
@@ -1523,10 +1603,16 @@ async fn run_task_cancel(args: TaskCancelArgs) -> Result<ExitCode> {
             .read_status()
             .map(|s| s.state.as_str().to_string())
             .unwrap_or_else(|_| "cancelled".to_string());
-        println!("{} {}", args.id, final_state);
+        println!(
+            "{}",
+            crate::output::format_task_final_state_line(&args.id, &final_state)
+        );
         Ok(ExitCode::SUCCESS)
     } else {
-        eprintln!("{}: kill delivered; worker did not finalize", args.id);
+        eprintln!(
+            "{}",
+            crate::output::format_kill_delivered_unfinalized_line(&args.id)
+        );
         Ok(ExitCode::from(1))
     }
 }
@@ -1538,7 +1624,10 @@ async fn run_durable_task_cancel(
     mut record: TaskRecord,
 ) -> Result<ExitCode> {
     if !is_local_detached_dispatch(&record) {
-        eprintln!("{id} is not a local detached dispatch; cancel it through its owning frontend");
+        eprintln!(
+            "{}",
+            crate::output::format_not_local_detached_cancel_line(id)
+        );
         return Ok(ExitCode::from(1));
     }
     if record.state.is_terminal() {
@@ -1644,7 +1733,10 @@ async fn run_durable_task_cancel(
             return Ok(finish_observed_terminal_cancel(id, paths, &record).await);
         }
         if record.executor_epoch != controller_epoch {
-            eprintln!("{id}: executor ownership changed while cancellation was requested");
+            eprintln!(
+                "{}",
+                crate::output::format_cancel_ownership_changed_line(id)
+            );
             return Ok(ExitCode::from(1));
         }
     }
@@ -1869,10 +1961,16 @@ async fn report_cancel_interruption(
         return ExitCode::from(1);
     }
     if record.state != DurableTaskState::Interrupted && record.state.is_terminal() {
-        println!("{id} already {}", record.state);
+        println!(
+            "{}",
+            crate::output::format_task_already_state_line(id, record.state)
+        );
         ExitCode::SUCCESS
     } else {
-        eprintln!("{id}: {diagnostic}; task is {}", record.state);
+        eprintln!(
+            "{}",
+            crate::output::format_cancel_diagnostic_line(id, diagnostic, record.state)
+        );
         ExitCode::from(1)
     }
 }
@@ -1903,8 +2001,8 @@ async fn refuse_unverifiable_cancel(
         return Ok(finish_observed_terminal_cancel(id, paths, &current).await);
     }
     eprintln!(
-        "{id}: process identity unavailable {phase} ({reason}); refusing control; task remains {}",
-        current.state
+        "{}",
+        crate::output::format_process_identity_unavailable_line(id, phase, reason, current.state)
     );
     Ok(ExitCode::from(1))
 }
@@ -1921,7 +2019,10 @@ async fn finish_observed_terminal_cancel(
     if !cleanup_observed_terminal(id, paths, record).await {
         return ExitCode::from(1);
     }
-    println!("{id} already {}", record.state);
+    println!(
+        "{}",
+        crate::output::format_task_already_state_line(id, record.state)
+    );
     ExitCode::SUCCESS
 }
 
@@ -1931,8 +2032,12 @@ async fn cleanup_observed_terminal(id: &str, paths: &TaskPaths, record: &TaskRec
         Ok(()) => true,
         Err(error) => {
             eprintln!(
-                "{id}: task is already {}, but process cleanup failed: {error:#}",
-                record.state
+                "{}",
+                crate::output::format_task_already_cleanup_failed_line(
+                    id,
+                    record.state,
+                    &format!("{error:#}")
+                )
             );
             false
         }
@@ -2295,7 +2400,10 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
     let (loaded, targets, chains) = match phase {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("config error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_config_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(2));
         }
     };
@@ -2507,56 +2615,27 @@ fn print_session_view(operation: &'static str, session: &SessionView, json: bool
 }
 
 fn print_session_control_error(kind: ErrorKind, json: bool) -> Result<ExitCode> {
-    let (code, message, exit) = match kind {
-        ErrorKind::NotFound => ("not_found", "session not found", ExitCode::from(2)),
-        ErrorKind::Conflict => (
-            "conflict",
-            "session revision changed; inspect the session and retry with its current revision",
-            ExitCode::from(3),
-        ),
-        ErrorKind::Indeterminate => (
-            "indeterminate",
-            "session reset may have been published; inspect the session before deciding whether to retry",
-            ExitCode::from(4),
-        ),
-        ErrorKind::Config => (
-            "invalid_argument",
-            "invalid session control request",
-            ExitCode::from(2),
-        ),
-        ErrorKind::Unsupported => (
-            "unsupported",
-            "session control is unavailable for this store",
-            ExitCode::from(1),
-        ),
-        ErrorKind::Io => (
-            "storage_error",
-            "session storage operation failed",
-            ExitCode::from(1),
-        ),
-        _ => (
-            "operation_failed",
-            "session control operation failed",
-            ExitCode::from(1),
-        ),
-    };
+    let view = crate::output::session_control_error_view(kind);
     if json {
         eprintln!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "status": "error",
                 "error": {
-                    "kind": code,
-                    "message": message,
+                    "kind": view.kind_code,
+                    "message": view.message,
                     "retryable": false,
-                    "inspect_before_retry": matches!(kind, ErrorKind::Conflict | ErrorKind::Indeterminate),
+                    "inspect_before_retry": view.inspect_before_retry,
                 },
             }))?
         );
     } else {
-        eprintln!("error: {message}");
+        eprintln!(
+            "{}",
+            crate::output::format_session_control_error_line(&view)
+        );
     }
-    Ok(exit)
+    Ok(ExitCode::from(view.exit_code))
 }
 
 async fn submit_daemon_workflow(args: WorkflowSubmitArgs) -> Result<ExitCode> {
@@ -2569,7 +2648,10 @@ async fn submit_daemon_workflow(args: WorkflowSubmitArgs) -> Result<ExitCode> {
     let vars = match parse_vars(vars) {
         Ok(vars) => vars,
         Err(error) => {
-            eprintln!("config error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_config_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(2));
         }
     };
@@ -2614,7 +2696,7 @@ async fn submit_daemon_workflow(args: WorkflowSubmitArgs) -> Result<ExitCode> {
             if json {
                 eprintln!("{}", serde_json::to_string(&error.json_value())?);
             } else {
-                eprintln!("error: {error}");
+                eprintln!("{}", crate::output::format_error_line(&error.to_string()));
             }
             return Ok(ExitCode::from(error.exit_code()));
         }
@@ -2622,7 +2704,7 @@ async fn submit_daemon_workflow(args: WorkflowSubmitArgs) -> Result<ExitCode> {
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
-        print_daemon_workflow_view(&view);
+        crate::output::print_daemon_workflow_view(&view);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -2654,7 +2736,7 @@ async fn status_daemon_workflow(args: WorkflowStatusArgs) -> Result<ExitCode> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
-        print_daemon_workflow_view(&view);
+        crate::output::print_daemon_workflow_view(&view);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -2665,58 +2747,22 @@ async fn cancel_daemon_workflow(args: WorkflowCancelArgs) -> Result<ExitCode> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&task)?);
     } else {
-        println!("workflow {} {}", task.id, task.state);
+        println!(
+            "{}",
+            crate::output::format_workflow_cancel_line(&task.id, task.state)
+        );
     }
     Ok(ExitCode::SUCCESS)
-}
-
-fn print_daemon_workflow_view(view: &WorkflowTaskView) {
-    print!("{}", format_daemon_workflow_view(view));
-}
-
-/// Human-readable daemon workflow status/submit lines, including the WP-152
-/// bounded success projection and durable `failure_code` already present on
-/// [`WorkflowTaskView`].
-fn format_daemon_workflow_view(view: &WorkflowTaskView) -> String {
-    let mut out = format!("workflow {} {}\n", view.task.id, view.task.state);
-    if let Some(code) = view.task.failure_code {
-        out.push_str(&format!("failure {code}\n"));
-    }
-    if let Some(journal) = view.journal.as_ref() {
-        let counts = &journal.steps;
-        out.push_str(&format!(
-            "journal {} {}: {}/{} ok, {} failed, {} skipped, {} cancelled\n",
-            journal.name,
-            crate::output::workflow_status_name(journal.status),
-            counts.success,
-            counts.success
-                + counts.failed
-                + counts.skipped
-                + counts.cancelled
-                + counts.pending
-                + counts.running,
-            counts.failed,
-            counts.skipped,
-            counts.cancelled
-        ));
-    }
-    if let Some(output) = view.output.as_ref() {
-        out.push_str("output\n");
-        out.push_str(output);
-        if !output.ends_with('\n') {
-            out.push('\n');
-        }
-    } else if view.output_omitted {
-        out.push_str("output omitted\n");
-    }
-    out
 }
 
 async fn run_workflow(config_path: Option<PathBuf>, args: WorkflowRunArgs) -> Result<ExitCode> {
     let vars = match parse_vars(args.vars) {
         Ok(vars) => vars,
         Err(error) => {
-            eprintln!("config error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_config_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(2));
         }
     };
@@ -2727,7 +2773,10 @@ async fn run_workflow(config_path: Option<PathBuf>, args: WorkflowRunArgs) -> Re
     let (loaded, wf) = match phase {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("config error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_config_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(2));
         }
     };
@@ -2769,7 +2818,10 @@ async fn resume_workflow(
 ) -> Result<ExitCode> {
     if !args.vars.is_empty() {
         eprintln!(
-            "config error: workflow resume uses variables from the journal; --var is not allowed"
+            "{}",
+            crate::output::format_config_error_line(
+                "workflow resume uses variables from the journal; --var is not allowed"
+            )
         );
         return Ok(ExitCode::from(2));
     }
@@ -2780,7 +2832,10 @@ async fn resume_workflow(
     let (loaded, wf) = match phase {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("config error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_config_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(2));
         }
     };
@@ -2825,7 +2880,10 @@ async fn replay_workflow(
 ) -> Result<ExitCode> {
     if !args.vars.is_empty() {
         eprintln!(
-            "config error: workflow replay uses variables from the source journal; --var is not allowed"
+            "{}",
+            crate::output::format_config_error_line(
+                "workflow replay uses variables from the source journal; --var is not allowed"
+            )
         );
         return Ok(ExitCode::from(2));
     }
@@ -2836,7 +2894,10 @@ async fn replay_workflow(
     let (loaded, wf) = match phase {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("config error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_config_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(2));
         }
     };
@@ -2915,14 +2976,22 @@ fn workflow_replay_id_event(
 async fn run_review_command(config_path: Option<PathBuf>, args: ReviewArgs) -> Result<ExitCode> {
     let reviewers = crate::review::ReviewArgs::parse_reviewers(&args.reviewers);
     if reviewers.len() < 2 {
-        eprintln!("config error: --reviewers needs at least 2 targets for independent review");
+        eprintln!(
+            "{}",
+            crate::output::format_config_error_line(
+                "--reviewers needs at least 2 targets for independent review"
+            )
+        );
         return Ok(ExitCode::from(2));
     }
 
     let loaded = match load_config(config_path.as_deref()) {
         Ok(loaded) => loaded,
         Err(error) => {
-            eprintln!("config error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_config_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(2));
         }
     };
@@ -2952,7 +3021,10 @@ async fn run_review_command(config_path: Option<PathBuf>, args: ReviewArgs) -> R
     {
         Ok(outcome) => outcome,
         Err(error) => {
-            eprintln!("error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(1));
         }
     };
@@ -2973,7 +3045,10 @@ async fn run_route_command(config_path: Option<PathBuf>, args: RouteArgs) -> Res
     let loaded = match load_config(config_path.as_deref()) {
         Ok(loaded) => loaded,
         Err(error) => {
-            eprintln!("config error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_config_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(2));
         }
     };
@@ -3016,7 +3091,10 @@ async fn run_route_command(config_path: Option<PathBuf>, args: RouteArgs) -> Res
     let result = match vyane_service::route_task(&loaded.config, route_params) {
         Ok(result) => result,
         Err(error) => {
-            eprintln!("error: {error:#}");
+            eprintln!(
+                "{}",
+                crate::output::format_error_line(&format!("{error:#}"))
+            );
             return Ok(ExitCode::from(1));
         }
     };
@@ -3024,15 +3102,7 @@ async fn run_route_command(config_path: Option<PathBuf>, args: RouteArgs) -> Res
     if args.json {
         println!("{}", serde_json::to_string_pretty(&result.decision)?);
     } else {
-        println!("profile:     {}", result.profile);
-        println!("provider:    {}", result.decision.provider);
-        println!("model:       {}", result.decision.model);
-        println!("tier:        {}", result.decision.tier.as_str());
-        println!("effort:      {}", result.decision.effort.as_str());
-        println!("score:       {:.3}", result.decision.complexity_score);
-        println!("tag:         {}", result.decision.tag);
-        println!("intent:      {}", result.decision.intent);
-        println!("reason:      {}", result.decision.reason);
+        crate::output::print_route_result(&result.profile, &result.decision);
     }
 
     Ok(ExitCode::SUCCESS)
@@ -3124,11 +3194,13 @@ fn print_run_json(record: vyane_core::RunRecord, output: Option<String>) -> Resu
 }
 
 fn print_workflow_error(error: &WorkflowError) {
-    if error.is_validation_or_config() {
-        eprintln!("config error: {error}");
-    } else {
-        eprintln!("error: {error}");
-    }
+    eprintln!(
+        "{}",
+        crate::output::format_workflow_error_line(
+            error.is_validation_or_config(),
+            &error.to_string()
+        )
+    );
 }
 
 fn workflow_error_exit(error: &WorkflowError) -> ExitCode {
@@ -3223,12 +3295,18 @@ impl vyane_workflow::WorkflowObserver for CliWorkflowObserver {
     fn on_event(&self, event: StepEvent) {
         match event {
             StepEvent::Started { step_id } => {
-                eprintln!("workflow step {step_id}: started");
+                eprintln!(
+                    "{}",
+                    crate::output::format_workflow_step_started_line(&step_id)
+                );
             }
             StepEvent::Succeeded { step_id, duration } => {
                 eprintln!(
-                    "workflow step {step_id}: succeeded in {}ms",
-                    duration.as_millis()
+                    "{}",
+                    crate::output::format_workflow_step_succeeded_line(
+                        &step_id,
+                        duration.as_millis()
+                    )
                 );
             }
             StepEvent::Failed {
@@ -3237,17 +3315,27 @@ impl vyane_workflow::WorkflowObserver for CliWorkflowObserver {
                 error,
             } => {
                 eprintln!(
-                    "workflow step {step_id}: failed in {}ms: {error}",
-                    duration.as_millis()
+                    "{}",
+                    crate::output::format_workflow_step_failed_line(
+                        &step_id,
+                        duration.as_millis(),
+                        &error.to_string()
+                    )
                 );
             }
             StepEvent::Skipped { step_id, reason } => {
-                eprintln!("workflow step {step_id}: skipped: {reason}");
+                eprintln!(
+                    "{}",
+                    crate::output::format_workflow_step_skipped_line(&step_id, &reason)
+                );
             }
             StepEvent::Cancelled { step_id, duration } => {
                 eprintln!(
-                    "workflow step {step_id}: cancelled in {}ms",
-                    duration.as_millis()
+                    "{}",
+                    crate::output::format_workflow_step_cancelled_line(
+                        &step_id,
+                        duration.as_millis()
+                    )
                 );
             }
         }
@@ -3302,128 +3390,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::daemon_workflow::WorkflowTaskView;
     #[cfg(target_os = "linux")]
     use crate::task::spawn::SpawnedWorker;
-    use vyane_task::{FailureCode, TaskKind, TaskOrigin, TaskRecord, TaskState};
-
-    fn sample_workflow_task(state: TaskState) -> TaskRecord {
-        TaskRecord {
-            id: "01999999-9999-7999-8999-999999999999".to_string(),
-            owner: "local".to_string(),
-            kind: TaskKind::Workflow,
-            origin: TaskOrigin::Daemon,
-            state,
-            task_digest: "a".repeat(64),
-            target_key: "workflow".to_string(),
-            created_at: chrono::Utc::now(),
-            started_at: None,
-            updated_at: chrono::Utc::now(),
-            finished_at: None,
-            revision: 0,
-            executor_epoch: 0,
-            controller: None,
-            lease: None,
-            ledger_run_id: None,
-            failure_code: None,
-        }
-    }
-
-    #[test]
-    fn human_daemon_workflow_view_prints_bounded_success_output() {
-        let view = WorkflowTaskView {
-            task: sample_workflow_task(TaskState::Succeeded),
-            journal: None,
-            output: Some("bounded answer".to_string()),
-            output_omitted: false,
-        };
-        let text = format_daemon_workflow_view(&view);
-        assert!(
-            text.contains("workflow 01999999-9999-7999-8999-999999999999 succeeded"),
-            "{text}"
-        );
-        assert!(
-            text.contains("output\nbounded answer\n"),
-            "expected WP-152 projection body in human status:\n{text}"
-        );
-        assert!(!text.contains("output omitted"), "{text}");
-        assert!(!text.contains("failure "), "{text}");
-    }
-
-    #[test]
-    fn human_daemon_workflow_view_prints_output_omitted_without_body() {
-        let view = WorkflowTaskView {
-            task: sample_workflow_task(TaskState::Succeeded),
-            journal: None,
-            output: None,
-            output_omitted: true,
-        };
-        let text = format_daemon_workflow_view(&view);
-        assert!(text.contains("output omitted\n"), "{text}");
-        assert!(!text.contains("output\n"), "{text}");
-        assert!(!text.contains("failure "), "{text}");
-    }
-
-    #[test]
-    fn human_daemon_workflow_view_hides_output_on_non_success() {
-        let view = WorkflowTaskView {
-            task: sample_workflow_task(TaskState::Running),
-            journal: None,
-            output: None,
-            output_omitted: false,
-        };
-        let text = format_daemon_workflow_view(&view);
-        assert!(text.contains("running"), "{text}");
-        assert!(!text.contains("output"), "{text}");
-        assert!(!text.contains("failure "), "{text}");
-    }
-
-    #[test]
-    fn human_daemon_workflow_view_prints_failure_code() {
-        let mut task = sample_workflow_task(TaskState::Failed);
-        task.failure_code = Some(FailureCode::WorkerLost);
-        let view = WorkflowTaskView {
-            task,
-            journal: None,
-            output: None,
-            output_omitted: false,
-        };
-        let text = format_daemon_workflow_view(&view);
-        assert!(
-            text.contains("workflow 01999999-9999-7999-8999-999999999999 failed"),
-            "{text}"
-        );
-        assert!(
-            text.contains("failure worker_lost\n"),
-            "expected durable failure_code in human status:\n{text}"
-        );
-        assert!(!text.contains("output"), "{text}");
-    }
-
-    #[test]
-    fn human_daemon_workflow_view_prints_timed_out_failure_code() {
-        let mut task = sample_workflow_task(TaskState::TimedOut);
-        task.failure_code = Some(FailureCode::TimedOut);
-        let view = WorkflowTaskView {
-            task,
-            journal: None,
-            output: None,
-            output_omitted: false,
-        };
-        let text = format_daemon_workflow_view(&view);
-        assert!(text.contains("timed_out"), "{text}");
-        assert!(
-            text.contains("failure timed_out\n"),
-            "expected timed_out failure_code in human status:\n{text}"
-        );
-        // State line first, then failure line.
-        let state_at = text.find("workflow ").expect("state line");
-        let failure_at = text.find("failure timed_out\n").expect("failure line");
-        assert!(
-            state_at < failure_at,
-            "state should precede failure:\n{text}"
-        );
-    }
 
     fn session_test_service(directory: &TempDir) -> VyaneService {
         VyaneService::from_loaded_with_paths(

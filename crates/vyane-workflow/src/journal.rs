@@ -134,6 +134,18 @@ pub enum JournalStepStatus {
 }
 
 impl JournalStepStatus {
+    /// Stable snake_case token matching the serde rename for this step status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -142,6 +154,12 @@ impl JournalStepStatus {
                 | JournalStepStatus::Skipped
                 | JournalStepStatus::Cancelled
         )
+    }
+}
+
+impl std::fmt::Display for JournalStepStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -945,5 +963,12 @@ mod tests {
             name.starts_with('.') && name.ends_with(".tmp")
         });
         assert!(!has_temp);
+    }
+
+    #[test]
+    fn journal_step_status_tokens_match_serde_snake_case() {
+        assert_eq!(JournalStepStatus::Pending.as_str(), "pending");
+        assert_eq!(JournalStepStatus::Success.to_string(), "success");
+        assert_eq!(JournalStepStatus::Skipped.as_str(), "skipped");
     }
 }

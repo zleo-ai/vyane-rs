@@ -34,6 +34,10 @@ pub use text_edit::{
 pub use tools::{
     MAX_TOOL_OUTPUT_CHARS, NativeTool, ToolCall, ToolCallLimits, ToolContext, ToolContextError,
     ToolError, ToolInvocation, ToolInvocationStatus, ToolRegistry, ToolRegistryError,
+    approval_required_output, denied_tool_output, invalid_json_tool_arguments_output,
+    invalid_tool_call_output, missing_approval_plan_output, tool_execution_cancelled_output,
+    tool_execution_timed_out_output, tool_failed_output, tool_panicked_output,
+    tool_unavailable_output, unknown_tool_output,
 };
 pub use trusted_commands::{
     NativeCommandHostError, NativeCommandMountSet, NativeCommandPolicy, NativeCommandPolicyError,

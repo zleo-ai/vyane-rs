@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -16,6 +18,25 @@ pub enum QuotaStatus {
     Unknown,
 }
 
+impl QuotaStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Limited => "limited",
+            Self::Exhausted => "exhausted",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for QuotaStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuotaUnit {
@@ -23,6 +44,25 @@ pub enum QuotaUnit {
     Tokens,
     Credits,
     UsdMicros,
+}
+
+impl QuotaUnit {
+    /// Stable snake_case token matching the serde rename for this unit.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Requests => "requests",
+            Self::Tokens => "tokens",
+            Self::Credits => "credits",
+            Self::UsdMicros => "usd_micros",
+        }
+    }
+}
+
+impl fmt::Display for QuotaUnit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,4 +176,65 @@ pub enum QuotaValidationError {
     InvalidBalance,
     #[error("quota status contradicts the normalized balance")]
     StatusContradictsBalance,
+}
+
+impl QuotaValidationError {
+    /// Stable snake_case *kind* token; field names stay out of the token.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::InvalidIdentifier { .. } => "invalid_identifier",
+            Self::TooManyWindows => "too_many_windows",
+            Self::InvalidWindowUsage => "invalid_window_usage",
+            Self::InvalidBalance => "invalid_balance",
+            Self::StatusContradictsBalance => "status_contradicts_balance",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_validation_error_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            QuotaValidationError::InvalidIdentifier { field: "secret" }.as_str(),
+            "invalid_identifier"
+        );
+        assert!(
+            !QuotaValidationError::InvalidIdentifier { field: "secret" }
+                .as_str()
+                .contains("secret")
+        );
+        assert_eq!(
+            QuotaValidationError::TooManyWindows.as_str(),
+            "too_many_windows"
+        );
+        assert_eq!(
+            QuotaValidationError::InvalidWindowUsage.as_str(),
+            "invalid_window_usage"
+        );
+        assert_eq!(
+            QuotaValidationError::InvalidBalance.as_str(),
+            "invalid_balance"
+        );
+        assert_eq!(
+            QuotaValidationError::StatusContradictsBalance.as_str(),
+            "status_contradicts_balance"
+        );
+    }
+
+    #[test]
+    fn quota_status_and_unit_tokens_match_serde_snake_case() {
+        assert_eq!(QuotaStatus::Available.as_str(), "available");
+        assert_eq!(QuotaStatus::Limited.to_string(), "limited");
+        assert_eq!(QuotaStatus::Exhausted.as_str(), "exhausted");
+        assert_eq!(QuotaStatus::Unknown.to_string(), "unknown");
+
+        assert_eq!(QuotaUnit::Requests.as_str(), "requests");
+        assert_eq!(QuotaUnit::Tokens.to_string(), "tokens");
+        assert_eq!(QuotaUnit::Credits.as_str(), "credits");
+        assert_eq!(QuotaUnit::UsdMicros.to_string(), "usd_micros");
+    }
 }

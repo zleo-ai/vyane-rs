@@ -47,7 +47,7 @@ impl GoalSegmentRuntime for DispatchGoalRuntime {
                 cancel,
             )
             .await;
-        match outcome {
+        let result = match outcome {
             Ok(outcome) => PursuitSegmentResult {
                 status: pursuit_segment_status(outcome.record.status),
                 run_id: Some(outcome.record.run_id),
@@ -56,7 +56,14 @@ impl GoalSegmentRuntime for DispatchGoalRuntime {
                 status: PursuitSegmentStatus::Error,
                 run_id: None,
             },
-        }
+        };
+        // Kind-only pure segment status on every CLI/daemon segment settle (WP-404).
+        tracing::info!(
+            status = result.status.as_str(),
+            "{}",
+            crate::output::format_pursuit_segment_status_line(result.status)
+        );
+        result
     }
 }
 

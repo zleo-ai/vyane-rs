@@ -40,6 +40,20 @@ pub enum NativeSideEffect {
     SessionCommit { expected_revision: u64 },
 }
 
+impl NativeSideEffect {
+    /// Stable snake_case *kind* token; turn/sequence counters stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ModelSend { .. } => "model_send",
+            Self::ToolOperation { .. } => "tool_operation",
+            Self::CheckpointPrepare { .. } => "checkpoint_prepare",
+            Self::CheckpointPublish { .. } => "checkpoint_publish",
+            Self::SessionCommit { .. } => "session_commit",
+        }
+    }
+}
+
 /// Live execution authority for a native tool loop.
 ///
 /// A native executor must call [`Self::revalidate`] immediately before each
@@ -125,5 +139,40 @@ mod tests {
         for (effect, expected) in cases {
             assert_eq!(format!("{effect:?}"), expected);
         }
+    }
+
+    #[test]
+    fn native_side_effect_kind_tokens_are_snake_case_without_counters() {
+        assert_eq!(
+            NativeSideEffect::ModelSend {
+                turn: 9,
+                wire_attempt: 3
+            }
+            .as_str(),
+            "model_send"
+        );
+        assert_eq!(
+            NativeSideEffect::ToolOperation {
+                turn: 9,
+                ordinal: 2
+            }
+            .as_str(),
+            "tool_operation"
+        );
+        assert_eq!(
+            NativeSideEffect::CheckpointPrepare { sequence: 42 }.as_str(),
+            "checkpoint_prepare"
+        );
+        assert_eq!(
+            NativeSideEffect::CheckpointPublish { sequence: 42 }.as_str(),
+            "checkpoint_publish"
+        );
+        assert_eq!(
+            NativeSideEffect::SessionCommit {
+                expected_revision: 7
+            }
+            .as_str(),
+            "session_commit"
+        );
     }
 }

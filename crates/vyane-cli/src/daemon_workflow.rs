@@ -274,31 +274,34 @@ impl DaemonWorkflowSupervisor {
                             Ok(Ok(control)) => match control.cleanup_all().await {
                                 Ok(report) if !report.all_resolved() => tracing::warn!(
                                     task_id = %record.id,
-                                    report = ?report,
+                                    unresolved = report.unresolved_count(),
+                                    first_status = report
+                                        .first_unresolved_status()
+                                        .unwrap_or("none"),
                                     "workflow recovery left fail-closed controller entries"
                                 ),
                                 Ok(_) => {}
-                                Err(error) => tracing::warn!(
+                                Err(_error) => tracing::warn!(
                                     task_id = %record.id,
-                                    error = %error,
+                                    error = "controller_cleanup",
                                     "workflow recovery controller cleanup failed; continuing interruption"
                                 ),
                             },
-                            Ok(Err(error)) => tracing::warn!(
+                            Ok(Err(_error)) => tracing::warn!(
                                 task_id = %record.id,
-                                error = %error,
+                                error = "controller_open",
                                 "workflow recovery controller set could not be opened; continuing interruption"
                             ),
-                            Err(error) => tracing::warn!(
+                            Err(_error) => tracing::warn!(
                                 task_id = %record.id,
-                                error = %error,
+                                error = "join",
                                 "workflow recovery controller opener failed to join; continuing interruption"
                             ),
                         }
                     }
-                    Err(error) => tracing::warn!(
+                    Err(_error) => tracing::warn!(
                         task_id = %record.id,
-                        error = %error,
+                        error = "invalid_task_id",
                         "workflow recovery found a non-canonical task id; skipping controller path"
                     ),
                 }
@@ -722,7 +725,21 @@ impl DaemonWorkflowSupervisor {
                             break worker.await;
                         }
                         Err(error) => {
-                            tracing::error!(task_id = %id, error = %error, "workflow lease renewal failed");
+                            // Kind-only pure line when store error is available (WP-363).
+                            if let Some(store_error) = error.downcast_ref::<TaskStoreError>() {
+                                tracing::error!(
+                                    task_id = %id,
+                                    error = store_error.as_str(),
+                                    "{}",
+                                    crate::output::format_task_store_error_kind_line(store_error)
+                                );
+                            } else {
+                                tracing::error!(
+                                    task_id = %id,
+                                    error = "internal",
+                                    "workflow lease renewal failed"
+                                );
+                            }
                             forced_code = Some(FailureCode::LeaseExpired);
                             cancel.cancel();
                             worker.abort();
@@ -737,11 +754,20 @@ impl DaemonWorkflowSupervisor {
             if let Some(live) = self.live.get(&id).map(|entry| entry.clone()) {
                 match live.control.cancel_all().await {
                     Ok(report) if !report.all_resolved() => {
-                        tracing::warn!(task_id = %id, report = ?report, "lease loss retained unresolved workflow controllers");
+                        tracing::warn!(
+                            task_id = %id,
+                            unresolved = report.unresolved_count(),
+                            first_status = report.first_unresolved_status().unwrap_or("none"),
+                            "lease loss retained unresolved workflow controllers"
+                        );
                     }
                     Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(task_id = %id, error = %error, "lease-loss controller cleanup failed");
+                    Err(_error) => {
+                        tracing::warn!(
+                            task_id = %id,
+                            error = "controller_cleanup",
+                            "lease-loss controller cleanup failed"
+                        );
                     }
                 }
             }
@@ -825,6 +851,24 @@ impl DaemonWorkflowSupervisor {
                         ledger_run_id: None,
                     },
                 };
+                // Kind-only pure lines; ledger/journal paths stay out (WP-383/389).
+                // BTreeMap is keyed by step id; last entry is the highest step id.
+                if let Some(step) = outcome.journal.steps.values().next_back() {
+                    tracing::info!(
+                        task_id = %id,
+                        step_status = step.status.as_str(),
+                        "{}",
+                        crate::output::format_journal_step_status_line(step.status)
+                    );
+                }
+                tracing::info!(
+                    task_id = %id,
+                    status = outcome.status.as_str(),
+                    settlement = settlement.as_str(),
+                    "{}; {}",
+                    crate::output::format_workflow_run_status_line(outcome.status),
+                    crate::output::format_task_settlement_line(&settlement)
+                );
                 CompletionAction::Settle(settlement)
             }
             Ok(Err(error)) => {
@@ -833,21 +877,43 @@ impl DaemonWorkflowSupervisor {
                 } else {
                     FailureCode::Internal
                 };
-                tracing::error!(task_id = %id, error = %error, "daemon workflow failed");
-                CompletionAction::Settle(TaskSettlement::Failed {
+                // Kind-only pure lines; never log paths/run ids from Display (WP-309/363/384).
+                tracing::error!(
+                    task_id = %id,
+                    error = error.as_str(),
+                    "{}",
+                    crate::output::format_workflow_error_kind_line(&error)
+                );
+                let settlement = TaskSettlement::Failed {
                     code,
                     ledger_run_id: None,
-                })
+                };
+                tracing::error!(
+                    task_id = %id,
+                    settlement = settlement.as_str(),
+                    "{}",
+                    crate::output::format_task_settlement_line(&settlement)
+                );
+                CompletionAction::Settle(settlement)
             }
-            Err(error) => {
-                tracing::error!(task_id = %id, error = %error, "daemon workflow task join failed");
+            Err(_error) => {
+                // JoinError has no closed kind API; body-free token only (WP-384).
                 if self.shutting_down.load(Ordering::Acquire) {
+                    tracing::error!(task_id = %id, error = "join", "daemon workflow task join failed");
                     CompletionAction::Interrupt(FailureCode::WorkerLost)
                 } else {
-                    CompletionAction::Settle(TaskSettlement::Failed {
+                    let settlement = TaskSettlement::Failed {
                         code: FailureCode::Internal,
                         ledger_run_id: None,
-                    })
+                    };
+                    tracing::error!(
+                        task_id = %id,
+                        error = "join",
+                        settlement = settlement.as_str(),
+                        "{}",
+                        crate::output::format_task_settlement_line(&settlement)
+                    );
+                    CompletionAction::Settle(settlement)
                 }
             }
         }
@@ -869,7 +935,21 @@ impl DaemonWorkflowSupervisor {
             match result {
                 Ok(()) => return,
                 Err(error) => {
-                    tracing::error!(task_id = %id, error = %error, "workflow metadata completion retry");
+                    // Kind-only pure line when store error is available (WP-363).
+                    if let Some(store_error) = error.downcast_ref::<TaskStoreError>() {
+                        tracing::error!(
+                            task_id = %id,
+                            error = store_error.as_str(),
+                            "{}",
+                            crate::output::format_task_store_error_kind_line(store_error)
+                        );
+                    } else {
+                        tracing::error!(
+                            task_id = %id,
+                            error = "internal",
+                            "workflow metadata completion retry"
+                        );
+                    }
                 }
             }
             tokio::time::sleep(delay).await;
@@ -1070,6 +1150,13 @@ impl DaemonWorkflowSupervisor {
                 return Ok(None);
             }
             if record.state.is_terminal() {
+                // Kind-only pure line for already-terminal cancel observation (WP-386).
+                tracing::info!(
+                    task_id = %id,
+                    state = record.state.as_str(),
+                    "{}",
+                    crate::output::format_task_state_line(record.state)
+                );
                 self.cleanup_terminal_controller(run_id).await;
                 return Ok(Some(record));
             }
@@ -1086,6 +1173,13 @@ impl DaemonWorkflowSupervisor {
                 }
             }
             if record.state == TaskState::Cancelling {
+                // Kind-only pure line for already-cancelling observation (WP-386).
+                tracing::info!(
+                    task_id = %id,
+                    state = record.state.as_str(),
+                    "{}",
+                    crate::output::format_task_state_line(record.state)
+                );
                 self.signal_live_cancel(&record);
                 return Ok(Some(record));
             }
@@ -1166,9 +1260,13 @@ impl DaemonWorkflowSupervisor {
         let cleanup = tokio::spawn(async move {
             tokio::time::sleep(CANCEL_CONTROLLER_GRACE).await;
             if live_map.get(&id).is_some_and(|entry| entry.epoch == epoch)
-                && let Err(error) = control.cancel_all().await
+                && let Err(_error) = control.cancel_all().await
             {
-                tracing::warn!(task_id = %id, error = %error, "workflow controller cleanup failed after cancel grace");
+                tracing::warn!(
+                    task_id = %id,
+                    error = "controller_cleanup",
+                    "workflow controller cleanup failed after cancel grace"
+                );
             }
         });
         let mut tasks = self
@@ -1183,15 +1281,28 @@ impl DaemonWorkflowSupervisor {
         match WorkflowHarnessControl::new(run_id, &self.service.storage_paths().data_dir) {
             Ok(control) => match control.cancel_all().await {
                 Ok(report) if !report.all_resolved() => {
-                    tracing::warn!(task_id = %run_id, report = ?report, "terminal workflow retained unresolved controllers");
+                    tracing::warn!(
+                        task_id = %run_id,
+                        unresolved = report.unresolved_count(),
+                        first_status = report.first_unresolved_status().unwrap_or("none"),
+                        "terminal workflow retained unresolved controllers"
+                    );
                 }
                 Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(task_id = %run_id, error = %error, "terminal workflow controller cleanup failed")
+                Err(_error) => {
+                    tracing::warn!(
+                        task_id = %run_id,
+                        error = "controller_cleanup",
+                        "terminal workflow controller cleanup failed"
+                    )
                 }
             },
-            Err(error) => {
-                tracing::warn!(task_id = %run_id, error = %error, "open terminal workflow controllers failed")
+            Err(_error) => {
+                tracing::warn!(
+                    task_id = %run_id,
+                    error = "controller_open",
+                    "open terminal workflow controllers failed"
+                )
             }
         }
     }
@@ -1255,13 +1366,14 @@ impl DaemonWorkflowSupervisor {
                         match result {
                             Ok(report) if !report.all_resolved() => tracing::warn!(
                                 task_id = %id,
-                                report = ?report,
+                                unresolved = report.unresolved_count(),
+                                first_status = report.first_unresolved_status().unwrap_or("none"),
                                 "shutdown retained fail-closed workflow controllers"
                             ),
                             Ok(_) => {}
-                            Err(error) => tracing::warn!(
+                            Err(_error) => tracing::warn!(
                                 task_id = %id,
-                                error = %error,
+                                error = "controller_cleanup",
                                 "shutdown workflow controller cleanup failed"
                             ),
                         }
@@ -1861,7 +1973,22 @@ impl DaemonWorkflowApiError {
                 "workflow task already exists",
             );
         }
-        tracing::error!(error = %error, "daemon workflow API failed");
+        // Kind-only pure lines when store/workflow-shaped (WP-382).
+        if let Some(workflow_error) = error.downcast_ref::<vyane_workflow::WorkflowError>() {
+            tracing::error!(
+                error = workflow_error.as_str(),
+                "{}",
+                crate::output::format_workflow_error_kind_line(workflow_error)
+            );
+        } else if let Some(store_error) = error.downcast_ref::<TaskStoreError>() {
+            tracing::error!(
+                error = store_error.as_str(),
+                "{}",
+                crate::output::format_task_store_error_kind_line(store_error)
+            );
+        } else {
+            tracing::error!(error = "internal", "daemon workflow API failed");
+        }
         Self::internal("daemon workflow operation failed")
     }
 

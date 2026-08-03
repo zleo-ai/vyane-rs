@@ -142,6 +142,29 @@ pub enum WorkflowState {
     Interrupted,
 }
 
+impl WorkflowState {
+    /// Stable snake_case token matching the serde rename for this workflow state.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Cancelling => "cancelling",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkflowState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowFailureCode {
@@ -156,6 +179,30 @@ pub enum WorkflowFailureCode {
     Internal,
 }
 
+impl WorkflowFailureCode {
+    /// Stable snake_case token matching the serde rename for this failure code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DispatchFailed => "dispatch_failed",
+            Self::SpawnFailed => "spawn_failed",
+            Self::Configuration => "configuration",
+            Self::ControlUnavailable => "control_unavailable",
+            Self::WorkerLost => "worker_lost",
+            Self::LeaseExpired => "lease_expired",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkflowFailureCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Closed error taxonomy. Source messages cannot cross this boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowControlError {
@@ -165,6 +212,21 @@ pub enum WorkflowControlError {
     Unavailable,
     OutcomeUnknown,
     Internal,
+}
+
+impl WorkflowControlError {
+    /// Stable snake_case *kind* token matching the closed control surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
+            Self::Unavailable => "unavailable",
+            Self::OutcomeUnknown => "outcome_unknown",
+            Self::Internal => "internal",
+        }
+    }
 }
 
 impl std::fmt::Display for WorkflowControlError {
@@ -562,7 +624,12 @@ impl SafeToolError {
         }
     }
 
-    const fn workflow_control(error: WorkflowControlError) -> Self {
+    fn workflow_control(error: WorkflowControlError) -> Self {
+        // Kind-only; no free-form request bodies or run ids (WP-335).
+        tracing::warn!(
+            error = error.as_str(),
+            "workflow control error mapped to public MCP error"
+        );
         match error {
             WorkflowControlError::InvalidRequest => Self {
                 code: PublicErrorCode::InvalidArgument,
@@ -2303,5 +2370,38 @@ mod tests {
         let wire = serde_json::to_value(result).unwrap();
         let text = wire["content"][0]["text"].as_str().unwrap();
         serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn mcp_workflow_closed_enum_tokens_match_serde_snake_case() {
+        assert_eq!(WorkflowState::TimedOut.as_str(), "timed_out");
+        assert_eq!(WorkflowState::Interrupted.to_string(), "interrupted");
+        assert_eq!(WorkflowState::Cancelling.as_str(), "cancelling");
+        assert_eq!(
+            WorkflowFailureCode::DispatchFailed.as_str(),
+            "dispatch_failed"
+        );
+        assert_eq!(
+            WorkflowFailureCode::ControlUnavailable.to_string(),
+            "control_unavailable"
+        );
+        assert_eq!(WorkflowFailureCode::LeaseExpired.as_str(), "lease_expired");
+        assert_eq!(WorkflowFailureCode::WorkerLost.to_string(), "worker_lost");
+    }
+
+    #[test]
+    fn workflow_control_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            WorkflowControlError::InvalidRequest.as_str(),
+            "invalid_request"
+        );
+        assert_eq!(WorkflowControlError::NotFound.as_str(), "not_found");
+        assert_eq!(WorkflowControlError::Conflict.as_str(), "conflict");
+        assert_eq!(WorkflowControlError::Unavailable.as_str(), "unavailable");
+        assert_eq!(
+            WorkflowControlError::OutcomeUnknown.as_str(),
+            "outcome_unknown"
+        );
+        assert_eq!(WorkflowControlError::Internal.as_str(), "internal");
     }
 }

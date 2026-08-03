@@ -526,10 +526,12 @@ impl ProcessGroupDropGuard {
                 group_empty,
             })
         {
+            // Kind-only; lifecycle reporter failures may carry free-form IO text.
+            let _ = error;
             tracing::warn!(
                 pid = identity.pid,
                 pgid = identity.pgid,
-                error = %error,
+                error = "lifecycle_report",
                 "failed to report stopped harness process group"
             );
         }

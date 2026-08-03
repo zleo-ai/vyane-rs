@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -19,6 +21,29 @@ pub enum GoalContinuityNextActionKind {
     ContinuityComplete,
 }
 
+impl GoalContinuityNextActionKind {
+    /// Stable snake_case token matching the serde rename for this action.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QueueApproval => "queue_approval",
+            Self::DecideApproval => "decide_approval",
+            Self::ExecuteApproval => "execute_approval",
+            Self::RecordSignal => "record_signal",
+            Self::WaitForDependency => "wait_for_dependency",
+            Self::WaitForExecution => "wait_for_execution",
+            Self::ResolveBlockedExecution => "resolve_blocked_execution",
+            Self::ManualDecision => "manual_decision",
+            Self::ContinuityComplete => "continuity_complete",
+        }
+    }
+}
+
+impl fmt::Display for GoalContinuityNextActionKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalContinuityOperatorCommand {
@@ -26,6 +51,24 @@ pub enum GoalContinuityOperatorCommand {
     ContinuityDecide,
     ContinuityExecute,
     ContinuitySignal,
+}
+
+impl GoalContinuityOperatorCommand {
+    /// Stable snake_case token matching the serde rename for this command.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ContinuityQueue => "continuity_queue",
+            Self::ContinuityDecide => "continuity_decide",
+            Self::ContinuityExecute => "continuity_execute",
+            Self::ContinuitySignal => "continuity_signal",
+        }
+    }
+}
+
+impl fmt::Display for GoalContinuityOperatorCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

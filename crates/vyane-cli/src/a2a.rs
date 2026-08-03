@@ -78,10 +78,15 @@ pub fn run(command: A2aCommand) -> Result<ExitCode> {
                     status: "error",
                     error: &message,
                 }) {
-                    eprintln!("a2a error: {message}; could not write JSON error: {write_error:#}");
+                    eprintln!(
+                        "{}",
+                        crate::output::format_a2a_error_line(&format!(
+                            "{message}; could not write JSON error: {write_error:#}"
+                        ))
+                    );
                 }
             } else {
-                eprintln!("a2a error: {message}");
+                eprintln!("{}", crate::output::format_a2a_error_line(&message));
             }
             Ok(ExitCode::from(2))
         }
@@ -158,7 +163,7 @@ fn send(args: A2aSendArgs) -> Result<ExitCode> {
             db: path_text(&db),
         })?;
     } else {
-        println!("{}", view.id);
+        println!("{}", format_a2a_send_line(&view));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -195,17 +200,10 @@ fn inbox(args: A2aInboxArgs) -> Result<ExitCode> {
         })?;
     } else {
         for view in views {
-            println!(
-                "{} {} -> {} {} {}",
-                terminal_safe(&view.id),
-                terminal_safe(&view.from_code),
-                terminal_safe(&view.to_code),
-                terminal_safe(&view.kind),
-                terminal_safe(&view.delivery_status),
-            );
+            println!("{}", format_a2a_inbox_line(&view));
         }
         if page.has_more {
-            eprintln!("more messages are available; raise --limit to include them");
+            eprintln!("{}", crate::output::format_a2a_more_messages_line());
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -248,17 +246,8 @@ fn read_with_writer(args: A2aReadArgs, stdout: &mut impl Write) -> Result<ExitCo
             },
         )?;
     } else {
-        writeln!(
-            stdout,
-            "{} {} -> {} {}",
-            terminal_safe(&view.id),
-            terminal_safe(&view.from_code),
-            terminal_safe(&view.to_code),
-            terminal_safe(&view.kind),
-        )
-        .context("write local A2A message header")?;
-        writeln!(stdout, "{}", terminal_safe(&view.body))
-            .context("write local A2A message body")?;
+        write!(stdout, "{}", format_a2a_read_message(&view))
+            .context("write local A2A message response")?;
         stdout.flush().context("flush local A2A message response")?;
     }
     store
@@ -272,8 +261,18 @@ fn open_store(common: &A2aCommonArgs) -> Result<(SqliteMessageStore, PathBuf)> {
         Some(path) => path.clone(),
         None => StoragePaths::resolve()?.message_db_path(),
     };
-    let store = SqliteMessageStore::open(&path)
-        .with_context(|| format!("open message database {}", path.display()))?;
+    let store = match SqliteMessageStore::open(&path) {
+        Ok(store) => store,
+        Err(error) => {
+            // Kind-only pure line; path stays only in anyhow context (WP-392).
+            tracing::error!(
+                error = error.as_str(),
+                "{}",
+                crate::output::format_message_store_error_kind_line(&error)
+            );
+            return Err(error).with_context(|| format!("open message database {}", path.display()));
+        }
+    };
     Ok((store, path))
 }
 
@@ -337,6 +336,12 @@ fn parse_payload(items: &[String]) -> Result<Value> {
 }
 
 fn message_view(message: &MessageRecord, delivery: &DeliveryRecord) -> MessageView {
+    // Kind-only pure line; no bodies/ids in the pure status message (WP-391).
+    tracing::info!(
+        status = delivery.status.as_str(),
+        "{}",
+        crate::output::format_delivery_status_line(delivery.status)
+    );
     MessageView {
         id: message.id.clone(),
         from_code: message.sender.id.clone(),
@@ -351,7 +356,7 @@ fn message_view(message: &MessageRecord, delivery: &DeliveryRecord) -> MessageVi
         trace_id: message.trace_id.clone(),
         kind: message.kind.clone(),
         payload: message.payload.clone(),
-        delivery_status: delivery.status.to_string(),
+        delivery_status: delivery.status.as_str().to_string(),
     }
 }
 
@@ -373,4 +378,94 @@ fn path_text(path: &Path) -> String {
 
 fn terminal_safe(value: &str) -> String {
     value.chars().flat_map(char::escape_default).collect()
+}
+
+/// Human one-line local A2A send result: terminal-safe message id.
+fn format_a2a_send_line(view: &MessageView) -> String {
+    terminal_safe(&view.id)
+}
+
+/// Human one-line local A2A inbox row: id, from, to, kind, delivery status.
+fn format_a2a_inbox_line(view: &MessageView) -> String {
+    format!(
+        "{} {} -> {} {} {}",
+        terminal_safe(&view.id),
+        terminal_safe(&view.from_code),
+        terminal_safe(&view.to_code),
+        terminal_safe(&view.kind),
+        terminal_safe(&view.delivery_status),
+    )
+}
+
+/// Human local A2A read projection: header line then body line (both terminal-safe).
+fn format_a2a_read_message(view: &MessageView) -> String {
+    format!(
+        "{} {} -> {} {}\n{}\n",
+        terminal_safe(&view.id),
+        terminal_safe(&view.from_code),
+        terminal_safe(&view.to_code),
+        terminal_safe(&view.kind),
+        terminal_safe(&view.body),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MessageView, format_a2a_inbox_line, format_a2a_read_message, format_a2a_send_line,
+    };
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    fn sample_view(id: &str, body: &str) -> MessageView {
+        let at = Utc.with_ymd_and_hms(2026, 8, 2, 17, 0, 0).unwrap();
+        MessageView {
+            id: id.into(),
+            from_code: "alice\n".into(),
+            to_code: "bob".into(),
+            body: body.into(),
+            created_at: at,
+            deliver_after: at,
+            owner_user_id: "local".into(),
+            delivered_at: None,
+            read_at: None,
+            thread_id: "t1".into(),
+            trace_id: None,
+            kind: "text\tplain".into(),
+            payload: json!({}),
+            delivery_status: "available".into(),
+        }
+    }
+
+    #[test]
+    fn human_a2a_send_line_is_terminal_safe_id() {
+        let view = sample_view("msg-1\u{1b}[31m", "hello");
+        let text = format_a2a_send_line(&view);
+        assert!(!text.contains('\u{1b}'), "no raw ESC:\n{text}");
+        assert!(text.contains("msg-1"), "{text}");
+    }
+
+    #[test]
+    fn human_a2a_inbox_line_prints_safe_route_and_status() {
+        let view = sample_view("m1", "body");
+        let text = format_a2a_inbox_line(&view);
+        assert!(text.contains("m1"), "{text}");
+        assert!(text.contains("alice\\n"), "{text}");
+        assert!(text.contains("-> bob"), "{text}");
+        assert!(text.contains("text\\tplain"), "{text}");
+        assert!(text.contains("available"), "{text}");
+        assert!(!text.contains('\n') || text.contains("\\n"), "{text}");
+    }
+
+    #[test]
+    fn human_a2a_read_message_prints_header_and_body() {
+        let view = sample_view("m2", "hello\tworld\u{1b}");
+        let text = format_a2a_read_message(&view);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].contains("m2"), "{text}");
+        assert!(lines[0].contains("-> bob"), "{text}");
+        assert!(!text.contains('\u{1b}'), "no raw ESC:\n{text}");
+        assert!(lines[1].contains("hello"), "{text}");
+    }
 }

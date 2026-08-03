@@ -270,7 +270,12 @@ impl AgentRunExecutor for ProcessAgentRunExecutor {
                 },
             },
             Err(_) => {
-                tracing::warn!(?state, "Process AgentRun dispatch ended without quiescence");
+                // Kind-only pure line; cycle counts stay out of the token (WP-372).
+                tracing::warn!(
+                    lifecycle = state.as_str(),
+                    "{}",
+                    crate::output::format_lifecycle_observation_line(state)
+                );
                 return AgentExecutorOutcome::Unknown;
             }
             Ok(outcome) => match outcome.record.status {
@@ -304,12 +309,19 @@ impl AgentRunExecutor for ProcessAgentRunExecutor {
                             message,
                         )
                         .await;
-                    let Ok(staged) = staged else {
-                        tracing::warn!(
-                            ?staged,
-                            "Process AgentRun completion staging was unavailable"
-                        );
-                        return AgentExecutorOutcome::Unknown;
+                    let staged = match staged {
+                        Ok(staged) => staged,
+                        Err(error) => {
+                            // Kind-only; never log body/key payloads (WP-371).
+                            tracing::warn!(
+                                stage_error = error.as_str(),
+                                "{}",
+                                crate::output::format_agent_message_completion_stage_error_kind_line(
+                                    error
+                                )
+                            );
+                            return AgentExecutorOutcome::Unknown;
+                        }
                     };
                     let _ = self.spool.remove(&input.run_id, &input.worker_id);
                     return AgentExecutorOutcome::Quiesced(
@@ -317,14 +329,28 @@ impl AgentRunExecutor for ProcessAgentRunExecutor {
                     );
                 }
                 RunStatus::Success => {
-                    tracing::warn!(?state, "successful Process AgentRun lacked stop proof");
+                    // Kind-only pure line; cycle counts stay out of the token (WP-372).
+                    tracing::warn!(
+                        lifecycle = state.as_str(),
+                        "{}",
+                        crate::output::format_lifecycle_observation_line(state)
+                    );
                     return AgentExecutorOutcome::Unknown;
                 }
                 RunStatus::Timeout if state.quiesced_or_never_started() => {
                     AgentExecutionSettlement::TimedOut
                 }
                 RunStatus::Error if state.quiesced_or_never_started() => {
-                    let spawn_failed = outcome.record.attempts.last().is_some_and(|attempt| {
+                    let last_attempt = outcome.record.attempts.last();
+                    if let Some(attempt) = last_attempt {
+                        // Kind-only pure line; payloads stay out of AttemptOutcome tokens (WP-390).
+                        tracing::info!(
+                            attempt = attempt.outcome.as_str(),
+                            "{}",
+                            crate::output::format_attempt_outcome_line(&attempt.outcome)
+                        );
+                    }
+                    let spawn_failed = last_attempt.is_some_and(|attempt| {
                         matches!(
                             attempt.outcome,
                             AttemptOutcome::Err {
@@ -341,15 +367,50 @@ impl AgentRunExecutor for ProcessAgentRunExecutor {
                         },
                     }
                 }
-                RunStatus::Cancelled | RunStatus::Timeout | RunStatus::Error => {
+                status @ (RunStatus::Cancelled | RunStatus::Timeout | RunStatus::Error) => {
+                    // Kind-only pure line for non-quiesced terminal status (WP-373).
+                    tracing::warn!(
+                        status = status.as_str(),
+                        lifecycle = state.as_str(),
+                        "{}; {}",
+                        crate::output::format_run_status_line(status),
+                        crate::output::format_lifecycle_observation_line(state)
+                    );
                     return AgentExecutorOutcome::Unknown;
                 }
             },
         };
         if self.remove_failed_input(&input) {
-            AgentExecutorOutcome::Quiesced(outcome)
+            let settled = AgentExecutorOutcome::Quiesced(outcome);
+            // Kind-only pure lines for settled process outcomes (WP-374/379).
+            tracing::info!(
+                settlement = settled.as_str(),
+                "{}",
+                crate::output::format_agent_executor_outcome_line(&settled)
+            );
+            if let AgentExecutorOutcome::Quiesced(ref settlement) = settled {
+                tracing::info!(
+                    settlement = settlement.as_str(),
+                    "{}",
+                    crate::output::format_agent_execution_settlement_line(settlement)
+                );
+                if let AgentExecutionSettlement::Failed { code } = settlement {
+                    tracing::info!(
+                        failure_code = code.as_str(),
+                        "{}",
+                        crate::output::format_run_failure_code_line(*code)
+                    );
+                }
+            }
+            settled
         } else {
-            AgentExecutorOutcome::Unknown
+            let unknown = AgentExecutorOutcome::Unknown;
+            tracing::warn!(
+                settlement = unknown.as_str(),
+                "{}",
+                crate::output::format_agent_executor_outcome_line(&unknown)
+            );
+            unknown
         }
     }
 }
@@ -359,7 +420,7 @@ const fn is_lower_hex(byte: u8) -> bool {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum LifecycleObservation {
+pub(crate) enum LifecycleObservation {
     NeverStarted,
     Running,
     Stopped { cycles: u32 },
@@ -367,6 +428,16 @@ enum LifecycleObservation {
 }
 
 impl LifecycleObservation {
+    /// Stable snake_case kind token; cycle counts stay out of the token.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NeverStarted => "never_started",
+            Self::Running => "running",
+            Self::Stopped { .. } => "stopped",
+            Self::Uncertain => "uncertain",
+        }
+    }
+
     fn quiesced_or_never_started(self) -> bool {
         matches!(self, Self::NeverStarted | Self::Stopped { .. })
     }
@@ -515,5 +586,21 @@ fn completion_message(input: &AgentSpoolInput, key: &str, output: String) -> New
             expires_at: None,
             max_attempts: 3,
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LifecycleObservation;
+
+    #[test]
+    fn lifecycle_observation_kind_tokens_are_snake_case() {
+        assert_eq!(LifecycleObservation::NeverStarted.as_str(), "never_started");
+        assert_eq!(LifecycleObservation::Running.as_str(), "running");
+        assert_eq!(
+            LifecycleObservation::Stopped { cycles: 3 }.as_str(),
+            "stopped"
+        );
+        assert_eq!(LifecycleObservation::Uncertain.as_str(), "uncertain");
     }
 }

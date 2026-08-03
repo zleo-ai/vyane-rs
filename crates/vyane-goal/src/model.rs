@@ -23,7 +23,8 @@ impl GoalStatus {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// Stable snake_case token matching the serde rename for this status.
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::InProgress => "in_progress",
@@ -78,7 +79,8 @@ pub enum GoalEventKind {
 }
 
 impl GoalEventKind {
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// Stable snake_case token matching the serde rename for this event kind.
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Created => "created",
             Self::Started => "started",
@@ -94,6 +96,12 @@ impl GoalEventKind {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
         }
+    }
+}
+
+impl fmt::Display for GoalEventKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -137,6 +145,25 @@ pub enum CriterionStatus {
     Inconclusive,
     ManualRequired,
     Error,
+}
+
+impl CriterionStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Satisfied => "satisfied",
+            Self::Unsatisfied => "unsatisfied",
+            Self::Inconclusive => "inconclusive",
+            Self::ManualRequired => "manual_required",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for CriterionStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,4 +462,24 @@ pub(crate) fn validate_text(field: &str, value: &str, maximum: usize) -> Result<
         )));
     }
     validate_optional_text(field, value, maximum)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CriterionStatus, GoalEventKind, GoalStatus};
+
+    #[test]
+    fn criterion_status_and_event_kind_tokens_match_serde_snake_case() {
+        assert_eq!(CriterionStatus::ManualRequired.as_str(), "manual_required");
+        assert_eq!(CriterionStatus::Satisfied.to_string(), "satisfied");
+        assert_eq!(GoalEventKind::LeaseRenewed.as_str(), "lease_renewed");
+        assert_eq!(GoalEventKind::Progress.to_string(), "progress");
+    }
+
+    #[test]
+    fn goal_status_tokens_match_serde_snake_case() {
+        assert_eq!(GoalStatus::Queued.as_str(), "queued");
+        assert_eq!(GoalStatus::InProgress.to_string(), "in_progress");
+        assert_eq!(GoalStatus::Completed.as_str(), "completed");
+    }
 }

@@ -13,6 +13,7 @@
 //! reproducible; inheriting the full parent environment is an opt-in.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,23 @@ pub enum InheritMode {
     Scrub,
     /// Inherit the full parent environment. Opt-in; injected values still win.
     Full,
+}
+
+impl InheritMode {
+    /// Stable snake_case token matching the serde rename for this inherit mode.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scrub => "scrub",
+            Self::Full => "full",
+        }
+    }
+}
+
+impl fmt::Display for InheritMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Policy for building a child process environment.
@@ -160,5 +178,11 @@ mod tests {
     fn build_is_deterministic() {
         let policy = EnvPolicy::scrubbed().inject("A", "1");
         assert_eq!(policy.build(parent()), policy.build(parent()));
+    }
+
+    #[test]
+    fn inherit_mode_tokens_match_serde_snake_case() {
+        assert_eq!(InheritMode::Scrub.as_str(), "scrub");
+        assert_eq!(InheritMode::Full.to_string(), "full");
     }
 }

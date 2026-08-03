@@ -6,6 +6,7 @@
 //! complete [`crate::resolve::ResolvedConfig`].
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use vyane_core::{Effort, ErrorKind, ModelId, Protocol, Sandbox, VyaneError, WebSearchContextSize};
@@ -82,6 +83,24 @@ pub enum NativeToolPermissionEffectConfig {
     Deny,
 }
 
+impl NativeToolPermissionEffectConfig {
+    /// Stable snake_case token matching the serde rename for this effect.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Ask => "ask",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+impl fmt::Display for NativeToolPermissionEffectConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeToolPermissionRuleConfig {
@@ -138,6 +157,23 @@ pub enum NativeCommandNetworkRouteConfig {
     #[default]
     Direct,
     EnvironmentProxy,
+}
+
+impl NativeCommandNetworkRouteConfig {
+    /// Stable snake_case token matching the serde rename for this network route.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::EnvironmentProxy => "environment_proxy",
+        }
+    }
+}
+
+impl fmt::Display for NativeCommandNetworkRouteConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -569,6 +605,18 @@ mod tests {
                 "#,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn config_native_policy_enum_tokens_match_serde_snake_case() {
+        assert_eq!(NativeToolPermissionEffectConfig::Allow.as_str(), "allow");
+        assert_eq!(NativeToolPermissionEffectConfig::Ask.to_string(), "ask");
+        assert_eq!(NativeToolPermissionEffectConfig::Deny.as_str(), "deny");
+        assert_eq!(NativeCommandNetworkRouteConfig::Direct.as_str(), "direct");
+        assert_eq!(
+            NativeCommandNetworkRouteConfig::EnvironmentProxy.to_string(),
+            "environment_proxy"
         );
     }
 }

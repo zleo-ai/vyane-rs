@@ -57,6 +57,23 @@ pub enum AgentSupervisorError {
     MissingRecoveryAdapter,
 }
 
+impl AgentSupervisorError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidSchedule => "invalid_schedule",
+            Self::InvalidExecution => "invalid_execution",
+            Self::InvalidRecovery => "invalid_recovery",
+            Self::InvalidCompletion => "invalid_completion",
+            Self::InvalidLaneCount => "invalid_lane_count",
+            Self::DuplicateExecutionBackend => "duplicate_execution_backend",
+            Self::DuplicateLeaseOwner => "duplicate_lease_owner",
+            Self::MissingRecoveryAdapter => "missing_recovery_adapter",
+        }
+    }
+}
+
 impl fmt::Display for AgentSupervisorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -721,14 +738,29 @@ async fn run_completion_loop(
                         NextStep::Delay(schedule.recovery_poll_interval)
                     }
                 } else {
+                    let first_degraded = report
+                        .items
+                        .iter()
+                        .copied()
+                        .find(|status| completion_degraded(*status))
+                        .map(AgentCompletionProjectionStatus::as_str)
+                        .unwrap_or("unknown");
+                    tracing::warn!(
+                        degraded,
+                        first_degraded,
+                        "AgentRun completion cycle retained degraded items"
+                    );
                     NextStep::Delay(backoff.failure_delay())
                 }
             }
-            Ok(Err(_)) => {
+            Ok(Err(error)) => {
+                tracing::warn!(error = error.as_str(), "AgentRun completion cycle failed");
                 stats.failed_cycles = stats.failed_cycles.saturating_add(1);
                 NextStep::Delay(backoff.failure_delay())
             }
             Err(_) => {
+                // Body-free: never format the panic payload (WP-281).
+                tracing::warn!(reason = "panic", "AgentRun completion cycle panicked");
                 stats.panicked_cycles = stats.panicked_cycles.saturating_add(1);
                 NextStep::Delay(backoff.failure_delay())
             }
@@ -764,8 +796,17 @@ async fn drain_completion_once(
                     .count(),
             );
         }
-        Ok(Err(_)) => stats.failed_cycles = stats.failed_cycles.saturating_add(1),
-        Err(_) => stats.panicked_cycles = stats.panicked_cycles.saturating_add(1),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = error.as_str(),
+                "AgentRun completion drain cycle failed"
+            );
+            stats.failed_cycles = stats.failed_cycles.saturating_add(1);
+        }
+        Err(_) => {
+            tracing::warn!(reason = "panic", "AgentRun completion drain cycle panicked");
+            stats.panicked_cycles = stats.panicked_cycles.saturating_add(1);
+        }
     }
 }
 
@@ -829,20 +870,39 @@ async fn run_execution_loop(
                                 NextStep::Delay(schedule.execution_poll_interval)
                             }
                         } else {
+                            // Kind-only diagnostic: first non-settled item token (WP-273).
+                            let first_degraded = report
+                                .items
+                                .iter()
+                                .copied()
+                                .find(|status| execution_degraded(*status))
+                                .map(AgentExecutionItemStatus::as_str)
+                                .unwrap_or("unknown");
+                            tracing::warn!(
+                                degraded,
+                                first_degraded,
+                                "AgentRun execution cycle retained degraded items"
+                            );
                             NextStep::Delay(backoff.failure_delay())
                         }
                     }
-                    Ok(Err(_)) => {
+                    Ok(Err(error)) => {
+                        tracing::warn!(error = error.as_str(), "AgentRun execution cycle failed");
                         stats.failed_cycles = stats.failed_cycles.saturating_add(1);
                         NextStep::Delay(backoff.failure_delay())
                     }
                     Err(_) => {
+                        tracing::warn!(reason = "panic", "AgentRun execution cycle panicked");
                         stats.panicked_cycles = stats.panicked_cycles.saturating_add(1);
                         NextStep::Delay(backoff.failure_delay())
                     }
                 }
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(
+                    error = error.as_str(),
+                    "AgentRun execution driver construction failed"
+                );
                 stats.failed_cycles = stats.failed_cycles.saturating_add(1);
                 NextStep::Delay(backoff.failure_delay())
             }
@@ -944,20 +1004,38 @@ async fn run_recovery_loop_source(
                                 NextStep::Delay(schedule.recovery_poll_interval)
                             }
                         } else {
+                            let first_degraded = report
+                                .items
+                                .iter()
+                                .copied()
+                                .find(|status| recovery_degraded(*status))
+                                .map(AgentRecoveryItemStatus::as_str)
+                                .unwrap_or("unknown");
+                            tracing::warn!(
+                                degraded,
+                                first_degraded,
+                                "AgentRun recovery cycle retained degraded items"
+                            );
                             NextStep::Delay(backoff.failure_delay())
                         }
                     }
-                    Ok(Err(_)) => {
+                    Ok(Err(error)) => {
+                        tracing::warn!(error = error.as_str(), "AgentRun recovery cycle failed");
                         stats.failed_cycles = stats.failed_cycles.saturating_add(1);
                         NextStep::Delay(backoff.failure_delay())
                     }
                     Err(_) => {
+                        tracing::warn!(reason = "panic", "AgentRun recovery cycle panicked");
                         stats.panicked_cycles = stats.panicked_cycles.saturating_add(1);
                         NextStep::Delay(backoff.failure_delay())
                     }
                 }
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(
+                    error = error.as_str(),
+                    "AgentRun recovery driver construction failed"
+                );
                 stats.failed_cycles = stats.failed_cycles.saturating_add(1);
                 NextStep::Delay(backoff.failure_delay())
             }
@@ -1090,6 +1168,26 @@ mod tests {
     const OWNER_RECOVERY: &str = "supervisor-recovery";
     const OWNER_COMPLETION: &str = "supervisor-completion";
     const OWNER_PROCESS: &str = "supervisor-process";
+
+    #[test]
+    fn supervisor_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            AgentSupervisorError::InvalidSchedule.as_str(),
+            "invalid_schedule"
+        );
+        assert_eq!(
+            AgentSupervisorError::InvalidLaneCount.as_str(),
+            "invalid_lane_count"
+        );
+        assert_eq!(
+            AgentSupervisorError::DuplicateExecutionBackend.as_str(),
+            "duplicate_execution_backend"
+        );
+        assert_eq!(
+            AgentSupervisorError::MissingRecoveryAdapter.as_str(),
+            "missing_recovery_adapter"
+        );
+    }
     const OWNER_PROCESS_SHUTDOWN: &str = "supervisor-process-shutdown";
 
     #[test]

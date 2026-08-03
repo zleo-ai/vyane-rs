@@ -163,6 +163,18 @@ pub enum AgentExecutionSettlement {
     TimedOut,
 }
 
+impl AgentExecutionSettlement {
+    /// Stable snake_case *kind* token; completion payloads and failure codes stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::CompletionStaged(_) => "completion_staged",
+            Self::Failed { .. } => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
 /// Result of polling a controller to an observation boundary.
 #[derive(Debug)]
 pub enum AgentExecutorOutcome {
@@ -171,6 +183,50 @@ pub enum AgentExecutorOutcome {
     Quiesced(AgentExecutionSettlement),
     /// The controller's state cannot be proved. It remains recovery-owned.
     Unknown,
+}
+
+impl AgentExecutorOutcome {
+    /// Stable snake_case *kind* token; settlement payloads stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Quiesced(_) => "quiesced",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[cfg(test)]
+mod agent_executor_outcome_tests {
+    use super::{AgentExecutionSettlement, AgentExecutorOutcome};
+
+    #[test]
+    fn agent_execution_settlement_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(AgentExecutionSettlement::TimedOut.as_str(), "timed_out");
+        assert_eq!(
+            AgentExecutionSettlement::Failed {
+                code: vyane_agent::RunFailureCode::Internal,
+            }
+            .as_str(),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn agent_executor_outcome_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(AgentExecutorOutcome::Unknown.as_str(), "unknown");
+        assert_eq!(
+            AgentExecutorOutcome::Quiesced(AgentExecutionSettlement::TimedOut).as_str(),
+            "quiesced"
+        );
+        assert_eq!(
+            AgentExecutorOutcome::Quiesced(AgentExecutionSettlement::Failed {
+                code: vyane_agent::RunFailureCode::Cancelled,
+            })
+            .as_str(),
+            "quiesced"
+        );
+    }
 }
 
 /// Trusted execution boundary for one controller implementation.
@@ -266,6 +322,25 @@ pub enum AgentExecutionError {
     InvalidStoreResult,
 }
 
+impl AgentExecutionError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidOwner => "invalid_owner",
+            Self::InvalidLeaseOwner => "invalid_lease_owner",
+            Self::InvalidOptions => "invalid_options",
+            Self::InvalidExecutorMetadata => "invalid_executor_metadata",
+            Self::ExecutorMetadataPanicked => "executor_metadata_panicked",
+            Self::RandomUnavailable => "random_unavailable",
+            Self::RuntimeUnavailable => "runtime_unavailable",
+            Self::ClaimTaskFailed => "claim_task_failed",
+            Self::ClaimStoreFailed => "claim_store_failed",
+            Self::InvalidStoreResult => "invalid_store_result",
+        }
+    }
+}
+
 impl fmt::Display for AgentExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -300,6 +375,27 @@ pub enum AgentExecutionItemStatus {
     ControllerUnknown,
     HeartbeatFailed,
     SettlementFailed,
+}
+
+impl AgentExecutionItemStatus {
+    /// Stable snake_case kind token for diagnostics and operator maps.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Settled => "settled",
+            Self::InvalidClaim => "invalid_claim",
+            Self::ControllerReservationPanicked => "controller_reservation_panicked",
+            Self::InvalidController => "invalid_controller",
+            Self::StartFailed => "start_failed",
+            Self::PermitFailed => "permit_failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::ExecutorPanicked => "executor_panicked",
+            Self::ControllerUnknown => "controller_unknown",
+            Self::HeartbeatFailed => "heartbeat_failed",
+            Self::SettlementFailed => "settlement_failed",
+        }
+    }
 }
 
 /// Bounded report with no durable identity or executor body.
@@ -454,15 +550,26 @@ impl AgentRunExecutionDriver {
             active: active_cancellation,
         };
         let items = stream::iter(prepared.into_iter().map(|prepared| {
-            execute_one(
-                owner.clone(),
-                Arc::clone(&store),
-                Arc::clone(&executor),
-                prepared,
-                execution_cancellation.clone(),
-                options.clone(),
-                base,
-            )
+            let store = Arc::clone(&store);
+            let executor = Arc::clone(&executor);
+            let owner = owner.clone();
+            let execution_cancellation = execution_cancellation.clone();
+            let options = options.clone();
+            async move {
+                let status = execute_one(
+                    owner,
+                    store,
+                    executor,
+                    prepared,
+                    execution_cancellation,
+                    options,
+                    base,
+                )
+                .await;
+                // Kind-only; no run/controller ids in structured fields (WP-351).
+                tracing::info!(status = status.as_str(), "agent execution item settled");
+                status
+            }
         }))
         .buffer_unordered(options.max_in_flight)
         .collect()
@@ -1603,6 +1710,44 @@ mod tests {
         ) -> AgentExecutorOutcome {
             panic!("must not execute")
         }
+    }
+
+    #[test]
+    fn execution_item_status_and_error_kind_tokens_are_snake_case() {
+        assert_eq!(AgentExecutionItemStatus::Settled.as_str(), "settled");
+        assert_eq!(
+            AgentExecutionItemStatus::ControllerUnknown.as_str(),
+            "controller_unknown"
+        );
+        assert_eq!(
+            AgentExecutionItemStatus::SettlementFailed.as_str(),
+            "settlement_failed"
+        );
+        assert_eq!(
+            AgentExecutionItemStatus::ControllerReservationPanicked.as_str(),
+            "controller_reservation_panicked"
+        );
+        assert_eq!(
+            AgentExecutionItemStatus::HeartbeatFailed.as_str(),
+            "heartbeat_failed"
+        );
+        assert_eq!(AgentExecutionItemStatus::TimedOut.as_str(), "timed_out");
+        assert_eq!(
+            AgentExecutionError::InvalidLeaseOwner.as_str(),
+            "invalid_lease_owner"
+        );
+        assert_eq!(
+            AgentExecutionError::ClaimStoreFailed.as_str(),
+            "claim_store_failed"
+        );
+        assert_eq!(
+            AgentExecutionError::RuntimeUnavailable.as_str(),
+            "runtime_unavailable"
+        );
+        assert_eq!(
+            AgentExecutionError::ExecutorMetadataPanicked.as_str(),
+            "executor_metadata_panicked"
+        );
     }
 
     #[test]

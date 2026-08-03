@@ -48,6 +48,18 @@ pub enum GoalObservationKind {
     },
 }
 
+impl GoalObservationKind {
+    /// Stable snake_case *kind* token; repos, PR numbers, and ids stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::QuotaReset => "quota_reset",
+            Self::ReviewChecksPassed { .. } => "review_checks_passed",
+            Self::ReviewChecksFailed { .. } => "review_checks_failed",
+        }
+    }
+}
+
 /// One typed fact. Owner and source are deliberately absent: the ingestion
 /// authority freezes the owner and binds a trusted watcher identity separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +79,24 @@ pub enum GoalObservationSignalKind {
     ReviewChecksFailed,
 }
 
+impl GoalObservationSignalKind {
+    /// Stable snake_case token matching the serde rename for this signal kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QuotaReset => "quota_reset",
+            Self::ReviewChecksPassed => "review_checks_passed",
+            Self::ReviewChecksFailed => "review_checks_failed",
+        }
+    }
+}
+
+impl fmt::Display for GoalObservationSignalKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalObservationStatus {
@@ -75,6 +105,26 @@ pub enum GoalObservationStatus {
     Absent,
     Rejected,
     Unavailable,
+}
+
+impl GoalObservationStatus {
+    /// Stable snake_case token matching the serde rename for this status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::Unchanged => "unchanged",
+            Self::Absent => "absent",
+            Self::Rejected => "rejected",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+impl fmt::Display for GoalObservationStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Allowlisted receipt. It contains no owner, target, repository, source,
@@ -91,6 +141,17 @@ pub struct GoalObservationReceipt {
 pub enum GoalObservationIngressError {
     InvalidSource,
     Unavailable,
+}
+
+impl GoalObservationIngressError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidSource => "invalid_source",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 impl fmt::Display for GoalObservationIngressError {
@@ -162,7 +223,14 @@ impl GoalObservationSink {
         recorded_at: DateTime<Utc>,
     ) -> GoalObservationReceipt {
         let kind = observation.signal_kind();
+        // Kind-only; never log repos, PR numbers, or observation ids (WP-334).
+        let observation_kind = observation.kind.as_str();
         if observation.goal_id.trim().is_empty() || observation.goal_id.len() > 256 {
+            tracing::warn!(
+                kind = observation_kind,
+                status = GoalObservationStatus::Rejected.as_str(),
+                "goal observation rejected before record"
+            );
             return GoalObservationReceipt {
                 goal_id: None,
                 kind,
@@ -187,6 +255,11 @@ impl GoalObservationSink {
             ) => GoalObservationStatus::Rejected,
             Err(_) => GoalObservationStatus::Unavailable,
         };
+        tracing::info!(
+            kind = observation_kind,
+            status = status.as_str(),
+            "goal observation ingested"
+        );
         GoalObservationReceipt {
             goal_id: Some(goal_id),
             kind,
@@ -317,6 +390,26 @@ pub enum GoalObservationWatcherErrorCode {
     Internal,
 }
 
+impl GoalObservationWatcherErrorCode {
+    /// Stable snake_case token matching the serde rename for this error code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication",
+            Self::RateLimited => "rate_limited",
+            Self::Unavailable => "unavailable",
+            Self::InvalidResponse => "invalid_response",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+impl fmt::Display for GoalObservationWatcherErrorCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GoalObservationWatcherError {
     pub code: GoalObservationWatcherErrorCode,
@@ -351,6 +444,25 @@ pub enum GoalObservationWatchStatus {
     InvalidBatch,
 }
 
+impl GoalObservationWatchStatus {
+    /// Stable snake_case token matching the serde rename for this watch status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+            Self::InvalidBatch => "invalid_batch",
+        }
+    }
+}
+
+impl fmt::Display for GoalObservationWatchStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GoalObservationWatchReport {
     pub watcher_id: String,
@@ -365,6 +477,17 @@ pub struct GoalObservationWatchReport {
 pub enum GoalObservationRunnerError {
     InvalidConfiguration,
     DuplicateWatcher,
+}
+
+impl GoalObservationRunnerError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration => "invalid_configuration",
+            Self::DuplicateWatcher => "duplicate_watcher",
+        }
+    }
 }
 
 impl fmt::Display for GoalObservationRunnerError {
@@ -509,6 +632,41 @@ mod tests {
 
     use super::*;
     use crate::{LoadedConfig, OwnerContext, VyaneService};
+
+    #[test]
+    fn goal_observation_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(GoalObservationKind::QuotaReset.as_str(), "quota_reset");
+        assert_eq!(
+            GoalObservationKind::ReviewChecksPassed {
+                repository: "secret/repo".into(),
+                pull_request: 42,
+                observation_id: "secret-obs".into(),
+                observation_sequence: 7,
+            }
+            .as_str(),
+            "review_checks_passed"
+        );
+        assert!(
+            !GoalObservationKind::ReviewChecksFailed {
+                repository: "secret/repo".into(),
+                pull_request: 42,
+                observation_id: "secret-obs".into(),
+                observation_sequence: 7,
+            }
+            .as_str()
+            .contains("secret")
+        );
+        assert_eq!(
+            GoalObservationKind::ReviewChecksFailed {
+                repository: "secret/repo".into(),
+                pull_request: 42,
+                observation_id: "secret-obs".into(),
+                observation_sequence: 7,
+            }
+            .as_str(),
+            "review_checks_failed"
+        );
+    }
 
     fn service(directory: &TempDir) -> VyaneService {
         VyaneService::from_loaded_with_paths(
@@ -932,5 +1090,76 @@ mod tests {
             ingress.bind_source(" bad"),
             Err(GoalObservationIngressError::InvalidSource)
         ));
+    }
+
+    #[test]
+    fn goal_observation_ingress_and_runner_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            GoalObservationIngressError::InvalidSource.as_str(),
+            "invalid_source"
+        );
+        assert_eq!(
+            GoalObservationIngressError::Unavailable.as_str(),
+            "unavailable"
+        );
+        assert_eq!(
+            GoalObservationRunnerError::InvalidConfiguration.as_str(),
+            "invalid_configuration"
+        );
+        assert_eq!(
+            GoalObservationRunnerError::DuplicateWatcher.as_str(),
+            "duplicate_watcher"
+        );
+    }
+
+    #[test]
+    fn goal_observation_closed_enum_tokens_match_serde_snake_case() {
+        assert_eq!(
+            GoalObservationSignalKind::QuotaReset.as_str(),
+            "quota_reset"
+        );
+        assert_eq!(
+            GoalObservationSignalKind::ReviewChecksPassed.to_string(),
+            "review_checks_passed"
+        );
+        assert_eq!(
+            GoalObservationSignalKind::ReviewChecksFailed.as_str(),
+            "review_checks_failed"
+        );
+
+        assert_eq!(GoalObservationStatus::Recorded.as_str(), "recorded");
+        assert_eq!(GoalObservationStatus::Unchanged.to_string(), "unchanged");
+        assert_eq!(GoalObservationStatus::Absent.as_str(), "absent");
+        assert_eq!(GoalObservationStatus::Rejected.to_string(), "rejected");
+        assert_eq!(GoalObservationStatus::Unavailable.as_str(), "unavailable");
+
+        assert_eq!(
+            GoalObservationWatcherErrorCode::Authentication.as_str(),
+            "authentication"
+        );
+        assert_eq!(
+            GoalObservationWatcherErrorCode::RateLimited.to_string(),
+            "rate_limited"
+        );
+        assert_eq!(
+            GoalObservationWatcherErrorCode::Unavailable.as_str(),
+            "unavailable"
+        );
+        assert_eq!(
+            GoalObservationWatcherErrorCode::InvalidResponse.to_string(),
+            "invalid_response"
+        );
+        assert_eq!(
+            GoalObservationWatcherErrorCode::Internal.as_str(),
+            "internal"
+        );
+
+        assert_eq!(GoalObservationWatchStatus::Complete.as_str(), "complete");
+        assert_eq!(GoalObservationWatchStatus::Error.to_string(), "error");
+        assert_eq!(GoalObservationWatchStatus::Timeout.as_str(), "timeout");
+        assert_eq!(
+            GoalObservationWatchStatus::InvalidBatch.to_string(),
+            "invalid_batch"
+        );
     }
 }

@@ -63,6 +63,23 @@ pub enum NativeCommandNetworkRoute {
     EnvironmentProxy,
 }
 
+impl NativeCommandNetworkRoute {
+    /// Stable snake_case token matching the serde rename for this network route.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::EnvironmentProxy => "environment_proxy",
+        }
+    }
+}
+
+impl std::fmt::Display for NativeCommandNetworkRoute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl NativeCommandNetworkPolicy {
     pub fn validate(&self) -> Result<(), NativeCommandNetworkPolicyError> {
         if self.allow.is_empty() {
@@ -138,6 +155,22 @@ pub enum NativeCommandNetworkPolicyError {
     InvalidByteLimit,
     #[error("native command network connect timeout is invalid")]
     InvalidConnectTimeout,
+}
+
+impl NativeCommandNetworkPolicyError {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyAllowlist => "empty_allowlist",
+            Self::TooManyRules => "too_many_rules",
+            Self::InvalidHost => "invalid_host",
+            Self::InvalidPorts => "invalid_ports",
+            Self::InvalidConnectionLimit => "invalid_connection_limit",
+            Self::InvalidByteLimit => "invalid_byte_limit",
+            Self::InvalidConnectTimeout => "invalid_connect_timeout",
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -838,6 +871,26 @@ fn public_v6(ip: Ipv6Addr) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_command_network_policy_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            NativeCommandNetworkPolicyError::EmptyAllowlist.as_str(),
+            "empty_allowlist"
+        );
+        assert_eq!(
+            NativeCommandNetworkPolicyError::InvalidConnectionLimit.as_str(),
+            "invalid_connection_limit"
+        );
+        assert_eq!(
+            NativeCommandNetworkPolicyError::InvalidConnectTimeout.as_str(),
+            "invalid_connect_timeout"
+        );
+        assert_eq!(
+            NativeCommandNetworkPolicyError::InvalidByteLimit.as_str(),
+            "invalid_byte_limit"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     struct AlwaysValidAuthority;
 
@@ -1073,5 +1126,14 @@ mod tests {
             .await
             .expect("broker task")
             .expect("broker completion");
+    }
+
+    #[test]
+    fn native_command_network_route_tokens_match_serde_snake_case() {
+        assert_eq!(NativeCommandNetworkRoute::Direct.as_str(), "direct");
+        assert_eq!(
+            NativeCommandNetworkRoute::EnvironmentProxy.to_string(),
+            "environment_proxy"
+        );
     }
 }

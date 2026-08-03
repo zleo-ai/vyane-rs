@@ -25,8 +25,12 @@ pub const MAX_TREE_CANCEL_RUNS: usize = 256;
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal,)+ }) => {
         impl $name {
-            pub(crate) const fn as_str(self) -> &'static str {
-                match self { $(Self::$variant => $value,)+ }
+            /// Stable snake_case token matching the serde rename for this enum.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value,)+
+                }
             }
         }
 
@@ -933,6 +937,16 @@ pub enum RunSettlement {
 }
 
 impl RunSettlement {
+    /// Stable snake_case *kind* token; failure codes stay out.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Failed { .. } => "failed",
+            Self::TimedOut => "timed_out",
+            Self::Interrupted { .. } => "interrupted",
+        }
+    }
+
     pub(crate) fn parts(self) -> Result<(RunState, Option<RunFailureCode>)> {
         match self {
             Self::Failed { code } => {
@@ -1155,6 +1169,42 @@ pub struct CancelPlan {
 pub enum CancelOutcome {
     Cancelled,
     ControllerUnavailable,
+}
+
+impl CancelOutcome {
+    /// Stable snake_case kind token for diagnostics (no free-form payload).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::ControllerUnavailable => "controller_unavailable",
+        }
+    }
+}
+
+impl fmt::Display for CancelOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod cancel_outcome_tests {
+    use super::CancelOutcome;
+
+    #[test]
+    fn cancel_outcome_kind_tokens_are_snake_case() {
+        assert_eq!(CancelOutcome::Cancelled.as_str(), "cancelled");
+        assert_eq!(
+            CancelOutcome::ControllerUnavailable.as_str(),
+            "controller_unavailable"
+        );
+        assert_eq!(CancelOutcome::Cancelled.to_string(), "cancelled");
+        assert_eq!(
+            CancelOutcome::ControllerUnavailable.to_string(),
+            "controller_unavailable"
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1390,4 +1440,69 @@ fn hex_lower(bytes: &[u8]) -> String {
         output.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AgentEventKind, ControllerKind, ExecutionBackend, ProjectionDeferReason,
+        ProjectionQuarantineReason, RecoveryReason, RunFailureCode, RunMode, RunSettlement,
+        RunState, WorkerLifecycle,
+    };
+
+    #[test]
+    fn run_settlement_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            RunSettlement::Failed {
+                code: RunFailureCode::Internal,
+            }
+            .as_str(),
+            "failed"
+        );
+        assert_eq!(RunSettlement::TimedOut.as_str(), "timed_out");
+        assert_eq!(
+            RunSettlement::Interrupted {
+                code: RunFailureCode::TransportInterrupted,
+            }
+            .as_str(),
+            "interrupted"
+        );
+    }
+
+    #[test]
+    fn agent_string_enum_tokens_are_public_snake_case() {
+        assert_eq!(WorkerLifecycle::Draining.as_str(), "draining");
+        assert_eq!(RunState::TimedOut.as_str(), "timed_out");
+        assert_eq!(RunState::Interrupted.to_string(), "interrupted");
+        assert_eq!(RunMode::Autonomous.to_string(), "autonomous");
+        assert_eq!(
+            RunFailureCode::TransportInterrupted.as_str(),
+            "transport_interrupted"
+        );
+        assert_eq!(ControllerKind::InProcess.as_str(), "in_process");
+        assert_eq!(
+            ExecutionBackend::CliHarnessProcess.to_string(),
+            "cli_harness_process"
+        );
+        assert_eq!(
+            ExecutionBackend::LegacyUnassigned.as_str(),
+            "legacy_unassigned"
+        );
+        assert_eq!(
+            RecoveryReason::ExecutionTimedOut.as_str(),
+            "execution_timed_out"
+        );
+        assert_eq!(
+            AgentEventKind::CompletionPrepared.as_str(),
+            "completion_prepared"
+        );
+        assert_eq!(
+            ProjectionDeferReason::SinkUnavailable.to_string(),
+            "sink_unavailable"
+        );
+        assert_eq!(
+            ProjectionQuarantineReason::InvalidEvent.as_str(),
+            "invalid_event"
+        );
+    }
 }

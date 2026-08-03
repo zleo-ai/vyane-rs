@@ -16,6 +16,7 @@
 //! rather than this projection, remain the source of truth.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
@@ -88,6 +89,28 @@ pub enum EventCategory {
     System,
 }
 
+impl EventCategory {
+    /// Stable snake_case token matching the serde rename for this category.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lifecycle => "lifecycle",
+            Self::Model => "model",
+            Self::Tool => "tool",
+            Self::Approval => "approval",
+            Self::Collaboration => "collaboration",
+            Self::Error => "error",
+            Self::System => "system",
+        }
+    }
+}
+
+impl fmt::Display for EventCategory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Component that produced an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,6 +124,28 @@ pub enum EventSource {
     System,
 }
 
+impl EventSource {
+    /// Stable snake_case token matching the serde rename for this source.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Kernel => "kernel",
+            Self::Workflow => "workflow",
+            Self::Harness => "harness",
+            Self::Daemon => "daemon",
+            Self::Broker => "broker",
+            Self::User => "user",
+            Self::System => "system",
+        }
+    }
+}
+
+impl fmt::Display for EventSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Whether one append must reach the filesystem before it is acknowledged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventDurability {
@@ -112,6 +157,23 @@ pub enum EventDurability {
     /// are also synced on Unix. Required for lifecycle, approval, terminal, and
     /// other control-plane facts.
     Durable,
+}
+
+impl EventDurability {
+    /// Stable lowercase token for this durability class.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Buffered => "buffered",
+            Self::Durable => "durable",
+        }
+    }
+}
+
+impl fmt::Display for EventDurability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Caller-supplied event fields. Sequence and timestamp are assigned by the log.
@@ -372,6 +434,22 @@ pub enum EventLogError {
     LockTimeout { mode: &'static str },
     #[error("corrupt event record")]
     CorruptRecord,
+}
+
+impl EventLogError {
+    /// Stable snake_case *kind* token; messages/modes/payloads stay out.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InvalidInput(_) => "invalid_input",
+            Self::Io(_) => "io",
+            Self::Serialize(_) => "serialize",
+            Self::Join(_) => "join",
+            Self::UnsupportedSchema { .. } => "unsupported_schema",
+            Self::LockTimeout { .. } => "lock_timeout",
+            Self::CorruptRecord => "corrupt_record",
+        }
+    }
 }
 
 pub type EventResult<T> = Result<T, EventLogError>;
@@ -914,4 +992,54 @@ fn open_private(path: &Path, append: bool) -> EventResult<File> {
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EventCategory, EventDurability, EventLogError, EventSource};
+
+    #[test]
+    fn ledger_event_enum_tokens_are_stable_snake_case() {
+        assert_eq!(EventCategory::Lifecycle.as_str(), "lifecycle");
+        assert_eq!(EventCategory::Collaboration.to_string(), "collaboration");
+        assert_eq!(EventSource::Kernel.as_str(), "kernel");
+        assert_eq!(EventSource::Workflow.to_string(), "workflow");
+        assert_eq!(EventDurability::Buffered.as_str(), "buffered");
+        assert_eq!(EventDurability::Durable.to_string(), "durable");
+    }
+
+    #[test]
+    fn event_log_error_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            EventLogError::InvalidInput("secret-input".into()).as_str(),
+            "invalid_input"
+        );
+        assert!(
+            !EventLogError::InvalidInput("secret-input".into())
+                .as_str()
+                .contains("secret")
+        );
+        assert_eq!(
+            EventLogError::Io(std::io::Error::other("secret-io")).as_str(),
+            "io"
+        );
+        assert_eq!(
+            EventLogError::Serialize(serde_json::from_str::<()>("not-json").expect_err("parse"))
+                .as_str(),
+            "serialize"
+        );
+        assert_eq!(
+            EventLogError::UnsupportedSchema {
+                found: 9,
+                supported: 3
+            }
+            .as_str(),
+            "unsupported_schema"
+        );
+        assert_eq!(
+            EventLogError::LockTimeout { mode: "exclusive" }.as_str(),
+            "lock_timeout"
+        );
+        assert_eq!(EventLogError::CorruptRecord.as_str(), "corrupt_record");
+    }
 }

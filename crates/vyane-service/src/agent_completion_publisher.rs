@@ -59,6 +59,25 @@ pub enum AgentCompletionProjectionStatus {
     StoreFailed,
 }
 
+impl AgentCompletionProjectionStatus {
+    /// Stable snake_case kind token for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unrelated => "unrelated",
+            Self::Published => "published",
+            Self::Discarded => "discarded",
+            Self::CompletionMissing => "completion_missing",
+            Self::CompletionConflict => "completion_conflict",
+            Self::SinkConflict => "sink_conflict",
+            Self::SinkMissing => "sink_missing",
+            Self::SinkUnavailable => "sink_unavailable",
+            Self::SinkPanicked => "sink_panicked",
+            Self::StoreFailed => "store_failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentCompletionProjectionReport {
     pub scanned: usize,
@@ -79,6 +98,23 @@ pub enum AgentCompletionPublisherError {
     SinkMetadataPanicked,
     RuntimeUnavailable,
     StoreUnavailable,
+}
+
+impl AgentCompletionPublisherError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidOwner => "invalid_owner",
+            Self::InvalidProjector => "invalid_projector",
+            Self::InvalidOptions => "invalid_options",
+            Self::InvalidSink => "invalid_sink",
+            Self::DuplicateSinkKind => "duplicate_sink_kind",
+            Self::SinkMetadataPanicked => "sink_metadata_panicked",
+            Self::RuntimeUnavailable => "runtime_unavailable",
+            Self::StoreUnavailable => "store_unavailable",
+        }
+    }
 }
 
 impl fmt::Display for AgentCompletionPublisherError {
@@ -197,7 +233,13 @@ impl AgentCompletionPublisher {
                 if self.acknowledge(event.event_id).await {
                     acknowledged += 1;
                 } else {
-                    items.push(AgentCompletionProjectionStatus::StoreFailed);
+                    let failed = AgentCompletionProjectionStatus::StoreFailed;
+                    // Kind-only; no event/run ids in structured fields (WP-352).
+                    tracing::info!(
+                        status = failed.as_str(),
+                        "agent completion projection item settled"
+                    );
+                    items.push(failed);
                     continue;
                 }
             } else {
@@ -231,11 +273,22 @@ impl AgentCompletionPublisher {
                             ProjectionDisposition::Quarantine(_) => quarantined += 1,
                         }
                     } else {
-                        items.push(AgentCompletionProjectionStatus::StoreFailed);
+                        let failed = AgentCompletionProjectionStatus::StoreFailed;
+                        // Kind-only; no event/run ids in structured fields (WP-352).
+                        tracing::info!(
+                            status = failed.as_str(),
+                            "agent completion projection item settled"
+                        );
+                        items.push(failed);
                         continue;
                     }
                 }
             }
+            // Kind-only; no event/run ids in structured fields (WP-352).
+            tracing::info!(
+                status = status.as_str(),
+                "agent completion projection item settled"
+            );
             items.push(status);
         }
         Ok(AgentCompletionProjectionReport {
@@ -434,6 +487,54 @@ mod tests {
 
     use super::*;
     use crate::AgentCompletionSinkObservation;
+
+    #[test]
+    fn completion_publisher_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            AgentCompletionPublisherError::InvalidProjector.as_str(),
+            "invalid_projector"
+        );
+        assert_eq!(
+            AgentCompletionPublisherError::DuplicateSinkKind.as_str(),
+            "duplicate_sink_kind"
+        );
+        assert_eq!(
+            AgentCompletionPublisherError::SinkMetadataPanicked.as_str(),
+            "sink_metadata_panicked"
+        );
+        assert_eq!(
+            AgentCompletionPublisherError::StoreUnavailable.as_str(),
+            "store_unavailable"
+        );
+    }
+
+    #[test]
+    fn completion_projection_status_kind_tokens_are_snake_case() {
+        assert_eq!(
+            AgentCompletionProjectionStatus::Unrelated.as_str(),
+            "unrelated"
+        );
+        assert_eq!(
+            AgentCompletionProjectionStatus::Published.as_str(),
+            "published"
+        );
+        assert_eq!(
+            AgentCompletionProjectionStatus::CompletionMissing.as_str(),
+            "completion_missing"
+        );
+        assert_eq!(
+            AgentCompletionProjectionStatus::CompletionConflict.as_str(),
+            "completion_conflict"
+        );
+        assert_eq!(
+            AgentCompletionProjectionStatus::SinkUnavailable.as_str(),
+            "sink_unavailable"
+        );
+        assert_eq!(
+            AgentCompletionProjectionStatus::StoreFailed.as_str(),
+            "store_failed"
+        );
+    }
 
     fn digest(byte: char) -> String {
         std::iter::repeat_n(byte, 64).collect()

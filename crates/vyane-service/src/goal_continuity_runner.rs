@@ -123,6 +123,18 @@ pub enum GoalContinuityRunnerAuthorityError {
     OwnerMismatch,
 }
 
+impl GoalContinuityRunnerAuthorityError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthenticationFailed => "authentication_failed",
+            Self::CapabilityMismatch => "capability_mismatch",
+            Self::OwnerMismatch => "owner_mismatch",
+        }
+    }
+}
+
 impl fmt::Display for GoalContinuityRunnerAuthorityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -152,6 +164,25 @@ pub enum GoalContinuityPortResult {
     Unchanged,
     Rejected,
     Unavailable,
+}
+
+impl GoalContinuityPortResult {
+    /// Stable snake_case token for this port mutation result.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+impl fmt::Display for GoalContinuityPortResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[async_trait]
@@ -263,6 +294,18 @@ pub enum GoalContinuityRunnerError {
     Unavailable,
 }
 
+impl GoalContinuityRunnerError {
+    /// Stable snake_case kind token (not the long Display prose).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidOptions => "invalid_options",
+            Self::InvalidGoalSet => "invalid_goal_set",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 impl fmt::Display for GoalContinuityRunnerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -290,6 +333,33 @@ pub enum GoalContinuityRunStatus {
     Rejected,
     Unavailable,
     TimedOut,
+}
+
+impl GoalContinuityRunStatus {
+    /// Stable snake_case token matching the serde rename for this run status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QueueApplied => "queue_applied",
+            Self::QueueUnchanged => "queue_unchanged",
+            Self::ExecutionApplied => "execution_applied",
+            Self::ExecutionUnchanged => "execution_unchanged",
+            Self::ManualDecisionRequired => "manual_decision_required",
+            Self::Waiting => "waiting",
+            Self::ExecutionBlocked => "execution_blocked",
+            Self::Complete => "complete",
+            Self::AuthorityUnavailable => "authority_unavailable",
+            Self::Rejected => "rejected",
+            Self::Unavailable => "unavailable",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+impl fmt::Display for GoalContinuityRunStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Redacted per-goal result. No owner, credential, target, path, prompt, raw
@@ -1136,5 +1206,81 @@ mod tests {
             .unwrap_err(),
             GoalContinuityRunnerError::InvalidOptions
         );
+    }
+
+    #[test]
+    fn goal_continuity_runner_error_kind_tokens_are_snake_case() {
+        assert_eq!(
+            GoalContinuityRunnerError::InvalidOptions.as_str(),
+            "invalid_options"
+        );
+        assert_eq!(
+            GoalContinuityRunnerError::InvalidGoalSet.as_str(),
+            "invalid_goal_set"
+        );
+        assert_eq!(
+            GoalContinuityRunnerError::Unavailable.as_str(),
+            "unavailable"
+        );
+        assert_eq!(
+            GoalContinuityRunnerAuthorityError::AuthenticationFailed.as_str(),
+            "authentication_failed"
+        );
+        assert_eq!(
+            GoalContinuityRunnerAuthorityError::CapabilityMismatch.as_str(),
+            "capability_mismatch"
+        );
+        assert_eq!(
+            GoalContinuityRunnerAuthorityError::OwnerMismatch.as_str(),
+            "owner_mismatch"
+        );
+    }
+
+    #[test]
+    fn goal_continuity_port_result_tokens_are_stable_snake_case() {
+        assert_eq!(GoalContinuityPortResult::Applied.as_str(), "applied");
+        assert_eq!(GoalContinuityPortResult::Unchanged.to_string(), "unchanged");
+        assert_eq!(GoalContinuityPortResult::Rejected.as_str(), "rejected");
+        assert_eq!(
+            GoalContinuityPortResult::Unavailable.to_string(),
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn goal_continuity_run_status_tokens_match_serde_snake_case() {
+        assert_eq!(
+            GoalContinuityRunStatus::QueueApplied.as_str(),
+            "queue_applied"
+        );
+        assert_eq!(
+            GoalContinuityRunStatus::QueueUnchanged.to_string(),
+            "queue_unchanged"
+        );
+        assert_eq!(
+            GoalContinuityRunStatus::ExecutionApplied.as_str(),
+            "execution_applied"
+        );
+        assert_eq!(
+            GoalContinuityRunStatus::ExecutionUnchanged.to_string(),
+            "execution_unchanged"
+        );
+        assert_eq!(
+            GoalContinuityRunStatus::ManualDecisionRequired.as_str(),
+            "manual_decision_required"
+        );
+        assert_eq!(GoalContinuityRunStatus::Waiting.to_string(), "waiting");
+        assert_eq!(
+            GoalContinuityRunStatus::ExecutionBlocked.as_str(),
+            "execution_blocked"
+        );
+        assert_eq!(GoalContinuityRunStatus::Complete.to_string(), "complete");
+        assert_eq!(
+            GoalContinuityRunStatus::AuthorityUnavailable.as_str(),
+            "authority_unavailable"
+        );
+        assert_eq!(GoalContinuityRunStatus::Rejected.to_string(), "rejected");
+        assert_eq!(GoalContinuityRunStatus::Unavailable.as_str(), "unavailable");
+        assert_eq!(GoalContinuityRunStatus::TimedOut.to_string(), "timed_out");
     }
 }

@@ -9,7 +9,8 @@ use crate::{Result, TaskStoreError};
 macro_rules! impl_string_enum {
     ($name:ident { $($variant:ident => $value:literal,)+ }) => {
         impl $name {
-            pub(crate) const fn as_str(self) -> &'static str {
+            /// Stable snake_case token matching the serde rename for this enum.
+            pub const fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => $value,)+
                 }
@@ -363,6 +364,17 @@ pub enum TaskSettlement {
 }
 
 impl TaskSettlement {
+    /// Stable snake_case *kind* token; failure codes and ledger run ids stay out.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Succeeded { .. } => "succeeded",
+            Self::Failed { .. } => "failed",
+            Self::TimedOut { .. } => "timed_out",
+            Self::Cancelled { .. } => "cancelled",
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if matches!(
             self,
@@ -468,4 +480,57 @@ pub(crate) fn validate_task_digest(value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FailureCode, TaskKind, TaskOrigin, TaskSettlement, TaskState};
+
+    #[test]
+    fn task_settlement_kind_tokens_are_snake_case_without_payload() {
+        assert_eq!(
+            TaskSettlement::Succeeded {
+                ledger_run_id: Some("secret-run".into()),
+            }
+            .as_str(),
+            "succeeded"
+        );
+        assert_eq!(
+            TaskSettlement::Failed {
+                code: FailureCode::Internal,
+                ledger_run_id: Some("secret-run".into()),
+            }
+            .as_str(),
+            "failed"
+        );
+        assert_eq!(
+            TaskSettlement::TimedOut {
+                ledger_run_id: None,
+            }
+            .as_str(),
+            "timed_out"
+        );
+        assert_eq!(
+            TaskSettlement::Cancelled {
+                ledger_run_id: Some("secret-run".into()),
+            }
+            .as_str(),
+            "cancelled"
+        );
+        assert!(
+            !TaskSettlement::Succeeded {
+                ledger_run_id: Some("secret-run".into()),
+            }
+            .as_str()
+            .contains("secret")
+        );
+    }
+
+    #[test]
+    fn task_string_enum_tokens_are_public_snake_case() {
+        assert_eq!(TaskState::TimedOut.as_str(), "timed_out");
+        assert_eq!(TaskState::Interrupted.to_string(), "interrupted");
+        assert_eq!(TaskOrigin::CliDetached.as_str(), "cli_detached");
+        assert_eq!(TaskKind::Workflow.to_string(), "workflow");
+    }
 }
