@@ -1093,6 +1093,10 @@ legacy detached list rows into task-list rows.
 [WP-446](plan/WP-446.md) reuses pure continuity signal-kind lines on CLI
 continuity-next for each projected accepted signal.
 
+[WP-447](plan/WP-447.md) adds pure allowlisted goal-signal lines on REST
+continuity-next success for each projected accepted signal.
+
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live

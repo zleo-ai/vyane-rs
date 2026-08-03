@@ -1516,6 +1516,14 @@ pub fn format_goal_continuity_signal_kind_line(
     format!("goal continuity signal: {}", terminal_safe(kind.as_str()))
 }
 
+/// Pure human line for closed allowlisted [`vyane_service::GoalSignalKind`] kinds.
+///
+/// Live on REST continuity-next success when accepted signals are projected
+/// (WP-447). Tokens match domain `GoalContinuitySignalKind::as_str`.
+pub fn format_goal_signal_kind_line(kind: vyane_service::GoalSignalKind) -> String {
+    format!("goal signal: {}", terminal_safe(kind.as_str()))
+}
+
 /// Pure human line for closed [`vyane_goal::GoalContinuityOperatorCommand`] kinds.
 ///
 /// Live on CLI continuity-next when a command is projected (WP-409).
@@ -2415,8 +2423,8 @@ mod tests {
         format_goal_observation_status_line, format_goal_observation_watch_status_line,
         format_goal_observation_watcher_error_code_line, format_goal_read_error_kind_line,
         format_goal_read_unavailable_line, format_goal_read_worker_failed_line,
-        format_goal_status_line, format_goal_store_error_kind_line, format_harness_kind_line,
-        format_identity_changed_before_sigkill_line,
+        format_goal_signal_kind_line, format_goal_status_line, format_goal_store_error_kind_line,
+        format_harness_kind_line, format_identity_changed_before_sigkill_line,
         format_identity_mismatch_nested_cleanup_failed_line,
         format_identity_mismatch_refuse_signal_line, format_inprocess_agent_effect_line,
         format_journal_step_status_line, format_kill_delivered_unfinalized_line,
@@ -4560,6 +4568,19 @@ mod tests {
                 vyane_goal::GoalContinuitySignalKind::ReviewChecksFailed
             ),
             "goal continuity signal: review_checks_failed"
+        );
+        // Allowlisted REST signal tokens on continuity-next success (WP-447).
+        assert_eq!(
+            format_goal_signal_kind_line(vyane_service::GoalSignalKind::QuotaReset),
+            "goal signal: quota_reset"
+        );
+        assert_eq!(
+            format_goal_signal_kind_line(vyane_service::GoalSignalKind::ReviewChecksPassed),
+            "goal signal: review_checks_passed"
+        );
+        assert_eq!(
+            format_goal_signal_kind_line(vyane_service::GoalSignalKind::ReviewChecksFailed),
+            "goal signal: review_checks_failed"
         );
         assert_eq!(
             format_goal_continuity_operator_command_line(
