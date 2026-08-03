@@ -225,6 +225,31 @@ pub fn format_daemon_workflow_view(view: &WorkflowTaskView) -> String {
 }
 
 pub fn print_daemon_workflow_view(view: &WorkflowTaskView) {
+    // Kind-only pure task kinds on daemon workflow status print (WP-434).
+    tracing::info!(
+        state = view.task.state.as_str(),
+        origin = view.task.origin.as_str(),
+        kind = view.task.kind.as_str(),
+        "{}; {}; {}",
+        format_task_state_line(view.task.state),
+        format_task_origin_line(view.task.origin),
+        format_task_kind_line(view.task.kind)
+    );
+    if let Some(code) = view.task.failure_code {
+        tracing::info!(
+            failure_code = code.as_str(),
+            "{}",
+            format_task_failure_code_line(code)
+        );
+    }
+    // Kind-only pure journal workflow status when present (WP-435).
+    if let Some(journal) = view.journal.as_ref() {
+        tracing::info!(
+            status = journal.status.as_str(),
+            "{}",
+            format_workflow_run_status_line(journal.status)
+        );
+    }
     print!("{}", format_daemon_workflow_view(view));
 }
 
