@@ -583,6 +583,7 @@ pub fn format_tool_invocation_status_line(status: ToolInvocationStatus) -> Strin
 ///
 /// Payloads (assistant text, approval plans) are never included — only
 /// `stop.as_str()` (WP-263/WP-268).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_native_turn_stop_line(stop: &NativeTurnStop) -> String {
     format!("native turn stop: {}", terminal_safe(stop.as_str()))
 }
@@ -714,6 +715,7 @@ pub fn format_goal_observation_runner_error_kind_line(
 }
 
 /// Pure human line for closed [`vyane_service::NativePermissionSetError`] kinds.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_native_permission_set_error_kind_line(
     error: vyane_service::NativePermissionSetError,
 ) -> String {
@@ -725,6 +727,7 @@ pub fn format_native_permission_set_error_kind_line(
 ///
 /// Live wire is on Process AgentRun completion staging; CLI pure surface for
 /// tests and operator diagnostics (WP-371).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_agent_message_completion_stage_error_kind_line(
     error: vyane_service::AgentMessageCompletionStageError,
 ) -> String {
@@ -747,6 +750,7 @@ pub(crate) fn format_lifecycle_observation_line(
 ///
 /// Live wire is on native AgentRun permission-policy assembly; CLI pure surface
 /// for tests and operator diagnostics (WP-367).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_permission_rule_error_kind_line(
     error: &vyane_harness::native::PermissionRuleError,
 ) -> String {
@@ -758,6 +762,7 @@ pub fn format_permission_rule_error_kind_line(
 ///
 /// Live wire is on native AgentRun workspace tool registry assembly; CLI pure
 /// surface for tests and operator diagnostics (WP-368).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_native_filesystem_policy_error_kind_line(
     error: vyane_harness::native::NativeFilesystemPolicyError,
 ) -> String {
@@ -791,6 +796,7 @@ pub fn format_tool_chat_validation_error_kind_line(
 ///
 /// Live wire is on daemon native and Process AgentRun create failures; CLI pure
 /// surface for tests and operator diagnostics (WP-299/376/377).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_agent_store_error_kind_line(error: &vyane_agent::AgentStoreError) -> String {
     format!("agent store: {}", terminal_safe(error.as_str()))
 }
@@ -847,6 +853,7 @@ pub fn format_workflow_control_error_kind_line(error: vyane_mcp::WorkflowControl
 ///
 /// Live wire is on native AgentRun tool registration; CLI pure surface for
 /// tests and operator diagnostics (WP-366).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_register_command_tool_error_kind_line(
     error: &vyane_harness::native::RegisterCommandToolError,
 ) -> String {
@@ -857,6 +864,7 @@ pub fn format_register_command_tool_error_kind_line(
 ///
 /// Live wire is on native AgentRun tool registration; CLI pure surface for
 /// tests and operator diagnostics (WP-313/365).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_register_web_fetch_tool_error_kind_line(
     error: &vyane_harness::native::RegisterWebFetchToolError,
 ) -> String {
@@ -867,6 +875,7 @@ pub fn format_register_web_fetch_tool_error_kind_line(
 ///
 /// Live wire is on native AgentRun tool registration; CLI pure surface for
 /// tests and operator diagnostics (WP-313/365).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_register_web_search_tool_error_kind_line(
     error: &vyane_harness::native::RegisterWebSearchToolError,
 ) -> String {
@@ -902,6 +911,7 @@ pub fn format_on_error_policy_line(policy: vyane_workflow::OnError) -> String {
 ///
 /// Live wire is on native AgentRun turn-failure mapping; CLI pure surface for
 /// tests and operator diagnostics (WP-322/378).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_error_kind_line_token(kind: vyane_core::ErrorKind) -> String {
     format!("error kind: {}", terminal_safe(kind.as_str()))
 }
@@ -910,6 +920,7 @@ pub fn format_error_kind_line_token(kind: vyane_core::ErrorKind) -> String {
 ///
 /// Live wire is on AgentRun quiesced failure settlement; CLI pure surface for
 /// tests and operator diagnostics (WP-379).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_run_failure_code_line(code: vyane_agent::RunFailureCode) -> String {
     format!("run failure: {}", terminal_safe(code.as_str()))
 }
@@ -1000,6 +1011,7 @@ pub fn format_nack_disposition_line(disposition: &vyane_message::NackDisposition
 /// Pure human line for closed [`vyane_agent::CancelOutcome`] kinds.
 ///
 /// Tokens-only pure surface for tests and operator diagnostics (WP-336).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_cancel_outcome_line(outcome: vyane_agent::CancelOutcome) -> String {
     format!("cancel: {}", terminal_safe(outcome.as_str()))
 }
@@ -1024,6 +1036,7 @@ pub fn format_adapter_failure_line(failure: &vyane_broker::AdapterFailure) -> St
 ///
 /// Live wire is on Process AgentRun quiesced Error settlement; CLI pure surface
 /// for tests and operator diagnostics (WP-340/390).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_attempt_outcome_line(outcome: &vyane_core::AttemptOutcome) -> String {
     format!("attempt: {}", terminal_safe(outcome.as_str()))
 }
@@ -1031,6 +1044,7 @@ pub fn format_attempt_outcome_line(outcome: &vyane_core::AttemptOutcome) -> Stri
 /// Pure human line for closed [`vyane_service::ControllerRecoveryObservation`] kinds.
 ///
 /// Tokens-only pure surface for tests and operator diagnostics (WP-341).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_controller_recovery_observation_line(
     observation: vyane_service::ControllerRecoveryObservation,
 ) -> String {
@@ -1044,6 +1058,7 @@ pub fn format_controller_recovery_observation_line(
 ///
 /// Live wire is on Process AgentRun settlement; CLI pure surface for tests and
 /// operator diagnostics (WP-343/374).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_agent_executor_outcome_line(outcome: &vyane_service::AgentExecutorOutcome) -> String {
     format!("executor outcome: {}", terminal_safe(outcome.as_str()))
 }
@@ -1076,6 +1091,7 @@ pub fn format_task_settlement_line(settlement: &vyane_task::TaskSettlement) -> S
 ///
 /// Live wire is on Process AgentRun quiesced settlement; CLI pure surface for
 /// tests and operator diagnostics (WP-345/374).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_agent_execution_settlement_line(
     settlement: &vyane_service::AgentExecutionSettlement,
 ) -> String {
@@ -1171,6 +1187,7 @@ pub fn format_agent_completion_projection_status_line(
 ///
 /// Live wire is on daemon AgentRun cancel observation of terminal/cancelling
 /// state; CLI pure surface for tests and operator diagnostics (WP-353/385).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_run_state_line(state: vyane_agent::RunState) -> String {
     format!("run state: {}", terminal_safe(state.as_str()))
 }
@@ -1227,6 +1244,7 @@ pub fn format_message_publication_status_line(
 ///
 /// Live wire is on daemon AgentRun terminal view assembly; CLI pure surface for
 /// tests and operator diagnostics (WP-354/388).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_run_completion_status_line(status: vyane_agent::RunCompletionStatus) -> String {
     format!("run completion: {}", terminal_safe(status.as_str()))
 }
@@ -1298,6 +1316,7 @@ pub fn format_message_event_kind_line(kind: vyane_message::MessageEventKind) -> 
 ///
 /// Live wire is on Process AgentRun non-quiesced terminal status diagnostics;
 /// CLI pure surface for tests and operator diagnostics (WP-357/373).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_run_status_line(status: vyane_core::RunStatus) -> String {
     format!("run status: {}", terminal_safe(status.as_str()))
 }
