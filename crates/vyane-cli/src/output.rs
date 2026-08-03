@@ -2293,7 +2293,21 @@ pub fn format_task_status(
     out
 }
 
+/// Pure human line for closed legacy detached [`TaskState`] kinds.
+///
+/// Live on detached `task status` print (WP-440). Distinct from durable
+/// [`vyane_task::TaskState`] pure lines.
+pub fn format_legacy_task_state_line(state: TaskState) -> String {
+    format!("legacy task state: {}", terminal_safe(state.as_str()))
+}
+
 pub fn print_task_status(status: &StatusFile, displayed: TaskState, log_tail: &[String]) {
+    // Kind-only pure legacy task state on detached status print (WP-440).
+    tracing::info!(
+        state = displayed.as_str(),
+        "{}",
+        format_legacy_task_state_line(displayed)
+    );
     print!("{}", format_task_status(status, displayed, log_tail));
 }
 
@@ -2347,7 +2361,7 @@ mod tests {
         format_identity_mismatch_nested_cleanup_failed_line,
         format_identity_mismatch_refuse_signal_line, format_inprocess_agent_effect_line,
         format_journal_step_status_line, format_kill_delivered_unfinalized_line,
-        format_legacy_session_line, format_message_event_kind_line,
+        format_legacy_session_line, format_legacy_task_state_line, format_message_event_kind_line,
         format_message_publication_status_line, format_message_store_error_kind_line,
         format_nack_disposition_line, format_native_filesystem_policy_error_kind_line,
         format_native_permission_axis_status_line, format_native_permission_set_error_kind_line,
@@ -4271,6 +4285,22 @@ mod tests {
         assert_eq!(
             format_task_state_line(vyane_task::TaskState::Running),
             "task state: running"
+        );
+        assert_eq!(
+            format_legacy_task_state_line(LegacyTaskState::Running),
+            "legacy task state: running"
+        );
+        assert_eq!(
+            format_legacy_task_state_line(LegacyTaskState::Died),
+            "legacy task state: died"
+        );
+        assert_eq!(
+            format_legacy_task_state_line(LegacyTaskState::Stale),
+            "legacy task state: stale"
+        );
+        assert_eq!(
+            format_legacy_task_state_line(LegacyTaskState::Success),
+            "legacy task state: succeeded"
         );
         assert_eq!(
             format_goal_status_line(vyane_goal::GoalStatus::InProgress),
