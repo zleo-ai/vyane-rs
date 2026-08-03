@@ -992,6 +992,48 @@ runtime freeze.
 [WP-412](plan/WP-412.md) wires pure final goal-status lines onto CLI pursue
 settle from the durable outcome field.
 
+[WP-413](plan/WP-413.md) adds `Protocol::as_str` and wires pure protocol lines
+onto `vyane check` per-provider rows.
+
+[WP-414](plan/WP-414.md) wires pure harness-kind lines onto `vyane check`
+harness availability rows.
+
+[WP-415](plan/WP-415.md) wires pure permission-effect lines onto native
+ApprovalRequired settle (ask surface).
+
+[WP-416](plan/WP-416.md) wires pure auth-style lines onto native target freeze
+when endpoint auth is present.
+
+[WP-417](plan/WP-417.md) wires pure protocol lines onto native target freeze
+(reusing WP-413 tokens).
+
+[WP-418](plan/WP-418.md) wires pure web-search context-size lines onto native
+web-search tool registration.
+
+[WP-419](plan/WP-419.md) adds `AdapterTransport::as_str` and wires pure
+transport lines onto native target freeze.
+
+[WP-420](plan/WP-420.md) wires pure effort lines onto native genparams freeze
+when effort is set.
+
+[WP-421](plan/WP-421.md) wires pure task failure-code lines onto daemon
+workflow Failed settle and interrupt paths.
+
+[WP-422](plan/WP-422.md) wires pure execution-backend lines onto daemon
+AgentRun submit freeze (process + native).
+
+[WP-423](plan/WP-423.md) wires pure run-mode lines onto the same daemon
+AgentRun submit freeze sites.
+
+[WP-424](plan/WP-424.md) wires pure controller-kind lines onto daemon AgentRun
+cancel dispatch (Process + InProcess).
+
+[WP-425](plan/WP-425.md) wires pure task origin/kind lines onto daemon workflow
+task create freeze.
+
+[WP-426](plan/WP-426.md) reuses pure sandbox lines on process AgentRun submit
+freeze.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
