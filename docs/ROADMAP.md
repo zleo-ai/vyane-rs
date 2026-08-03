@@ -1034,6 +1034,27 @@ task create freeze.
 [WP-426](plan/WP-426.md) reuses pure sandbox lines on process AgentRun submit
 freeze.
 
+[WP-427](plan/WP-427.md) wires pure session-native-state lines onto session
+list/inspect human output.
+
+[WP-428](plan/WP-428.md) wires pure native-session-transition lines onto
+session reset-native success.
+
+[WP-429](plan/WP-429.md) reuses pure error-kind lines on session control
+failure paths.
+
+[WP-430](plan/WP-430.md) wires pure task-settlement lines onto daemon workflow
+lease-loss Forced Failed settle.
+
+[WP-431](plan/WP-431.md) reuses pure task-state lines on durable task status
+print.
+
+[WP-432](plan/WP-432.md) reuses pure task origin/kind lines on durable task
+status print.
+
+[WP-433](plan/WP-433.md) reuses pure task failure-code lines on durable task
+status print when a code is present.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
