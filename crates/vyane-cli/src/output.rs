@@ -150,7 +150,30 @@ pub fn format_route_result(profile: &str, decision: &RouteDecision) -> String {
     )
 }
 
+/// Pure human line for closed [`vyane_router::RouteTier`] kinds.
+///
+/// Live on `vyane route` human print (WP-441).
+pub fn format_route_tier_line(tier: vyane_router::RouteTier) -> String {
+    format!("route tier: {}", terminal_safe(tier.as_str()))
+}
+
+/// Pure human line for closed [`vyane_router::RouteEffort`] kinds.
+///
+/// Live on `vyane route` human print (WP-441). Distinct from core
+/// [`vyane_core::Effort`] pure lines.
+pub fn format_route_effort_line(effort: vyane_router::RouteEffort) -> String {
+    format!("route effort: {}", terminal_safe(effort.as_str()))
+}
+
 pub fn print_route_result(profile: &str, decision: &RouteDecision) {
+    // Kind-only pure route tier/effort on route print (WP-441).
+    tracing::info!(
+        tier = decision.tier.as_str(),
+        effort = decision.effort.as_str(),
+        "{}; {}",
+        format_route_tier_line(decision.tier),
+        format_route_effort_line(decision.effort)
+    );
     print!("{}", format_route_result(profile, decision));
 }
 
@@ -2382,29 +2405,30 @@ mod tests {
         format_record_line, format_register_command_tool_error_kind_line,
         format_register_web_fetch_tool_error_kind_line,
         format_register_web_search_tool_error_kind_line, format_replay_safety_line,
-        format_route_result, format_run_attempt_outcome_view_line,
-        format_run_completion_status_line, format_run_failure_code_line, format_run_failure_line,
-        format_run_id_line, format_run_ledger_query_error_line, format_run_mode_line,
-        format_run_settlement_line, format_run_state_line, format_run_status_line,
-        format_sandbox_line, format_serve_listening_line, format_serve_loopback_only_line,
-        format_serve_starting_line, format_session_control_error_line,
-        format_session_native_state_line, format_session_snapshot_query_error_line,
-        format_session_view_line, format_stale_detached_status_line,
-        format_stream_dispatch_label_error_line, format_stream_dispatch_request_error_line,
-        format_stream_not_applicable_line, format_stream_route_error_line,
-        format_stream_tool_use_line, format_stream_unsupported_fallback_line,
-        format_takeover_approval_status_line, format_takeover_decision_line,
-        format_takeover_run_status_line, format_takeover_sandbox_line,
-        format_task_already_cleanup_failed_line, format_task_already_state_line,
-        format_task_dispatch_failed_line, format_task_dispatch_panicked_line,
-        format_task_duplicate_runtime_dispatch_line, format_task_failure_code_line,
-        format_task_final_state_line, format_task_init_cleanup_contended_line,
-        format_task_init_cleanup_failed_line, format_task_init_cleanup_read_failed_line,
-        format_task_kind_line, format_task_legacy_output_read_failed_line,
-        format_task_metadata_error_line, format_task_metadata_settlement_retry_line,
-        format_task_origin_line, format_task_output_artifact_failed_line,
-        format_task_output_read_failed_line, format_task_settlement_line, format_task_state_line,
-        format_task_status, format_task_store_error_kind_line, format_task_table,
+        format_route_effort_line, format_route_result, format_route_tier_line,
+        format_run_attempt_outcome_view_line, format_run_completion_status_line,
+        format_run_failure_code_line, format_run_failure_line, format_run_id_line,
+        format_run_ledger_query_error_line, format_run_mode_line, format_run_settlement_line,
+        format_run_state_line, format_run_status_line, format_sandbox_line,
+        format_serve_listening_line, format_serve_loopback_only_line, format_serve_starting_line,
+        format_session_control_error_line, format_session_native_state_line,
+        format_session_snapshot_query_error_line, format_session_view_line,
+        format_stale_detached_status_line, format_stream_dispatch_label_error_line,
+        format_stream_dispatch_request_error_line, format_stream_not_applicable_line,
+        format_stream_route_error_line, format_stream_tool_use_line,
+        format_stream_unsupported_fallback_line, format_takeover_approval_status_line,
+        format_takeover_decision_line, format_takeover_run_status_line,
+        format_takeover_sandbox_line, format_task_already_cleanup_failed_line,
+        format_task_already_state_line, format_task_dispatch_failed_line,
+        format_task_dispatch_panicked_line, format_task_duplicate_runtime_dispatch_line,
+        format_task_failure_code_line, format_task_final_state_line,
+        format_task_init_cleanup_contended_line, format_task_init_cleanup_failed_line,
+        format_task_init_cleanup_read_failed_line, format_task_kind_line,
+        format_task_legacy_output_read_failed_line, format_task_metadata_error_line,
+        format_task_metadata_settlement_retry_line, format_task_origin_line,
+        format_task_output_artifact_failed_line, format_task_output_read_failed_line,
+        format_task_settlement_line, format_task_state_line, format_task_status,
+        format_task_store_error_kind_line, format_task_table,
         format_tool_chat_validation_error_kind_line, format_tool_invocation_status_line,
         format_web_search_context_size_line, format_worker_error_line,
         format_worker_gone_nested_cleanup_complete_line,
@@ -3835,6 +3859,22 @@ mod tests {
         assert_eq!(
             format_effort_line(vyane_core::Effort::Xhigh),
             "effort: xhigh"
+        );
+        assert_eq!(
+            format_route_tier_line(RouteTier::Mainline),
+            "route tier: mainline"
+        );
+        assert_eq!(
+            format_route_tier_line(RouteTier::Frontier),
+            "route tier: frontier"
+        );
+        assert_eq!(
+            format_route_effort_line(RouteEffort::High),
+            "route effort: high"
+        );
+        assert_eq!(
+            format_route_effort_line(RouteEffort::Xhigh),
+            "route effort: xhigh"
         );
         assert_eq!(
             format_permission_effect_line(vyane_harness::native::PermissionEffect::Ask),
