@@ -1712,6 +1712,12 @@ async fn goal_continuity_next(
                 "{}",
                 crate::output::format_goal_next_action_kind_line(next_action.action)
             );
+            // Kind-only pure closed reason code on REST success (WP-450).
+            tracing::info!(
+                reason_code = next_action.reason_code.as_str(),
+                "{}",
+                crate::output::format_goal_next_reason_code_line(next_action.reason_code)
+            );
             // Kind-only pure operator command when projected (WP-449).
             if let Some(command) = next_action.command {
                 tracing::info!(

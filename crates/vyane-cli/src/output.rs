@@ -1540,6 +1540,14 @@ pub fn format_goal_operator_command_line(command: vyane_service::GoalOperatorCom
     format!("goal operator command: {}", terminal_safe(command.as_str()))
 }
 
+/// Pure human line for closed allowlisted [`vyane_service::GoalNextReasonCode`] kinds.
+///
+/// Live on REST continuity-next success (WP-450). Tokens are closed snake_case
+/// reason codes (never free-form reason text).
+pub fn format_goal_next_reason_code_line(code: vyane_service::GoalNextReasonCode) -> String {
+    format!("goal next reason: {}", terminal_safe(code.as_str()))
+}
+
 /// Pure human line for closed [`vyane_goal::GoalContinuityOperatorCommand`] kinds.
 ///
 /// Live on CLI continuity-next when a command is projected (WP-409).
@@ -2434,14 +2442,14 @@ mod tests {
         format_goal_continuity_runner_error_kind_line, format_goal_continuity_signal_kind_line,
         format_goal_continuity_status_line, format_goal_continuity_step_status_line,
         format_goal_error_line, format_goal_event_kind_line, format_goal_next_action_kind_line,
-        format_goal_observation_ingress_error_kind_line, format_goal_observation_kind_line,
-        format_goal_observation_runner_error_kind_line, format_goal_observation_signal_kind_line,
-        format_goal_observation_status_line, format_goal_observation_watch_status_line,
-        format_goal_observation_watcher_error_code_line, format_goal_operator_command_line,
-        format_goal_read_error_kind_line, format_goal_read_unavailable_line,
-        format_goal_read_worker_failed_line, format_goal_signal_kind_line, format_goal_status_line,
-        format_goal_store_error_kind_line, format_harness_kind_line,
-        format_identity_changed_before_sigkill_line,
+        format_goal_next_reason_code_line, format_goal_observation_ingress_error_kind_line,
+        format_goal_observation_kind_line, format_goal_observation_runner_error_kind_line,
+        format_goal_observation_signal_kind_line, format_goal_observation_status_line,
+        format_goal_observation_watch_status_line, format_goal_observation_watcher_error_code_line,
+        format_goal_operator_command_line, format_goal_read_error_kind_line,
+        format_goal_read_unavailable_line, format_goal_read_worker_failed_line,
+        format_goal_signal_kind_line, format_goal_status_line, format_goal_store_error_kind_line,
+        format_harness_kind_line, format_identity_changed_before_sigkill_line,
         format_identity_mismatch_nested_cleanup_failed_line,
         format_identity_mismatch_refuse_signal_line, format_inprocess_agent_effect_line,
         format_journal_step_status_line, format_kill_delivered_unfinalized_line,
@@ -4622,6 +4630,23 @@ mod tests {
         assert_eq!(
             format_goal_operator_command_line(vyane_service::GoalOperatorCommand::ContinuitySignal),
             "goal operator command: continuity_signal"
+        );
+        // Allowlisted REST reason-code tokens (WP-450).
+        assert_eq!(
+            format_goal_next_reason_code_line(vyane_service::GoalNextReasonCode::ApprovalRequired),
+            "goal next reason: approval_required"
+        );
+        assert_eq!(
+            format_goal_next_reason_code_line(
+                vyane_service::GoalNextReasonCode::ExternalSignalRequired
+            ),
+            "goal next reason: external_signal_required"
+        );
+        assert_eq!(
+            format_goal_next_reason_code_line(
+                vyane_service::GoalNextReasonCode::ContinuityComplete
+            ),
+            "goal next reason: continuity_complete"
         );
         assert_eq!(
             format_goal_continuity_operator_command_line(
