@@ -251,6 +251,16 @@ fn continuity_next(args: GoalIdArgs) -> Result<ExitCode> {
         "{}",
         crate::output::format_goal_continuity_next_action_kind_line(next_action.action)
     );
+    // Kind-only pure ready signal kinds from durable continuity state (WP-451).
+    if let Some(state) = snapshot.goal.continuity_state.as_ref() {
+        for signal in &state.ready_signals {
+            tracing::info!(
+                kind = signal.kind.as_str(),
+                "{}",
+                crate::output::format_goal_continuity_signal_kind_line(signal.kind)
+            );
+        }
+    }
     // Kind-only pure accepted signal kinds when projected (WP-446).
     for kind in &next_action.accepted_signals {
         tracing::info!(
