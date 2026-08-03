@@ -1508,7 +1508,8 @@ pub fn format_goal_continuity_next_action_kind_line(
 
 /// Pure human line for closed [`vyane_goal::GoalContinuitySignalKind`] kinds.
 ///
-/// Live on CLI continuity-signal settle (WP-408).
+/// Live on CLI continuity-signal settle (WP-408) and continuity-next accepted
+/// signals projection (WP-446).
 pub fn format_goal_continuity_signal_kind_line(
     kind: vyane_goal::GoalContinuitySignalKind,
 ) -> String {
@@ -4546,6 +4547,19 @@ mod tests {
                 vyane_goal::GoalContinuitySignalKind::QuotaReset
             ),
             "goal continuity signal: quota_reset"
+        );
+        // Closed accepted-signal tokens reused on continuity-next (WP-446).
+        assert_eq!(
+            format_goal_continuity_signal_kind_line(
+                vyane_goal::GoalContinuitySignalKind::ReviewChecksPassed
+            ),
+            "goal continuity signal: review_checks_passed"
+        );
+        assert_eq!(
+            format_goal_continuity_signal_kind_line(
+                vyane_goal::GoalContinuitySignalKind::ReviewChecksFailed
+            ),
+            "goal continuity signal: review_checks_failed"
         );
         assert_eq!(
             format_goal_continuity_operator_command_line(

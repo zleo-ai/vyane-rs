@@ -251,6 +251,14 @@ fn continuity_next(args: GoalIdArgs) -> Result<ExitCode> {
         "{}",
         crate::output::format_goal_continuity_next_action_kind_line(next_action.action)
     );
+    // Kind-only pure accepted signal kinds when projected (WP-446).
+    for kind in &next_action.accepted_signals {
+        tracing::info!(
+            kind = kind.as_str(),
+            "{}",
+            crate::output::format_goal_continuity_signal_kind_line(*kind)
+        );
+    }
     // Kind-only pure operator command when projected (WP-409).
     if let Some(command) = next_action.command {
         tracing::info!(
