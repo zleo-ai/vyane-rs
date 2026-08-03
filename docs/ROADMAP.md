@@ -1072,6 +1072,9 @@ summary print.
 [WP-439](plan/WP-439.md) reuses pure run-status lines on broadcast table print
 for successful rows.
 
+[WP-440](plan/WP-440.md) wires pure legacy detached task-state lines on task
+status print.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
