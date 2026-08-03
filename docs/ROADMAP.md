@@ -1087,6 +1087,9 @@ print.
 [WP-444](plan/WP-444.md) reuses pure task state/origin/kind/failure lines when
 projecting durable records into task-list rows.
 
+[WP-445](plan/WP-445.md) reuses pure legacy task-state lines when projecting
+legacy detached list rows into task-list rows.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
