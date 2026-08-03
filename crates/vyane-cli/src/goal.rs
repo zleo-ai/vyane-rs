@@ -449,6 +449,12 @@ fn continuity_queue(args: GoalContinuityQueueArgs) -> Result<ExitCode> {
         upstream_run_id,
         upstream_run_status,
     };
+    // Kind-only pure ready step status selected for queue (WP-452).
+    tracing::info!(
+        status = step.status.as_str(),
+        "{}",
+        crate::output::format_goal_continuity_step_status_line(step.status)
+    );
     let approval = store
         .queue_takeover_approval(&args.common.owner, &request, Utc::now())
         .context("queue takeover approval")?;

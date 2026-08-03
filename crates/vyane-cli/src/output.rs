@@ -1463,7 +1463,8 @@ pub fn format_workflow_state_line(state: vyane_mcp::WorkflowState) -> String {
 
 /// Pure human line for closed [`vyane_goal::GoalContinuityStepStatus`] kinds.
 ///
-/// Live on CLI continuity-next for next-ready / projected plan steps (WP-403).
+/// Live on CLI continuity-next for next-ready / projected plan steps (WP-403)
+/// and continuity-queue ready-step selection (WP-452).
 pub fn format_goal_continuity_step_status_line(
     status: vyane_goal::GoalContinuityStepStatus,
 ) -> String {
