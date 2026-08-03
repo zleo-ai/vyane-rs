@@ -110,7 +110,20 @@ pub fn format_session_view_line(record: &SessionView) -> String {
     )
 }
 
+/// Pure human line for closed [`vyane_service::SessionNativeState`] kinds.
+///
+/// Live on session list/inspect human path (WP-427).
+pub fn format_session_native_state_line(state: vyane_service::SessionNativeState) -> String {
+    format!("session native: {}", terminal_safe(state.as_str()))
+}
+
 pub fn print_session_view_line(record: &SessionView) {
+    // Kind-only pure native state on session list/inspect (WP-427).
+    tracing::info!(
+        native_session = record.native_state.as_str(),
+        "{}",
+        format_session_native_state_line(record.native_state)
+    );
     println!("{}", format_session_view_line(record));
 }
 
@@ -949,9 +962,8 @@ pub fn format_on_error_policy_line(policy: vyane_workflow::OnError) -> String {
 
 /// Pure human line for closed kernel [`vyane_core::ErrorKind`] tokens.
 ///
-/// Live wire is on native AgentRun turn-failure mapping; CLI pure surface for
-/// tests and operator diagnostics (WP-322/378).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Live on native AgentRun turn-failure mapping (WP-322/378) and session
+/// control failure paths (WP-429).
 pub fn format_error_kind_line_token(kind: vyane_core::ErrorKind) -> String {
     format!("error kind: {}", terminal_safe(kind.as_str()))
 }
@@ -1191,8 +1203,8 @@ pub fn format_agent_execution_settlement_line(
 
 /// Pure human line for closed [`vyane_core::NativeSessionTransition`] kinds.
 ///
-/// Tokens-only pure surface for tests and operator diagnostics (WP-346).
-#[allow(dead_code)]
+/// Live on session reset-native success (WP-428); tokens-only pure surface for
+/// tests and operator diagnostics (WP-346).
 pub fn format_native_session_transition_line(
     transition: &vyane_core::NativeSessionTransition,
 ) -> String {
@@ -2164,6 +2176,24 @@ pub fn format_durable_task_status(task: &TaskRecord, log_tail: &[String]) -> Str
 }
 
 pub fn print_durable_task_status(task: &TaskRecord, log_tail: &[String]) {
+    // Kind-only pure task state/origin/kind on durable status print (WP-431/432).
+    tracing::info!(
+        state = task.state.as_str(),
+        origin = task.origin.as_str(),
+        kind = task.kind.as_str(),
+        "{}; {}; {}",
+        format_task_state_line(task.state),
+        format_task_origin_line(task.origin),
+        format_task_kind_line(task.kind)
+    );
+    // Kind-only pure failure code only when durable failure is present (WP-433).
+    if let Some(code) = task.failure_code {
+        tracing::info!(
+            failure_code = code.as_str(),
+            "{}",
+            format_task_failure_code_line(code)
+        );
+    }
     print!("{}", format_durable_task_status(task, log_tail));
 }
 
@@ -2289,23 +2319,23 @@ mod tests {
         format_run_settlement_line, format_run_state_line, format_run_status_line,
         format_sandbox_line, format_serve_listening_line, format_serve_loopback_only_line,
         format_serve_starting_line, format_session_control_error_line,
-        format_session_snapshot_query_error_line, format_session_view_line,
-        format_stale_detached_status_line, format_stream_dispatch_label_error_line,
-        format_stream_dispatch_request_error_line, format_stream_not_applicable_line,
-        format_stream_route_error_line, format_stream_tool_use_line,
-        format_stream_unsupported_fallback_line, format_takeover_approval_status_line,
-        format_takeover_decision_line, format_takeover_run_status_line,
-        format_takeover_sandbox_line, format_task_already_cleanup_failed_line,
-        format_task_already_state_line, format_task_dispatch_failed_line,
-        format_task_dispatch_panicked_line, format_task_duplicate_runtime_dispatch_line,
-        format_task_failure_code_line, format_task_final_state_line,
-        format_task_init_cleanup_contended_line, format_task_init_cleanup_failed_line,
-        format_task_init_cleanup_read_failed_line, format_task_kind_line,
-        format_task_legacy_output_read_failed_line, format_task_metadata_error_line,
-        format_task_metadata_settlement_retry_line, format_task_origin_line,
-        format_task_output_artifact_failed_line, format_task_output_read_failed_line,
-        format_task_settlement_line, format_task_state_line, format_task_status,
-        format_task_store_error_kind_line, format_task_table,
+        format_session_native_state_line, format_session_snapshot_query_error_line,
+        format_session_view_line, format_stale_detached_status_line,
+        format_stream_dispatch_label_error_line, format_stream_dispatch_request_error_line,
+        format_stream_not_applicable_line, format_stream_route_error_line,
+        format_stream_tool_use_line, format_stream_unsupported_fallback_line,
+        format_takeover_approval_status_line, format_takeover_decision_line,
+        format_takeover_run_status_line, format_takeover_sandbox_line,
+        format_task_already_cleanup_failed_line, format_task_already_state_line,
+        format_task_dispatch_failed_line, format_task_dispatch_panicked_line,
+        format_task_duplicate_runtime_dispatch_line, format_task_failure_code_line,
+        format_task_final_state_line, format_task_init_cleanup_contended_line,
+        format_task_init_cleanup_failed_line, format_task_init_cleanup_read_failed_line,
+        format_task_kind_line, format_task_legacy_output_read_failed_line,
+        format_task_metadata_error_line, format_task_metadata_settlement_retry_line,
+        format_task_origin_line, format_task_output_artifact_failed_line,
+        format_task_output_read_failed_line, format_task_settlement_line, format_task_state_line,
+        format_task_status, format_task_store_error_kind_line, format_task_table,
         format_tool_chat_validation_error_kind_line, format_tool_invocation_status_line,
         format_web_search_context_size_line, format_worker_error_line,
         format_worker_gone_nested_cleanup_complete_line,
@@ -4032,6 +4062,22 @@ mod tests {
         assert_eq!(
             format_native_session_state_line(&vyane_core::NativeSessionState::Absent),
             "native session: absent"
+        );
+        assert_eq!(
+            format_session_native_state_line(vyane_service::SessionNativeState::Absent),
+            "session native: absent"
+        );
+        assert_eq!(
+            format_session_native_state_line(vyane_service::SessionNativeState::LegacyUnbound),
+            "session native: legacy_unbound"
+        );
+        assert_eq!(
+            format_session_native_state_line(vyane_service::SessionNativeState::Bound),
+            "session native: bound"
+        );
+        assert_eq!(
+            format_session_native_state_line(vyane_service::SessionNativeState::Unknown),
+            "session native: unknown"
         );
         assert_eq!(
             format_native_session_state_line(&vyane_core::NativeSessionState::LegacyUnbound {

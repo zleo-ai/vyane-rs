@@ -2603,6 +2603,16 @@ async fn run_session_reset_native(
         .await
     {
         Ok(session) => {
+            // Kind-only pure Reset transition on success (WP-428); revision stays
+            // out of the closed token.
+            let transition = vyane_core::NativeSessionTransition::Reset {
+                expected_revision: args.expected_revision,
+            };
+            tracing::info!(
+                transition = transition.as_str(),
+                "{}",
+                crate::output::format_native_session_transition_line(&transition)
+            );
             print_session_view("reset_native", &session, args.json)?;
             Ok(ExitCode::SUCCESS)
         }
@@ -2627,6 +2637,12 @@ fn print_session_view(operation: &'static str, session: &SessionView, json: bool
 }
 
 fn print_session_control_error(kind: ErrorKind, json: bool) -> Result<ExitCode> {
+    // Kind-only pure ErrorKind on session control failure (WP-429).
+    tracing::warn!(
+        error_kind = kind.as_str(),
+        "{}",
+        crate::output::format_error_kind_line_token(kind)
+    );
     let view = crate::output::session_control_error_view(kind);
     if json {
         eprintln!(
