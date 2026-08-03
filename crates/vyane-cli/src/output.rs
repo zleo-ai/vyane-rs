@@ -735,6 +735,8 @@ pub fn format_agent_message_completion_stage_error_kind_line(
 ///
 /// Live wire is on Process AgentRun dispatch/stop-proof diagnostics; CLI pure
 /// surface for tests and operator diagnostics (WP-372).
+/// Linux-only: `agent_host` (and Process AgentRun) is not assembled on other OS.
+#[cfg(target_os = "linux")]
 pub(crate) fn format_lifecycle_observation_line(
     observation: crate::agent_host::LifecycleObservation,
 ) -> String {
@@ -2133,13 +2135,13 @@ mod tests {
         format_identity_mismatch_nested_cleanup_failed_line,
         format_identity_mismatch_refuse_signal_line, format_inprocess_agent_effect_line,
         format_journal_step_status_line, format_kill_delivered_unfinalized_line,
-        format_legacy_session_line, format_lifecycle_observation_line,
-        format_message_event_kind_line, format_message_publication_status_line,
-        format_message_store_error_kind_line, format_nack_disposition_line,
-        format_native_filesystem_policy_error_kind_line, format_native_permission_axis_status_line,
-        format_native_permission_set_error_kind_line, format_native_session_state_line,
-        format_native_session_transition_line, format_native_side_effect_line,
-        format_native_turn_stop_line, format_nested_harness_controller_cleanup_failed_line,
+        format_legacy_session_line, format_message_event_kind_line,
+        format_message_publication_status_line, format_message_store_error_kind_line,
+        format_nack_disposition_line, format_native_filesystem_policy_error_kind_line,
+        format_native_permission_axis_status_line, format_native_permission_set_error_kind_line,
+        format_native_session_state_line, format_native_session_transition_line,
+        format_native_side_effect_line, format_native_turn_stop_line,
+        format_nested_harness_controller_cleanup_failed_line,
         format_nested_harness_controller_write_failed_line,
         format_nested_harness_identity_unavailable_line, format_no_output_recorded_line,
         format_no_such_detached_run_line, format_not_local_detached_cancel_line,
@@ -3518,26 +3520,6 @@ mod tests {
             "goal observation runner: duplicate_watcher"
         );
         assert_eq!(
-            format_lifecycle_observation_line(
-                crate::agent_host::LifecycleObservation::NeverStarted
-            ),
-            "lifecycle: never_started"
-        );
-        assert_eq!(
-            format_lifecycle_observation_line(crate::agent_host::LifecycleObservation::Running),
-            "lifecycle: running"
-        );
-        assert_eq!(
-            format_lifecycle_observation_line(crate::agent_host::LifecycleObservation::Stopped {
-                cycles: 9
-            }),
-            "lifecycle: stopped"
-        );
-        assert_eq!(
-            format_lifecycle_observation_line(crate::agent_host::LifecycleObservation::Uncertain),
-            "lifecycle: uncertain"
-        );
-        assert_eq!(
             format_agent_message_completion_stage_error_kind_line(
                 vyane_service::AgentMessageCompletionStageError::InvalidMessage
             ),
@@ -4312,5 +4294,30 @@ mod tests {
         assert!(harness.contains("available"), "{harness}");
         let env = format_check_profile_env_line("coding", "OPENAI_API_KEY", false);
         assert!(env.contains("missing"), "{env}");
+    }
+
+    /// Process AgentRun lifecycle pure line is Linux-only (`agent_host` cfg).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pure_lifecycle_observation_line_matches_kind_tokens() {
+        use super::format_lifecycle_observation_line;
+        use crate::agent_host::LifecycleObservation;
+
+        assert_eq!(
+            format_lifecycle_observation_line(LifecycleObservation::NeverStarted),
+            "lifecycle: never_started"
+        );
+        assert_eq!(
+            format_lifecycle_observation_line(LifecycleObservation::Running),
+            "lifecycle: running"
+        );
+        assert_eq!(
+            format_lifecycle_observation_line(LifecycleObservation::Stopped { cycles: 9 }),
+            "lifecycle: stopped"
+        );
+        assert_eq!(
+            format_lifecycle_observation_line(LifecycleObservation::Uncertain),
+            "lifecycle: uncertain"
+        );
     }
 }
