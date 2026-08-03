@@ -1064,6 +1064,9 @@ workflow status print when a journal is present.
 [WP-436](plan/WP-436.md) reuses pure workflow-run-status lines on workflow list
 print.
 
+[WP-437](plan/WP-437.md) reuses pure workflow-run-status lines on local workflow
+summary print.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live

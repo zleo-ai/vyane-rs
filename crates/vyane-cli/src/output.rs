@@ -1984,6 +1984,12 @@ pub fn format_workflow_summary(outcome: &WorkflowOutcome) -> String {
 }
 
 pub fn print_workflow_summary(outcome: &WorkflowOutcome) {
+    // Kind-only pure workflow run status on local summary print (WP-437).
+    tracing::info!(
+        status = outcome.status.as_str(),
+        "{}",
+        format_workflow_run_status_line(outcome.status)
+    );
     print!("{}", format_workflow_summary(outcome));
 }
 
