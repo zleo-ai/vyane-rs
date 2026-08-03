@@ -2164,6 +2164,12 @@ impl TaskRow {
     }
 
     pub fn from_legacy(row: &TaskListRow) -> Self {
+        // Kind-only pure legacy task state on list projection (WP-445).
+        tracing::info!(
+            state = row.state.as_str(),
+            "{}",
+            format_legacy_task_state_line(row.state)
+        );
         Self {
             id: row.id.clone(),
             state: row.state.as_str().to_string(),
