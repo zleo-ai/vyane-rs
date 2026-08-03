@@ -62,14 +62,21 @@ pub enum Protocol {
     AnthropicMessages,
 }
 
+impl Protocol {
+    /// Stable snake_case token matching the serde rename for this protocol.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenaiChat => "openai_chat",
+            Self::OpenaiResponses => "openai_responses",
+            Self::AnthropicMessages => "anthropic_messages",
+        }
+    }
+}
+
 impl fmt::Display for Protocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Protocol::OpenaiChat => "openai_chat",
-            Protocol::OpenaiResponses => "openai_responses",
-            Protocol::AnthropicMessages => "anthropic_messages",
-        };
-        f.write_str(s)
+        f.write_str(self.as_str())
     }
 }
 
@@ -137,6 +144,23 @@ pub enum AdapterTransport {
     CliWrap,
     /// Speak the protocol directly over HTTP. No workspace capabilities.
     DirectHttp,
+}
+
+impl AdapterTransport {
+    /// Stable snake_case token matching the serde rename for this transport.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CliWrap => "cli_wrap",
+            Self::DirectHttp => "direct_http",
+        }
+    }
+}
+
+impl fmt::Display for AdapterTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Workspace permission level for a run.
@@ -360,5 +384,18 @@ mod tests {
         assert_eq!(Sandbox::ReadOnly.as_str(), "read-only");
         assert_eq!(Sandbox::Write.to_string(), "write");
         assert_eq!(Sandbox::Full.as_str(), "full");
+    }
+
+    #[test]
+    fn protocol_tokens_match_serde_snake_case() {
+        assert_eq!(Protocol::OpenaiChat.as_str(), "openai_chat");
+        assert_eq!(Protocol::OpenaiResponses.to_string(), "openai_responses");
+        assert_eq!(Protocol::AnthropicMessages.as_str(), "anthropic_messages");
+    }
+
+    #[test]
+    fn adapter_transport_tokens_match_serde_snake_case() {
+        assert_eq!(AdapterTransport::CliWrap.as_str(), "cli_wrap");
+        assert_eq!(AdapterTransport::DirectHttp.to_string(), "direct_http");
     }
 }

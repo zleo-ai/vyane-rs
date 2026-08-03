@@ -157,6 +157,12 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
     println!("{}", crate::output::format_check_providers_header());
     for (id, provider) in &loaded.config.providers.providers {
         let default_model = provider.default_model.as_ref().map(ToString::to_string);
+        // Kind-only pure protocol token per configured provider (WP-413).
+        tracing::info!(
+            protocol = provider.protocol.as_str(),
+            "{}",
+            crate::output::format_protocol_line(provider.protocol)
+        );
         print!(
             "{}",
             crate::output::format_check_provider_line(
@@ -186,9 +192,15 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
     println!("{}", crate::output::format_check_harnesses_header());
     for kind in [HarnessKind::ClaudeCode, HarnessKind::CodexCli] {
         let available = harness_available(kind.clone()).await;
+        // Kind-only pure harness token per check row (WP-414).
+        tracing::info!(
+            harness = kind.as_str(),
+            "{}",
+            crate::output::format_harness_kind_line(&kind)
+        );
         print!(
             "{}",
-            crate::output::format_check_harness_line(kind, available)
+            crate::output::format_check_harness_line(&kind, available)
         );
     }
 

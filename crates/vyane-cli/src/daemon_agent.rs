@@ -391,6 +391,12 @@ impl DaemonAgentHost {
             AgentSpoolSandbox::Write => Sandbox::Write,
             AgentSpoolSandbox::Full => Sandbox::Full,
         };
+        // Kind-only pure sandbox on process AgentRun freeze (WP-426).
+        tracing::info!(
+            sandbox = sandbox.as_str(),
+            "{}",
+            crate::output::format_sandbox_line(sandbox)
+        );
         let requested_workdir = freeze_requested_workdir(sandbox, request.workdir)
             .map_err(|_| AgentApiError::bad_request())?;
         let scoped = self.service.scope(OwnerContext::single_user_local());
@@ -464,6 +470,15 @@ impl DaemonAgentHost {
             timeout_seconds,
             max_resume_attempts: 0,
         };
+        // Kind-only pure execution backend + run mode on process AgentRun freeze
+        // (WP-422/423).
+        tracing::info!(
+            execution_backend = run.execution_backend.as_str(),
+            mode = run.mode.as_str(),
+            "{}; {}",
+            crate::output::format_execution_backend_line(run.execution_backend),
+            crate::output::format_run_mode_line(run.mode)
+        );
         let store = Arc::clone(&self.store);
         let created =
             tokio::task::spawn_blocking(move || store.create_root(LOCAL_TASK_OWNER, &worker, &run))
@@ -671,6 +686,15 @@ impl DaemonAgentHost {
             timeout_seconds,
             max_resume_attempts: 0,
         };
+        // Kind-only pure execution backend + run mode on native AgentRun freeze
+        // (WP-422/423).
+        tracing::info!(
+            execution_backend = run.execution_backend.as_str(),
+            mode = run.mode.as_str(),
+            "{}; {}",
+            crate::output::format_execution_backend_line(run.execution_backend),
+            crate::output::format_run_mode_line(run.mode)
+        );
         let worker = NewWorker {
             id: worker_id,
             logical_session_id: None,
@@ -803,6 +827,12 @@ impl DaemonAgentHost {
             let (outcome, confirmed_gone, confirmed_adapter) = match ticket.controller.clone() {
                 None => (CancelOutcome::Cancelled, None, None),
                 Some(controller) if controller.kind == ControllerKind::Process => {
+                    // Kind-only pure controller kind on cancel dispatch (WP-424).
+                    tracing::info!(
+                        controller_kind = controller.kind.as_str(),
+                        "{}",
+                        crate::output::format_controller_kind_line(controller.kind)
+                    );
                     let observation = self
                         .controller
                         .stop_exact(Instant::now() + CANCEL_CONTROL_TIMEOUT, controller.clone())
@@ -826,6 +856,12 @@ impl DaemonAgentHost {
                     }
                 }
                 Some(controller) if controller.kind == ControllerKind::InProcess => {
+                    // Kind-only pure controller kind on cancel dispatch (WP-424).
+                    tracing::info!(
+                        controller_kind = controller.kind.as_str(),
+                        "{}",
+                        crate::output::format_controller_kind_line(controller.kind)
+                    );
                     let observation = self
                         .native_controller
                         .observe_gone(

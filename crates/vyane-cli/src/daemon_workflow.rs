@@ -423,6 +423,14 @@ impl DaemonWorkflowSupervisor {
             target_key: "workflow".into(),
             created_at: chrono::Utc::now(),
         };
+        // Kind-only pure origin/kind on daemon workflow task freeze (WP-425).
+        tracing::info!(
+            origin = task.origin.as_str(),
+            kind = task.kind.as_str(),
+            "{}; {}",
+            crate::output::format_task_origin_line(task.origin),
+            crate::output::format_task_kind_line(task.kind)
+        );
         let created = match self.create_submission(task).await? {
             SubmissionCreate::Created(created) => created,
             SubmissionCreate::Existing(existing) => return Ok(existing),
@@ -771,6 +779,13 @@ impl DaemonWorkflowSupervisor {
                     }
                 }
             }
+            // Kind-only pure failure code on lease-loss Forced Failed settle (WP-421).
+            tracing::error!(
+                task_id = %id,
+                failure_code = code.as_str(),
+                "{}",
+                crate::output::format_task_failure_code_line(code)
+            );
             CompletionAction::Settle(TaskSettlement::Failed {
                 code,
                 ledger_run_id: None,
@@ -869,6 +884,15 @@ impl DaemonWorkflowSupervisor {
                     crate::output::format_workflow_run_status_line(outcome.status),
                     crate::output::format_task_settlement_line(&settlement)
                 );
+                // Kind-only pure failure code when settle is Failed (WP-421).
+                if let TaskSettlement::Failed { code, .. } = &settlement {
+                    tracing::error!(
+                        task_id = %id,
+                        failure_code = code.as_str(),
+                        "{}",
+                        crate::output::format_task_failure_code_line(*code)
+                    );
+                }
                 CompletionAction::Settle(settlement)
             }
             Ok(Err(error)) => {
@@ -891,27 +915,39 @@ impl DaemonWorkflowSupervisor {
                 tracing::error!(
                     task_id = %id,
                     settlement = settlement.as_str(),
-                    "{}",
-                    crate::output::format_task_settlement_line(&settlement)
+                    failure_code = code.as_str(),
+                    "{}; {}",
+                    crate::output::format_task_settlement_line(&settlement),
+                    crate::output::format_task_failure_code_line(code)
                 );
                 CompletionAction::Settle(settlement)
             }
             Err(_error) => {
                 // JoinError has no closed kind API; body-free token only (WP-384).
                 if self.shutting_down.load(Ordering::Acquire) {
-                    tracing::error!(task_id = %id, error = "join", "daemon workflow task join failed");
+                    // Kind-only pure interrupt failure code (WP-421).
+                    tracing::error!(
+                        task_id = %id,
+                        error = "join",
+                        failure_code = FailureCode::WorkerLost.as_str(),
+                        "{}",
+                        crate::output::format_task_failure_code_line(FailureCode::WorkerLost)
+                    );
                     CompletionAction::Interrupt(FailureCode::WorkerLost)
                 } else {
+                    let code = FailureCode::Internal;
                     let settlement = TaskSettlement::Failed {
-                        code: FailureCode::Internal,
+                        code,
                         ledger_run_id: None,
                     };
                     tracing::error!(
                         task_id = %id,
                         error = "join",
                         settlement = settlement.as_str(),
-                        "{}",
-                        crate::output::format_task_settlement_line(&settlement)
+                        failure_code = code.as_str(),
+                        "{}; {}",
+                        crate::output::format_task_settlement_line(&settlement),
+                        crate::output::format_task_failure_code_line(code)
                     );
                     CompletionAction::Settle(settlement)
                 }
