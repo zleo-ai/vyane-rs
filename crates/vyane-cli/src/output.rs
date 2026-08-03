@@ -746,6 +746,46 @@ pub(crate) fn format_lifecycle_observation_line(
     format!("lifecycle: {}", terminal_safe(observation.as_str()))
 }
 
+/// Pure human line for closed [`vyane_harness::native::PermissionEffect`] kinds.
+///
+/// Live on native AgentRun ApprovalRequired settle (ask surface) (WP-415).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn format_permission_effect_line(effect: vyane_harness::native::PermissionEffect) -> String {
+    format!("permission effect: {}", terminal_safe(effect.as_str()))
+}
+
+/// Pure human line for closed [`vyane_core::AuthStyle`] kinds.
+///
+/// Live on native target freeze when endpoint auth is present (WP-416).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn format_auth_style_line(style: vyane_core::AuthStyle) -> String {
+    format!("auth style: {}", terminal_safe(style.as_str()))
+}
+
+/// Pure human line for closed [`vyane_core::WebSearchContextSize`] kinds.
+///
+/// Live on native web-search tool registration (WP-418).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn format_web_search_context_size_line(size: vyane_core::WebSearchContextSize) -> String {
+    format!("web search context: {}", terminal_safe(size.as_str()))
+}
+
+/// Pure human line for closed [`vyane_core::AdapterTransport`] kinds.
+///
+/// Live on native target freeze (WP-419).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn format_adapter_transport_line(transport: vyane_core::AdapterTransport) -> String {
+    format!("adapter transport: {}", terminal_safe(transport.as_str()))
+}
+
+/// Pure human line for closed [`vyane_core::Effort`] kinds.
+///
+/// Live on native genparams freeze when effort is set (WP-420).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn format_effort_line(effort: vyane_core::Effort) -> String {
+    format!("effort: {}", terminal_safe(effort.as_str()))
+}
+
 /// Pure human line for closed [`vyane_harness::native::PermissionRuleError`] kinds.
 ///
 /// Live wire is on native AgentRun permission-policy assembly; CLI pure surface
@@ -923,6 +963,48 @@ pub fn format_error_kind_line_token(kind: vyane_core::ErrorKind) -> String {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn format_run_failure_code_line(code: vyane_agent::RunFailureCode) -> String {
     format!("run failure: {}", terminal_safe(code.as_str()))
+}
+
+/// Pure human line for closed [`vyane_task::FailureCode`] kinds.
+///
+/// Live on daemon workflow Failed settle / interrupt (WP-421).
+pub fn format_task_failure_code_line(code: vyane_task::FailureCode) -> String {
+    format!("task failure: {}", terminal_safe(code.as_str()))
+}
+
+/// Pure human line for closed [`vyane_task::TaskOrigin`] kinds.
+///
+/// Live on daemon workflow task create freeze (WP-425).
+pub fn format_task_origin_line(origin: vyane_task::TaskOrigin) -> String {
+    format!("task origin: {}", terminal_safe(origin.as_str()))
+}
+
+/// Pure human line for closed [`vyane_task::TaskKind`] kinds.
+///
+/// Live on daemon workflow task create freeze (WP-425).
+pub fn format_task_kind_line(kind: vyane_task::TaskKind) -> String {
+    format!("task kind: {}", terminal_safe(kind.as_str()))
+}
+
+/// Pure human line for closed [`vyane_agent::ExecutionBackend`] kinds.
+///
+/// Live on daemon AgentRun submit freeze (process + native) (WP-422).
+pub fn format_execution_backend_line(backend: vyane_agent::ExecutionBackend) -> String {
+    format!("execution backend: {}", terminal_safe(backend.as_str()))
+}
+
+/// Pure human line for closed [`vyane_agent::RunMode`] kinds.
+///
+/// Live on daemon AgentRun submit freeze (process + native) (WP-423).
+pub fn format_run_mode_line(mode: vyane_agent::RunMode) -> String {
+    format!("run mode: {}", terminal_safe(mode.as_str()))
+}
+
+/// Pure human line for closed [`vyane_agent::ControllerKind`] kinds.
+///
+/// Live on daemon AgentRun cancel dispatch (WP-424).
+pub fn format_controller_kind_line(kind: vyane_agent::ControllerKind) -> String {
+    format!("controller kind: {}", terminal_safe(kind.as_str()))
 }
 
 /// Pure human line for closed [`vyane_broker::BrokerError`] kinds.
@@ -1370,7 +1452,8 @@ pub fn format_takeover_sandbox_line(sandbox: vyane_goal::TakeoverSandbox) -> Str
 
 /// Pure human line for closed [`vyane_core::Sandbox`] kinds.
 ///
-/// Live on CLI goal pursue runtime freeze (WP-411).
+/// Live on CLI goal pursue runtime freeze (WP-411) and process AgentRun submit
+/// freeze (WP-426).
 pub fn format_sandbox_line(sandbox: vyane_core::Sandbox) -> String {
     format!("sandbox: {}", terminal_safe(sandbox.as_str()))
 }
@@ -1694,16 +1777,24 @@ pub fn format_check_config_files(entries: &[(String, bool)]) -> String {
     out
 }
 
+/// Pure human line for closed [`vyane_core::Protocol`] kinds.
+///
+/// Live on `vyane check` per-provider rows (WP-413).
+pub fn format_protocol_line(protocol: vyane_core::Protocol) -> String {
+    format!("protocol: {}", terminal_safe(protocol.as_str()))
+}
+
 /// Human `vyane check` one provider row.
+/// Protocol column uses domain `as_str` kind tokens (WP-413).
 pub fn format_check_provider_line(
     id: &str,
-    protocol: impl std::fmt::Display,
+    protocol: vyane_core::Protocol,
     default_model: Option<&str>,
 ) -> String {
     format!(
         "  {}: {} default_model={}\n",
         terminal_safe(id),
-        protocol,
+        protocol.as_str(),
         default_model.unwrap_or("-")
     )
 }
@@ -1713,10 +1804,19 @@ pub fn format_check_profile_line(name: &str, body: &str) -> String {
     format!("  {}: {}\n", terminal_safe(name), terminal_safe(body))
 }
 
+/// Pure human line for closed [`vyane_core::HarnessKind`] closed variants.
+///
+/// Live on `vyane check` harness rows (WP-414). `Other(_)` still uses as_str.
+pub fn format_harness_kind_line(kind: &vyane_core::HarnessKind) -> String {
+    format!("harness: {}", terminal_safe(kind.as_str()))
+}
+
 /// Human `vyane check` one harness availability row.
-pub fn format_check_harness_line(kind: impl std::fmt::Display, available: bool) -> String {
+/// Kind column uses domain `as_str` tokens (WP-414).
+pub fn format_check_harness_line(kind: &vyane_core::HarnessKind, available: bool) -> String {
     format!(
-        "  {kind}: {}\n",
+        "  {}: {}\n",
+        terminal_safe(kind.as_str()),
         if available { "available" } else { "missing" }
     )
 }
@@ -2112,7 +2212,7 @@ mod tests {
 
     use super::{
         BroadcastRow, TaskRow, format_a2a_error_line, format_a2a_more_messages_line,
-        format_adapter_failure_line, format_adapter_outcome_line,
+        format_adapter_failure_line, format_adapter_outcome_line, format_adapter_transport_line,
         format_agent_completion_projection_status_line,
         format_agent_completion_sink_observation_line,
         format_agent_completion_sink_transition_line, format_agent_execution_item_status_line,
@@ -2120,15 +2220,16 @@ mod tests {
         format_agent_message_completion_stage_error_kind_line,
         format_agent_recovery_item_status_line, format_agent_store_error_kind_line,
         format_async_dispatch_label_error_line, format_attempt_outcome_line,
-        format_broadcast_label_error_line, format_broadcast_setup_error_line,
-        format_broadcast_table, format_broadcast_target_error_line, format_broker_error_kind_line,
+        format_auth_style_line, format_broadcast_label_error_line,
+        format_broadcast_setup_error_line, format_broadcast_table,
+        format_broadcast_target_error_line, format_broker_error_kind_line,
         format_cancel_diagnostic_line, format_cancel_incomplete_process_groups_line,
         format_cancel_outcome_line, format_cancel_ownership_changed_line,
         format_check_config_files, format_check_harness_line, format_check_harnesses_header,
         format_check_profile_env_line, format_check_profile_environment_header,
         format_check_profile_line, format_check_profile_warning_body, format_check_profiles_header,
         format_check_provider_line, format_check_providers_header, format_config_check_status_line,
-        format_config_error_line, format_config_issue_code_line,
+        format_config_error_line, format_config_issue_code_line, format_controller_kind_line,
         format_controller_recovery_observation_line, format_credential_status_line,
         format_criterion_status_line, format_daemon_already_running_line,
         format_daemon_listening_line, format_daemon_not_running_line,
@@ -2137,8 +2238,9 @@ mod tests {
         format_daemon_workflow_control_error_kind_line, format_daemon_workflow_view,
         format_delivery_status_line, format_dispatch_broadcast_error_line,
         format_dispatch_label_error_line, format_dispatch_stream_error_line,
-        format_durable_task_status, format_empty_task_list_line, format_error_kind_line_token,
-        format_error_line, format_event_log_error_kind_line, format_external_task_label_error_line,
+        format_durable_task_status, format_effort_line, format_empty_task_list_line,
+        format_error_kind_line_token, format_error_line, format_event_log_error_kind_line,
+        format_execution_backend_line, format_external_task_label_error_line,
         format_goal_continuity_authority_error_kind_line, format_goal_continuity_mode_line,
         format_goal_continuity_next_action_kind_line, format_goal_continuity_operator_command_line,
         format_goal_continuity_runner_error_kind_line, format_goal_continuity_signal_kind_line,
@@ -2149,7 +2251,7 @@ mod tests {
         format_goal_observation_status_line, format_goal_observation_watch_status_line,
         format_goal_observation_watcher_error_code_line, format_goal_read_error_kind_line,
         format_goal_read_unavailable_line, format_goal_read_worker_failed_line,
-        format_goal_status_line, format_goal_store_error_kind_line,
+        format_goal_status_line, format_goal_store_error_kind_line, format_harness_kind_line,
         format_identity_changed_before_sigkill_line,
         format_identity_mismatch_nested_cleanup_failed_line,
         format_identity_mismatch_refuse_signal_line, format_inprocess_agent_effect_line,
@@ -2166,38 +2268,41 @@ mod tests {
         format_no_such_detached_run_line, format_not_local_detached_cancel_line,
         format_not_local_detached_line, format_on_error_policy_line,
         format_output_write_failed_line, format_owner_context_error_kind_line,
-        format_permission_check, format_permission_rule_error_kind_line,
-        format_process_identity_unavailable_line, format_profile_check_status_line,
-        format_pump_item_status_line, format_pursuit_checkpoint_status_line,
-        format_pursuit_segment_status_line, format_pursuit_status_line,
-        format_quota_runner_error_kind_line, format_quota_transport_error_kind_line,
-        format_quota_validation_error_kind_line, format_record_line,
-        format_register_command_tool_error_kind_line,
+        format_permission_check, format_permission_effect_line,
+        format_permission_rule_error_kind_line, format_process_identity_unavailable_line,
+        format_profile_check_status_line, format_protocol_line, format_pump_item_status_line,
+        format_pursuit_checkpoint_status_line, format_pursuit_segment_status_line,
+        format_pursuit_status_line, format_quota_runner_error_kind_line,
+        format_quota_transport_error_kind_line, format_quota_validation_error_kind_line,
+        format_record_line, format_register_command_tool_error_kind_line,
         format_register_web_fetch_tool_error_kind_line,
         format_register_web_search_tool_error_kind_line, format_replay_safety_line,
         format_route_result, format_run_attempt_outcome_view_line,
         format_run_completion_status_line, format_run_failure_code_line, format_run_failure_line,
-        format_run_id_line, format_run_ledger_query_error_line, format_run_settlement_line,
-        format_run_state_line, format_run_status_line, format_sandbox_line,
-        format_serve_listening_line, format_serve_loopback_only_line, format_serve_starting_line,
-        format_session_control_error_line, format_session_snapshot_query_error_line,
-        format_session_view_line, format_stale_detached_status_line,
-        format_stream_dispatch_label_error_line, format_stream_dispatch_request_error_line,
-        format_stream_not_applicable_line, format_stream_route_error_line,
-        format_stream_tool_use_line, format_stream_unsupported_fallback_line,
-        format_takeover_approval_status_line, format_takeover_decision_line,
-        format_takeover_run_status_line, format_takeover_sandbox_line,
-        format_task_already_cleanup_failed_line, format_task_already_state_line,
-        format_task_dispatch_failed_line, format_task_dispatch_panicked_line,
-        format_task_duplicate_runtime_dispatch_line, format_task_final_state_line,
+        format_run_id_line, format_run_ledger_query_error_line, format_run_mode_line,
+        format_run_settlement_line, format_run_state_line, format_run_status_line,
+        format_sandbox_line, format_serve_listening_line, format_serve_loopback_only_line,
+        format_serve_starting_line, format_session_control_error_line,
+        format_session_snapshot_query_error_line, format_session_view_line,
+        format_stale_detached_status_line, format_stream_dispatch_label_error_line,
+        format_stream_dispatch_request_error_line, format_stream_not_applicable_line,
+        format_stream_route_error_line, format_stream_tool_use_line,
+        format_stream_unsupported_fallback_line, format_takeover_approval_status_line,
+        format_takeover_decision_line, format_takeover_run_status_line,
+        format_takeover_sandbox_line, format_task_already_cleanup_failed_line,
+        format_task_already_state_line, format_task_dispatch_failed_line,
+        format_task_dispatch_panicked_line, format_task_duplicate_runtime_dispatch_line,
+        format_task_failure_code_line, format_task_final_state_line,
         format_task_init_cleanup_contended_line, format_task_init_cleanup_failed_line,
-        format_task_init_cleanup_read_failed_line, format_task_legacy_output_read_failed_line,
-        format_task_metadata_error_line, format_task_metadata_settlement_retry_line,
+        format_task_init_cleanup_read_failed_line, format_task_kind_line,
+        format_task_legacy_output_read_failed_line, format_task_metadata_error_line,
+        format_task_metadata_settlement_retry_line, format_task_origin_line,
         format_task_output_artifact_failed_line, format_task_output_read_failed_line,
         format_task_settlement_line, format_task_state_line, format_task_status,
         format_task_store_error_kind_line, format_task_table,
         format_tool_chat_validation_error_kind_line, format_tool_invocation_status_line,
-        format_worker_error_line, format_worker_gone_nested_cleanup_complete_line,
+        format_web_search_context_size_line, format_worker_error_line,
+        format_worker_gone_nested_cleanup_complete_line,
         format_worker_gone_nested_cleanup_failed_line,
         format_worker_leader_exited_group_remains_line,
         format_worker_metadata_settlement_failed_line, format_workflow_cancel_line,
@@ -2216,8 +2321,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use vyane_core::{
-        AdapterTransport, ErrorKind, ModelId, NativeSessionState, Protocol, ProviderId, RunRecord,
-        RunStatus, Sandbox, SessionRecord, SessionSnapshot, Target,
+        AdapterTransport, ErrorKind, HarnessKind, ModelId, NativeSessionState, Protocol,
+        ProviderId, RunRecord, RunStatus, Sandbox, SessionRecord, SessionSnapshot, Target,
     };
     use vyane_router::{RouteDecision, RouteEffort, RouteTier};
     use vyane_service::{
@@ -3593,6 +3698,52 @@ mod tests {
             "native filesystem policy: registry"
         );
         assert_eq!(
+            format_auth_style_line(vyane_core::AuthStyle::Bearer),
+            "auth style: bearer"
+        );
+        assert_eq!(
+            format_auth_style_line(vyane_core::AuthStyle::XApiKey),
+            "auth style: x_api_key"
+        );
+        assert_eq!(
+            format_web_search_context_size_line(vyane_core::WebSearchContextSize::High),
+            "web search context: high"
+        );
+        assert_eq!(
+            format_web_search_context_size_line(vyane_core::WebSearchContextSize::Low),
+            "web search context: low"
+        );
+        assert_eq!(
+            format_adapter_transport_line(vyane_core::AdapterTransport::DirectHttp),
+            "adapter transport: direct_http"
+        );
+        assert_eq!(
+            format_adapter_transport_line(vyane_core::AdapterTransport::CliWrap),
+            "adapter transport: cli_wrap"
+        );
+        assert_eq!(format_effort_line(vyane_core::Effort::Low), "effort: low");
+        assert_eq!(
+            format_effort_line(vyane_core::Effort::Medium),
+            "effort: medium"
+        );
+        assert_eq!(format_effort_line(vyane_core::Effort::High), "effort: high");
+        assert_eq!(
+            format_effort_line(vyane_core::Effort::Xhigh),
+            "effort: xhigh"
+        );
+        assert_eq!(
+            format_permission_effect_line(vyane_harness::native::PermissionEffect::Ask),
+            "permission effect: ask"
+        );
+        assert_eq!(
+            format_permission_effect_line(vyane_harness::native::PermissionEffect::Deny),
+            "permission effect: deny"
+        );
+        assert_eq!(
+            format_permission_effect_line(vyane_harness::native::PermissionEffect::Allow),
+            "permission effect: allow"
+        );
+        assert_eq!(
             format_permission_rule_error_kind_line(
                 &vyane_harness::native::PermissionRuleError::EmptyToolPattern
             ),
@@ -4089,6 +4240,82 @@ mod tests {
             "run failure: timed_out"
         );
         assert_eq!(
+            format_task_failure_code_line(FailureCode::DispatchFailed),
+            "task failure: dispatch_failed"
+        );
+        assert_eq!(
+            format_task_failure_code_line(FailureCode::WorkerLost),
+            "task failure: worker_lost"
+        );
+        assert_eq!(
+            format_task_failure_code_line(FailureCode::LeaseExpired),
+            "task failure: lease_expired"
+        );
+        assert_eq!(
+            format_task_failure_code_line(FailureCode::Configuration),
+            "task failure: configuration"
+        );
+        assert_eq!(
+            format_task_failure_code_line(FailureCode::Internal),
+            "task failure: internal"
+        );
+        assert_eq!(
+            format_execution_backend_line(vyane_agent::ExecutionBackend::CliHarnessProcess),
+            "execution backend: cli_harness_process"
+        );
+        assert_eq!(
+            format_execution_backend_line(vyane_agent::ExecutionBackend::NativeInProcess),
+            "execution backend: native_in_process"
+        );
+        assert_eq!(
+            format_execution_backend_line(vyane_agent::ExecutionBackend::Remote),
+            "execution backend: remote"
+        );
+        assert_eq!(
+            format_execution_backend_line(vyane_agent::ExecutionBackend::LegacyUnassigned),
+            "execution backend: legacy_unassigned"
+        );
+        assert_eq!(
+            format_run_mode_line(vyane_agent::RunMode::Autonomous),
+            "run mode: autonomous"
+        );
+        assert_eq!(
+            format_run_mode_line(vyane_agent::RunMode::Interactive),
+            "run mode: interactive"
+        );
+        assert_eq!(
+            format_controller_kind_line(vyane_agent::ControllerKind::InProcess),
+            "controller kind: in_process"
+        );
+        assert_eq!(
+            format_controller_kind_line(vyane_agent::ControllerKind::Process),
+            "controller kind: process"
+        );
+        assert_eq!(
+            format_controller_kind_line(vyane_agent::ControllerKind::Remote),
+            "controller kind: remote"
+        );
+        assert_eq!(
+            format_task_origin_line(TaskOrigin::RestAsync),
+            "task origin: rest_async"
+        );
+        assert_eq!(
+            format_task_origin_line(TaskOrigin::CliDetached),
+            "task origin: cli_detached"
+        );
+        assert_eq!(
+            format_task_origin_line(TaskOrigin::Daemon),
+            "task origin: daemon"
+        );
+        assert_eq!(
+            format_task_kind_line(TaskKind::Dispatch),
+            "task kind: dispatch"
+        );
+        assert_eq!(
+            format_task_kind_line(TaskKind::Workflow),
+            "task kind: workflow"
+        );
+        assert_eq!(
             format_run_status_line(vyane_core::RunStatus::Timeout),
             "run status: timeout"
         );
@@ -4304,13 +4531,23 @@ mod tests {
 
     #[test]
     fn human_check_provider_and_profile_lines_are_terminal_safe() {
-        let provider = format_check_provider_line("openai\n", "openai_chat", Some("gpt-x"));
+        let provider = format_check_provider_line("openai\n", Protocol::OpenaiChat, Some("gpt-x"));
+        assert!(provider.contains("openai_chat"), "{provider}");
         assert!(provider.contains("default_model=gpt-x"), "{provider}");
         assert!(!provider.contains('\u{1b}'));
+        assert_eq!(
+            format_protocol_line(Protocol::AnthropicMessages),
+            "protocol: anthropic_messages"
+        );
         let profile = format_check_profile_line("coding", "p1 -> p2");
         assert_eq!(profile, "  coding: p1 -> p2\n");
-        let harness = format_check_harness_line("claude_code", true);
+        let harness = format_check_harness_line(&HarnessKind::ClaudeCode, true);
+        assert!(harness.contains("claude-code"), "{harness}");
         assert!(harness.contains("available"), "{harness}");
+        assert_eq!(
+            format_harness_kind_line(&HarnessKind::CodexCli),
+            "harness: codex-cli"
+        );
         let env = format_check_profile_env_line("coding", "OPENAI_API_KEY", false);
         assert!(env.contains("missing"), "{env}");
     }

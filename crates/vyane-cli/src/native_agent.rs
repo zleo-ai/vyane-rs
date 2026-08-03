@@ -381,13 +381,33 @@ fn target_snapshot(
     bound: &vyane_core::BoundTarget,
     protocol: NativeProtocolSnapshot,
 ) -> Result<NativeTargetSnapshot, NativeAgentSpoolError> {
+    // Kind-only pure protocol on native freeze (WP-417).
+    tracing::info!(
+        protocol = bound.target.protocol.as_str(),
+        "{}",
+        crate::output::format_protocol_line(bound.target.protocol)
+    );
+    // Kind-only pure transport on native freeze (WP-419).
+    tracing::info!(
+        transport = bound.transport.as_str(),
+        "{}",
+        crate::output::format_adapter_transport_line(bound.transport)
+    );
     let endpoint = bound
         .endpoint
         .as_ref()
         .ok_or(NativeAgentSpoolError::BindingMismatch)?;
-    let auth_style = endpoint.auth.as_ref().map(|auth| match auth.style {
-        AuthStyle::Bearer => NativeAuthStyleSnapshot::Bearer,
-        AuthStyle::XApiKey => NativeAuthStyleSnapshot::XApiKey,
+    let auth_style = endpoint.auth.as_ref().map(|auth| {
+        // Kind-only pure auth style on native freeze (WP-416).
+        tracing::info!(
+            style = auth.style.as_str(),
+            "{}",
+            crate::output::format_auth_style_line(auth.style)
+        );
+        match auth.style {
+            AuthStyle::Bearer => NativeAuthStyleSnapshot::Bearer,
+            AuthStyle::XApiKey => NativeAuthStyleSnapshot::XApiKey,
+        }
     });
     let routing_digest = endpoint_routing_digest(&endpoint.base_url)
         .map_err(|_| NativeAgentSpoolError::BindingMismatch)?;
@@ -533,6 +553,14 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             search_bound.as_ref(),
             search_client,
         ) {
+            // Kind-only pure context size before register (WP-418).
+            tracing::info!(
+                context = search.policy.search_context_size.as_str(),
+                "{}",
+                crate::output::format_web_search_context_size_line(
+                    search.policy.search_context_size
+                )
+            );
             // Kind-only; never log policy/model/params payloads (WP-313/365).
             if let Err(error) = register_web_search_tool(
                 &mut registry,
@@ -681,6 +709,16 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                                 "{}",
                                 crate::output::format_native_turn_stop_line(&stop)
                             );
+                            // Permission ask surface: pure effect kind (WP-415).
+                            if matches!(stop, NativeTurnStop::ApprovalRequired(_)) {
+                                tracing::info!(
+                                    effect = vyane_harness::native::PermissionEffect::Ask.as_str(),
+                                    "{}",
+                                    crate::output::format_permission_effect_line(
+                                        vyane_harness::native::PermissionEffect::Ask
+                                    )
+                                );
+                            }
                             return self.quiesced_failure(&controller, &input, code);
                         }
                     }
@@ -791,6 +829,14 @@ fn params_snapshot(params: &vyane_core::GenParams) -> NativeGenParamsSnapshot {
         let encoded = serde_json::to_string(&params.extra).unwrap_or_default();
         format!("{:x}", Sha256::digest(encoded.as_bytes()))
     });
+    // Kind-only pure effort when frozen into native genparams (WP-420).
+    if let Some(effort) = params.effort {
+        tracing::info!(
+            effort = effort.as_str(),
+            "{}",
+            crate::output::format_effort_line(effort)
+        );
+    }
     NativeGenParamsSnapshot {
         temperature: params.temperature,
         top_p: params.top_p,
