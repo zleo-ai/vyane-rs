@@ -1096,6 +1096,8 @@ continuity-next for each projected accepted signal.
 [WP-447](plan/WP-447.md) adds pure allowlisted goal-signal lines on REST
 continuity-next success for each projected accepted signal.
 
+[WP-448](plan/WP-448.md) adds pure allowlisted next-action lines on REST
+continuity-next success for the projected action kind.
 
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;

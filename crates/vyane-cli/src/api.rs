@@ -1706,6 +1706,12 @@ async fn goal_continuity_next(
     let result = tokio::task::spawn_blocking(move || goals.continuity_next(&id)).await;
     let response = match result {
         Ok(Ok(next_action)) => {
+            // Kind-only pure projected next-action kind on REST success (WP-448).
+            tracing::info!(
+                action = next_action.action.as_str(),
+                "{}",
+                crate::output::format_goal_next_action_kind_line(next_action.action)
+            );
             // Kind-only pure accepted signal kinds on REST success (WP-447).
             for kind in &next_action.accepted_signals {
                 tracing::info!(
