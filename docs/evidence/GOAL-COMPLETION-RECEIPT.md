@@ -11,7 +11,7 @@
 | model | grok-4.5 |
 | reasoning_effort | high |
 | Prepared baseline | `10ebe700cef3416459beebfb7ed07d7e9b866de7` |
-| Implementation HEAD | `5b64b991a43519e355abf5943741d14bd017b811` |
+| Implementation HEAD | `55f7bda7a66d5fd765d4a50eed5c13d164cff567` |
 
 ## Ready
 
@@ -46,3 +46,19 @@
 ## Stop conditions hit
 
 - None of the hard stop conditions (payment, production, release publish, etc.).
+
+## Same-model review dispositions (PR #169)
+
+Reviewer: grok-4.5 / grok-build (same-model, independent explore agent).
+
+| Finding | Disposition |
+|---------|-------------|
+| Lifecycle orphan dead code | Fixed: prepare_cleanup_state before terminal + inventory after |
+| LED-05 plan table drift | Fixed: partial in DECISION-GRADE-KERNEL.md |
+| UnknownFieldForbidden dead | Fixed: deny_unknown_fields + test; removed unused error variant |
+| Soft crash recovery assert | Fixed: require Completed on designed recover-to-success path |
+| Criterion 10 typed fields | Partial: remaining_risks + validation_summary on dogfood complete; human GOAL-COMPLETION-RECEIPT remains |
+| Synthetic effect residual | Accepted residual (documented) |
+| display_hint test weak | Accepted nit for follow-up |
+
+Disposition after fixes: **APPROVE** pending required CI (same-model label retained; cross-model still preferred).
