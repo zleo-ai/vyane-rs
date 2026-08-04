@@ -1565,7 +1565,8 @@ pub fn format_goal_continuity_operator_command_line(
 
 /// Pure human line for closed [`vyane_goal::TakeoverSandbox`] kinds.
 ///
-/// Live on CLI continuity-queue after approval freeze (WP-410).
+/// Live on CLI continuity-queue after approval freeze (WP-410) and
+/// continuity-execute dispatch freeze (WP-459).
 pub fn format_takeover_sandbox_line(sandbox: vyane_goal::TakeoverSandbox) -> String {
     format!("takeover sandbox: {}", terminal_safe(sandbox.as_str()))
 }
@@ -4686,6 +4687,15 @@ mod tests {
         assert_eq!(
             format_takeover_sandbox_line(vyane_goal::TakeoverSandbox::ReadOnly),
             "takeover sandbox: read_only"
+        );
+        // Execute dispatch freeze tokens (WP-459).
+        assert_eq!(
+            format_takeover_sandbox_line(vyane_goal::TakeoverSandbox::Write),
+            "takeover sandbox: write"
+        );
+        assert_eq!(
+            format_takeover_sandbox_line(vyane_goal::TakeoverSandbox::Full),
+            "takeover sandbox: full"
         );
         assert_eq!(
             format_sandbox_line(vyane_core::Sandbox::ReadOnly),

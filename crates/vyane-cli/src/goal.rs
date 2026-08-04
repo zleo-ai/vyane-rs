@@ -560,6 +560,12 @@ async fn continuity_execute(
         "{}",
         crate::output::format_takeover_approval_status_line(approval.status)
     );
+    // Kind-only pure frozen takeover sandbox for execute dispatch (WP-459).
+    tracing::info!(
+        sandbox = approval.sandbox.as_str(),
+        "{}",
+        crate::output::format_takeover_sandbox_line(approval.sandbox)
+    );
     let (cancel, signal_task) = cancellation_token();
     let outcome = service
         .dispatch(
