@@ -1439,8 +1439,9 @@ pub fn format_goal_continuity_status_line(status: vyane_goal::GoalContinuityStat
 
 /// Pure human line for closed [`vyane_goal::TakeoverApprovalStatus`] kinds.
 ///
-/// Live on goal continuity decide / queue settle (WP-355/393) and continuity
-/// execute admission (WP-457).
+/// Live on goal continuity decide / queue settle (WP-355/393), continuity
+/// execute admission (WP-457), and continuity-execute consume/finish settle
+/// (WP-458).
 pub fn format_takeover_approval_status_line(status: vyane_goal::TakeoverApprovalStatus) -> String {
     format!("takeover approval: {}", terminal_safe(status.as_str()))
 }
@@ -4465,6 +4466,19 @@ mod tests {
         assert_eq!(
             format_takeover_approval_status_line(vyane_goal::TakeoverApprovalStatus::Pending),
             "takeover approval: pending"
+        );
+        // Consume/finish settle tokens on continuity-execute (WP-458).
+        assert_eq!(
+            format_takeover_approval_status_line(vyane_goal::TakeoverApprovalStatus::InFlight),
+            "takeover approval: in_flight"
+        );
+        assert_eq!(
+            format_takeover_approval_status_line(vyane_goal::TakeoverApprovalStatus::Done),
+            "takeover approval: done"
+        );
+        assert_eq!(
+            format_takeover_approval_status_line(vyane_goal::TakeoverApprovalStatus::Blocked),
+            "takeover approval: blocked"
         );
         assert_eq!(
             format_journal_step_status_line(vyane_workflow::JournalStepStatus::Skipped),
