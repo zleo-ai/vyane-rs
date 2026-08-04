@@ -1147,6 +1147,9 @@ AgentRun cancel Unknown settle (`cancelled` tool status).
 [WP-464](plan/WP-464.md) pure-logs nested ErrorKind tokens on native
 AgentRun AbortedAfterToolActivity settle.
 
+[WP-465](plan/WP-465.md) pure-logs ErrorKind tokens on native AgentRun
+failover-eligible intermediate continue (before next bound).
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live

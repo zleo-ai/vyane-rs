@@ -672,10 +672,18 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             )
             .await;
             tool_context.wait_for_blocking_quiescence().await;
-            if matches!(
-                &attempt,
-                Ok(Err(error)) if error.failover_eligible() && index + 1 < bounds.len()
-            ) {
+            // Intermediate failover-eligible model error: pure kind before
+            // skipping to the next bound (WP-465). Final settle pure remains
+            // WP-378/461/464 on the selected attempt.
+            if let Ok(Err(error)) = &attempt
+                && error.failover_eligible()
+                && index + 1 < bounds.len()
+            {
+                tracing::info!(
+                    error = error.kind.as_str(),
+                    "{}",
+                    crate::output::format_error_kind_line_token(error.kind)
+                );
                 continue;
             }
             turn = Some(attempt);
