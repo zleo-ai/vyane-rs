@@ -11,7 +11,8 @@
 | model | grok-4.5 |
 | reasoning_effort | high |
 | Prepared baseline | `10ebe700cef3416459beebfb7ed07d7e9b866de7` |
-| Implementation HEAD | `78ddfa5` (branch tip; see PR #169) |
+| Merged main HEAD (PR #169) | `a92bcadcd57f134b3dbcb8f6a850304fffc67a55` |
+| Skeptic-gap fix branch | see PR for `fix/decision-grade-skeptic-gaps` |
 
 ## Ready
 
@@ -25,11 +26,23 @@
 
 ## Partial / remaining
 
-- Full daemon Process e2e still relies on existing `daemon_agent_acceptance` for live harness spawn; dogfood library path is the product composition under test here.
-- Approval **resume** (not only ask-stop) remains open (GOV-05 residual).
-- Durable multi-process receipt store (beyond MemoryReceiptLedger) not shipped.
+- Dogfood Process effect is a real OS child (`sh` marker write) under CliHarnessProcess **lease**, not a full Claude/Codex harness binary spawn; live harness spawn remains covered by `daemon_agent_acceptance`.
+- Approval **resume** after terminal ask (product store) remains open; dogfood now proves grant→effect→complete.
+- Durable effects/receipts/lease snapshots are filesystem-backed for dogfood restart; not a multi-tenant production receipt service.
 - Python matched performance numbers largely **incomparable** under clean-room.
 - Live pause/resume (CON-04) and automatic payload replay (CON-05) intentionally not productized.
+
+## Skeptic-gap repairs (post #169)
+
+| Gap | Fix |
+|-----|-----|
+| In-memory effect log | `ExternalEffectLog::open` durable JSON |
+| Same-instance CrashFence only | `DogfoodPath::reopen` + drop + durable lease snapshot |
+| Orphan theater | Real child PID + `/proc` inventory; reaped after effect |
+| Lease generation | `hostile_expired_agent_lease_rejects_stale_generation` with TestClock |
+| Boundary cancel bypass | `MemoryReceiptLedger::cancel` CAS |
+| Boundary no truth receipt | `DriveDogfood` command runs full path |
+| grant_approval untested | `approval_grant_allows_effect_and_completion` |
 
 ## Recommended migration path
 

@@ -733,16 +733,83 @@ impl CompletionReceipt {
 }
 
 /// In-memory, owner-isolated, revision-fenced receipt ledger for tests and
-/// local dogfood. Not a multi-process store.
+/// local dogfood. Optionally durable when constructed with
+/// [`MemoryReceiptLedger::open_durable`].
 #[derive(Debug, Default)]
 pub struct MemoryReceiptLedger {
     by_owner: BTreeMap<String, BTreeMap<String, CompletionReceipt>>,
+    /// When set, every successful mutation is fsynced as JSON under this root.
+    durable_root: Option<std::path::PathBuf>,
 }
 
 impl MemoryReceiptLedger {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Open or create a durable ledger rooted at `dir` (`{owner}/{receipt_id}.json`).
+    pub fn open_durable(dir: impl Into<std::path::PathBuf>) -> ReceiptResult<Self> {
+        let root = dir.into();
+        std::fs::create_dir_all(&root).map_err(|_| ReceiptError::InvalidInput("durable root"))?;
+        let mut ledger = Self {
+            by_owner: BTreeMap::new(),
+            durable_root: Some(root.clone()),
+        };
+        ledger.load_from_disk()?;
+        Ok(ledger)
+    }
+
+    fn load_from_disk(&mut self) -> ReceiptResult<()> {
+        let Some(root) = self.durable_root.clone() else {
+            return Ok(());
+        };
+        let Ok(owners) = std::fs::read_dir(&root) else {
+            return Ok(());
+        };
+        for owner_entry in owners.flatten() {
+            if !owner_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let owner = owner_entry.file_name().to_string_lossy().into_owned();
+            let Ok(files) = std::fs::read_dir(owner_entry.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let raw = std::fs::read_to_string(&path)
+                    .map_err(|_| ReceiptError::InvalidInput("read durable receipt"))?;
+                let receipt = CompletionReceipt::from_canonical_json(&raw)?;
+                if receipt.owner != owner {
+                    return Err(ReceiptError::OwnerMismatch);
+                }
+                self.by_owner
+                    .entry(owner.clone())
+                    .or_default()
+                    .insert(receipt.receipt_id.clone(), receipt);
+            }
+        }
+        Ok(())
+    }
+
+    fn persist_receipt(&self, receipt: &CompletionReceipt) -> ReceiptResult<()> {
+        let Some(root) = &self.durable_root else {
+            return Ok(());
+        };
+        let owner_dir = root.join(&receipt.owner);
+        std::fs::create_dir_all(&owner_dir)
+            .map_err(|_| ReceiptError::InvalidInput("create durable owner dir"))?;
+        let path = owner_dir.join(format!("{}.json", receipt.receipt_id));
+        let tmp = owner_dir.join(format!("{}.json.tmp", receipt.receipt_id));
+        let json = receipt.to_canonical_json()?;
+        std::fs::write(&tmp, json.as_bytes())
+            .map_err(|_| ReceiptError::InvalidInput("write durable receipt tmp"))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|_| ReceiptError::InvalidInput("rename durable receipt"))?;
+        Ok(())
     }
 
     pub fn insert_open(&mut self, receipt: CompletionReceipt) -> ReceiptResult<()> {
@@ -752,11 +819,18 @@ impl MemoryReceiptLedger {
                 "insert_open requires open revision 1",
             ));
         }
-        let owner_map = self.by_owner.entry(receipt.owner.clone()).or_default();
-        if owner_map.contains_key(&receipt.receipt_id) {
+        if self
+            .by_owner
+            .get(&receipt.owner)
+            .is_some_and(|m| m.contains_key(&receipt.receipt_id))
+        {
             return Err(ReceiptError::InvalidInput("receipt_id already exists"));
         }
-        owner_map.insert(receipt.receipt_id.clone(), receipt);
+        self.persist_receipt(&receipt)?;
+        self.by_owner
+            .entry(receipt.owner.clone())
+            .or_default()
+            .insert(receipt.receipt_id.clone(), receipt);
         Ok(())
     }
 
@@ -781,13 +855,12 @@ impl MemoryReceiptLedger {
     where
         F: FnOnce(&mut CompletionReceipt) -> ReceiptResult<()>,
     {
-        let owner_map = self
+        let current = self
             .by_owner
-            .get_mut(owner)
-            .ok_or(ReceiptError::InvalidInput("receipt not found"))?;
-        let current = owner_map
-            .get_mut(receipt_id)
-            .ok_or(ReceiptError::InvalidInput("receipt not found"))?;
+            .get(owner)
+            .and_then(|m| m.get(receipt_id))
+            .ok_or(ReceiptError::InvalidInput("receipt not found"))?
+            .clone();
         if current.owner != owner {
             return Err(ReceiptError::OwnerMismatch);
         }
@@ -800,14 +873,20 @@ impl MemoryReceiptLedger {
         if current.final_status.is_terminal() {
             return Err(ReceiptError::TerminalImmutable);
         }
-        let mut next = current.clone();
+        let mut next = current;
         mutate(&mut next)?;
         next.revision = expected_revision
             .checked_add(1)
             .ok_or(ReceiptError::InvalidInput("revision overflow"))?;
         next.updated_at = now;
         next.validate()?;
-        *current = next.clone();
+        // Persist before the in-memory swap so a crash still reloads the
+        // advanced revision from disk.
+        self.persist_receipt(&next)?;
+        self.by_owner
+            .entry(owner.to_string())
+            .or_default()
+            .insert(receipt_id.to_string(), next.clone());
         Ok(next)
     }
 
