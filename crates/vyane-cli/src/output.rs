@@ -3732,6 +3732,10 @@ mod tests {
             format_native_turn_stop_line(&NativeTurnStop::TimedOut),
             "native turn stop: timed_out"
         );
+        assert_eq!(
+            format_native_turn_stop_line(&NativeTurnStop::Cancelled),
+            "native turn stop: cancelled"
+        );
         // Payloads must never leak into the pure human line or Display.
         let plan = vyane_harness::native::ApprovalPlan {
             schema: 1,

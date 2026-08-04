@@ -697,6 +697,12 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                         None => {
                             // Cancelled / completed-without-reply: leave
                             // reconciliation in charge without a false failure.
+                            // Pure stop kind still surfaces for diagnostics (WP-461).
+                            tracing::info!(
+                                stop_kind = stop.as_str(),
+                                "{}",
+                                crate::output::format_native_turn_stop_line(&stop)
+                            );
                             return AgentExecutorOutcome::Unknown;
                         }
                         Some(code) => {
@@ -735,6 +741,12 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
             },
             Ok(Err(error)) => {
                 if error.kind == ErrorKind::Cancelled {
+                    // Pure cancel kind before Unknown reconciliation (WP-461).
+                    tracing::info!(
+                        error = error.kind.as_str(),
+                        "{}",
+                        crate::output::format_error_kind_line_token(error.kind)
+                    );
                     return AgentExecutorOutcome::Unknown;
                 }
                 // Kind-only pure line; never log free-form error bodies (WP-378).
