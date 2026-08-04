@@ -11,13 +11,13 @@
 | reasoning_effort | high |
 | role | Developer |
 | Baseline SHA | `a3e24ba6a3195b482fccce9ca4fef527623fa222` (main post #169/#170) |
-| Final SHA (branch HEAD pre-merge) | `8a82867` (see PR #172; pin exact after CI) |
+| Final SHA (branch HEAD pre-merge) | `cd9b7449892a45420a7fb81f6fef1cfe765eda08` |
 | PR | https://github.com/zleo-ai/vyane-rs/pull/172 |
 | started_at (UTC) | 2026-08-04T14:53:14Z |
-| ended_at (UTC) | 2026-08-04 (implementation train; CI pending) |
+| ended_at (UTC) | 2026-08-04T15:34:10Z |
 | distinct attempts | 1 primary implementation train |
 | corrective commits | tracked on feature branch |
-| first-pass | pending independent review + CI |
+| first-pass | CI green on HEAD; independent review REQUEST_CHANGES→fixed (same-model explore); cross-model still preferred before merge |
 | rework_count | 0 (post-skeptic of prior program; this pilot is new) |
 | cost / tokens | **unknown** (never claimed as 0) |
 
