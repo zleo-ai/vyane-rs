@@ -517,6 +517,12 @@ async fn continuity_execute(
         .get_takeover_approval(&args.common.owner, &args.approval_id)
         .context("read takeover approval")?
         .with_context(|| format!("takeover approval `{}` was not found", args.approval_id))?;
+    // Kind-only pure approval status at execute admission (WP-457).
+    tracing::info!(
+        status = approval.status.as_str(),
+        "{}",
+        crate::output::format_takeover_approval_status_line(approval.status)
+    );
     if approval.status != TakeoverApprovalStatus::Approved {
         bail!(
             "takeover approval `{}` is {} and cannot be executed",

@@ -1123,6 +1123,9 @@ summary print for each journal step.
 [WP-456](plan/WP-456.md) reuses pure takeover run-status lines on CLI
 continuity-execute when approval evidence is assembled into the prompt.
 
+[WP-457](plan/WP-457.md) reuses pure takeover approval-status lines on CLI
+continuity-execute admission before the approved check.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live

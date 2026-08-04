@@ -1439,8 +1439,8 @@ pub fn format_goal_continuity_status_line(status: vyane_goal::GoalContinuityStat
 
 /// Pure human line for closed [`vyane_goal::TakeoverApprovalStatus`] kinds.
 ///
-/// Live wire is on goal continuity decide; CLI pure surface for tests and
-/// operator diagnostics (WP-355/393).
+/// Live on goal continuity decide / queue settle (WP-355/393) and continuity
+/// execute admission (WP-457).
 pub fn format_takeover_approval_status_line(status: vyane_goal::TakeoverApprovalStatus) -> String {
     format!("takeover approval: {}", terminal_safe(status.as_str()))
 }
