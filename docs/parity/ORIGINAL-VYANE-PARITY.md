@@ -50,7 +50,10 @@ private-only 项从统计中移除而宣称完成。
 ### 2.1 状态定义
 
 下列状态表示 **Rust 基线自身的实现状态**，不是跨仓行为等价结论。当前 53 项计数为：
-`implemented` 7、`partial` 22、`missing` 13、`different` 9、`planned` 2。
+`implemented` 7、`partial` 23、`missing` 12、`different` 9、`planned` 2。
+（2026-08-04 decision-grade kernel program：LED-05 由 `missing` 升为 `partial`，因公开
+`CompletionReceipt` / gate / artifact digest 契约与 hermetic dogfood 验收已落地；仍无独立
+approval/notification 产品 store 与完整 intervention API。）
 
 | 状态 | 含义 |
 | --- | --- |
@@ -146,7 +149,7 @@ private-only 项从统计中移除而宣称完成。
 | LED-02 | durable task lifecycle ledger | `different` | public-core | task 状态分布在 status JSON 与多种 daemon JSON/SQLite store。 | `vyane-rs:crates/vyane-task` 统一 SQLite snapshot+event+CAS/epoch | 接受 Rust 作为 stronger canonical contract；为 CLI/REST/daemon 三 origin 建 lifecycle/event consistency 测试。 | — |
 | LED-03 | Git-backed board/event ledger | `missing` | optional-adapter | board workflow 通过 Git-backed 文件、CLI、MCP 与 HTTP mutation 协作。 | Rust 无 board schema/parser/gitops/service | 先做 generic board/event ledger crate；平台文件格式、git remote 与 push 由 optional adapter 处理。 | P3 |
 | LED-04 | daemon event/timeline store | `partial` | public-core | daemon event store 支持 timeline 和图形化投影 API。 | `vyane-rs:crates/vyane-ledger/src/event.rs` 已有 owner-scoped append-only stream、monotonic sequence、stable event id、durable/buffered append、bounded cursor/page；`vyane-message` 与 `vyane-agent` 均有事务无正文 outbox。`vyane-broker::{MessageEventProjector,AgentEventProjector}` 都以 bounded append-then-mark 方式 durable append、复用 stable source event id、再独立 ack；AgentRun 投影只映射 bounded worker/run lifecycle metadata，并排除 prompt/target/policy、logical/native session、task/trace 与 raw body。显式 non-`Clone` `ResidentBrokerSupervisor` 已组装进 daemon，可并行常驻轮询两个 projector、delivery lanes 与 maintenance；当前 delivery lane set 刻意为空，batch/concurrency/backoff 有界，各 loop failure 隔离，取消会 drain 已开始的有界 cycle。driver 不建 channel/runtime/第二队列；`AgentProjectionComponents::open` 封装 raw store，ordinary dispatch 不打开 AgentRun DB 或启动 background work。仍缺 concrete delivery adapter、dispatch/workflow producers、subscription、retention/GC 和统一 timeline/trace projection | 定义 trace/span correlation、concrete delivery assembly、subscription、retention 和其余 producer wiring；message/dispatch/workflow/worker 使用可追踪的统一 event projection，并验证 cursor resume、投影重试、backpressure、graceful drain 与 GC。 | P2 |
-| LED-05 | approvals/interventions/notifications/artifacts | `missing` | public-core | 独立 typed store 管理 approval、intervention、notification 与 artifact registry。 | Rust 无对应 typed stores | 每类先建立 owner-scoped typed record 与 CAS/idempotency；API mutation 必须 auth/decision-audited，payload 与 secret 分离。 | P2 |
+| LED-05 | approvals/interventions/notifications/artifacts | `partial` | public-core | 独立 typed store 管理 approval、intervention、notification 与 artifact registry。 | `vyane-core::receipt` 提供公开 schema：`CompletionReceipt`、gate（含 truth_probe）、immutable artifact digest、approval gate 记录与 revision-fenced `MemoryReceiptLedger`；`vyane-service::dogfood` hermetic 路径证明 broken baseline 先 fail 再 complete。仍无独立 approval/intervention/notification 产品 store、expiry/resume binding 或 durable multi-process receipt ledger | 保持 receipt 不能在 truth 未过时 complete；补 owner-scoped durable approval store、notification、intervention CAS 与 API mutation 审计；payload 与 secret 分离。 | P2 |
 | LED-06 | goal ledger | `different` | decision | goal 使用 append-only truth 与查询索引组合持久化。 | WP-60 的 `vyane-goal` 以一个 SQLite database 同时承载 current query snapshot 与 immutable lifecycle/progress events；每次 mutation 在同一 IMMEDIATE transaction 更新同 revision snapshot/event，foreign-as-absent 与 same-id cross-owner contract 已覆盖。它刻意不复制 JSONL + SQLite 双事实源 | 接受 Rust stronger single-truth contract；后续 migration/projector 必须保持 event immutable、snapshot/event atomic 与 owner predicate，不能再引入并列 writable truth。 | — |
 
 ### 4.5 Governance
