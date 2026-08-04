@@ -1031,8 +1031,9 @@ pub fn format_on_error_policy_line(policy: vyane_workflow::OnError) -> String {
 
 /// Pure human line for closed kernel [`vyane_core::ErrorKind`] tokens.
 ///
-/// Live on native AgentRun turn-failure mapping (WP-322/378) and session
-/// control failure paths (WP-429).
+/// Live on native AgentRun turn-failure mapping (WP-322/378), session
+/// control failure paths (WP-429), cancel Unknown (WP-461), and
+/// AbortedAfterToolActivity settle (WP-464).
 pub fn format_error_kind_line_token(kind: vyane_core::ErrorKind) -> String {
     format!("error kind: {}", terminal_safe(kind.as_str()))
 }

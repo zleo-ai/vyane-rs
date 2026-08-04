@@ -758,6 +758,15 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                                     )
                                 );
                             }
+                            // Nested model/transport kind on abort-after-tool
+                            // (WP-464; peer Ok(Err) pure is WP-378/461).
+                            if let NativeTurnStop::AbortedAfterToolActivity { kind } = stop {
+                                tracing::info!(
+                                    error = kind.as_str(),
+                                    "{}",
+                                    crate::output::format_error_kind_line_token(kind)
+                                );
+                            }
                             return self.quiesced_failure(&controller, &input, code);
                         }
                     }
