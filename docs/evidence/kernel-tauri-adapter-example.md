@@ -39,7 +39,9 @@ path. Do not treat adapter-only approve as multi-process durable authority.
 
 1. Principal owner is bound by the adapter; payload cannot override owner.
 2. `display_hint` is never used for branching on task state.
-3. Client cache may drop; rebuild from durable store via Status/ReadReceipt.
+3. Client cache may drop; rebuild from durable store via Status/ReadReceipt
+   **with `dogfood_root` (or a registered durable root after DriveDogfood)**.
+   `LocalKernelAdapter` loads `kernel.sqlite` under that root — not memory alone.
 4. Duplicate command_id handling is idempotent or fail-closed Conflict — never a second effect.
 
 ## Not in kernel

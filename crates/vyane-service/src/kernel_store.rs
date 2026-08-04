@@ -20,7 +20,7 @@ use vyane_core::{
 use crate::approval_fsm::{self, DeliveryEvent, DeliveryPhase, DeliveryTransitionError};
 
 const SCHEMA_VERSION: u32 = 1;
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 const MIGRATION_0001: &str = include_str!("../migrations/0001_kernel.sql");
 
 /// Errors from the kernel durable store.
@@ -226,14 +226,18 @@ impl KernelStore {
     fn initialize(&self) -> KernelStoreResult<()> {
         // Retry on SQLITE_BUSY so concurrent first-open does not fail closed spuriously.
         let mut last_err = None;
-        for attempt in 0..32 {
+        for attempt in 0..64 {
             match self.initialize_once() {
                 Ok(()) => return Ok(()),
                 Err(KernelStoreError::Sqlite(msg))
-                    if msg.contains("locked") || msg.contains("busy") =>
+                    if msg.contains("locked")
+                        || msg.contains("busy")
+                        || msg.contains("database is locked") =>
                 {
                     last_err = Some(KernelStoreError::Sqlite(msg));
-                    std::thread::sleep(Duration::from_millis(5 + attempt * 2));
+                    // Exponential-ish backoff capped at 50ms.
+                    let delay = (1u64 << attempt.min(5)).min(50);
+                    std::thread::sleep(Duration::from_millis(delay));
                 }
                 Err(e) => return Err(e),
             }

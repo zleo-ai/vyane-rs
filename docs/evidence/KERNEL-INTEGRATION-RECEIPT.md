@@ -30,12 +30,23 @@
 5. **Versioned kernel boundary**: commands submit/status/approve/deny/cancel/read artifact|receipt/DriveDogfood; events covering accepted through completion_receipt_finalized / canceled|failed; display_hint non-authoritative; principal authz before mutation. **Durable multi-process path** is DriveDogfood → KernelStore; in-process approve/deny without dogfood are event stubs (see residual).
 6. **Composition**: reuses `SqliteAgentStore` for AgentRun claim/lease; does **not** fork a second runtime.
 
+## Skeptic-gap repairs (post #172 merge)
+
+| Gap | Fix |
+|-----|-----|
+| Status after DriveDogfood → NotFound | Status/ReadReceipt/ReadArtifact load from `kernel.sqlite` via `dogfood_root` + registered durable roots |
+| No discard-rebuild test | `status_rebuilds_projection_from_kernel_store_after_discard` |
+| Adapter doc overclaim | `kernel-tauri-adapter-example.md` requires dogfood_root / registered root |
+| Harness not linked to CompletionReceipt | `run_dogfood_with_hermetic_harness` + integration test; Unix process groups on effect children |
+| concurrent_schema_init flaky | longer busy_timeout, 64 retries, exponential backoff; 5× stress green |
+| approval-suite.log | captured under implementer scratch + CI suite |
+
 ## Partial / residual (pilot, not production)
 
 - Formal Claude/Codex/Grok product harness wiring remains in adapter plane / existing daemon acceptance.
-- LocalKernelAdapter event queue is process-local; in-process `DecideApproval`/`DenyApproval` without KernelStore are **not** multi-process durable authority (dogfood/KernelStore is).
+- In-process `DecideApproval`/`DenyApproval` without KernelStore are **not** multi-process durable authority (dogfood/KernelStore grant path is).
 - Effect apply is record-then-side-effect (at-most-once / no duplicate); crash between CAS and OS child may leave identity without side effect — recovery does not invent success without truth probe.
-- Multi-writer race probe uses concurrent threads on one SQLite file (Immediate txn); true OS multi-process open race covered by idempotent schema init + Immediate effect apply.
+- Multi-writer race probe uses concurrent threads on one SQLite file (Immediate txn); schema init hardened under load.
 - No multi-tenant production service, no production cutover, no crates.io/tag/release.
 - Live pause/resume (CON-04) and automatic payload replay (CON-05) remain intentionally out.
 

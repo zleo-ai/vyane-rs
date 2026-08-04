@@ -15,7 +15,8 @@
 //!   KernelStore for durable grant binding.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
@@ -26,9 +27,30 @@ use vyane_core::{
 };
 
 use crate::dogfood::run_successful_dogfood;
+use crate::kernel_store::KernelStore;
 
 /// Frozen local boundary protocol version.
 pub const KERNEL_BOUNDARY_VERSION: u32 = 1;
+
+/// Collect candidate `kernel.sqlite` paths under a dogfood root for receipt rebuild.
+fn push_kernel_candidates(root: &Path, receipt_id: &str, out: &mut Vec<PathBuf>) {
+    out.push(root.join("kernel.sqlite"));
+    if let Some(suffix) = receipt_id.strip_prefix("rcpt-") {
+        out.push(root.join(format!("durable-{suffix}")).join("kernel.sqlite"));
+    }
+    // Scan durable-* children (DriveDogfood layout).
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with("durable-") {
+                    out.push(path.join("kernel.sqlite"));
+                }
+            }
+        }
+    }
+}
 
 /// Local principal (not a multi-user production boundary).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,12 +283,18 @@ impl KernelErrorCode {
 }
 
 /// In-process adapter exercising the transport-neutral contract.
+///
+/// Process-local event queue is rebuildable. Durable receipt authority for the
+/// Process dogfood path is [`KernelStore`] under registered / command
+/// `dogfood_root` paths — Status/ReadReceipt discard memory and re-read facts.
 pub struct LocalKernelAdapter {
     principal: KernelPrincipal,
     events: Mutex<VecDeque<KernelEvent>>,
     next_sequence: Mutex<u64>,
-    /// Fenced receipt ledger (same contract as dogfood), not raw map mutation.
+    /// Fenced receipt ledger for pure boundary submit/cancel (non-dogfood).
     receipts: Mutex<MemoryReceiptLedger>,
+    /// Durable dogfood roots (`…/durable-*` or roots containing `kernel.sqlite`).
+    durable_roots: Mutex<Vec<PathBuf>>,
 }
 
 impl LocalKernelAdapter {
@@ -277,7 +305,71 @@ impl LocalKernelAdapter {
             events: Mutex::new(VecDeque::new()),
             next_sequence: Mutex::new(1),
             receipts: Mutex::new(MemoryReceiptLedger::new()),
+            durable_roots: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Register a durable root so later Status/ReadReceipt can rebuild without
+    /// an in-process receipt cache (discard-and-rebuild).
+    pub fn register_durable_root(&self, root: impl Into<PathBuf>) {
+        let root = root.into();
+        if let Ok(mut guard) = self.durable_roots.lock()
+            && !guard.iter().any(|p| p == &root)
+        {
+            guard.push(root);
+        }
+    }
+
+    /// Drop process-local receipt cache (events kept). Used by rebuild tests.
+    pub fn discard_in_memory_receipts(&self) {
+        if let Ok(mut guard) = self.receipts.lock() {
+            *guard = MemoryReceiptLedger::new();
+        }
+    }
+
+    /// Load receipt: memory first, then durable KernelStore under dogfood roots.
+    fn load_receipt(
+        &self,
+        receipt_id: &str,
+        dogfood_root: Option<&str>,
+    ) -> Option<CompletionReceipt> {
+        if let Ok(guard) = self.receipts.lock()
+            && let Some(r) = guard.get_for_owner(&self.principal.owner, receipt_id)
+        {
+            return Some(r.clone());
+        }
+        self.load_receipt_from_durable(receipt_id, dogfood_root)
+    }
+
+    fn load_receipt_from_durable(
+        &self,
+        receipt_id: &str,
+        dogfood_root: Option<&str>,
+    ) -> Option<CompletionReceipt> {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(root) = dogfood_root.map(PathBuf::from) {
+            push_kernel_candidates(&root, receipt_id, &mut candidates);
+        }
+        if let Ok(roots) = self.durable_roots.lock() {
+            for root in roots.iter() {
+                push_kernel_candidates(root, receipt_id, &mut candidates);
+            }
+        }
+        // Dedup paths.
+        candidates.sort();
+        candidates.dedup();
+        for path in candidates {
+            if !path.exists() {
+                continue;
+            }
+            let Ok(store) = KernelStore::open(&path) else {
+                continue;
+            };
+            if let Ok(Some(receipt)) = store.get_receipt(&self.principal.owner, receipt_id) {
+                return Some(receipt);
+            }
+        }
+        None
     }
 
     pub fn handle(&self, command: KernelCommand, now: DateTime<Utc>) -> KernelEvent {
@@ -418,6 +510,10 @@ impl LocalKernelAdapter {
                 let suffix = command.command_id.clone();
                 match run_successful_dogfood(&root, &self.principal.owner, &suffix, now) {
                     Ok((receipt, effects)) => {
+                        // Register durable path so Status rebuilds after memory discard.
+                        let durable = root.join(format!("durable-{suffix}"));
+                        self.register_durable_root(&durable);
+                        self.register_durable_root(&root);
                         // Emit lifecycle event kinds for shell adapters (non-authoritative
                         // display_hint only). Durable facts live in kernel.sqlite under root.
                         let _ = self.push_event(
@@ -529,8 +625,7 @@ impl LocalKernelAdapter {
             | KernelCommandKind::ReadReceipt
             | KernelCommandKind::GetProjection => {
                 if let Some(receipt_id) = &command.receipt_id {
-                    let guard = self.receipts.lock().expect("receipts");
-                    match guard.get_for_owner(&self.principal.owner, receipt_id) {
+                    match self.load_receipt(receipt_id, command.dogfood_root.as_deref()) {
                         Some(receipt) => self.push_event(
                             KernelEventKind::ReceiptUpdated,
                             now,
@@ -538,7 +633,7 @@ impl LocalKernelAdapter {
                             command.agent_run_id,
                             Some(receipt.final_status),
                             Some(KernelProjection::Receipt {
-                                receipt: Box::new(receipt.clone()),
+                                receipt: Box::new(receipt),
                             }),
                             None,
                             None,
@@ -568,8 +663,7 @@ impl LocalKernelAdapter {
                 let Some(receipt_id) = &command.receipt_id else {
                     return self.error_event(now, KernelErrorCode::InvalidCommand, None);
                 };
-                let guard = self.receipts.lock().expect("receipts");
-                match guard.get_for_owner(&self.principal.owner, receipt_id) {
+                match self.load_receipt(receipt_id, command.dogfood_root.as_deref()) {
                     Some(receipt) if receipt.output_artifact_digest.is_some() => self.push_event(
                         KernelEventKind::ArtifactFinalized,
                         now,
@@ -577,16 +671,13 @@ impl LocalKernelAdapter {
                         command.agent_run_id,
                         Some(receipt.final_status),
                         Some(KernelProjection::Receipt {
-                            receipt: Box::new(receipt.clone()),
+                            receipt: Box::new(receipt),
                         }),
                         None,
                         // display_hint must never be treated as authority
                         Some("artifact projection (non-authoritative hint)".into()),
                     ),
-                    Some(_) => {
-                        self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id.clone()))
-                    }
-                    None => {
+                    Some(_) | None => {
                         self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id.clone()))
                     }
                 }
@@ -991,5 +1082,99 @@ mod tests {
             }
             other => panic!("expected receipt projection, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn status_rebuilds_projection_from_kernel_store_after_discard() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let adapter = LocalKernelAdapter::new(principal());
+        let driven = adapter.handle(
+            KernelCommand {
+                boundary_version: KERNEL_BOUNDARY_VERSION,
+                command_id: "rb01".into(),
+                kind: KernelCommandKind::DriveDogfood,
+                principal: principal(),
+                task_case: None,
+                route: None,
+                receipt_id: None,
+                agent_run_id: None,
+                approval_granted: None,
+                subscribe: None,
+                replay_from: None,
+                dogfood_root: Some(root_s.clone()),
+            },
+            now(),
+        );
+        assert_eq!(driven.kind, KernelEventKind::CompletionReceiptFinalized);
+        let receipt_id = driven.receipt_id.clone().expect("receipt_id on complete");
+        let digest = match driven.projection.as_ref() {
+            Some(KernelProjection::Receipt { receipt }) => {
+                receipt.output_artifact_digest.clone().unwrap()
+            }
+            _ => panic!("expected receipt projection"),
+        };
+
+        // Discard process-local cache — client cache drop.
+        adapter.discard_in_memory_receipts();
+
+        // Fresh adapter with only dogfood_root (no registered roots, empty memory)
+        // proves durable store is authority.
+        let fresh = LocalKernelAdapter::new(principal());
+        let status = fresh.handle(
+            KernelCommand {
+                boundary_version: KERNEL_BOUNDARY_VERSION,
+                command_id: "st1".into(),
+                kind: KernelCommandKind::Status,
+                principal: principal(),
+                task_case: None,
+                route: None,
+                receipt_id: Some(receipt_id.clone()),
+                agent_run_id: None,
+                approval_granted: None,
+                subscribe: None,
+                replay_from: None,
+                dogfood_root: Some(root_s.clone()),
+            },
+            now(),
+        );
+        assert_eq!(
+            status.error, None,
+            "Status must rebuild from kernel.sqlite, got {status:?}"
+        );
+        assert_eq!(status.kind, KernelEventKind::ReceiptUpdated);
+        assert_eq!(status.final_status, Some(ReceiptFinalStatus::Completed));
+        match status.projection.unwrap() {
+            KernelProjection::Receipt { receipt } => {
+                assert_eq!(receipt.receipt_id, receipt_id);
+                assert_eq!(
+                    receipt.output_artifact_digest.as_deref(),
+                    Some(digest.as_str())
+                );
+                assert!(receipt.final_status.is_success());
+            }
+            other => panic!("expected rebuilt receipt, got {other:?}"),
+        }
+
+        // Same on original adapter after discard (uses registered durable roots).
+        let status2 = adapter.handle(
+            KernelCommand {
+                boundary_version: KERNEL_BOUNDARY_VERSION,
+                command_id: "st2".into(),
+                kind: KernelCommandKind::ReadReceipt,
+                principal: principal(),
+                task_case: None,
+                route: None,
+                receipt_id: Some(receipt_id),
+                agent_run_id: None,
+                approval_granted: None,
+                subscribe: None,
+                replay_from: None,
+                dogfood_root: None,
+            },
+            now(),
+        );
+        assert_eq!(status2.error, None);
+        assert_eq!(status2.final_status, Some(ReceiptFinalStatus::Completed));
     }
 }

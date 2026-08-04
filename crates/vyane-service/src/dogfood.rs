@@ -284,6 +284,10 @@ pub struct DogfoodConfig {
     pub permission: PermissionDecision,
     pub code_base_sha: Option<String>,
     pub code_head_sha: Option<String>,
+    /// Optional path to `vyane_harness_lifecycle` hermetic CLI stand-in.
+    /// When set, process effects spawn that binary (process group on Unix)
+    /// instead of a minimal `sh` marker writer.
+    pub hermetic_harness_bin: Option<PathBuf>,
 }
 
 /// Snapshot of lifecycle cleanup after a terminal run.
@@ -1003,7 +1007,16 @@ impl DogfoodPath {
         if first {
             self.effect_applied = true;
             let marker = self.config.workdir.join("effect.marker");
-            let pid = spawn_effect_child(&marker, payload)?;
+            let pid = if let Some(bin) = &self.config.hermetic_harness_bin {
+                spawn_hermetic_harness_child(
+                    bin,
+                    &self.config.workdir,
+                    &self.config.run_id,
+                    payload,
+                )?
+            } else {
+                spawn_effect_child(&marker, payload)?
+            };
             self.effect_child_pids.push(pid);
             self.lifecycle.child_scopes_open = self
                 .lifecycle
@@ -1515,6 +1528,7 @@ pub fn run_successful_dogfood(
         permission: PermissionDecision::Allow,
         code_base_sha: Some(base_sha.clone()),
         code_head_sha: Some(base_sha),
+        hermetic_harness_bin: None,
     };
 
     let mut path = DogfoodPath::open_durable(&durable, config, now)?;
@@ -1551,14 +1565,19 @@ fn suffix_u48(suffix: &str) -> u64 {
 
 fn spawn_effect_child(marker: &Path, payload: &str) -> Result<u32, DogfoodError> {
     let marker_s = marker.to_string_lossy().into_owned();
-    let mut child = std::process::Command::new("sh")
-        .arg("-c")
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
         .arg("printf '%s' \"$1\" > \"$2\"")
         .arg("dogfood-effect")
         .arg(payload)
-        .arg(&marker_s)
-        .spawn()
-        .map_err(|e| DogfoodError::Io(e.to_string()))?;
+        .arg(&marker_s);
+    // Own process group so cancel/SIGTERM can target the whole tree.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(|e| DogfoodError::Io(e.to_string()))?;
     let pid = child.id();
     let status = child.wait().map_err(|e| DogfoodError::Io(e.to_string()))?;
     if !status.success() {
@@ -1568,6 +1587,113 @@ fn spawn_effect_child(marker: &Path, payload: &str) -> Result<u32, DogfoodError>
         )));
     }
     Ok(pid)
+}
+
+/// Spawn the public hermetic harness lifecycle binary as a real OS child
+/// (process group on Unix). Produces effect.marker + MARKER + artifacts.
+fn spawn_hermetic_harness_child(
+    bin: &Path,
+    workdir: &Path,
+    run_id: &str,
+    payload: &str,
+) -> Result<u32, DogfoodError> {
+    fs::create_dir_all(workdir).map_err(|e| DogfoodError::Io(e.to_string()))?;
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args([
+        "--mode",
+        "normal",
+        "--workdir",
+        &workdir.to_string_lossy(),
+        "--run-id",
+        run_id,
+        "--payload",
+        payload,
+    ])
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+    let child = cmd.spawn().map_err(|e| DogfoodError::Io(e.to_string()))?;
+    let pid = child.id();
+    let output = child
+        .wait_with_output()
+        .map_err(|e| DogfoodError::Io(e.to_string()))?;
+    if !output.status.success() {
+        return Err(DogfoodError::Io(format!(
+            "hermetic harness exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    // Harness writes MARKER=PASS; dogfood truth probe expects that.
+    Ok(pid)
+}
+
+/// End-to-end dogfood path driven by the hermetic harness binary as the OS
+/// effect child (spawn → events → artifact → truth-gated CompletionReceipt).
+pub fn run_dogfood_with_hermetic_harness(
+    root: &Path,
+    owner: &str,
+    run_suffix: &str,
+    harness_bin: &Path,
+    now: DateTime<Utc>,
+) -> Result<(CompletionReceipt, Arc<ExternalEffectLog>), DogfoodError> {
+    let durable = root.join(format!("durable-{run_suffix}"));
+    let workdir = durable.join("workdir");
+    fs::create_dir_all(&workdir).map_err(|e| DogfoodError::Io(e.to_string()))?;
+    // Broken baseline first for truth probe fail-then-pass.
+    fs::write(workdir.join("MARKER"), "BROKEN").map_err(|e| DogfoodError::Io(e.to_string()))?;
+
+    let base_sha = "10ebe700cef3416459beebfb7ed07d7e9b866de7".to_string();
+    let config = DogfoodConfig {
+        owner: owner.into(),
+        receipt_id: format!("rcpt-{run_suffix}"),
+        run_id: format!("0197f524-7a00-7000-8000-{:012}", suffix_u48(run_suffix)),
+        worker_id: format!("worker-{run_suffix}"),
+        lease_owner: format!("lease-{run_suffix}"),
+        workdir: workdir.clone(),
+        route: RouteConfig {
+            provider: ProviderId::new("fixture-provider"),
+            endpoint_class: EndpointClass::LocalProcess,
+            protocol: Protocol::OpenaiChat,
+            harness: Some(HarnessKind::ClaudeCode),
+            model: ModelId::new("fixture-model"),
+            model_snapshot: None,
+            requested_effort: Some(vyane_core::Effort::High),
+            effective_effort: Some(vyane_core::Effort::High),
+            profile_or_config_digest: Some(digest_bytes(b"profile-dogfood-harness")),
+            billing_mode_category: BillingModeCategory::SubscriptionHarness,
+        },
+        risk_class: RiskClass::WorkspaceWrite,
+        require_approval: false,
+        permission: PermissionDecision::Allow,
+        code_base_sha: Some(base_sha.clone()),
+        code_head_sha: Some(base_sha),
+        hermetic_harness_bin: Some(harness_bin.to_path_buf()),
+    };
+
+    let mut path = DogfoodPath::open_durable(&durable, config, now)?;
+    path.create_or_adopt_agent_run(now)?;
+    path.claim_and_lease()?;
+    path.record_attempt(now)?;
+    path.evaluate_permission(now)?;
+    // Truth probe must fail on broken baseline before harness effect.
+    let fail = path.run_truth_probe(now);
+    assert!(
+        matches!(fail, Err(DogfoodError::TruthProbeFailed { .. })),
+        "truth probe must fail before hermetic harness, got {fail:?}"
+    );
+    // Spawns real hermetic harness OS child (process group); writes MARKER=PASS.
+    path.execute_process_effect("hermetic-payload-v1")?;
+    path.run_truth_probe(now)?;
+    path.record_local_gates(now)?;
+    path.publish_artifact("hermetic-payload-v1", now)?;
+    let receipt = path.finish_success(now)?;
+    let effects = Arc::clone(&path.effects);
+    Ok((receipt, effects))
 }
 
 fn wait_pid_gone(pid: u32, budget: Duration) -> bool {
@@ -1685,6 +1811,7 @@ mod tests {
             permission: PermissionDecision::Allow,
             code_base_sha: Some("10ebe700cef3416459beebfb7ed07d7e9b866de7".into()),
             code_head_sha: Some("10ebe700cef3416459beebfb7ed07d7e9b866de7".into()),
+            hermetic_harness_bin: None,
         }
     }
 
