@@ -1534,6 +1534,12 @@ fn append_approval_evidence(prompt: &mut String, label: &str, approval: &Takeove
         prompt.push_str(&format!("- {label}.run_id: {run_id}\n"));
     }
     if let Some(status) = approval.run_status {
+        // Kind-only pure run status frozen into execute prompt evidence (WP-456).
+        tracing::info!(
+            status = status.as_str(),
+            "{}",
+            crate::output::format_takeover_run_status_line(status)
+        );
         prompt.push_str(&format!("- {label}.run_status: {}\n", status.as_str()));
     }
 }
