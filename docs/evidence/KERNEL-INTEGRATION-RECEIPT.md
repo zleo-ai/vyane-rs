@@ -11,9 +11,9 @@
 | reasoning_effort | high |
 | role | Developer |
 | Baseline SHA | `a3e24ba6a3195b482fccce9ca4fef527623fa222` (main post #169/#170) |
-| Final SHA | *(filled at merge)* |
+| Final SHA (branch HEAD pre-merge) | `4adffb68d34f697c00f82d2ce895c413552f167e` |
 | started_at (UTC) | 2026-08-04T14:53:14Z |
-| ended_at (UTC) | *(filled at merge)* |
+| ended_at (UTC) | 2026-08-04 (implementation train; CI pending) |
 | distinct attempts | 1 primary implementation train |
 | corrective commits | tracked on feature branch |
 | first-pass | pending independent review + CI |
