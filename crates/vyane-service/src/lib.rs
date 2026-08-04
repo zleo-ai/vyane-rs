@@ -89,7 +89,8 @@ pub use diagnostics::{
 };
 pub use dogfood::{
     CrashFence, DOGFOOD_TASK_TYPE, DogfoodConfig, DogfoodError, DogfoodPath, ExternalEffectLog,
-    LifecycleInventory, PermissionDecision, digest_bytes, run_successful_dogfood,
+    LifecycleInventory, PermissionDecision, digest_bytes, inventory_live_pids,
+    run_successful_dogfood,
 };
 pub use factory::{
     AssemblerFactory, authorized_native_client, authorized_web_fetch_client,

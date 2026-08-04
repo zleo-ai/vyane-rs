@@ -5,13 +5,17 @@
 //! from typed projections and the receipt contract.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use vyane_core::{
-    CompletionReceipt, RECEIPT_SCHEMA_VERSION, ReceiptFinalStatus, RouteConfig, TaskCase,
+    CompletionReceipt, MemoryReceiptLedger, RECEIPT_SCHEMA_VERSION, ReceiptFinalStatus,
+    RouteConfig, TaskCase,
 };
+
+use crate::dogfood::run_successful_dogfood;
 
 /// Frozen local boundary protocol version.
 pub const KERNEL_BOUNDARY_VERSION: u32 = 1;
@@ -39,6 +43,7 @@ pub enum KernelCapability {
     ProjectOwnership,
     ProjectReceipt,
     ReplayEvents,
+    DriveDogfood,
 }
 
 impl KernelCapability {
@@ -55,6 +60,7 @@ impl KernelCapability {
             Self::ProjectOwnership => "project_ownership",
             Self::ProjectReceipt => "project_receipt",
             Self::ReplayEvents => "replay_events",
+            Self::DriveDogfood => "drive_dogfood",
         }
     }
 }
@@ -71,6 +77,8 @@ pub enum KernelCommandKind {
     GetProjection,
     Subscribe,
     Replay,
+    /// Drive the Process dogfood path to a truth-verified CompletionReceipt.
+    DriveDogfood,
 }
 
 /// Versioned local command.
@@ -94,6 +102,9 @@ pub struct KernelCommand {
     pub subscribe: Option<SubscribeRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_from: Option<ReplayCursor>,
+    /// Durable dogfood root for [`KernelCommandKind::DriveDogfood`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dogfood_root: Option<String>,
 }
 
 /// Event stream subscription request.
@@ -220,7 +231,8 @@ pub struct LocalKernelAdapter {
     principal: KernelPrincipal,
     events: Mutex<VecDeque<KernelEvent>>,
     next_sequence: Mutex<u64>,
-    receipts: Mutex<std::collections::BTreeMap<String, CompletionReceipt>>,
+    /// Fenced receipt ledger (same contract as dogfood), not raw map mutation.
+    receipts: Mutex<MemoryReceiptLedger>,
 }
 
 impl LocalKernelAdapter {
@@ -230,7 +242,7 @@ impl LocalKernelAdapter {
             principal,
             events: Mutex::new(VecDeque::new()),
             next_sequence: Mutex::new(1),
-            receipts: Mutex::new(std::collections::BTreeMap::new()),
+            receipts: Mutex::new(MemoryReceiptLedger::new()),
         }
     }
 
@@ -266,6 +278,7 @@ impl LocalKernelAdapter {
                         KernelCapability::ProjectOwnership,
                         KernelCapability::ProjectReceipt,
                         KernelCapability::ReplayEvents,
+                        KernelCapability::DriveDogfood,
                     ],
                     receipt_schema_version: RECEIPT_SCHEMA_VERSION,
                 };
@@ -304,10 +317,11 @@ impl LocalKernelAdapter {
                         Some(receipt_id),
                     );
                 };
-                self.receipts
-                    .lock()
-                    .expect("receipts")
-                    .insert(receipt_id.clone(), receipt.clone());
+                let mut guard = self.receipts.lock().expect("receipts");
+                if guard.insert_open(receipt.clone()).is_err() {
+                    return self.error_event(now, KernelErrorCode::Conflict, Some(receipt_id));
+                }
+                drop(guard);
                 self.push_event(
                     KernelEventKind::TaskAccepted,
                     now,
@@ -326,19 +340,24 @@ impl LocalKernelAdapter {
                     return self.error_event(now, KernelErrorCode::InvalidCommand, None);
                 };
                 let mut guard = self.receipts.lock().expect("receipts");
-                let Some(receipt) = guard.get_mut(&receipt_id) else {
+                let Some(current) = guard
+                    .get_for_owner(&self.principal.owner, &receipt_id)
+                    .cloned()
+                else {
                     return self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id));
                 };
-                if receipt.owner != self.principal.owner {
-                    return self.error_event(now, KernelErrorCode::OwnerMismatch, Some(receipt_id));
-                }
-                if receipt.final_status.is_terminal() {
-                    return self.error_event(now, KernelErrorCode::Conflict, Some(receipt_id));
-                }
-                receipt.final_status = ReceiptFinalStatus::Cancelled;
-                receipt.revision = receipt.revision.saturating_add(1);
-                receipt.updated_at = now;
-                let cloned = receipt.clone();
+                // Fenced cancel — same CAS path as dogfood / MemoryReceiptLedger.
+                let cancelled =
+                    match guard.cancel(&self.principal.owner, &receipt_id, current.revision, now) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            return self.error_event(
+                                now,
+                                KernelErrorCode::Conflict,
+                                Some(receipt_id),
+                            );
+                        }
+                    };
                 drop(guard);
                 self.push_event(
                     KernelEventKind::Cancelled,
@@ -347,11 +366,40 @@ impl LocalKernelAdapter {
                     command.agent_run_id,
                     Some(ReceiptFinalStatus::Cancelled),
                     Some(KernelProjection::Receipt {
-                        receipt: Box::new(cloned),
+                        receipt: Box::new(cancelled),
                     }),
                     None,
                     Some("cancelled".into()),
                 )
+            }
+            KernelCommandKind::DriveDogfood => {
+                let Some(root) = command.dogfood_root.clone() else {
+                    return self.error_event(now, KernelErrorCode::InvalidCommand, None);
+                };
+                let root = PathBuf::from(root);
+                let suffix = command.command_id.clone();
+                match run_successful_dogfood(&root, &self.principal.owner, &suffix, now) {
+                    Ok((receipt, _effects)) => {
+                        // Import completed receipt into the boundary ledger for projection.
+                        let _guard = self.receipts.lock().expect("receipts");
+                        // Project the completed receipt directly (insert_open requires Open).
+                        self.push_event(
+                            KernelEventKind::ReceiptUpdated,
+                            now,
+                            Some(receipt.receipt_id.clone()),
+                            command.agent_run_id,
+                            Some(receipt.final_status),
+                            Some(KernelProjection::Receipt {
+                                receipt: Box::new(receipt),
+                            }),
+                            None,
+                            Some("dogfood completed".into()),
+                        )
+                    }
+                    Err(_) => {
+                        self.error_event(now, KernelErrorCode::Unavailable, command.receipt_id)
+                    }
+                }
             }
             KernelCommandKind::DecideApproval => {
                 let granted = command.approval_granted.unwrap_or(false);
@@ -385,8 +433,8 @@ impl LocalKernelAdapter {
             KernelCommandKind::GetProjection => {
                 if let Some(receipt_id) = &command.receipt_id {
                     let guard = self.receipts.lock().expect("receipts");
-                    match guard.get(receipt_id) {
-                        Some(receipt) if receipt.owner == self.principal.owner => self.push_event(
+                    match guard.get_for_owner(&self.principal.owner, receipt_id) {
+                        Some(receipt) => self.push_event(
                             KernelEventKind::ReceiptUpdated,
                             now,
                             Some(receipt_id.clone()),
@@ -397,11 +445,6 @@ impl LocalKernelAdapter {
                             }),
                             None,
                             None,
-                        ),
-                        Some(_) => self.error_event(
-                            now,
-                            KernelErrorCode::OwnerMismatch,
-                            Some(receipt_id.clone()),
                         ),
                         None => self.error_event(
                             now,
@@ -597,6 +640,7 @@ mod tests {
                 approval_granted: None,
                 subscribe: None,
                 replay_from: None,
+                dogfood_root: None,
             },
             now(),
         );
@@ -625,6 +669,7 @@ mod tests {
                 approval_granted: None,
                 subscribe: None,
                 replay_from: None,
+                dogfood_root: None,
             },
             now(),
         );
@@ -647,6 +692,7 @@ mod tests {
                 approval_granted: None,
                 subscribe: None,
                 replay_from: None,
+                dogfood_root: None,
             },
             now(),
         );
@@ -675,6 +721,7 @@ mod tests {
                 approval_granted: None,
                 subscribe: None,
                 replay_from: None,
+                dogfood_root: None,
             },
             now(),
         );
@@ -693,6 +740,7 @@ mod tests {
                 approval_granted: None,
                 subscribe: None,
                 replay_from: None,
+                dogfood_root: None,
             },
             now(),
         );
@@ -716,6 +764,7 @@ mod tests {
                 approval_granted: None,
                 subscribe: None,
                 replay_from: None,
+                dogfood_root: None,
             },
             now(),
         );
@@ -732,6 +781,7 @@ mod tests {
                 approval_granted: None,
                 subscribe: None,
                 replay_from: None,
+                dogfood_root: None,
             },
             now(),
         );
@@ -752,6 +802,7 @@ mod tests {
                 approval_granted: None,
                 subscribe: None,
                 replay_from: Some(ReplayCursor { sequence: 1 }),
+                dogfood_root: None,
             },
             now(),
         );
@@ -780,5 +831,41 @@ mod tests {
         // Contract: display_hint must not be the sole signal — documented by
         // requiring projection for receipt authority in GetProjection handler.
         let _ = event.display_hint;
+    }
+
+    #[test]
+    fn drive_dogfood_yields_truth_verified_receipt_projection() {
+        let root = tempfile::tempdir().unwrap();
+        let adapter = LocalKernelAdapter::new(principal());
+        let event = adapter.handle(
+            KernelCommand {
+                boundary_version: KERNEL_BOUNDARY_VERSION,
+                command_id: "df01".into(),
+                kind: KernelCommandKind::DriveDogfood,
+                principal: principal(),
+                task_case: None,
+                route: None,
+                receipt_id: None,
+                agent_run_id: None,
+                approval_granted: None,
+                subscribe: None,
+                replay_from: None,
+                dogfood_root: Some(root.path().to_string_lossy().into_owned()),
+            },
+            now(),
+        );
+        assert_eq!(event.kind, KernelEventKind::ReceiptUpdated);
+        assert_eq!(event.final_status, Some(ReceiptFinalStatus::Completed));
+        match event.projection.unwrap() {
+            KernelProjection::Receipt { receipt } => {
+                assert!(receipt.final_status.is_success());
+                assert!(receipt.output_artifact_digest.is_some());
+                assert_eq!(
+                    receipt.gates.truth_probe.outcome,
+                    vyane_core::GateOutcome::Passed
+                );
+            }
+            other => panic!("expected receipt projection, got {other:?}"),
+        }
     }
 }
