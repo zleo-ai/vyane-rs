@@ -44,7 +44,6 @@ pub enum ReceiptError {
     MissingArtifact,
     IncompleteGates,
     TerminalImmutable,
-    UnknownFieldForbidden,
 }
 
 impl fmt::Display for ReceiptError {
@@ -62,9 +61,6 @@ impl fmt::Display for ReceiptError {
             Self::MissingArtifact => f.write_str("completion requires an output artifact digest"),
             Self::IncompleteGates => f.write_str("completion requires all required gates to pass"),
             Self::TerminalImmutable => f.write_str("terminal receipt cannot be mutated"),
-            Self::UnknownFieldForbidden => {
-                f.write_str("unknown fields are not silently accepted as success evidence")
-            }
         }
     }
 }
@@ -233,6 +229,7 @@ pub const GATE_CI_PACKAGING: &str = "ci_packaging";
 
 /// One bounded task case (acceptance + risk), secret-free.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskCase {
     pub task_case_id: String,
     pub task_type: String,
@@ -255,6 +252,7 @@ impl TaskCase {
 
 /// Explicit route provenance without private account data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RouteConfig {
     pub provider: ProviderId,
     pub endpoint_class: EndpointClass,
@@ -360,6 +358,7 @@ impl AttemptStatus {
 
 /// Cost evidence: actual only when the provider supplied it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CostEvidence {
     /// Provider-supplied actual cost in micro-units of currency, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -378,6 +377,7 @@ pub struct CostEvidence {
 /// ledger [`crate::run::Attempt`]. Serialized field names match the product
 /// contract (`attempt_id`, …).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReceiptAttempt {
     pub attempt_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -426,6 +426,7 @@ impl ReceiptAttempt {
 
 /// One named validation gate with optional evidence URI or content digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NamedGate {
     pub name: String,
     pub outcome: GateOutcome,
@@ -464,6 +465,7 @@ impl NamedGate {
 
 /// Aggregate gate results for a receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GateResult {
     pub unit: NamedGate,
     pub integration: NamedGate,
@@ -560,6 +562,7 @@ impl GateResult {
 
 /// One review finding disposition (public-safe summary).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReviewFindingDisposition {
     pub finding_id: String,
     pub severity: String,
@@ -570,6 +573,7 @@ pub struct ReviewFindingDisposition {
 
 /// Recovery / cleanup visibility on the receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryCleanupState {
     /// Whether post-terminal process inventory reported orphans.
     pub orphan_processes_detected: bool,
@@ -591,7 +595,11 @@ impl Default for RecoveryCleanupState {
 }
 
 /// Durable CompletionReceipt — product truth for one finished delivery path.
+///
+/// Unknown JSON fields fail closed (`deny_unknown_fields`). Missing optional
+/// evidence stays absent and never implies success.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompletionReceipt {
     pub schema_version: u32,
     pub receipt_id: String,
@@ -1239,6 +1247,49 @@ mod tests {
         let json = serde_json::to_string(&receipt).unwrap();
         let err = CompletionReceipt::from_canonical_json(&json).unwrap_err();
         assert_eq!(err, ReceiptError::TruthRequired);
+    }
+
+    #[test]
+    fn unknown_json_fields_fail_closed() {
+        let json = r#"{
+            "schema_version": 1,
+            "receipt_id": "rcpt-001",
+            "owner": "local",
+            "revision": 1,
+            "task_case": {
+                "task_case_id": "tc",
+                "task_type": "t",
+                "acceptance_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "truth_probe_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "risk_class": "read_only",
+                "secret_extra": true
+            },
+            "route": {
+                "provider": "p",
+                "endpoint_class": "unknown",
+                "protocol": "openai_chat",
+                "model": "m",
+                "billing_mode_category": "unknown"
+            },
+            "attempts": [],
+            "gates": {
+                "unit": {"name": "unit", "outcome": "unknown"},
+                "integration": {"name": "integration", "outcome": "unknown"},
+                "truth_probe": {"name": "truth_probe", "outcome": "unknown"},
+                "independent_review": {"name": "independent_review", "outcome": "unknown"},
+                "ci_packaging": {"name": "ci_packaging", "outcome": "unknown"}
+            },
+            "final_status": "open",
+            "rework_count": 0,
+            "recovery_cleanup": {
+                "orphan_processes_detected": false,
+                "cleanup_succeeded": true
+            },
+            "require_review_and_ci": false,
+            "created_at": "2026-08-04T12:00:00Z",
+            "updated_at": "2026-08-04T12:00:00Z"
+        }"#;
+        assert!(CompletionReceipt::from_canonical_json(json).is_err());
     }
 
     #[test]

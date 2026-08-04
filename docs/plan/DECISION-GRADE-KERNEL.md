@@ -80,7 +80,7 @@ Classification is relative to the **Process dogfood path**, not whole-system par
 | COL-03 | partial | Durable AgentRun queue/claim/lease |
 | COL-05 | partial | Tree cancel / process-group cancel |
 | LED-01 | implemented | Attempt trail / usage fields when available |
-| LED-05 | missing | Approvals + artifacts as receipt gates (generic schema in-repo) |
+| LED-05 | partial | Approvals + artifacts as receipt gates (generic schema in-repo; no full approval store) |
 | GOV-01 | partial | Owner isolation on receipt store |
 | GOV-02 | implemented | Clean-env, process group, controller recovery |
 | GOV-03 | partial | Capability/sandbox ceiling on route |

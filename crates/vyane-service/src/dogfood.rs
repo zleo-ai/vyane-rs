@@ -640,6 +640,28 @@ impl DogfoodPath {
             .commit_completion(&self.config.owner, &prepared.permit)
             .map_err(|e| DogfoodError::Agent(e.to_string()))?;
 
+        // Capture lifecycle inventory before the terminal transition so cleanup
+        // fields can land on the still-open receipt.
+        let cleanup = self.prepare_cleanup_state(true);
+        let updated = self.receipts.transition(
+            &self.config.owner,
+            &self.config.receipt_id,
+            self.receipt_revision,
+            now,
+            |receipt| {
+                receipt.recovery_cleanup = cleanup;
+                receipt.remaining_risks = vec![
+                    "approval_resume_open".into(),
+                    "durable_multiprocess_receipt_store_open".into(),
+                    "daemon_process_spawn_covered_by_existing_acceptance".into(),
+                ];
+                receipt.validation_summary = Some(
+                    "dogfood: truth_probe passed; artifact published; process effect once".into(),
+                );
+                Ok(())
+            },
+        )?;
+        self.receipt_revision = updated.revision;
         let receipt = self.receipts.complete(
             &self.config.owner,
             &self.config.receipt_id,
@@ -647,16 +669,8 @@ impl DogfoodPath {
             now,
         )?;
         self.receipt_revision = receipt.revision;
-        self.cleanup_lifecycle(true);
-        let mut final_receipt = receipt;
-        // Reflect cleanup on a side structure; terminal receipt is immutable,
-        // so cleanup visibility for tests is also on LifecycleInventory.
-        let _ = &mut final_receipt;
-        Ok(self
-            .receipts
-            .get(&self.config.owner, &self.config.receipt_id)
-            .cloned()
-            .expect("receipt present after complete"))
+        self.apply_cleanup_inventory(true);
+        Ok(receipt)
     }
 
     pub fn cancel_path(&mut self, now: DateTime<Utc>) -> Result<CompletionReceipt, DogfoodError> {
@@ -681,6 +695,18 @@ impl DogfoodPath {
                 }
             }
         }
+        let cleanup = self.prepare_cleanup_state(true);
+        let updated = self.receipts.transition(
+            &self.config.owner,
+            &self.config.receipt_id,
+            self.receipt_revision,
+            now,
+            |receipt| {
+                receipt.recovery_cleanup = cleanup;
+                Ok(())
+            },
+        )?;
+        self.receipt_revision = updated.revision;
         let receipt = self.receipts.cancel(
             &self.config.owner,
             &self.config.receipt_id,
@@ -688,50 +714,39 @@ impl DogfoodPath {
             now,
         )?;
         self.receipt_revision = receipt.revision;
-        self.cleanup_lifecycle(true);
+        self.apply_cleanup_inventory(true);
         Ok(receipt)
     }
 
-    /// Recover after injected crash: re-open same receipt, prevent duplicate effect.
+    /// Recover after injected crash: prevent duplicate effect and complete when
+    /// MARKER=PASS and an effect was already applied. Incomplete recovery is
+    /// `Unresolved` (never invented success).
     pub fn recover_after_crash(
         &mut self,
         now: DateTime<Utc>,
     ) -> Result<CompletionReceipt, DogfoodError> {
-        // Clear crash fence for recovery attempt.
         self.crash_after = None;
         self.cancel = false;
-        // Effect must not re-apply.
-        if self.effect_applied
-            || self
-                .effects
-                .was_applied(&format!("effect:{}", self.config.run_id))
-        {
-            // already applied
+        let effect_id = format!("effect:{}", self.config.run_id);
+        if !self.effects.was_applied(&effect_id) {
+            let receipt = self.receipts.mark_unresolved(
+                &self.config.owner,
+                &self.config.receipt_id,
+                self.receipt_revision,
+                "recovery without prior effect".to_string(),
+                now,
+            )?;
+            self.receipt_revision = receipt.revision;
+            return Ok(receipt);
         }
-        // If truth already passable and artifact exists, complete.
         if self.artifact_digest.is_none() {
-            // Re-publish same artifact body if marker indicates success path mid-flight.
-            if let Ok(body) = fs::read_to_string(self.config.workdir.join("effect.marker")) {
-                let _ = self.publish_artifact(&format!("recovered:{body}"), now);
-            }
+            let body = fs::read_to_string(self.config.workdir.join("effect.marker"))
+                .unwrap_or_else(|_| "recovered-missing-marker".into());
+            self.publish_artifact(&format!("recovered:{body}"), now)?;
         }
-        // Re-run truth if marker is PASS.
-        let _ = self.run_truth_probe(now);
-        let _ = self.record_local_gates(now);
-        match self.finish_success(now) {
-            Ok(r) => Ok(r),
-            Err(e) => {
-                let receipt = self.receipts.mark_unresolved(
-                    &self.config.owner,
-                    &self.config.receipt_id,
-                    self.receipt_revision,
-                    e.to_string(),
-                    now,
-                )?;
-                self.receipt_revision = receipt.revision;
-                Ok(receipt)
-            }
-        }
+        self.run_truth_probe(now)?;
+        self.record_local_gates(now)?;
+        self.finish_success(now)
     }
 
     pub fn fail_path(
@@ -740,6 +755,18 @@ impl DogfoodPath {
         _class: AttemptFailureClass,
         now: DateTime<Utc>,
     ) -> Result<CompletionReceipt, DogfoodError> {
+        let cleanup = self.prepare_cleanup_state(false);
+        let updated = self.receipts.transition(
+            &self.config.owner,
+            &self.config.receipt_id,
+            self.receipt_revision,
+            now,
+            |receipt| {
+                receipt.recovery_cleanup = cleanup;
+                Ok(())
+            },
+        )?;
+        self.receipt_revision = updated.revision;
         let receipt = self.receipts.fail(
             &self.config.owner,
             &self.config.receipt_id,
@@ -748,30 +775,39 @@ impl DogfoodPath {
             now,
         )?;
         self.receipt_revision = receipt.revision;
-        self.cleanup_lifecycle(true);
+        self.apply_cleanup_inventory(false);
         Ok(receipt)
     }
 
-    fn cleanup_lifecycle(&mut self, succeeded: bool) {
-        // Remove effect marker from "live" temp set when cleaning.
+    /// Snapshot cleanup truth **before** terminalization (scopes still open).
+    fn prepare_cleanup_state(&self, graceful: bool) -> RecoveryCleanupState {
+        let scopes_open = self.lifecycle.child_scopes_open;
+        RecoveryCleanupState {
+            orphan_processes_detected: !graceful && scopes_open > 0,
+            // Graceful path expects scopes to be closable; ungraceful leaves residual.
+            cleanup_succeeded: graceful,
+            note: Some(if graceful {
+                "dogfood-declared-scope-cleanup".into()
+            } else {
+                "dogfood-ungraceful-stop-scopes-still-open".into()
+            }),
+        }
+    }
+
+    /// Apply post-terminal inventory mutations (ephemeral markers, scope close).
+    fn apply_cleanup_inventory(&mut self, graceful: bool) {
         let marker = self.config.workdir.join("effect.marker");
         if marker.exists() {
-            // Keep artifact; remove ephemeral marker when cleaning.
             let _ = fs::remove_file(&marker);
             self.lifecycle.temp_paths_remaining =
                 self.lifecycle.temp_paths_remaining.saturating_sub(1);
         }
-        self.lifecycle.child_scopes_open = 0;
-        self.lifecycle.orphan_processes_detected =
-            !succeeded && self.lifecycle.child_scopes_open > 0;
-        // Note: orphan detection for real processes is covered in lifecycle tests
-        // that inspect OS process trees; this path tracks declared scopes.
-        let _ = RecoveryCleanupState {
-            orphan_processes_detected: self.lifecycle.orphan_processes_detected,
-            cleanup_succeeded: self.lifecycle.temp_paths_remaining == 0
-                && self.lifecycle.child_scopes_open == 0,
-            note: Some("dogfood-declared-scope-cleanup".into()),
-        };
+        if graceful {
+            self.lifecycle.child_scopes_open = 0;
+            self.lifecycle.orphan_processes_detected = false;
+        } else {
+            self.lifecycle.orphan_processes_detected = self.lifecycle.child_scopes_open > 0;
+        }
     }
 
     #[must_use]
@@ -1061,10 +1097,8 @@ mod tests {
         // Recovery must not add a second effect.
         let recovered = path.recover_after_crash(now()).unwrap();
         assert_eq!(effects.len(), 1);
-        assert!(
-            recovered.final_status == ReceiptFinalStatus::Completed
-                || recovered.final_status == ReceiptFinalStatus::Unresolved
-        );
+        assert_eq!(recovered.final_status, ReceiptFinalStatus::Completed);
+        assert!(!recovered.recovery_cleanup.orphan_processes_detected);
         // Re-apply same effect is idempotent no-op.
         path.execute_process_effect("once-only").unwrap();
         assert_eq!(effects.len(), 1);
@@ -1161,10 +1195,8 @@ mod tests {
         );
         let recovered = path.recover_after_crash(now()).unwrap();
         assert_eq!(effects.len(), 1);
-        assert!(
-            recovered.final_status == ReceiptFinalStatus::Completed
-                || recovered.final_status == ReceiptFinalStatus::Unresolved
-        );
+        assert_eq!(recovered.final_status, ReceiptFinalStatus::Completed);
+        assert!(recovered.output_artifact_digest.is_some());
     }
 
     #[test]
