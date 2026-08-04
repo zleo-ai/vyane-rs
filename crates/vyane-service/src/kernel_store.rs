@@ -238,9 +238,8 @@ impl KernelStore {
                 Err(e) => return Err(e),
             }
         }
-        Err(last_err.unwrap_or_else(|| {
-            KernelStoreError::Sqlite("initialize busy after retries".into())
-        }))
+        Err(last_err
+            .unwrap_or_else(|| KernelStoreError::Sqlite("initialize busy after retries".into())))
     }
 
     fn initialize_once(&self) -> KernelStoreResult<()> {
