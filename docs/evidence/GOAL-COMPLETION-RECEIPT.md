@@ -11,8 +11,8 @@
 | model | grok-4.5 |
 | reasoning_effort | high |
 | Prepared baseline | `10ebe700cef3416459beebfb7ed07d7e9b866de7` |
-| Merged main HEAD (PR #169) | `a92bcadcd57f134b3dbcb8f6a850304fffc67a55` |
-| Skeptic-gap fix branch | see PR for `fix/decision-grade-skeptic-gaps` |
+| Decision-grade merge (PR #169) | `a92bcadcd57f134b3dbcb8f6a850304fffc67a55` |
+| Final HEAD after skeptic fixes (PR #170) | `a3e24ba6a3195b482fccce9ca4fef527623fa222` |
 
 ## Ready
 
