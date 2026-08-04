@@ -107,16 +107,21 @@ jobs:
           cargo test -p vyane-broker --test supervisor_contract \
             panics_use_bounded_exponential_backoff \
             -- --exact
-          # Resident service lifecycle fixtures can occasionally stall at the
-          # handoff from earlier Tokio runtimes even though each is stable in a
-          # fresh process. Keep the rest of the service suite serialized and
-          # give each observed lifecycle case its own runtime/process boundary.
+          # Resident service lifecycle and uncertain-recovery fixtures can
+          # occasionally stall at the handoff from earlier Tokio runtimes even
+          # though each is stable in a fresh process. Keep the rest of the
+          # service suite serialized and give each observed lifecycle case its
+          # own runtime/process boundary.
           cargo test -p vyane-service -- \
             --test-threads=1 \
             --skip agent_supervisor::tests::resident_supervisor_publishes_committed_completion \
+            --skip agent_supervisor::tests::uncertain_execution_is_recovered_without_automatic_resume \
             --skip message::tests::resident_broker_assembly_owns_scope_and_drains_without_delivery_lanes
           cargo test -p vyane-service \
             agent_supervisor::tests::resident_supervisor_publishes_committed_completion \
+            -- --exact
+          cargo test -p vyane-service \
+            agent_supervisor::tests::uncertain_execution_is_recovered_without_automatic_resume \
             -- --exact
           cargo test -p vyane-service \
             message::tests::resident_broker_assembly_owns_scope_and_drains_without_delivery_lanes \
