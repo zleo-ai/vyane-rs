@@ -3,6 +3,16 @@
 //! Versioned commands and events only. No Tauri types, no UI inference of
 //! completion/ownership/route from display strings. Authority always comes
 //! from typed projections and the receipt contract.
+//!
+//! # Authority split (honest)
+//!
+//! - **Durable multi-process facts** for Process dogfood live in
+//!   [`crate::kernel_store::KernelStore`] (`kernel.sqlite`) and are exercised
+//!   by [`KernelCommandKind::DriveDogfood`].
+//! - [`LocalKernelAdapter`] approve/deny/submit without a dogfood root emit
+//!   **versioned events and in-process receipt projections only** — they are
+//!   not a second multi-process store. Shell adapters must call dogfood /
+//!   KernelStore for durable grant binding.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -36,6 +46,10 @@ pub enum KernelCapability {
     SubmitTask,
     CancelTask,
     Approve,
+    Deny,
+    Status,
+    ReadArtifact,
+    ReadReceipt,
     SubscribeEvents,
     ProjectTask,
     ProjectAgentRun,
@@ -53,6 +67,10 @@ impl KernelCapability {
             Self::SubmitTask => "submit_task",
             Self::CancelTask => "cancel_task",
             Self::Approve => "approve",
+            Self::Deny => "deny",
+            Self::Status => "status",
+            Self::ReadArtifact => "read_artifact",
+            Self::ReadReceipt => "read_receipt",
             Self::SubscribeEvents => "subscribe_events",
             Self::ProjectTask => "project_task",
             Self::ProjectAgentRun => "project_agent_run",
@@ -74,7 +92,13 @@ pub enum KernelCommandKind {
     SubmitTask,
     CancelTask,
     DecideApproval,
+    /// Explicit deny (never recoverable by a later grant on the same request).
+    DenyApproval,
     GetProjection,
+    /// Alias of status/read projection for shell adapters.
+    Status,
+    ReadArtifact,
+    ReadReceipt,
     Subscribe,
     Replay,
     /// Drive the Process dogfood path to a truth-verified CompletionReceipt.
@@ -128,11 +152,21 @@ pub struct ReplayCursor {
 pub enum KernelEventKind {
     Capabilities,
     TaskAccepted,
+    Claimed,
+    Started,
     TaskStateChanged,
     ApprovalRequired,
+    Approved,
+    Denied,
+    Resumed,
     ApprovalDecided,
+    EffectRecorded,
+    GateResult,
+    ArtifactFinalized,
+    CompletionReceiptFinalized,
     ReceiptUpdated,
     Cancelled,
+    Failed,
     Error,
     Heartbeat,
     Unknown,
@@ -271,6 +305,10 @@ impl LocalKernelAdapter {
                         KernelCapability::SubmitTask,
                         KernelCapability::CancelTask,
                         KernelCapability::Approve,
+                        KernelCapability::Deny,
+                        KernelCapability::Status,
+                        KernelCapability::ReadArtifact,
+                        KernelCapability::ReadReceipt,
                         KernelCapability::SubscribeEvents,
                         KernelCapability::ProjectTask,
                         KernelCapability::ProjectAgentRun,
@@ -379,12 +417,55 @@ impl LocalKernelAdapter {
                 let root = PathBuf::from(root);
                 let suffix = command.command_id.clone();
                 match run_successful_dogfood(&root, &self.principal.owner, &suffix, now) {
-                    Ok((receipt, _effects)) => {
-                        // Import completed receipt into the boundary ledger for projection.
-                        let _guard = self.receipts.lock().expect("receipts");
-                        // Project the completed receipt directly (insert_open requires Open).
+                    Ok((receipt, effects)) => {
+                        // Emit lifecycle event kinds for shell adapters (non-authoritative
+                        // display_hint only). Durable facts live in kernel.sqlite under root.
+                        let _ = self.push_event(
+                            KernelEventKind::Started,
+                            now,
+                            Some(receipt.receipt_id.clone()),
+                            command.agent_run_id.clone(),
+                            Some(ReceiptFinalStatus::Open),
+                            None,
+                            None,
+                            Some("started".into()),
+                        );
+                        if !effects.is_empty() {
+                            let _ = self.push_event(
+                                KernelEventKind::EffectRecorded,
+                                now,
+                                Some(receipt.receipt_id.clone()),
+                                command.agent_run_id.clone(),
+                                None,
+                                None,
+                                None,
+                                Some("effect_recorded".into()),
+                            );
+                        }
+                        if receipt.output_artifact_digest.is_some() {
+                            let _ = self.push_event(
+                                KernelEventKind::ArtifactFinalized,
+                                now,
+                                Some(receipt.receipt_id.clone()),
+                                command.agent_run_id.clone(),
+                                None,
+                                None,
+                                None,
+                                Some("artifact_finalized".into()),
+                            );
+                        }
+                        let _ = self.push_event(
+                            KernelEventKind::GateResult,
+                            now,
+                            Some(receipt.receipt_id.clone()),
+                            command.agent_run_id.clone(),
+                            None,
+                            None,
+                            None,
+                            Some("gate_result".into()),
+                        );
                         self.push_event(
-                            KernelEventKind::ReceiptUpdated,
+                            KernelEventKind::CompletionReceiptFinalized,
                             now,
                             Some(receipt.receipt_id.clone()),
                             command.agent_run_id,
@@ -393,7 +474,7 @@ impl LocalKernelAdapter {
                                 receipt: Box::new(receipt),
                             }),
                             None,
-                            Some("dogfood completed".into()),
+                            Some("completion_receipt_finalized".into()),
                         )
                     }
                     Err(_) => {
@@ -416,7 +497,7 @@ impl LocalKernelAdapter {
                     );
                 }
                 self.push_event(
-                    KernelEventKind::ApprovalDecided,
+                    KernelEventKind::Approved,
                     now,
                     command.receipt_id,
                     command.agent_run_id,
@@ -430,7 +511,23 @@ impl LocalKernelAdapter {
                     Some("approval granted".into()),
                 )
             }
-            KernelCommandKind::GetProjection => {
+            KernelCommandKind::DenyApproval => self.push_event(
+                KernelEventKind::Denied,
+                now,
+                command.receipt_id,
+                command.agent_run_id,
+                Some(ReceiptFinalStatus::Failed),
+                Some(KernelProjection::Ownership {
+                    owner: self.principal.owner.clone(),
+                    lease_owner: Some(self.principal.principal_id.clone()),
+                    generation: None,
+                }),
+                None,
+                Some("approval denied".into()),
+            ),
+            KernelCommandKind::Status
+            | KernelCommandKind::ReadReceipt
+            | KernelCommandKind::GetProjection => {
                 if let Some(receipt_id) = &command.receipt_id {
                     let guard = self.receipts.lock().expect("receipts");
                     match guard.get_for_owner(&self.principal.owner, receipt_id) {
@@ -465,6 +562,33 @@ impl LocalKernelAdapter {
                         Some(KernelErrorCode::NotFound),
                         None,
                     )
+                }
+            }
+            KernelCommandKind::ReadArtifact => {
+                let Some(receipt_id) = &command.receipt_id else {
+                    return self.error_event(now, KernelErrorCode::InvalidCommand, None);
+                };
+                let guard = self.receipts.lock().expect("receipts");
+                match guard.get_for_owner(&self.principal.owner, receipt_id) {
+                    Some(receipt) if receipt.output_artifact_digest.is_some() => self.push_event(
+                        KernelEventKind::ArtifactFinalized,
+                        now,
+                        Some(receipt_id.clone()),
+                        command.agent_run_id,
+                        Some(receipt.final_status),
+                        Some(KernelProjection::Receipt {
+                            receipt: Box::new(receipt.clone()),
+                        }),
+                        None,
+                        // display_hint must never be treated as authority
+                        Some("artifact projection (non-authoritative hint)".into()),
+                    ),
+                    Some(_) => {
+                        self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id.clone()))
+                    }
+                    None => {
+                        self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id.clone()))
+                    }
                 }
             }
             KernelCommandKind::Subscribe => {
@@ -854,7 +978,7 @@ mod tests {
             },
             now(),
         );
-        assert_eq!(event.kind, KernelEventKind::ReceiptUpdated);
+        assert_eq!(event.kind, KernelEventKind::CompletionReceiptFinalized);
         assert_eq!(event.final_status, Some(ReceiptFinalStatus::Completed));
         match event.projection.unwrap() {
             KernelProjection::Receipt { receipt } => {

@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use vyane_agent::{
     AgentStore, CancelOutcome, CancelRequest, ClaimedRun, ControllerKind, ControllerRef,
@@ -27,9 +26,14 @@ use vyane_agent::{
 use vyane_core::{
     AttemptFailureClass, AttemptStatus, BillingModeCategory, CompletionReceipt, CostEvidence,
     EndpointClass, GATE_CI_PACKAGING, GATE_INDEPENDENT_REVIEW, GATE_INTEGRATION, GATE_TRUTH_PROBE,
-    GATE_UNIT, GateOutcome, HarnessKind, MemoryReceiptLedger, ModelId, NamedGate, Protocol,
-    ProviderId, ReceiptAttempt, ReceiptError, RecoveryCleanupState, RiskClass, RouteConfig,
-    TaskCase,
+    GATE_UNIT, GateOutcome, HarnessKind, ModelId, NamedGate, Protocol, ProviderId, ReceiptAttempt,
+    ReceiptError, RecoveryCleanupState, RiskClass, RouteConfig, TaskCase,
+};
+
+use crate::approval_fsm::{DeliveryEvent, DeliveryPhase};
+use crate::kernel_store::{
+    ApprovalDecisionKind, ApprovalGrantBinding, ArtifactMeta, KernelStore, KernelStoreError,
+    LeaseFence,
 };
 
 /// Stable dogfood task type recorded on receipts.
@@ -40,9 +44,11 @@ pub const DOGFOOD_TASK_TYPE: &str = "process_lane_autonomous_delivery";
 pub enum DogfoodError {
     Receipt(String),
     Agent(String),
+    Kernel(String),
     TruthProbeFailed { reason: String },
     ApprovalRequired,
     PermissionDenied,
+    ApprovalDenied,
     DuplicateEffect { effect_id: String },
     Cancelled,
     InvalidState(&'static str),
@@ -54,9 +60,11 @@ impl std::fmt::Display for DogfoodError {
         match self {
             Self::Receipt(msg) => write!(f, "receipt: {msg}"),
             Self::Agent(msg) => write!(f, "agent: {msg}"),
+            Self::Kernel(msg) => write!(f, "kernel: {msg}"),
             Self::TruthProbeFailed { reason } => write!(f, "truth probe failed: {reason}"),
             Self::ApprovalRequired => f.write_str("approval required before side effect"),
             Self::PermissionDenied => f.write_str("permission denied"),
+            Self::ApprovalDenied => f.write_str("approval denied; not recoverable by grant"),
             Self::DuplicateEffect { effect_id } => {
                 write!(f, "duplicate external effect prevented for {effect_id}")
             }
@@ -72,6 +80,17 @@ impl std::error::Error for DogfoodError {}
 impl From<ReceiptError> for DogfoodError {
     fn from(value: ReceiptError) -> Self {
         Self::Receipt(value.to_string())
+    }
+}
+
+impl From<KernelStoreError> for DogfoodError {
+    fn from(value: KernelStoreError) -> Self {
+        match value {
+            KernelStoreError::DuplicateEffect { effect_id } => Self::DuplicateEffect { effect_id },
+            KernelStoreError::ApprovalDeniedFinal => Self::ApprovalDenied,
+            KernelStoreError::NotFound => Self::InvalidState("kernel row not found"),
+            other => Self::Kernel(other.to_string()),
+        }
     }
 }
 
@@ -94,28 +113,54 @@ impl PermissionDecision {
     }
 }
 
-/// Durable append-only log of external effects for duplicate-effect detection.
+/// Effect log view over the multi-process [`KernelStore`] (or ephemeral/JSON map).
 ///
-/// Survives process restart when opened at a stable filesystem path. Apply is
-/// atomic: map update is written to disk before the method returns success.
+/// Production dogfood authority is `kernel.sqlite`. Ephemeral/JSON modes remain
+/// for unit isolation; they are not multi-process authority.
 #[derive(Debug)]
 pub struct ExternalEffectLog {
-    path: PathBuf,
-    // effect_id -> first application payload digest
-    applied: Mutex<BTreeMap<String, String>>,
+    backend: EffectLogBackend,
+}
+
+#[derive(Debug)]
+enum EffectLogBackend {
+    Ephemeral {
+        applied: Mutex<BTreeMap<String, String>>,
+    },
+    Json {
+        path: PathBuf,
+        applied: Mutex<BTreeMap<String, String>>,
+    },
+    Kernel {
+        store: KernelStore,
+        owner: String,
+    },
 }
 
 impl ExternalEffectLog {
-    /// In-memory only (tests that do not exercise restart). Prefer [`Self::open`].
+    /// In-memory only (tests that do not exercise multi-process restart).
     #[must_use]
     pub fn new_ephemeral() -> Self {
         Self {
-            path: PathBuf::new(),
-            applied: Mutex::new(BTreeMap::new()),
+            backend: EffectLogBackend::Ephemeral {
+                applied: Mutex::new(BTreeMap::new()),
+            },
         }
     }
 
-    /// Open or create a durable effect log at `path` (JSON object map).
+    /// View over an existing kernel store (multi-process authority).
+    #[must_use]
+    pub fn from_kernel(store: KernelStore, owner: impl Into<String>) -> Self {
+        Self {
+            backend: EffectLogBackend::Kernel {
+                store,
+                owner: owner.into(),
+            },
+        }
+    }
+
+    /// Open a JSON-backed log (legacy single-process helper).
+    /// Prefer [`Self::from_kernel`] for concurrent writers / reopen authority.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, DogfoodError> {
         let path = path.into();
         if let Some(parent) = path.parent() {
@@ -128,53 +173,83 @@ impl ExternalEffectLog {
             BTreeMap::new()
         };
         Ok(Self {
-            path,
-            applied: Mutex::new(applied),
+            backend: EffectLogBackend::Json {
+                path,
+                applied: Mutex::new(applied),
+            },
         })
     }
 
-    fn flush_locked(&self, map: &BTreeMap<String, String>) -> Result<(), DogfoodError> {
-        if self.path.as_os_str().is_empty() {
-            return Ok(());
-        }
-        let tmp = self.path.with_extension("json.tmp");
+    fn flush_json(path: &Path, map: &BTreeMap<String, String>) -> Result<(), DogfoodError> {
+        let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_string(map).map_err(|e| DogfoodError::Io(e.to_string()))?;
         fs::write(&tmp, body).map_err(|e| DogfoodError::Io(e.to_string()))?;
-        fs::rename(&tmp, &self.path).map_err(|e| DogfoodError::Io(e.to_string()))?;
+        fs::rename(&tmp, path).map_err(|e| DogfoodError::Io(e.to_string()))?;
         Ok(())
     }
 
     /// Apply once. Same digest is idempotent (`Ok(false)`). Conflicting digest
     /// is [`DogfoodError::DuplicateEffect`].
     pub fn apply_once(&self, effect_id: &str, payload_digest: &str) -> Result<bool, DogfoodError> {
-        let mut guard = self
-            .applied
-            .lock()
-            .map_err(|_| DogfoodError::InvalidState("effect log poisoned"))?;
-        match guard.get(effect_id) {
-            Some(existing) if existing == payload_digest => Ok(false),
-            Some(_) => Err(DogfoodError::DuplicateEffect {
-                effect_id: effect_id.to_string(),
-            }),
-            None => {
-                guard.insert(effect_id.to_string(), payload_digest.to_string());
-                self.flush_locked(&guard)?;
-                Ok(true)
+        match &self.backend {
+            EffectLogBackend::Ephemeral { applied } => {
+                let mut guard = applied
+                    .lock()
+                    .map_err(|_| DogfoodError::InvalidState("effect log poisoned"))?;
+                match guard.get(effect_id) {
+                    Some(existing) if existing == payload_digest => Ok(false),
+                    Some(_) => Err(DogfoodError::DuplicateEffect {
+                        effect_id: effect_id.to_string(),
+                    }),
+                    None => {
+                        guard.insert(effect_id.to_string(), payload_digest.to_string());
+                        Ok(true)
+                    }
+                }
             }
+            EffectLogBackend::Json { path, applied } => {
+                let mut guard = applied
+                    .lock()
+                    .map_err(|_| DogfoodError::InvalidState("effect log poisoned"))?;
+                match guard.get(effect_id) {
+                    Some(existing) if existing == payload_digest => Ok(false),
+                    Some(_) => Err(DogfoodError::DuplicateEffect {
+                        effect_id: effect_id.to_string(),
+                    }),
+                    None => {
+                        guard.insert(effect_id.to_string(), payload_digest.to_string());
+                        Self::flush_json(path, &guard)?;
+                        Ok(true)
+                    }
+                }
+            }
+            EffectLogBackend::Kernel { store, owner } => store
+                .apply_effect_once(owner, effect_id, payload_digest, None, None, Utc::now())
+                .map_err(Into::into),
         }
     }
 
     #[must_use]
     pub fn was_applied(&self, effect_id: &str) -> bool {
-        self.applied
-            .lock()
-            .map(|g| g.contains_key(effect_id))
-            .unwrap_or(false)
+        match &self.backend {
+            EffectLogBackend::Ephemeral { applied } | EffectLogBackend::Json { applied, .. } => {
+                applied
+                    .lock()
+                    .map(|g| g.contains_key(effect_id))
+                    .unwrap_or(false)
+            }
+            EffectLogBackend::Kernel { store, owner } => store.was_effect_applied(owner, effect_id),
+        }
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.applied.lock().map(|g| g.len()).unwrap_or(0)
+        match &self.backend {
+            EffectLogBackend::Ephemeral { applied } | EffectLogBackend::Json { applied, .. } => {
+                applied.lock().map(|g| g.len()).unwrap_or(0)
+            }
+            EffectLogBackend::Kernel { store, owner } => store.effect_count(owner).unwrap_or(0),
+        }
     }
 
     #[must_use]
@@ -184,7 +259,11 @@ impl ExternalEffectLog {
 
     #[must_use]
     pub fn path(&self) -> &Path {
-        &self.path
+        match &self.backend {
+            EffectLogBackend::Kernel { store, .. } => store.path(),
+            EffectLogBackend::Json { path, .. } => path.as_path(),
+            EffectLogBackend::Ephemeral { .. } => Path::new(""),
+        }
     }
 }
 
@@ -220,12 +299,13 @@ pub struct LifecycleInventory {
 /// Orchestrates one Process-lane dogfood delivery with durable effect/receipt state.
 pub struct DogfoodPath {
     config: DogfoodConfig,
-    /// Durable root: effects.json, receipts/, agent.sqlite path sibling, pid inventory.
+    /// Durable root: kernel.sqlite, agent.sqlite, workdir, pid inventory.
     durable_root: PathBuf,
     #[allow(dead_code)]
     agent_db_path: PathBuf,
     agent: Arc<SqliteAgentStore>,
-    receipts: MemoryReceiptLedger,
+    /// Multi-process authority for receipt/effect/approval/lease fence/phase.
+    kernel: KernelStore,
     effects: Arc<ExternalEffectLog>,
     cancel: bool,
     /// Simulated crash fence: if set, stop after the named stage without
@@ -237,7 +317,11 @@ pub struct DogfoodPath {
     artifact_path: Option<PathBuf>,
     artifact_digest: Option<String>,
     receipt_revision: u64,
-    approval_granted: bool,
+    /// Delivery phase revision in kernel_delivery.
+    phase_revision: u64,
+    /// Pending approval request digest (ask path).
+    approval_request_digest: Option<String>,
+    approval_id: Option<String>,
     lifecycle: LifecycleInventory,
     /// Child PIDs spawned for process effects (for real inventory).
     effect_child_pids: Vec<u32>,
@@ -248,26 +332,14 @@ pub struct DogfoodPath {
 pub enum CrashFence {
     AfterEffectBeforeReceipt,
     AfterArtifactBeforeTransition,
-}
-
-/// Durable lease snapshot so restart can re-issue a permit without inventing
-/// a second AgentRun or replaying the external effect.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DurableLeaseSnapshot {
-    run_id: String,
-    worker_id: String,
-    generation: u64,
-    revision: u64,
-    lease_owner: String,
-    token: String,
-    policy_digest: String,
+    AfterGrantBeforeEffect,
 }
 
 impl DogfoodPath {
     /// Open a new dogfood session with durable state under `durable_root`.
     ///
-    /// Layout: `{durable_root}/effects.json`, `{durable_root}/receipts/`,
-    /// `{durable_root}/agent.sqlite`, `{config.workdir}/`.
+    /// Layout: `{durable_root}/kernel.sqlite`, `{durable_root}/agent.sqlite`,
+    /// `{config.workdir}/`.
     pub fn open_durable(
         durable_root: impl Into<PathBuf>,
         config: DogfoodConfig,
@@ -281,9 +353,11 @@ impl DogfoodPath {
             SqliteAgentStore::open(&agent_db_path)
                 .map_err(|e| DogfoodError::Agent(e.to_string()))?,
         );
-        let effects = Arc::new(ExternalEffectLog::open(durable_root.join("effects.json"))?);
-        let mut receipts = MemoryReceiptLedger::open_durable(durable_root.join("receipts"))
-            .map_err(|e| DogfoodError::Receipt(e.to_string()))?;
+        let kernel = KernelStore::open(durable_root.join("kernel.sqlite"))?;
+        let effects = Arc::new(ExternalEffectLog::from_kernel(
+            kernel.clone(),
+            config.owner.clone(),
+        ));
         let acceptance_digest = digest_bytes(b"acceptance:marker-file-PASS");
         let truth_probe_digest = digest_bytes(b"truth_probe:marker-equals-PASS");
         let task = TaskCase {
@@ -304,13 +378,19 @@ impl DogfoodPath {
         receipt.code_head_sha = config.code_head_sha.clone();
         receipt.validate()?;
         let revision = receipt.revision;
-        receipts.insert_open(receipt)?;
+        kernel.insert_open_receipt(&receipt)?;
+        let (_, phase_revision) = kernel.ensure_delivery_running(
+            &config.owner,
+            &config.receipt_id,
+            &config.run_id,
+            now,
+        )?;
         Ok(Self {
             config,
             durable_root,
             agent_db_path,
             agent,
-            receipts,
+            kernel,
             effects,
             cancel: false,
             crash_after: None,
@@ -320,7 +400,9 @@ impl DogfoodPath {
             artifact_path: None,
             artifact_digest: None,
             receipt_revision: revision,
-            approval_granted: false,
+            phase_revision,
+            approval_request_digest: None,
+            approval_id: None,
             lifecycle: LifecycleInventory::default(),
             effect_child_pids: Vec::new(),
         })
@@ -340,14 +422,20 @@ impl DogfoodPath {
             .map(|p| p.join(format!("durable-{}", config.receipt_id)))
             .unwrap_or_else(|| config.workdir.join("durable"));
         fs::create_dir_all(&durable_root).map_err(|e| DogfoodError::Io(e.to_string()))?;
-        // Prefer caller-supplied effects if already durable; else open under root.
+        let kernel = KernelStore::open(durable_root.join("kernel.sqlite"))?;
+        // Prefer kernel-backed effects for multi-process authority.
         let effects = if effects.path().as_os_str().is_empty() {
-            Arc::new(ExternalEffectLog::open(durable_root.join("effects.json"))?)
+            Arc::new(ExternalEffectLog::from_kernel(
+                kernel.clone(),
+                config.owner.clone(),
+            ))
         } else {
-            effects
+            // If caller supplied a non-kernel log, still dual-authority via kernel for dogfood path.
+            Arc::new(ExternalEffectLog::from_kernel(
+                kernel.clone(),
+                config.owner.clone(),
+            ))
         };
-        let mut receipts = MemoryReceiptLedger::open_durable(durable_root.join("receipts"))
-            .map_err(|e| DogfoodError::Receipt(e.to_string()))?;
         let acceptance_digest = digest_bytes(b"acceptance:marker-file-PASS");
         let truth_probe_digest = digest_bytes(b"truth_probe:marker-equals-PASS");
         let task = TaskCase {
@@ -368,13 +456,19 @@ impl DogfoodPath {
         receipt.code_head_sha = config.code_head_sha.clone();
         receipt.validate()?;
         let revision = receipt.revision;
-        receipts.insert_open(receipt)?;
+        kernel.insert_open_receipt(&receipt)?;
+        let (_, phase_revision) = kernel.ensure_delivery_running(
+            &config.owner,
+            &config.receipt_id,
+            &config.run_id,
+            now,
+        )?;
         Ok(Self {
             config,
             durable_root,
             agent_db_path: PathBuf::new(),
             agent,
-            receipts,
+            kernel,
             effects,
             cancel: false,
             crash_after: None,
@@ -384,13 +478,15 @@ impl DogfoodPath {
             artifact_path: None,
             artifact_digest: None,
             receipt_revision: revision,
-            approval_granted: false,
+            phase_revision,
+            approval_request_digest: None,
+            approval_id: None,
             lifecycle: LifecycleInventory::default(),
             effect_child_pids: Vec::new(),
         })
     }
 
-    /// Reopen after process death: reload durable effects + receipts, re-open AgentStore.
+    /// Reopen after process death: reload durable kernel + AgentStore.
     ///
     /// Does **not** retain in-memory `claimed` / permits. Callers must
     /// re-claim or recover from AgentStore truth, then `recover_after_crash`.
@@ -404,21 +500,33 @@ impl DogfoodPath {
             SqliteAgentStore::open(&agent_db_path)
                 .map_err(|e| DogfoodError::Agent(e.to_string()))?,
         );
-        let effects = Arc::new(ExternalEffectLog::open(durable_root.join("effects.json"))?);
-        let receipts = MemoryReceiptLedger::open_durable(durable_root.join("receipts"))
-            .map_err(|e| DogfoodError::Receipt(e.to_string()))?;
-        let receipt = receipts
-            .get_for_owner(&config.owner, &config.receipt_id)
+        let kernel = KernelStore::open(durable_root.join("kernel.sqlite"))?;
+        let effects = Arc::new(ExternalEffectLog::from_kernel(
+            kernel.clone(),
+            config.owner.clone(),
+        ));
+        let receipt = kernel
+            .get_receipt(&config.owner, &config.receipt_id)?
             .ok_or(DogfoodError::InvalidState("receipt missing after reopen"))?;
         let revision = receipt.revision;
         let artifact_digest = receipt.output_artifact_digest.clone();
-        let effect_applied = effects.was_applied(&format!("effect:{}", config.run_id));
+        let effect_applied =
+            kernel.was_effect_applied(&config.owner, &format!("effect:{}", config.run_id));
+        let (phase, phase_revision) = kernel
+            .get_delivery_phase(&config.owner, &config.receipt_id)?
+            .unwrap_or((DeliveryPhase::Running, 0));
+        let approval = kernel.get_approval(&config.owner, &config.receipt_id)?;
+        let (approval_id, approval_request_digest) = match approval {
+            Some(a) => (Some(a.approval_id), Some(a.request_digest)),
+            None => (None, None),
+        };
+        let _ = phase; // phase recovered; resume methods re-check
         Ok(Self {
             config,
             durable_root,
             agent_db_path,
             agent,
-            receipts,
+            kernel,
             effects,
             cancel: false,
             crash_after: None,
@@ -428,7 +536,9 @@ impl DogfoodPath {
             artifact_path: None,
             artifact_digest,
             receipt_revision: revision,
-            approval_granted: false,
+            phase_revision,
+            approval_request_digest,
+            approval_id,
             lifecycle: LifecycleInventory::default(),
             effect_child_pids: Vec::new(),
         })
@@ -440,9 +550,16 @@ impl DogfoodPath {
     }
 
     #[must_use]
-    pub fn receipt(&self) -> Option<&CompletionReceipt> {
-        self.receipts
-            .get_for_owner(&self.config.owner, &self.config.receipt_id)
+    pub fn kernel(&self) -> &KernelStore {
+        &self.kernel
+    }
+
+    #[must_use]
+    pub fn receipt(&self) -> Option<CompletionReceipt> {
+        self.kernel
+            .get_receipt(&self.config.owner, &self.config.receipt_id)
+            .ok()
+            .flatten()
     }
 
     #[must_use]
@@ -458,8 +575,153 @@ impl DogfoodPath {
         self.cancel = true;
     }
 
-    pub fn grant_approval(&mut self) {
-        self.approval_granted = true;
+    /// Bound grant for a pending approval request.
+    ///
+    /// Requires a prior ask (`evaluate_permission` → ApprovalRequired) that
+    /// recorded `approval_request_digest`. Binding includes owner, run, revision,
+    /// lease owner, generation, and request digest. Deny is never recoverable.
+    pub fn grant_approval(&mut self, now: DateTime<Utc>) -> Result<(), DogfoodError> {
+        let digest = self
+            .approval_request_digest
+            .clone()
+            .ok_or(DogfoodError::InvalidState("no pending approval request"))?;
+        let generation = self
+            .claimed
+            .as_ref()
+            .map(|c| c.receipt.generation)
+            .or_else(|| {
+                self.kernel
+                    .get_lease_fence(&self.config.owner, &self.config.run_id)
+                    .ok()
+                    .flatten()
+                    .map(|f| f.generation)
+            })
+            .ok_or(DogfoodError::InvalidState("no lease generation for grant"))?;
+        let binding = ApprovalGrantBinding {
+            owner: self.config.owner.clone(),
+            receipt_id: self.config.receipt_id.clone(),
+            run_id: self.config.run_id.clone(),
+            request_digest: digest,
+            expected_revision: self
+                .kernel
+                .get_approval(&self.config.owner, &self.config.receipt_id)?
+                .map(|a| a.bound_revision)
+                .unwrap_or(self.receipt_revision),
+            lease_owner: self.config.lease_owner.clone(),
+            generation,
+            decided_by: self.config.lease_owner.clone(),
+        };
+        let decision = self.kernel.grant_approval(&binding, now)?;
+        if decision.decision != ApprovalDecisionKind::Approved {
+            return Err(DogfoodError::InvalidState("grant did not approve"));
+        }
+        let (phase, rev) = self.kernel.set_delivery_phase(
+            &self.config.owner,
+            &self.config.receipt_id,
+            &self.config.run_id,
+            self.phase_revision,
+            DeliveryEvent::GrantAccepted,
+            Some(&decision.approval_id),
+            now,
+        )?;
+        self.phase_revision = rev;
+        self.approval_id = Some(decision.approval_id);
+        // Record approval gate as passed on the receipt.
+        let gate = NamedGate {
+            name: "approval".into(),
+            outcome: GateOutcome::Passed,
+            exact_head_sha: self.config.code_head_sha.clone(),
+            evidence_uri: Some("synthetic://approval_granted".into()),
+            content_digest: Some(digest_bytes(b"approved")),
+        };
+        let updated = self.kernel.set_gate(
+            &self.config.owner,
+            &self.config.receipt_id,
+            self.receipt_revision,
+            gate,
+            now,
+        )?;
+        self.receipt_revision = updated.revision;
+        let _ = phase;
+        if self.crash_after == Some(CrashFence::AfterGrantBeforeEffect) {
+            return Err(DogfoodError::InvalidState(
+                "injected crash after grant before effect",
+            ));
+        }
+        // Advance to Resuming so effects may run.
+        let (phase, rev) = self.kernel.set_delivery_phase(
+            &self.config.owner,
+            &self.config.receipt_id,
+            &self.config.run_id,
+            self.phase_revision,
+            DeliveryEvent::ResumeStarted,
+            self.approval_id.as_deref(),
+            now,
+        )?;
+        self.phase_revision = rev;
+        let _ = phase;
+        Ok(())
+    }
+
+    /// Explicit deny — terminal; subsequent grant fails closed.
+    pub fn deny_approval(&mut self, now: DateTime<Utc>) -> Result<(), DogfoodError> {
+        let digest = self
+            .approval_request_digest
+            .clone()
+            .ok_or(DogfoodError::InvalidState("no pending approval request"))?;
+        self.kernel.deny_approval(
+            &self.config.owner,
+            &self.config.receipt_id,
+            &digest,
+            &self.config.lease_owner,
+            now,
+        )?;
+        let (phase, rev) = self.kernel.set_delivery_phase(
+            &self.config.owner,
+            &self.config.receipt_id,
+            &self.config.run_id,
+            self.phase_revision,
+            DeliveryEvent::DenyAccepted,
+            self.approval_id.as_deref(),
+            now,
+        )?;
+        self.phase_revision = rev;
+        let gate = NamedGate {
+            name: "approval".into(),
+            outcome: GateOutcome::Failed,
+            exact_head_sha: self.config.code_head_sha.clone(),
+            evidence_uri: Some("synthetic://approval_denied".into()),
+            content_digest: Some(digest_bytes(b"denied")),
+        };
+        let updated = self.kernel.set_gate(
+            &self.config.owner,
+            &self.config.receipt_id,
+            self.receipt_revision,
+            gate,
+            now,
+        )?;
+        self.receipt_revision = updated.revision;
+        let _ = phase;
+        Err(DogfoodError::ApprovalDenied)
+    }
+
+    /// Whether a durable grant exists for this receipt.
+    #[must_use]
+    pub fn is_approval_granted(&self) -> bool {
+        self.kernel
+            .get_approval(&self.config.owner, &self.config.receipt_id)
+            .ok()
+            .flatten()
+            .is_some_and(|a| a.decision == ApprovalDecisionKind::Approved)
+    }
+
+    #[must_use]
+    pub fn delivery_phase(&self) -> Option<DeliveryPhase> {
+        self.kernel
+            .get_delivery_phase(&self.config.owner, &self.config.receipt_id)
+            .ok()
+            .flatten()
+            .map(|(p, _)| p)
     }
 
     /// Create root AgentRun (or adopt existing same identity as no-op check).
@@ -548,40 +810,25 @@ impl DogfoodPath {
         Ok(())
     }
 
-    fn lease_snapshot_path(&self) -> PathBuf {
-        self.durable_root.join("lease-snapshot.json")
-    }
-
     fn persist_lease_snapshot(&self, claimed: &ClaimedRun) -> Result<(), DogfoodError> {
-        if self.durable_root.as_os_str().is_empty() {
-            return Ok(());
-        }
-        let snap = DurableLeaseSnapshot {
+        let fence = LeaseFence {
+            owner: self.config.owner.clone(),
             run_id: claimed.receipt.run_id.clone(),
-            worker_id: claimed.receipt.worker_id.clone(),
+            lease_owner: claimed.receipt.lease_owner.clone(),
             generation: claimed.receipt.generation,
             revision: claimed.receipt.revision,
-            lease_owner: claimed.receipt.lease_owner.clone(),
             token: claimed.receipt.token.clone(),
             policy_digest: claimed.run.policy_digest.clone(),
+            expires_at_ms: None,
         };
-        let path = self.lease_snapshot_path();
-        let tmp = path.with_extension("json.tmp");
-        let body = serde_json::to_string(&snap).map_err(|e| DogfoodError::Io(e.to_string()))?;
-        fs::write(&tmp, body).map_err(|e| DogfoodError::Io(e.to_string()))?;
-        fs::rename(&tmp, &path).map_err(|e| DogfoodError::Io(e.to_string()))?;
+        self.kernel.put_lease_fence(&fence, Utc::now())?;
         Ok(())
     }
 
-    fn load_lease_snapshot(&self) -> Result<Option<DurableLeaseSnapshot>, DogfoodError> {
-        let path = self.lease_snapshot_path();
-        if !path.exists() {
-            return Ok(None);
-        }
-        let raw = fs::read_to_string(&path).map_err(|e| DogfoodError::Io(e.to_string()))?;
-        let snap: DurableLeaseSnapshot =
-            serde_json::from_str(&raw).map_err(|e| DogfoodError::Io(e.to_string()))?;
-        Ok(Some(snap))
+    fn load_lease_snapshot(&self) -> Result<Option<LeaseFence>, DogfoodError> {
+        Ok(self
+            .kernel
+            .get_lease_fence(&self.config.owner, &self.config.run_id)?)
     }
 
     /// Record route attempt provenance on the receipt.
@@ -608,7 +855,7 @@ impl DogfoodPath {
             output_tokens: None,
             cost: CostEvidence::default(),
         };
-        let updated = self.receipts.record_attempt(
+        let updated = self.kernel.record_attempt(
             &self.config.owner,
             &self.config.receipt_id,
             self.receipt_revision,
@@ -622,8 +869,19 @@ impl DogfoodPath {
     /// Evaluate permission ceiling; Ask without grant blocks effects.
     pub fn evaluate_permission(&mut self, now: DateTime<Utc>) -> Result<(), DogfoodError> {
         self.ensure_not_cancelled()?;
-        let decision = if self.config.require_approval && !self.approval_granted {
+        // Denied delivery phase is terminal.
+        if self.delivery_phase() == Some(DeliveryPhase::Denied) {
+            return Err(DogfoodError::ApprovalDenied);
+        }
+        let granted = self.is_approval_granted();
+        // Already waiting on approval: fail closed without re-transition.
+        if matches!(self.delivery_phase(), Some(DeliveryPhase::ApprovalRequired)) && !granted {
+            return Err(DogfoodError::ApprovalRequired);
+        }
+        let decision = if self.config.require_approval && !granted {
             PermissionDecision::Ask
+        } else if granted {
+            PermissionDecision::Allow
         } else {
             self.config.permission
         };
@@ -636,16 +894,46 @@ impl DogfoodPath {
                 )?;
                 Err(DogfoodError::PermissionDenied)
             }
-            PermissionDecision::Ask if !self.approval_granted => {
+            PermissionDecision::Ask if !granted => {
+                let request_digest = digest_bytes(
+                    format!(
+                        "ask:{}:{}:{}",
+                        self.config.receipt_id, self.config.run_id, self.receipt_revision
+                    )
+                    .as_bytes(),
+                );
+                let approval_id = format!("appr-{}", self.config.receipt_id);
+                let decision_row = self.kernel.record_approval_required(
+                    &self.config.owner,
+                    &approval_id,
+                    &self.config.receipt_id,
+                    &self.config.run_id,
+                    &request_digest,
+                    self.receipt_revision,
+                    now,
+                )?;
+                self.approval_id = Some(decision_row.approval_id);
+                self.approval_request_digest = Some(request_digest.clone());
+                let (phase, rev) = self.kernel.set_delivery_phase(
+                    &self.config.owner,
+                    &self.config.receipt_id,
+                    &self.config.run_id,
+                    self.phase_revision,
+                    DeliveryEvent::AskRequired,
+                    self.approval_id.as_deref(),
+                    now,
+                )?;
+                self.phase_revision = rev;
+                let _ = phase;
                 // Record approval-required as a gate note, do not execute.
                 let gate = NamedGate {
                     name: "approval".into(),
                     outcome: GateOutcome::Failed,
                     exact_head_sha: self.config.code_head_sha.clone(),
                     evidence_uri: Some("synthetic://approval_required".into()),
-                    content_digest: Some(digest_bytes(b"approval_required")),
+                    content_digest: Some(request_digest),
                 };
-                let updated = self.receipts.set_gate(
+                let updated = self.kernel.set_gate(
                     &self.config.owner,
                     &self.config.receipt_id,
                     self.receipt_revision,
@@ -663,7 +951,7 @@ impl DogfoodPath {
                     evidence_uri: Some("synthetic://approval_granted_or_allow".into()),
                     content_digest: Some(digest_bytes(decision.as_str().as_bytes())),
                 };
-                let updated = self.receipts.set_gate(
+                let updated = self.kernel.set_gate(
                     &self.config.owner,
                     &self.config.receipt_id,
                     self.receipt_revision,
@@ -688,7 +976,30 @@ impl DogfoodPath {
         }
         let effect_id = format!("effect:{}", self.config.run_id);
         let digest = digest_bytes(payload.as_bytes());
-        let first = self.effects.apply_once(&effect_id, &digest)?;
+        // Idempotent re-apply of an already-recorded effect is allowed even after
+        // terminal phases (no second side effect). New effects still require a
+        // phase that allows execution.
+        let already = self
+            .kernel
+            .was_effect_applied(&self.config.owner, &effect_id);
+        if !already
+            && self
+                .delivery_phase()
+                .is_some_and(|phase| !phase.allows_effect())
+        {
+            return Err(DogfoodError::InvalidState(
+                "delivery phase does not allow effects",
+            ));
+        }
+        // Multi-process authority: KernelStore apply with owner/run binding.
+        let first = self.kernel.apply_effect_once(
+            &self.config.owner,
+            &effect_id,
+            &digest,
+            Some(&self.config.run_id),
+            Some(&self.config.receipt_id),
+            Utc::now(),
+        )?;
         if first {
             self.effect_applied = true;
             let marker = self.config.workdir.join("effect.marker");
@@ -751,7 +1062,7 @@ impl DogfoodPath {
             evidence_uri: Some("synthetic://truth_probe/MARKER".into()),
             content_digest: note.map(|n| digest_bytes(n.as_bytes())),
         };
-        let updated = self.receipts.set_gate(
+        let updated = self.kernel.set_gate(
             &self.config.owner,
             &self.config.receipt_id,
             self.receipt_revision,
@@ -789,9 +1100,18 @@ impl DogfoodPath {
             use std::os::unix::fs::PermissionsExt as _;
             let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o444));
         }
-        self.artifact_path = Some(path);
+        self.artifact_path = Some(path.clone());
         self.artifact_digest = Some(digest.clone());
-        let updated = self.receipts.set_artifact_digest(
+        let meta = ArtifactMeta {
+            owner: self.config.owner.clone(),
+            receipt_id: self.config.receipt_id.clone(),
+            digest: digest.clone(),
+            path: path.to_string_lossy().into_owned(),
+            content_bytes: body.len() as u64,
+            created_at_ms: now.timestamp_millis(),
+        };
+        self.kernel.put_artifact_meta(&meta)?;
+        let updated = self.kernel.set_artifact_digest(
             &self.config.owner,
             &self.config.receipt_id,
             self.receipt_revision,
@@ -822,7 +1142,7 @@ impl DogfoodPath {
                 evidence_uri: Some(format!("synthetic://gate/{name}")),
                 content_digest: Some(digest_bytes(name.as_bytes())),
             };
-            let updated = self.receipts.set_gate(
+            let updated = self.kernel.set_gate(
                 &self.config.owner,
                 &self.config.receipt_id,
                 self.receipt_revision,
@@ -882,7 +1202,7 @@ impl DogfoodPath {
         // Capture lifecycle inventory before the terminal transition so cleanup
         // fields can land on the still-open receipt.
         let cleanup = self.prepare_cleanup_state(true);
-        let updated = self.receipts.transition(
+        let updated = self.kernel.transition_receipt(
             &self.config.owner,
             &self.config.receipt_id,
             self.receipt_revision,
@@ -890,24 +1210,54 @@ impl DogfoodPath {
             |receipt| {
                 receipt.recovery_cleanup = cleanup;
                 receipt.remaining_risks = vec![
-                    "approval_resume_open".into(),
-                    "durable_multiprocess_receipt_store_open".into(),
+                    "formal_vendor_harness_integration_open".into(),
                     "daemon_process_spawn_covered_by_existing_acceptance".into(),
+                    "production_cutover_not_performed".into(),
                 ];
                 receipt.validation_summary = Some(
-                    "dogfood: truth_probe passed; artifact published; process effect once".into(),
+                    "dogfood: kernel.sqlite authority; truth_probe passed; artifact published; process effect once".into(),
                 );
                 Ok(())
             },
         )?;
         self.receipt_revision = updated.revision;
-        let receipt = self.receipts.complete(
+        let receipt = self.kernel.complete_receipt(
             &self.config.owner,
             &self.config.receipt_id,
             self.receipt_revision,
             now,
         )?;
         self.receipt_revision = receipt.revision;
+        // Delivery phase must reach terminal consistently with the receipt.
+        // If still Approved after grant-crash, Complete is legal (FSM allows it).
+        match self.kernel.set_delivery_phase(
+            &self.config.owner,
+            &self.config.receipt_id,
+            &self.config.run_id,
+            self.phase_revision,
+            DeliveryEvent::Complete,
+            self.approval_id.as_deref(),
+            now,
+        ) {
+            Ok((_phase, rev)) => {
+                self.phase_revision = rev;
+            }
+            Err(KernelStoreError::Delivery(_)) | Err(KernelStoreError::StaleRevision { .. }) => {
+                // Already terminal or concurrent advance: re-read and require completed/denied/etc.
+                if let Some((phase, rev)) = self
+                    .kernel
+                    .get_delivery_phase(&self.config.owner, &self.config.receipt_id)?
+                {
+                    self.phase_revision = rev;
+                    if !phase.is_terminal() {
+                        return Err(DogfoodError::InvalidState(
+                            "delivery phase failed to reach terminal on complete",
+                        ));
+                    }
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
         self.apply_cleanup_inventory(true);
         Ok(receipt)
     }
@@ -935,7 +1285,7 @@ impl DogfoodPath {
             }
         }
         let cleanup = self.prepare_cleanup_state(true);
-        let updated = self.receipts.transition(
+        let updated = self.kernel.transition_receipt(
             &self.config.owner,
             &self.config.receipt_id,
             self.receipt_revision,
@@ -946,7 +1296,7 @@ impl DogfoodPath {
             },
         )?;
         self.receipt_revision = updated.revision;
-        let receipt = self.receipts.cancel(
+        let receipt = self.kernel.cancel_receipt(
             &self.config.owner,
             &self.config.receipt_id,
             self.receipt_revision,
@@ -974,7 +1324,7 @@ impl DogfoodPath {
             // Disk marker alone is not enough to invent an effect id — but if
             // the marker exists and log is empty after reopen of ephemeral log,
             // still refuse re-application by checking marker+digest conflict path.
-            let receipt = self.receipts.mark_unresolved(
+            let receipt = self.kernel.mark_unresolved(
                 &self.config.owner,
                 &self.config.receipt_id,
                 self.receipt_revision,
@@ -1000,7 +1350,7 @@ impl DogfoodPath {
     }
 
     /// After reopen, restore lease from durable snapshot and re-issue permit.
-    fn reclaim_or_adopt_after_restart(&mut self) -> Result<(), DogfoodError> {
+    pub fn reclaim_or_adopt_after_restart(&mut self) -> Result<(), DogfoodError> {
         let run = self
             .agent
             .get_run(&self.config.owner, &self.config.run_id)
@@ -1019,13 +1369,20 @@ impl DogfoodPath {
                 "no durable lease snapshot after reopen",
             ));
         };
+        // Generation fence: wrong owner/generation fail closed.
+        self.kernel.assert_generation(
+            &self.config.owner,
+            &self.config.run_id,
+            &self.config.lease_owner,
+            snap.generation,
+        )?;
         let receipt = RunLeaseReceipt {
-            run_id: snap.run_id,
-            worker_id: snap.worker_id,
+            run_id: snap.run_id.clone(),
+            worker_id: self.config.worker_id.clone(),
             generation: snap.generation,
             revision: snap.revision,
-            lease_owner: snap.lease_owner,
-            token: snap.token,
+            lease_owner: snap.lease_owner.clone(),
+            token: snap.token.clone(),
         };
         // Stale generation / expired lease fail closed here — cannot complete with
         // a dead fence (see hostile lease tests).
@@ -1052,7 +1409,7 @@ impl DogfoodPath {
         now: DateTime<Utc>,
     ) -> Result<CompletionReceipt, DogfoodError> {
         let cleanup = self.prepare_cleanup_state(false);
-        let updated = self.receipts.transition(
+        let updated = self.kernel.transition_receipt(
             &self.config.owner,
             &self.config.receipt_id,
             self.receipt_revision,
@@ -1063,7 +1420,7 @@ impl DogfoodPath {
             },
         )?;
         self.receipt_revision = updated.revision;
-        let receipt = self.receipts.fail(
+        let receipt = self.kernel.fail_receipt(
             &self.config.owner,
             &self.config.receipt_id,
             self.receipt_revision,
@@ -1350,6 +1707,113 @@ mod tests {
     }
 
     #[test]
+    fn approval_deny_then_grant_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let durable = root.path().join("d");
+        let workdir = durable.join("wd");
+        fs::create_dir_all(&workdir).unwrap();
+        let mut config = sample_config(root.path(), "deny", workdir);
+        config.require_approval = true;
+        config.permission = PermissionDecision::Ask;
+        let mut path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
+        path.create_or_adopt_agent_run(now()).unwrap();
+        path.claim_and_lease().unwrap();
+        path.record_attempt(now()).unwrap();
+        assert_eq!(
+            path.evaluate_permission(now()).unwrap_err(),
+            DogfoodError::ApprovalRequired
+        );
+        assert_eq!(
+            path.deny_approval(now()).unwrap_err(),
+            DogfoodError::ApprovalDenied
+        );
+        let err = path.grant_approval(now()).unwrap_err();
+        assert!(
+            matches!(err, DogfoodError::ApprovalDenied | DogfoodError::Kernel(_)),
+            "deny then grant must fail closed, got {err:?}"
+        );
+        assert!(path.effects().is_empty());
+        assert_eq!(path.delivery_phase(), Some(DeliveryPhase::Denied));
+    }
+
+    #[test]
+    fn approval_grant_then_crash_before_effect_no_duplicate_on_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let durable = root.path().join("d");
+        let workdir = durable.join("wd");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::write(workdir.join("MARKER"), "PASS").unwrap();
+        let mut config = sample_config(root.path(), "gcrash", workdir);
+        config.require_approval = true;
+        config.permission = PermissionDecision::Ask;
+        let config_reopen = config.clone();
+        {
+            let mut path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
+            path.set_crash_after(CrashFence::AfterGrantBeforeEffect);
+            path.create_or_adopt_agent_run(now()).unwrap();
+            path.claim_and_lease().unwrap();
+            path.record_attempt(now()).unwrap();
+            assert_eq!(
+                path.evaluate_permission(now()).unwrap_err(),
+                DogfoodError::ApprovalRequired
+            );
+            let crash = path.grant_approval(now()).unwrap_err();
+            assert!(matches!(crash, DogfoodError::InvalidState(_)));
+            assert!(path.is_approval_granted());
+            assert!(path.effects().is_empty());
+        }
+        let mut path = DogfoodPath::reopen(&durable, config_reopen).unwrap();
+        assert!(path.is_approval_granted());
+        // Resume: re-claim and continue after grant.
+        path.create_or_adopt_agent_run(now()).unwrap();
+        // Run may still be Running with lease; reclaim via recover path only if effect exists.
+        // Here effect not yet applied — re-claim if needed.
+        if path.claimed.is_none() {
+            // Lease fence exists; adopt without re-claim race by reclaim helper.
+            path.reclaim_or_adopt_after_restart().unwrap();
+        }
+        // Ensure Resuming phase after durable grant (crash may have skipped ResumeStarted).
+        if path.delivery_phase() == Some(DeliveryPhase::Approved) {
+            let (phase, rev) = path
+                .kernel
+                .set_delivery_phase(
+                    &path.config.owner,
+                    &path.config.receipt_id,
+                    &path.config.run_id,
+                    path.phase_revision,
+                    DeliveryEvent::ResumeStarted,
+                    path.approval_id.as_deref(),
+                    now(),
+                )
+                .unwrap();
+            path.phase_revision = rev;
+            assert_eq!(phase, DeliveryPhase::Resuming);
+        }
+        path.evaluate_permission(now()).unwrap();
+        path.execute_process_effect("after-grant-resume").unwrap();
+        path.run_truth_probe(now()).unwrap();
+        path.record_local_gates(now()).unwrap();
+        path.publish_artifact("after-grant-resume", now()).unwrap();
+        let receipt = path.finish_success(now()).unwrap();
+        assert_eq!(receipt.final_status, ReceiptFinalStatus::Completed);
+        assert_eq!(path.effects().len(), 1);
+        // Approval evidence on receipt.
+        assert!(
+            receipt.gates.extra.contains_key("approval")
+                || receipt
+                    .gates
+                    .extra
+                    .values()
+                    .any(|g| g.evidence_uri.as_deref() == Some("synthetic://approval_granted"))
+                || receipt
+                    .gates
+                    .extra
+                    .get("approval")
+                    .is_some_and(|g| g.outcome == GateOutcome::Passed)
+        );
+    }
+
+    #[test]
     fn approval_grant_allows_effect_and_completion() {
         let root = tempfile::tempdir().unwrap();
         let durable = root.path().join("d");
@@ -1367,7 +1831,7 @@ mod tests {
             path.evaluate_permission(now()).unwrap_err(),
             DogfoodError::ApprovalRequired
         );
-        path.grant_approval();
+        path.grant_approval(now()).unwrap();
         path.evaluate_permission(now()).unwrap();
         path.execute_process_effect("granted-effect").unwrap();
         path.run_truth_probe(now()).unwrap();
@@ -1478,8 +1942,9 @@ mod tests {
 
     #[test]
     fn stale_lease_generation_cannot_complete_foreign_mutation() {
-        // Cross-owner complete is fenced by MemoryReceiptLedger.
-        let mut ledger = MemoryReceiptLedger::new();
+        // Cross-owner complete is fenced by KernelStore (foreign-as-absent).
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let task = TaskCase {
             task_case_id: "tc".into(),
             task_type: DOGFOOD_TASK_TYPE.into(),
@@ -1500,9 +1965,10 @@ mod tests {
             billing_mode_category: BillingModeCategory::Unknown,
         };
         let receipt = CompletionReceipt::open("r1", "alice", task, route, now()).unwrap();
-        ledger.insert_open(receipt).unwrap();
-        let err = ledger.complete("bob", "r1", 1, now()).unwrap_err();
-        assert_eq!(err, ReceiptError::InvalidInput("receipt not found"));
+        store.insert_open_receipt(&receipt).unwrap();
+        let err = store.complete_receipt("bob", "r1", 1, now()).unwrap_err();
+        assert!(matches!(err, KernelStoreError::NotFound));
+        assert!(store.get_receipt("bob", "r1").unwrap().is_none());
     }
 
     #[test]

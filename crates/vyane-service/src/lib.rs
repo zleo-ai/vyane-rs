@@ -32,6 +32,7 @@ mod agent_completion_publisher;
 mod agent_execution;
 mod agent_recovery;
 mod agent_supervisor;
+mod approval_fsm;
 mod config;
 mod diagnostics;
 mod dogfood;
@@ -41,6 +42,7 @@ mod goal_continuity_runner;
 mod goal_observation;
 mod inprocess_agent;
 mod kernel_boundary;
+mod kernel_store;
 mod message;
 mod native_authority;
 mod native_permissions;
@@ -75,6 +77,9 @@ pub use agent_supervisor::{
     AgentSupervisorOptions, ResidentAgentBackend, ResidentAgentExecutionLane, ResidentAgentHost,
     ResidentAgentHostBackend, ResidentAgentHostExit, ResidentAgentSupervisor,
     ResidentInProcessAgentSupervisor,
+};
+pub use approval_fsm::{
+    DeliveryEvent, DeliveryPhase, DeliveryTransitionError, transition as transition_delivery,
 };
 pub use config::{LoadedConfig, Runtime, StoragePaths, load_config};
 pub use diagnostics::{
@@ -128,6 +133,10 @@ pub use kernel_boundary::{
     KERNEL_BOUNDARY_VERSION, KernelCapability, KernelCommand, KernelCommandKind, KernelErrorCode,
     KernelEvent, KernelEventKind, KernelPrincipal, KernelProjection, LocalKernelAdapter,
     ReplayCursor, SubscribeRequest,
+};
+pub use kernel_store::{
+    ApprovalDecision, ApprovalDecisionKind, ApprovalGrantBinding, ArtifactMeta, KernelStore,
+    KernelStoreError, LeaseFence,
 };
 pub use message::{
     AgentMessageCompletionReadError, AgentMessageCompletionStageError, MessageComponents,

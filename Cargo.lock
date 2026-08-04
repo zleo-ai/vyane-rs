@@ -2662,6 +2662,7 @@ dependencies = [
  "dirs",
  "futures",
  "getrandom 0.4.3",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
