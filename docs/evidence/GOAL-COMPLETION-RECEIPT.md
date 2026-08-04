@@ -11,6 +11,7 @@
 | model | grok-4.5 |
 | reasoning_effort | high |
 | Prepared baseline | `10ebe700cef3416459beebfb7ed07d7e9b866de7` |
+| Implementation HEAD | `5b64b991a43519e355abf5943741d14bd017b811` |
 
 ## Ready
 
