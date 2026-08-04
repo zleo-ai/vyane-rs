@@ -11,7 +11,7 @@
 | model | grok-4.5 |
 | reasoning_effort | high |
 | Prepared baseline | `10ebe700cef3416459beebfb7ed07d7e9b866de7` |
-| Implementation HEAD | `55f7bda7a66d5fd765d4a50eed5c13d164cff567` |
+| Implementation HEAD | `78ddfa5` (branch tip; see PR #169) |
 
 ## Ready
 
