@@ -709,8 +709,17 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                                 "{}",
                                 crate::output::format_native_turn_stop_line(&stop)
                             );
-                            // Permission ask surface: pure effect kind (WP-415).
+                            // Permission ask surface: pure tool status + effect
+                            // kinds (WP-415 effect; WP-460 tool status).
                             if matches!(stop, NativeTurnStop::ApprovalRequired(_)) {
+                                tracing::info!(
+                                    status = vyane_harness::native::ToolInvocationStatus::ApprovalRequired
+                                        .as_str(),
+                                    "{}",
+                                    crate::output::format_tool_invocation_status_line(
+                                        vyane_harness::native::ToolInvocationStatus::ApprovalRequired
+                                    )
+                                );
                                 tracing::info!(
                                     effect = vyane_harness::native::PermissionEffect::Ask.as_str(),
                                     "{}",
