@@ -57,15 +57,16 @@ Matched surface for this report:
 
 ## Recommendation
 
-### **B. Gradual module-by-module replacement**
+### **B. Gradual module-by-module replacement** (reaffirmed by Kernel Integration Pilot)
 
 **Evidence:**
 
 - The Process dogfood path proves a **decision-grade core slice**: claim/lease → effect → truth probe → artifact → receipt → crash/cancel safety.
+- Integration pilot adds **multi-process SQLite authority** (`kernel.sqlite`) for receipt/effect/approval/lease fence/delivery phase, product-grade approval resume FSM, and a hermetic CLI lifecycle protocol binary — without claiming vendor harness product integration.
 - Large Python-only surfaces (channels, A2A HTTP, board, dashboard) remain valuable as an **adapter plane** and should not block Rust kernel progress.
-- A full rewrite (A without adapters) is not justified: migration report cells are largely incomparable without a shared public Python harness.
-- Keeping Rust as pure experiment (C) understates the already-production-assembled Process/Native host and stronger fencing.
-- Therefore: **keep a Rust kernel for durable execution/ownership/receipt**, grow it module-by-module, and leave fast-changing UX/channel/provider glue in adapters (Python or future Tauri frontends over the local kernel boundary).
+- A full rewrite (A without adapters) is not justified: migration report cells are largely incomparable without a shared public Python harness; no single Python capability was selected for shadow migration in this pilot.
+- Keeping Rust as pure experiment (C) understates the already-production-assembled Process/Native host, multi-process store, and stronger fencing.
+- Therefore: **keep a Rust kernel for durable execution/ownership/receipt/approval**, grow it module-by-module, and leave fast-changing UX/channel/provider glue in adapters (Python or future Tauri frontends over the local kernel boundary).
 
 This is **not** a production cutover recommendation.
 

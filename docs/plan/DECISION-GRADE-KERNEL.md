@@ -1,9 +1,12 @@
 # Decision-grade Rust kernel — product path and milestone plan
 
-**Status:** active product program (not a micro-WP train)  
-**Baseline HEAD:** `10ebe700cef3416459beebfb7ed07d7e9b866de7` (main = origin/main at goal start)  
+**Status:** completed for Process dogfood path (#169/#170); **follow-on pilot** in `KERNEL-INTEGRATION-PILOT.md`  
+**Baseline HEAD (original program):** `10ebe700cef3416459beebfb7ed07d7e9b866de7`  
+**Merged main after #170:** `a3e24ba6a3195b482fccce9ca4fef527623fa222`  
 **Runtime identity for this program:** runtime=`grok-build`, harness=`grok-build`, model=`grok-4.5`, reasoning_effort=`high`  
 **Non-goal:** resume WP-179–465 pure-formatter residual work (hard stop remains)
+
+**Follow-on:** multi-process `kernel.sqlite` authority, approval resume FSM, hermetic harness lifecycle binary — see [`KERNEL-INTEGRATION-PILOT.md`](./KERNEL-INTEGRATION-PILOT.md) and `docs/evidence/KERNEL-INTEGRATION-RECEIPT.md`.
 
 ## 1. Why this program exists
 
