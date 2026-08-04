@@ -7,6 +7,10 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use chrono::{TimeZone as _, Utc};
+use vyane_core::ReceiptFinalStatus;
+use vyane_service::run_dogfood_with_hermetic_harness;
+
 #[test]
 fn hermetic_harness_lifecycle_spawn_ask_resume_artifact_dual_run() {
     let bin = env!("CARGO_BIN_EXE_vyane_harness_lifecycle");
@@ -93,6 +97,28 @@ fn hermetic_harness_cancel_via_kill() {
     let _ = child.kill();
     let status = child.wait().unwrap();
     assert!(!status.success());
+}
+
+#[test]
+fn hermetic_harness_drives_dogfood_to_completion_receipt() {
+    let bin = env!("CARGO_BIN_EXE_vyane_harness_lifecycle");
+    let root = tempfile::tempdir().unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 4, 16, 0, 0).single().unwrap();
+    let (receipt, effects) =
+        run_dogfood_with_hermetic_harness(root.path(), "local", "hl01", bin.as_ref(), now)
+            .expect("hermetic harness dogfood path");
+    assert_eq!(receipt.final_status, ReceiptFinalStatus::Completed);
+    assert!(receipt.output_artifact_digest.is_some());
+    assert_eq!(
+        receipt.gates.truth_probe.outcome,
+        vyane_core::GateOutcome::Passed
+    );
+    assert_eq!(effects.len(), 1);
+    // Dual consistent run.
+    let (r2, e2) =
+        run_dogfood_with_hermetic_harness(root.path(), "local", "hl02", bin.as_ref(), now).unwrap();
+    assert_eq!(r2.final_status, ReceiptFinalStatus::Completed);
+    assert_eq!(e2.len(), 1);
 }
 
 #[test]
