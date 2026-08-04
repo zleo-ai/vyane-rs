@@ -1141,6 +1141,9 @@ cancel Unknown settlement path (no false failure code).
 [WP-462](plan/WP-462.md) reuses pure tool-invocation-status lines on native
 AgentRun tool-lane TimedOut settle.
 
+[WP-463](plan/WP-463.md) reuses pure tool-invocation-status lines on native
+AgentRun cancel Unknown settle (`cancelled` tool status).
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live

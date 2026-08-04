@@ -703,6 +703,18 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                                 "{}",
                                 crate::output::format_native_turn_stop_line(&stop)
                             );
+                            // Tool-lane cancel maps to NativeTurnStop::Cancelled
+                            // (WP-463 companion pure tool status).
+                            if matches!(stop, NativeTurnStop::Cancelled) {
+                                tracing::info!(
+                                    status = vyane_harness::native::ToolInvocationStatus::Cancelled
+                                        .as_str(),
+                                    "{}",
+                                    crate::output::format_tool_invocation_status_line(
+                                        vyane_harness::native::ToolInvocationStatus::Cancelled
+                                    )
+                                );
+                            }
                             return AgentExecutorOutcome::Unknown;
                         }
                         Some(code) => {

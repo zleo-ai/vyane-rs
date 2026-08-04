@@ -655,8 +655,8 @@ pub fn format_stream_tool_use_line(name: &str, summary: &str) -> String {
 ///
 /// Pure surface for the native ask/deny/error vocabulary (WP-266/WP-267).
 /// Live on stream ToolUse progress as Executed (WP-267), native AgentRun
-/// ApprovalRequired settle (WP-460), and native tool-lane TimedOut settle
-/// (WP-462).
+/// ApprovalRequired settle (WP-460), tool-lane TimedOut settle (WP-462), and
+/// cancel Unknown settle (WP-463).
 pub fn format_tool_invocation_status_line(status: ToolInvocationStatus) -> String {
     format!("tool status: {}", terminal_safe(status.as_str()))
 }
@@ -3716,6 +3716,10 @@ mod tests {
         assert_eq!(
             format_tool_invocation_status_line(ToolInvocationStatus::TimedOut),
             "tool status: timed_out"
+        );
+        assert_eq!(
+            format_tool_invocation_status_line(ToolInvocationStatus::Cancelled),
+            "tool status: cancelled"
         );
         assert_eq!(
             format_tool_invocation_status_line(ToolInvocationStatus::Denied),
