@@ -9,14 +9,34 @@ the private Python system. Cross-repository status, deliberate differences, and
 acceptance gates are tracked in
 [`docs/parity/ORIGINAL-VYANE-PARITY.md`](parity/ORIGINAL-VYANE-PARITY.md).
 
+## Decision-grade kernel path (active product program)
+
+Product question: produce **one restart-safe autonomous delivery path** with a
+truth-verified `CompletionReceipt`, enough to decide Rust-vs-Python migration
+boundaries for a future Horus/Tauri shell — **not** to port every Python file
+and **not** to resume the WP-179–465 pure-formatter residual train.
+
+- **Chosen vertical path:** `ProcessLaneAutonomousDelivery` — TaskCase →
+  RouteConfig → owner-scoped AgentRun claim/lease → Linux CLI-harness Process
+  execution → permission/approval gates → failing-then-passing truth probe →
+  immutable artifact → `CompletionReceipt` → cancel/crash/restart
+  duplicate-effect safety.
+- **Plan of record:** [`docs/plan/DECISION-GRADE-KERNEL.md`](plan/DECISION-GRADE-KERNEL.md)
+  (parity classification a–e, assumptions, stop conditions, semantic
+  milestones M0–M5).
+- **Capability counts remain honest:** after LED-05 moved to `partial` on
+  hermetic receipt/dogfood evidence, the 53-item matrix is
+  7 implemented / 23 partial / 12 missing / 9 different / 2 planned. No
+  unqualified whole-system “implemented” claims.
+
 ## Active P0-P3 whole-system parity program
 
 Unqualified “full parity” means whole-system capability parity, not merely public-core parity.
 Private credentials, deployment details, endpoints, paths, and identity data
 must not enter this public repository; the corresponding generic contracts and
 optional/private adapter boundaries must nevertheless be verifiable. In the
-current public integration baseline the 53 matrix items are 7 implemented, 22 partial,
-13 missing, 9 different, and 2 planned.
+current public integration baseline the 53 matrix items are 7 implemented, 23 partial,
+12 missing, 9 different, and 2 planned.
 
 | wave | active scope |
 |------|--------------|

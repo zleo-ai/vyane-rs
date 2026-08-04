@@ -34,11 +34,13 @@ mod agent_recovery;
 mod agent_supervisor;
 mod config;
 mod diagnostics;
+mod dogfood;
 mod factory;
 mod goal;
 mod goal_continuity_runner;
 mod goal_observation;
 mod inprocess_agent;
+mod kernel_boundary;
 mod message;
 mod native_authority;
 mod native_permissions;
@@ -85,6 +87,10 @@ pub use diagnostics::{
     ROUTE_PREVIEW_MAX_TASK_BYTES, ROUTE_PREVIEW_MAX_VALUE_BYTES, RoutePreview, RoutePreviewParams,
     RouteSelectionBasis, check_config, check_permissions,
 };
+pub use dogfood::{
+    CrashFence, DOGFOOD_TASK_TYPE, DogfoodConfig, DogfoodError, DogfoodPath, ExternalEffectLog,
+    LifecycleInventory, PermissionDecision, digest_bytes, run_successful_dogfood,
+};
 pub use factory::{
     AssemblerFactory, authorized_native_client, authorized_web_fetch_client,
     authorized_web_search_client, direct_http_client,
@@ -116,6 +122,11 @@ pub use inprocess_agent::{
     InProcessCompletionError, InProcessCompletionStageError, InProcessEffectAuthority,
     InProcessEffectPermit, InProcessNativeAuthority, InProcessNativeBindError,
     InProcessPreparedCompletion,
+};
+pub use kernel_boundary::{
+    KERNEL_BOUNDARY_VERSION, KernelCapability, KernelCommand, KernelCommandKind, KernelErrorCode,
+    KernelEvent, KernelEventKind, KernelPrincipal, KernelProjection, LocalKernelAdapter,
+    ReplayCursor, SubscribeRequest,
 };
 pub use message::{
     AgentMessageCompletionReadError, AgentMessageCompletionStageError, MessageComponents,

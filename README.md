@@ -70,7 +70,7 @@ one exact commit. The registry token is exposed only to the final publish step.
 The 17-crate local package preflight passes, but no crate has
 been published. This does not mean full parity with the original private Vyane
 system.** In the current public integration baseline, the fixed cross-repository matrix
-tracks 53 capabilities across eight domains: 7 implemented, 22 partial, 13
+tracks 53 capabilities across eight domains: 7 implemented, 23 partial, 12
 missing, 9 deliberately different or awaiting a decision, and 2 planned. It
 records substantial native-harness, continuity, collaboration, governance,
 observability, and interface work still to do. Unqualified “full parity” means

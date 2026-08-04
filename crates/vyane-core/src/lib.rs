@@ -26,6 +26,7 @@ pub mod chat;
 pub mod env;
 pub mod error;
 pub mod native_authority;
+pub mod receipt;
 pub mod run;
 pub mod session;
 pub mod target;
@@ -40,6 +41,13 @@ pub use chat::{ChatMessage, ChatOutcome, ChatRequest, Role, StreamEvent};
 pub use env::{BASELINE_ENV, EnvPolicy, InheritMode};
 pub use error::{ErrorKind, Result, VyaneError};
 pub use native_authority::{NativeExecutionAuthority, NativeSideEffect};
+pub use receipt::{
+    AttemptFailureClass, AttemptStatus, BillingModeCategory, CompletionReceipt, CostEvidence,
+    EndpointClass, GATE_CI_PACKAGING, GATE_INDEPENDENT_REVIEW, GATE_INTEGRATION, GATE_TRUTH_PROBE,
+    GATE_UNIT, GateOutcome, GateResult, MemoryReceiptLedger, NamedGate, RECEIPT_SCHEMA_VERSION,
+    ReceiptAttempt, ReceiptError, ReceiptFinalStatus, ReceiptResult, RecoveryCleanupState,
+    ReviewFindingDisposition, RiskClass, RouteConfig, TaskCase,
+};
 pub use run::{Attempt, AttemptOutcome, RunQuery, RunRecord, RunStatus, Usage};
 pub use session::{
     NativeSessionBinding, NativeSessionDomain, NativeSessionState, NativeSessionTransition,

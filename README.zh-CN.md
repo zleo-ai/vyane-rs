@@ -46,7 +46,7 @@ token 都不等于这项授权。手动发布 workflow 还要求受保护的 `cr
 reviewer 批准，并要求输入的 release tag、当前 `main` 与 workflow SHA 精确指向同一个 commit；
 registry token 只注入最终 publish step。17 个 crate 的本地 package preflight 已通过，但没有任何 crate
 实际发布。这不表示已经完全对齐原始私有 Vyane。** 在当前公开集成基线上，固定双仓
-矩阵按 8 个域追踪 53 个能力项：7 个 `implemented`、22 个 `partial`、13 个 `missing`、
+矩阵按 8 个域追踪 53 个能力项：7 个 `implemented`、23 个 `partial`、12 个 `missing`、
 9 个刻意不同或待决策、2 个 `planned`。native harness、
 连续性、协作、治理、可观测性和接口仍有大量工作。未加限定的“完全对齐”默认指
 whole-system capability parity：私有凭据和部署细节不进入本公开仓，但对应 generic contract
