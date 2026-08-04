@@ -1132,6 +1132,9 @@ continuity-execute after consume (InFlight) and finish settle (Done/Blocked).
 [WP-459](plan/WP-459.md) reuses pure takeover-sandbox lines on CLI
 continuity-execute for the frozen sandbox before dispatch.
 
+[WP-460](plan/WP-460.md) reuses pure tool-invocation-status lines on native
+AgentRun ApprovalRequired settle (`approval_required` ask surface).
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
