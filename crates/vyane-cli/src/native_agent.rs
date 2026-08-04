@@ -734,6 +734,18 @@ impl InProcessAgentOperation for FreshNativeAgentOperation {
                                     )
                                 );
                             }
+                            // Tool-lane timeout maps to NativeTurnStop::TimedOut
+                            // (wall-clock outer timeout uses ErrorKind path) (WP-462).
+                            if matches!(stop, NativeTurnStop::TimedOut) {
+                                tracing::info!(
+                                    status = vyane_harness::native::ToolInvocationStatus::TimedOut
+                                        .as_str(),
+                                    "{}",
+                                    crate::output::format_tool_invocation_status_line(
+                                        vyane_harness::native::ToolInvocationStatus::TimedOut
+                                    )
+                                );
+                            }
                             return self.quiesced_failure(&controller, &input, code);
                         }
                     }

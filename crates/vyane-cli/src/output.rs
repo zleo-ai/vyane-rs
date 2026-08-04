@@ -654,8 +654,9 @@ pub fn format_stream_tool_use_line(name: &str, summary: &str) -> String {
 /// Human native tool status line using the closed `ToolInvocationStatus` token.
 ///
 /// Pure surface for the native ask/deny/error vocabulary (WP-266/WP-267).
-/// Live on stream ToolUse progress as Executed (WP-267) and native AgentRun
-/// ApprovalRequired settle as ApprovalRequired (WP-460).
+/// Live on stream ToolUse progress as Executed (WP-267), native AgentRun
+/// ApprovalRequired settle (WP-460), and native tool-lane TimedOut settle
+/// (WP-462).
 pub fn format_tool_invocation_status_line(status: ToolInvocationStatus) -> String {
     format!("tool status: {}", terminal_safe(status.as_str()))
 }
