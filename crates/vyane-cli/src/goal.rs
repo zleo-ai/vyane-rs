@@ -554,6 +554,12 @@ async fn continuity_execute(
     let approval = store
         .consume_takeover_approval(&args.common.owner, &args.approval_id, Utc::now())
         .context("consume takeover approval")?;
+    // Kind-only pure approval status after consume → InFlight (WP-458).
+    tracing::info!(
+        status = approval.status.as_str(),
+        "{}",
+        crate::output::format_takeover_approval_status_line(approval.status)
+    );
     let (cancel, signal_task) = cancellation_token();
     let outcome = service
         .dispatch(
@@ -622,6 +628,13 @@ async fn continuity_execute(
     let settled = store
         .finish_takeover_approval(&args.common.owner, &args.approval_id, &finish, Utc::now())
         .context("settle takeover approval")?;
+    // Kind-only pure settled approval status after finish (Done/Blocked) (WP-458).
+    // Matches print_takeover_result pure residual used by queue/decide (WP-397).
+    tracing::info!(
+        status = settled.status.as_str(),
+        "{}",
+        crate::output::format_takeover_approval_status_line(settled.status)
+    );
     if args.common.json {
         print_json(&TakeoverApprovalOutput {
             status: if exit == ExitCode::SUCCESS {
