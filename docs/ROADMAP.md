@@ -1170,6 +1170,9 @@ AgentRun AbortedAfterToolActivity settle.
 [WP-465](plan/WP-465.md) pure-logs ErrorKind tokens on native AgentRun
 failover-eligible intermediate continue (before next bound).
 
+[WP-466](plan/WP-466.md) gives the uncertain native AgentRun recovery fixture
+its own CI process after exact-main macOS exposed a Tokio runtime handoff stall.
+
 WP-72 composes the P2 goal foundation into the resident daemon behind explicit
 opt-in target/workdir/sandbox authority. One local goal is pursued at a time;
 running checkpoints survive daemon replacement, while semantic pauses and live
