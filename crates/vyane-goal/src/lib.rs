@@ -2,7 +2,8 @@
 //!
 //! Every lifecycle or progress mutation updates the current goal snapshot and
 //! appends an immutable event in the same transaction. Acceptance criteria are
-//! persisted as descriptors; executing them belongs to a later verifier layer.
+//! persisted as descriptors; independent verification artifacts gate
+//! `completed` (or an explicit auditable waiver).
 
 mod acceptance;
 mod approval;

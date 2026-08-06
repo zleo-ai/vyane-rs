@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -12,13 +13,14 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    AcceptanceCriterion, AcceptanceVerification, GoalContinuityPolicy, GoalContinuitySignal,
-    GoalContinuitySignalResult, GoalContinuityState, GoalContinuityStepStatus, GoalEvent,
-    GoalEventKind, GoalPursuitCheckpoint, GoalQuery, GoalQuotaEvent, GoalRecord,
-    GoalRecoveryCursor, GoalRecoveryFilter, GoalRecoveryPage, GoalStatus, GoalStore,
-    GoalStoreError, GoalVerificationArtifact, NewGoal, PursuitCheckpointStatus, Result,
-    TakeoverApproval, TakeoverApprovalRequest, TakeoverApprovalStatus, TakeoverBoundTarget,
-    TakeoverDecision, TakeoverFinish, TakeoverRunStatus, TakeoverSandbox,
+    AcceptanceCriterion, AcceptanceVerification, CriterionStatus, GoalContinuityPolicy,
+    GoalContinuitySignal, GoalContinuitySignalResult, GoalContinuityState,
+    GoalContinuityStepStatus, GoalEvent, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
+    GoalQuotaEvent, GoalRecord, GoalRecoveryCursor, GoalRecoveryFilter, GoalRecoveryPage,
+    GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact, NewGoal,
+    PursuitCheckpointStatus, Result, TakeoverApproval, TakeoverApprovalRequest,
+    TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision, TakeoverFinish,
+    TakeoverRunStatus, TakeoverSandbox,
     continuity::{ready_approval_target, state_for_event, with_ready_signal, with_step_status},
     model::{
         validate_detail, validate_goal_id, validate_lease_seconds, validate_optional_reason,
@@ -278,6 +280,7 @@ impl SqliteGoalStore {
             &GoalRecord,
             &mut GoalRecord,
             DateTime<Utc>,
+            DateTime<Utc>,
         ) -> Result<(Option<String>, Option<String>)>,
     {
         validate_owner(owner)?;
@@ -359,12 +362,17 @@ where
         &GoalRecord,
         &mut GoalRecord,
         DateTime<Utc>,
+        DateTime<Utc>,
     ) -> Result<(Option<String>, Option<String>)>,
 {
+    // effective_at is monotonic for event ordering / updated_at.
+    // lease_at is the caller's unclamped time for lease evaluation so a prior
+    // future-dated write cannot false-expire an otherwise active lease.
     let effective_at = std::cmp::max(occurred_at, before.updated_at);
+    let lease_at = occurred_at;
     let mut after = before.clone();
     let (stage, detail) =
-        mutation(before, &mut after, effective_at).map_err(|error| match error {
+        mutation(before, &mut after, effective_at, lease_at).map_err(|error| match error {
             GoalStoreError::InvalidStatus { .. } => GoalStoreError::InvalidStatus {
                 id: before.id.clone(),
                 operation,
@@ -397,12 +405,13 @@ type EventAnnotations = (Option<String>, Option<String>);
 fn apply_claim<'a>(
     worker_id: &'a str,
     lease_seconds: u64,
-) -> impl FnOnce(&GoalRecord, &mut GoalRecord, DateTime<Utc>) -> Result<EventAnnotations> + 'a {
-    move |before, after, effective_at| {
+) -> impl FnOnce(&GoalRecord, &mut GoalRecord, DateTime<Utc>, DateTime<Utc>) -> Result<EventAnnotations>
++ 'a {
+    move |before, after, effective_at, lease_at| {
         match before.status {
             GoalStatus::Queued => {}
             GoalStatus::InProgress if before.claimed_by.is_none() => {}
-            GoalStatus::InProgress if before.lease_active(effective_at) => {
+            GoalStatus::InProgress if before.lease_active(lease_at) => {
                 return Err(GoalStoreError::LeaseHeld {
                     id: before.id.clone(),
                     held_by: before
@@ -422,7 +431,11 @@ fn apply_claim<'a>(
                 });
             }
         }
-        grant_lease(after, worker_id, lease_seconds, effective_at)?;
+        // Lease expiry is computed from the caller's time, not the monotonic clamp.
+        grant_lease(after, worker_id, lease_seconds, lease_at)?;
+        if after.started_at.is_none() {
+            after.started_at = Some(effective_at);
+        }
         Ok((None, Some(worker_id.to_string())))
     }
 }
@@ -431,18 +444,15 @@ fn grant_lease(
     after: &mut GoalRecord,
     worker_id: &str,
     lease_seconds: u64,
-    effective_at: DateTime<Utc>,
+    lease_at: DateTime<Utc>,
 ) -> Result<()> {
     after.status = GoalStatus::InProgress;
     after.claimed_by = Some(worker_id.to_string());
-    after.claim_expires_at = Some(lease_expiry(effective_at, lease_seconds)?);
+    after.claim_expires_at = Some(lease_expiry(lease_at, lease_seconds)?);
     after.claim_generation = after
         .claim_generation
         .checked_add(1)
         .ok_or_else(|| GoalStoreError::CorruptData("claim generation overflow".into()))?;
-    if after.started_at.is_none() {
-        after.started_at = Some(effective_at);
-    }
     Ok(())
 }
 
@@ -450,6 +460,10 @@ fn grant_lease(
 /// the holder may mutate the goal. A stale worker whose lease was reclaimed
 /// (its `claim_generation` superseded) no longer matches `claimed_by` and is
 /// rejected, as is any anonymous caller.
+///
+/// `at` must be the caller's unclamped time (`lease_at` / `occurred_at`), not the
+/// monotonic `effective_at` used for event ordering — otherwise a prior
+/// future-dated write can make an unexpired lease appear expired.
 fn ensure_lease_holder(
     record: &GoalRecord,
     worker_id: Option<&str>,
@@ -465,6 +479,45 @@ fn ensure_lease_holder(
         }
     }
     Ok(())
+}
+
+/// Indices of acceptance criteria that have durable independent verifier
+/// evidence (`CriterionStatus::Satisfied` in at least one verification artifact).
+fn verifier_satisfied_indices(
+    transaction: &Transaction<'_>,
+    owner: &str,
+    goal_id: &str,
+) -> Result<HashSet<usize>> {
+    let mut statement = transaction.prepare(
+        "SELECT payload_json, payload_sha256 FROM goal_verifications \
+         WHERE owner = ?1 AND goal_id = ?2 ORDER BY sequence ASC",
+    )?;
+    let rows = statement.query_map(params![owner, goal_id], |row| {
+        let payload_json: String = row.get(0)?;
+        let payload_sha256: String = row.get(1)?;
+        Ok((payload_json, payload_sha256))
+    })?;
+    let mut satisfied = HashSet::new();
+    for row in rows {
+        let (payload_json, payload_sha256) = row?;
+        if hex_digest(payload_json.as_bytes()) != payload_sha256 {
+            return Err(GoalStoreError::CorruptData(
+                "verification artifact digest mismatch".into(),
+            ));
+        }
+        let verification: AcceptanceVerification =
+            serde_json::from_str(&payload_json).map_err(|error| {
+                GoalStoreError::CorruptData(format!(
+                    "verification artifact payload is not valid JSON: {error}"
+                ))
+            })?;
+        for result in verification.results {
+            if result.status == CriterionStatus::Satisfied {
+                satisfied.insert(result.criterion_index);
+            }
+        }
+    }
+    Ok(satisfied)
 }
 
 fn validate_optional_worker(worker_id: Option<&str>) -> Result<()> {
@@ -715,7 +768,7 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::LeaseRenewed,
             "renew the lease on",
             at,
-            |before, after, effective_at| {
+            |before, after, _effective_at, lease_at| {
                 if before.status != GoalStatus::InProgress {
                     return Err(GoalStoreError::InvalidStatus {
                         id: before.id.clone(),
@@ -736,12 +789,12 @@ impl GoalStore for SqliteGoalStore {
                         held_by: holder.to_string(),
                     });
                 }
-                if !before.lease_active(effective_at) {
+                if !before.lease_active(lease_at) {
                     return Err(GoalStoreError::LeaseExpired {
                         id: before.id.clone(),
                     });
                 }
-                after.claim_expires_at = Some(lease_expiry(effective_at, lease_seconds)?);
+                after.claim_expires_at = Some(lease_expiry(lease_at, lease_seconds)?);
                 Ok((None, Some(worker_id.to_string())))
             },
         )
@@ -764,7 +817,7 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Reclaimed,
             "reclaim",
             at,
-            |before, after, effective_at| {
+            |before, after, effective_at, lease_at| {
                 if before.status != GoalStatus::InProgress || before.claimed_by.is_none() {
                     return Err(GoalStoreError::InvalidStatus {
                         id: before.id.clone(),
@@ -772,7 +825,7 @@ impl GoalStore for SqliteGoalStore {
                         status: before.status,
                     });
                 }
-                if before.lease_active(effective_at) {
+                if before.lease_active(lease_at) {
                     return Err(GoalStoreError::LeaseHeld {
                         id: before.id.clone(),
                         held_by: before
@@ -781,7 +834,10 @@ impl GoalStore for SqliteGoalStore {
                             .unwrap_or_else(|| "unknown".into()),
                     });
                 }
-                grant_lease(after, worker_id, lease_seconds, effective_at)?;
+                grant_lease(after, worker_id, lease_seconds, lease_at)?;
+                if after.started_at.is_none() {
+                    after.started_at = Some(effective_at);
+                }
                 Ok((None, Some(worker_id.to_string())))
             },
         )
@@ -803,7 +859,7 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::CriterionSatisfied,
             "satisfy a criterion on",
             at,
-            |before, after, effective_at| {
+            |before, after, effective_at, lease_at| {
                 if before.status != GoalStatus::InProgress {
                     return Err(GoalStoreError::InvalidStatus {
                         id: before.id.clone(),
@@ -811,7 +867,7 @@ impl GoalStore for SqliteGoalStore {
                         status: before.status,
                     });
                 }
-                ensure_lease_holder(before, worker_id, effective_at)?;
+                ensure_lease_holder(before, worker_id, lease_at)?;
                 let total = before.acceptance_criteria.len();
                 let Some(criterion) = after.acceptance_criteria.get_mut(index) else {
                     return Err(GoalStoreError::InvalidInput(format!(
@@ -1000,7 +1056,7 @@ impl GoalStore for SqliteGoalStore {
                     GoalEventKind::CriterionSatisfied,
                     "satisfy a criterion on",
                     occurred_at,
-                    |_before, after, effective_at| {
+                    |_before, after, effective_at, _lease_at| {
                         let Some(criterion) = after.acceptance_criteria.get_mut(index) else {
                             return Err(GoalStoreError::InvalidInput(format!(
                                 "criterion index {index} is out of range for {total} criteria"
@@ -1126,7 +1182,7 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Progress,
             "record quota handoff",
             at,
-            move |_before, after, _effective_at| {
+            move |_before, after, _effective_at, _lease_at| {
                 after.continuity_state = Some(persisted);
                 Ok((
                     Some("quota_handoff".into()),
@@ -1197,7 +1253,7 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Progress,
             "record continuity signal for",
             at,
-            move |_before, after, _effective_at| {
+            move |_before, after, _effective_at, _lease_at| {
                 after.continuity_state = Some(persisted);
                 Ok((Some("continuity_signal".into()), Some(signal_detail)))
             },
@@ -1262,7 +1318,7 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Started,
             "start",
             at,
-            |before, after, effective_at| {
+            |before, after, effective_at, _lease_at| {
                 ensure_transition(before, GoalStatus::InProgress, "start")?;
                 after.status = GoalStatus::InProgress;
                 if after.started_at.is_none() {
@@ -1278,10 +1334,12 @@ impl GoalStore for SqliteGoalStore {
         &self,
         owner: &str,
         id: &str,
+        worker_id: Option<&str>,
         stage: &str,
         detail: &str,
         at: DateTime<Utc>,
     ) -> Result<GoalEvent> {
+        validate_optional_worker(worker_id)?;
         validate_stage(stage)?;
         validate_detail(detail)?;
         self.mutate(
@@ -1290,7 +1348,15 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Progress,
             "record progress on",
             at,
-            |_before, _after, _effective_at| {
+            |before, _after, _effective_at, lease_at| {
+                if before.status != GoalStatus::InProgress {
+                    return Err(GoalStoreError::InvalidStatus {
+                        id: before.id.clone(),
+                        operation: "record progress on",
+                        status: before.status,
+                    });
+                }
+                ensure_lease_holder(before, worker_id, lease_at)?;
                 Ok((Some(stage.to_string()), Some(detail.to_string())))
             },
         )
@@ -1313,9 +1379,9 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Paused,
             "pause",
             at,
-            |before, after, effective_at| {
+            |before, after, _effective_at, lease_at| {
                 ensure_transition(before, GoalStatus::Paused, "pause")?;
-                ensure_lease_holder(before, worker_id, effective_at)?;
+                ensure_lease_holder(before, worker_id, lease_at)?;
                 after.status = GoalStatus::Paused;
                 // Pausing releases the lease: a paused goal is never leased.
                 clear_lease(after);
@@ -1342,9 +1408,9 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Resumed,
             "resume",
             at,
-            |before, after, effective_at| {
+            |before, after, _effective_at, lease_at| {
                 ensure_transition(before, GoalStatus::InProgress, "resume")?;
-                ensure_lease_holder(before, worker_id, effective_at)?;
+                ensure_lease_holder(before, worker_id, lease_at)?;
                 after.status = GoalStatus::InProgress;
                 // Pause already released the lease; clear any stale fields left
                 // by older data so a resumed goal is unambiguously unleased.
@@ -1375,31 +1441,38 @@ impl GoalStore for SqliteGoalStore {
         let before = get_in_transaction(&transaction, owner, id)?
             .ok_or_else(|| GoalStoreError::NotFound { id: id.to_string() })?;
         ensure_transition(&before, GoalStatus::Completed, "complete")?;
-        let effective_at = std::cmp::max(occurred_at, before.updated_at);
-        ensure_lease_holder(&before, worker_id, effective_at)?;
-        let unsatisfied: Vec<String> = before
+        // Lease evaluation uses the caller's unclamped time so a prior future-dated
+        // mutation cannot false-expire an active lease via the monotonic clamp.
+        ensure_lease_holder(&before, worker_id, occurred_at)?;
+        let verified = verifier_satisfied_indices(&transaction, owner, id)?;
+        // Completion requires durable independent verifier evidence per criterion,
+        // not bare self-asserted satisfy_criterion alone. Waiver covers the rest
+        // without forging satisfied_at.
+        let unresolved: Vec<String> = before
             .acceptance_criteria
             .iter()
             .enumerate()
-            .filter(|(_, criterion)| criterion.satisfied_at.is_none())
+            .filter(|(index, _)| !verified.contains(index))
             .map(|(index, criterion)| format!("{index}:{}", criterion.kind))
             .collect();
         let mut base = before;
-        if !unsatisfied.is_empty() {
+        if !unresolved.is_empty() {
             let Some(reason) = waive_reason else {
                 return Err(GoalStoreError::CriteriaUnsatisfied {
                     id: id.to_string(),
-                    remaining: unsatisfied.len(),
+                    remaining: unresolved.len(),
                 });
             };
-            let detail = format!("waived [{}]: {reason}", unsatisfied.join(", "));
+            let detail = format!("waived [{}]: {reason}", unresolved.join(", "));
             let (waived, _event) = mutate_in_transaction(
                 &transaction,
                 &base,
                 GoalEventKind::CriteriaWaived,
                 "waive acceptance criteria on",
                 occurred_at,
-                |_before, _after, _effective_at| Ok((Some("waive".into()), Some(detail))),
+                |_before, _after, _effective_at, _lease_at| {
+                    Ok((Some("waive".into()), Some(detail)))
+                },
             )?;
             base = waived;
         }
@@ -1409,7 +1482,7 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Completed,
             "complete",
             occurred_at,
-            |before, after, effective_at| {
+            |before, after, effective_at, _lease_at| {
                 ensure_transition(before, GoalStatus::Completed, "complete")?;
                 after.status = GoalStatus::Completed;
                 after.finished_at = Some(effective_at);
@@ -1441,9 +1514,9 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Failed,
             "fail",
             at,
-            |before, after, effective_at| {
+            |before, after, effective_at, lease_at| {
                 ensure_transition(before, GoalStatus::Failed, "fail")?;
-                ensure_lease_holder(before, worker_id, effective_at)?;
+                ensure_lease_holder(before, worker_id, lease_at)?;
                 after.status = GoalStatus::Failed;
                 after.finished_at = Some(effective_at);
                 // Terminal states release the lease.
@@ -1471,9 +1544,9 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Cancelled,
             "cancel",
             at,
-            |before, after, effective_at| {
+            |before, after, effective_at, lease_at| {
                 ensure_transition(before, GoalStatus::Cancelled, "cancel")?;
-                ensure_lease_holder(before, worker_id, effective_at)?;
+                ensure_lease_holder(before, worker_id, lease_at)?;
                 after.status = GoalStatus::Cancelled;
                 after.finished_at = Some(effective_at);
                 // Terminal states release the lease.
@@ -1655,7 +1728,7 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Progress,
             "consume takeover approval for",
             occurred_at,
-            |before, after, _effective_at| {
+            |before, after, _effective_at, _lease_at| {
                 if before.status != GoalStatus::InProgress {
                     return Err(GoalStoreError::InvalidStatus {
                         id: before.id.clone(),
@@ -1741,7 +1814,7 @@ impl GoalStore for SqliteGoalStore {
             GoalEventKind::Progress,
             "finish takeover approval for",
             occurred_at,
-            |before, after, _effective_at| {
+            |before, after, _effective_at, _lease_at| {
                 let Some(state) = before.continuity_state.as_ref() else {
                     return Err(GoalStoreError::TakeoverBoundaryChanged {
                         id: approval_id.to_string(),
@@ -1971,7 +2044,7 @@ fn record_pursuit_checkpoint_in_transaction(
         event_kind,
         operation,
         occurred_at,
-        |before, after, effective_at| {
+        |before, after, effective_at, _lease_at| {
             match checkpoint.status {
                 PursuitCheckpointStatus::Running => {}
                 PursuitCheckpointStatus::Paused => {
@@ -1982,10 +2055,13 @@ fn record_pursuit_checkpoint_in_transaction(
                 }
                 PursuitCheckpointStatus::Achieved => {
                     ensure_transition(before, GoalStatus::Completed, "complete")?;
+                    let verified =
+                        verifier_satisfied_indices(transaction, &before.owner, &before.id)?;
                     let remaining = before
                         .acceptance_criteria
                         .iter()
-                        .filter(|criterion| criterion.satisfied_at.is_none())
+                        .enumerate()
+                        .filter(|(index, _)| !verified.contains(index))
                         .count();
                     if remaining > 0 {
                         return Err(GoalStoreError::CriteriaUnsatisfied {

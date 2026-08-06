@@ -3,9 +3,9 @@ use rusqlite::Connection;
 use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use vyane_goal::{
-    AcceptanceCriterion, AcceptanceVerification, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
-    GoalRecoveryFilter, GoalStatus, GoalStore, GoalStoreError, NewGoal, PursuitCheckpointStatus,
-    SqliteGoalStore,
+    AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalEventKind,
+    GoalPursuitCheckpoint, GoalQuery, GoalRecoveryFilter, GoalStatus, GoalStore, GoalStoreError,
+    NewGoal, PursuitCheckpointStatus, SqliteGoalStore,
 };
 
 const OWNER_A: &str = "owner-a";
@@ -27,6 +27,46 @@ fn new_goal(id: &str, title: &str, priority: u8, at: DateTime<Utc>) -> NewGoal {
     goal.id = Some(id.to_string());
     goal.priority = priority;
     goal
+}
+
+fn satisfied_result(index: usize, kind: &str, target: &str) -> CriterionResult {
+    CriterionResult {
+        criterion_index: index,
+        criterion_key: format!("{index}:{kind}"),
+        kind: kind.into(),
+        target: target.into(),
+        status: CriterionStatus::Satisfied,
+        command: Vec::new(),
+        cwd: "/tmp".into(),
+        exit_code: Some(0),
+        duration_ms: 1,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        detail: "verified".into(),
+    }
+}
+
+fn record_independent_verification(
+    store: &SqliteGoalStore,
+    owner: &str,
+    id: &str,
+    worker_id: Option<&str>,
+    criteria: &[(usize, &str, &str)],
+    at: DateTime<Utc>,
+) {
+    let results = criteria
+        .iter()
+        .map(|(index, kind, target)| satisfied_result(*index, kind, target))
+        .collect::<Vec<_>>();
+    let verification = AcceptanceVerification {
+        goal_id: id.into(),
+        all_satisfied: !results.is_empty(),
+        summary: format!("independent verification for {id}"),
+        results,
+    };
+    store
+        .record_verification(owner, id, worker_id, &verification, at)
+        .expect("record independent verification");
 }
 
 #[test]
@@ -55,6 +95,7 @@ fn lifecycle_updates_snapshot_and_appends_revision_ordered_events() {
         .progress(
             OWNER_A,
             &created.id,
+            None,
             "implementation",
             "store and CLI wired",
             base + TimeDelta::seconds(2),
@@ -80,6 +121,17 @@ fn lifecycle_updates_snapshot_and_appends_revision_ordered_events() {
         .expect("resume");
     assert_eq!(resumed.status, GoalStatus::InProgress);
 
+    record_independent_verification(
+        &store,
+        OWNER_A,
+        &created.id,
+        None,
+        &[
+            (0, "test-passes", "workspace"),
+            (1, "manual-confirm", "release owner approves"),
+        ],
+        base + TimeDelta::seconds(5),
+    );
     for index in 0..2 {
         store
             .satisfy_criterion(
@@ -103,6 +155,7 @@ fn lifecycle_updates_snapshot_and_appends_revision_ordered_events() {
         )
         .expect("complete");
     assert_eq!(completed.status, GoalStatus::Completed);
+    // create/start/progress/pause/resume + 2×satisfy + completed = revisions 0..7
     assert_eq!(completed.revision, 7);
     assert_eq!(
         completed.completion_summary.as_deref(),
@@ -285,6 +338,7 @@ fn recovery_pages_filter_leases_and_ignore_mutable_update_order() {
         .progress(
             OWNER_A,
             "available-b",
+            None,
             "concurrent",
             "move mutable updated_at",
             base + TimeDelta::seconds(30),
@@ -481,7 +535,7 @@ fn snapshot_and_event_write_roll_back_together() {
 
     assert!(
         store
-            .progress(OWNER_A, "atomic", "reject", "must roll back", at)
+            .progress(OWNER_A, "atomic", None, "reject", "must roll back", at)
             .is_err()
     );
     let record = store.get(OWNER_A, "atomic").expect("get").expect("record");
@@ -1003,6 +1057,14 @@ fn achieved_checkpoint_and_goal_completion_are_one_atomic_transition() {
         before_events
     );
 
+    record_independent_verification(
+        &store,
+        OWNER_A,
+        "atomic-achieved",
+        Some("worker-a"),
+        &[(0, "custom", "cmd:true")],
+        at + TimeDelta::seconds(2),
+    );
     let satisfied = store
         .satisfy_criterion(
             OWNER_A,

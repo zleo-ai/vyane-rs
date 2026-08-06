@@ -158,10 +158,17 @@ pub trait GoalStore: Send + Sync {
 
     fn start(&self, owner: &str, id: &str, at: DateTime<Utc>) -> Result<GoalRecord>;
 
+    /// Append a progress event. The goal must be `in_progress`. While an active
+    /// lease is held, only the holder (matching `worker_id`) may record
+    /// progress; anonymous and non-holder callers are rejected with
+    /// [`crate::GoalStoreError::LeaseHeld`]. Progress does not change lifecycle
+    /// status and is rejected after terminal states so it cannot dirty
+    /// terminal=final.
     fn progress(
         &self,
         owner: &str,
         id: &str,
+        worker_id: Option<&str>,
         stage: &str,
         detail: &str,
         at: DateTime<Utc>,
@@ -188,10 +195,13 @@ pub trait GoalStore: Send + Sync {
         at: DateTime<Utc>,
     ) -> Result<GoalRecord>;
 
-    /// Complete a goal. Every acceptance criterion must carry `satisfied_at`,
-    /// unless `waive_reason` explicitly waives the unsatisfied remainder, which
-    /// appends an auditable `criteria_waived` event before completion. While an
-    /// active lease is held, only the holder (matching `worker_id`) may
+    /// Complete a goal. Every acceptance criterion must be backed by durable
+    /// independent verifier evidence (`AcceptanceVerification` artifacts with
+    /// `CriterionStatus::Satisfied` for that index), unless `waive_reason`
+    /// explicitly waives the unverified remainder, which appends an auditable
+    /// `criteria_waived` event before completion. Bare `satisfy_criterion`
+    /// self-report alone is not enough. Waiver never forges `satisfied_at`.
+    /// While an active lease is held, only the holder (matching `worker_id`) may
     /// complete; terminal states clear the lease.
     fn done(
         &self,

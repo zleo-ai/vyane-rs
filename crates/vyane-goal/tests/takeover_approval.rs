@@ -556,7 +556,14 @@ fn stale_goal_revision_cannot_consume_approval() {
         )
         .unwrap();
     store
-        .progress(OWNER, "goal-a", "unrelated", "revision changed", at(1_202))
+        .progress(
+            OWNER,
+            "goal-a",
+            None,
+            "unrelated",
+            "revision changed",
+            at(1_202),
+        )
         .unwrap();
     assert!(matches!(
         store.consume_takeover_approval(OWNER, &approval.approval_id, at(1_203)),
