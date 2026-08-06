@@ -10,7 +10,8 @@
 | Branch | `grok/EOS-652-verifier-goal` |
 | Worktree | `/home/maple/AIOS/worktrees/vyane-rs/eos652-verifier-goal` |
 | Base (origin/main) | `915905a14f4f7cb810fad90fd87aec49f91f6b36` |
-| Head | `6c217a2b985b7a27c3a42201e9a0d6ef03a0c573` |
+| Head (implementation) | `6c217a2b985b7a27c3a42201e9a0d6ef03a0c573` |
+| Branch tip | `89bdf2936f9e8f6c2f82905b993bacc70728e2fe` (includes CLI lifecycle + receipt pin commits) |
 | Push / PR | **none** (bounded local commit only) |
 
 ## Audit (main baseline)
