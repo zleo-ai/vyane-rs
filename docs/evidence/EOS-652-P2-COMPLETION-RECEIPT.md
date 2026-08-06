@@ -32,6 +32,7 @@ Already-present P1 left intact: claim/generation fencing, owner isolation, pause
 - `crates/vyane-goal/src/pursuit.rs` — wall-clock store `at` for lease-safe checkpoint/verification writes
 - `crates/vyane-goal/src/lib.rs` — module docs
 - `crates/vyane-cli/src/cli.rs`, `crates/vyane-cli/src/goal.rs` — optional `--worker` on `goal progress`
+- `crates/vyane-cli/tests/goal_acceptance.rs` — lifecycle public path uses verify→done (durable artifacts)
 - `crates/vyane-goal/tests/eos652_p2.rs` — residual P2 regressions (new)
 - `crates/vyane-goal/tests/claim_lease.rs`, `store_contract.rs`, `continuity_projection.rs`, `takeover_approval.rs` — call-site + completion-path updates
 - `docs/evidence/EOS-652-P2-COMPLETION-RECEIPT.md` — this receipt
@@ -62,11 +63,15 @@ Environment note: local umask `002` makes default tempdirs group-writable; GoalS
 | `cargo test -p vyane-goal --test eos652_p2` | **6 passed** |
 | `cargo test -p vyane-goal --test claim_lease --test store_contract --test pursuit` | **15 + 26 + 25 passed** |
 | `cargo test -p vyane-goal` | **all green** (lib + integration) |
-| CLI goal-related filters | **green** (unit + daemon_goal/goal_acceptance filters exercised) |
+| `cargo test -p vyane-cli --test goal_acceptance` | **25 passed** (lifecycle uses verify→done durable artifacts) |
+| CLI goal-related unit filters | **green** |
 | `cargo fmt --all -- --check` | exit 0 |
 | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0 |
 
-Logs: implementer scratch `directed-green.log`, `related-green.log`, `fmt-clippy-tests.log`.
+Logs: implementer scratch `directed-green.log`, `related-green.log`, `fmt-clippy-tests.log`, `cli-goal-acceptance-green.log`.
+
+### Skeptic gap closure
+- CLI `lifecycle_round_trip_has_stable_json_and_persisted_acceptance` previously bare-satisfied then `done` (exit 2 under P2 gate). Updated to machine-checkable criteria + `goal verify` (durable artifact) then `done`; full `goal_acceptance` re-run green.
 
 ## Behavior summary
 

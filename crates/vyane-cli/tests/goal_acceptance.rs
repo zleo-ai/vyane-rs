@@ -231,6 +231,7 @@ exit 1
 fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
     let directory = TempDir::new().unwrap();
     let db = db_text(&directory.path().join("goals.sqlite3"));
+    let workdir = directory.path().to_str().unwrap();
     let created = json_output(
         &[
             "goal",
@@ -248,19 +249,18 @@ fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
             "Exercise every Phase 1 transition",
             "--priority",
             "1",
+            // Machine-checkable criteria so the public path can record durable
+            // independent verification artifacts before completion (EOS-652 P2).
             "--acceptance",
-            "test-passes:workspace",
+            "custom:cmd:true",
             "--acceptance",
-            "manual-confirm:release approved",
+            "custom:cmd:true",
         ],
         0,
     );
     assert_eq!(created["status"], "success");
     assert_eq!(created["goal"]["status"], "queued");
-    assert_eq!(
-        created["goal"]["acceptance_criteria"][0]["kind"],
-        "test-passes"
-    );
+    assert_eq!(created["goal"]["acceptance_criteria"][0]["kind"], "custom");
 
     for args in [
         vec![
@@ -309,31 +309,41 @@ fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
             "--json",
             "goal-public",
         ],
-        vec![
+    ] {
+        assert_eq!(json_output(&args, 0)["status"], "success");
+    }
+
+    // Independent verifier path: durable artifact + satisfied_at, then done.
+    let verified = json_output(
+        &[
             "goal",
-            "satisfy",
+            "verify",
             "--db",
             &db,
             "--owner",
             "owner-a",
             "--json",
+            "--workdir",
+            workdir,
+            "--timeout-seconds",
+            "2",
             "goal-public",
-            "--index",
-            "0",
         ],
-        vec![
-            "goal",
-            "satisfy",
-            "--db",
-            &db,
-            "--owner",
-            "owner-a",
-            "--json",
-            "goal-public",
-            "--index",
-            "1",
-        ],
-        vec![
+        0,
+    );
+    assert_eq!(verified["status"], "success");
+    assert_eq!(verified["verification"]["all_satisfied"], true);
+    assert_eq!(verified["artifact"]["goal_id"], "goal-public");
+    assert_eq!(
+        verified["artifact"]["payload_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+
+    let completed = json_output(
+        &[
             "goal",
             "done",
             "--db",
@@ -345,9 +355,10 @@ fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
             "--summary",
             "verified",
         ],
-    ] {
-        assert_eq!(json_output(&args, 0)["status"], "success");
-    }
+        0,
+    );
+    assert_eq!(completed["status"], "success");
+    assert_eq!(completed["goal"]["status"], "completed");
 
     let detail = json_output(
         &[
@@ -363,8 +374,13 @@ fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
         0,
     );
     assert_eq!(detail["goal"]["status"], "completed");
+    // create/start/progress/pause/resume + 2×satisfy(from verify) + completed
     assert_eq!(detail["goal"]["revision"], 7);
-    assert_eq!(detail["verifications"], serde_json::json!([]));
+    assert_eq!(detail["verifications"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        detail["verifications"][0]["verification"]["all_satisfied"],
+        true
+    );
     assert_eq!(detail["goal"]["completion_summary"], "verified");
     assert!(detail["goal"]["acceptance_criteria"][0]["satisfied_at"].is_string());
     assert!(detail["goal"]["acceptance_criteria"][1]["satisfied_at"].is_string());
