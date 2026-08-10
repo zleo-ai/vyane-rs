@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalEventKind,
-    GoalStatus, GoalStore, GoalStoreError, NewGoal, SqliteGoalStore,
+    GoalStatus, GoalStore, GoalStoreError, NewGoal, SqliteGoalStore, criterion_key,
 };
 
 const OWNER: &str = "owner-a";
@@ -315,22 +315,32 @@ fn goal_with_criteria(store: &SqliteGoalStore, id: &str, at: DateTime<Utc>) {
     let mut goal = NewGoal::new(format!("Goal {id}"), at);
     goal.id = Some(id.to_string());
     goal.acceptance_criteria = vec![
-        AcceptanceCriterion::new("test-passes", "cargo test"),
-        AcceptanceCriterion::new("review-approved", "independent reviewer"),
+        AcceptanceCriterion::new("custom", "cmd:true"),
+        AcceptanceCriterion::new("manual-confirm", "release owner approves"),
     ];
     store.create(OWNER, goal).expect("create goal");
 }
 
-fn satisfied_result(index: usize, kind: &str, target: &str) -> CriterionResult {
+fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
+    let command = if criterion.kind == "manual-confirm" {
+        Vec::new()
+    } else {
+        vec!["true".into()]
+    };
+    let exit_code = if criterion.kind == "manual-confirm" {
+        None
+    } else {
+        Some(0)
+    };
     CriterionResult {
         criterion_index: index,
-        criterion_key: format!("{index}:{kind}"),
-        kind: kind.into(),
-        target: target.into(),
+        criterion_key: criterion_key(index, criterion),
+        kind: criterion.kind.clone(),
+        target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
-        command: Vec::new(),
+        command,
         cwd: "/tmp".into(),
-        exit_code: Some(0),
+        exit_code,
         duration_ms: 1,
         stdout_tail: String::new(),
         stderr_tail: String::new(),
@@ -342,16 +352,20 @@ fn record_independent_verification(
     store: &SqliteGoalStore,
     id: &str,
     worker_id: Option<&str>,
-    indices: &[(usize, &str, &str)],
+    indices: &[usize],
     at: DateTime<Utc>,
 ) {
+    let record = store.get(OWNER, id).expect("get").expect("record");
     let results = indices
         .iter()
-        .map(|(index, kind, target)| satisfied_result(*index, kind, target))
+        .map(|index| satisfied_result(*index, &record.acceptance_criteria[*index]))
         .collect::<Vec<_>>();
     let verification = AcceptanceVerification {
         goal_id: id.into(),
-        all_satisfied: !results.is_empty(),
+        all_satisfied: results.len() == record.acceptance_criteria.len()
+            && results
+                .iter()
+                .all(|result| result.status == CriterionStatus::Satisfied),
         summary: format!("independent verification for {id}"),
         results,
     };
@@ -385,26 +399,14 @@ fn done_is_rejected_while_acceptance_criteria_are_unsatisfied() {
         store.done(OWNER, "gated", None, None, None, at),
         Err(GoalStoreError::CriteriaUnsatisfied { remaining: 2, .. })
     ));
-    record_independent_verification(
-        &store,
-        "gated",
-        None,
-        &[(0, "test-passes", "cargo test")],
-        at + TimeDelta::seconds(1),
-    );
+    record_independent_verification(&store, "gated", None, &[0], at + TimeDelta::seconds(1));
     assert!(matches!(
         store.done(OWNER, "gated", None, None, None, at + TimeDelta::seconds(2)),
         Err(GoalStoreError::CriteriaUnsatisfied { remaining: 1, .. })
     ));
 
     // All criteria independently verified: completion goes through.
-    record_independent_verification(
-        &store,
-        "gated",
-        None,
-        &[(1, "review-approved", "independent reviewer")],
-        at + TimeDelta::seconds(3),
-    );
+    record_independent_verification(&store, "gated", None, &[1], at + TimeDelta::seconds(3));
     store
         .satisfy_criterion(OWNER, "gated", None, 1, at + TimeDelta::seconds(4))
         .expect("persist second satisfied_at");
@@ -449,8 +451,8 @@ fn satisfy_criterion_persists_satisfied_at_and_appends_an_event() {
         .iter()
         .find(|event| event.kind == GoalEventKind::CriterionSatisfied)
         .expect("criterion_satisfied event");
-    assert_eq!(satisfied.stage.as_deref(), Some("test-passes"));
-    assert_eq!(satisfied.detail.as_deref(), Some("cargo test"));
+    assert_eq!(satisfied.stage.as_deref(), Some("custom"));
+    assert_eq!(satisfied.detail.as_deref(), Some("cmd:true"));
 
     // A criterion cannot be satisfied twice.
     assert!(matches!(
@@ -517,7 +519,7 @@ fn explicit_waiver_records_an_auditable_event_before_completion() {
     let waive_event = &events[3];
     assert_eq!(waive_event.to_status, GoalStatus::InProgress);
     let detail = waive_event.detail.as_deref().expect("waive detail");
-    assert!(detail.contains("1:review-approved"));
+    assert!(detail.contains("1:manual-confirm"));
     assert!(detail.contains("reviewer unavailable before deadline"));
     assert_eq!(
         events
@@ -711,16 +713,7 @@ fn stale_worker_writes_are_fenced_out_after_reclaim() {
         ),
         Err(GoalStoreError::LeaseHeld { held_by, .. }) if held_by == "worker-b"
     ));
-    record_independent_verification(
-        &store,
-        "fenced",
-        Some("worker-b"),
-        &[
-            (0, "test-passes", "cargo test"),
-            (1, "review-approved", "independent reviewer"),
-        ],
-        now,
-    );
+    record_independent_verification(&store, "fenced", Some("worker-b"), &[0, 1], now);
     store
         .satisfy_criterion(OWNER, "fenced", Some("worker-b"), 0, now)
         .expect("holder satisfies");

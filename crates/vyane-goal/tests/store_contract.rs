@@ -5,7 +5,7 @@ use tempfile::TempDir;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalEventKind,
     GoalPursuitCheckpoint, GoalQuery, GoalRecoveryFilter, GoalStatus, GoalStore, GoalStoreError,
-    NewGoal, PursuitCheckpointStatus, SqliteGoalStore,
+    NewGoal, PursuitCheckpointStatus, SqliteGoalStore, criterion_key,
 };
 
 const OWNER_A: &str = "owner-a";
@@ -29,16 +29,26 @@ fn new_goal(id: &str, title: &str, priority: u8, at: DateTime<Utc>) -> NewGoal {
     goal
 }
 
-fn satisfied_result(index: usize, kind: &str, target: &str) -> CriterionResult {
+fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
+    let command = if criterion.kind == "manual-confirm" {
+        Vec::new()
+    } else {
+        vec!["true".into()]
+    };
+    let exit_code = if criterion.kind == "manual-confirm" {
+        None
+    } else {
+        Some(0)
+    };
     CriterionResult {
         criterion_index: index,
-        criterion_key: format!("{index}:{kind}"),
-        kind: kind.into(),
-        target: target.into(),
+        criterion_key: criterion_key(index, criterion),
+        kind: criterion.kind.clone(),
+        target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
-        command: Vec::new(),
+        command,
         cwd: "/tmp".into(),
-        exit_code: Some(0),
+        exit_code,
         duration_ms: 1,
         stdout_tail: String::new(),
         stderr_tail: String::new(),
@@ -51,16 +61,20 @@ fn record_independent_verification(
     owner: &str,
     id: &str,
     worker_id: Option<&str>,
-    criteria: &[(usize, &str, &str)],
+    indices: &[usize],
     at: DateTime<Utc>,
 ) {
-    let results = criteria
+    let record = store.get(owner, id).expect("get").expect("record");
+    let results = indices
         .iter()
-        .map(|(index, kind, target)| satisfied_result(*index, kind, target))
+        .map(|index| satisfied_result(*index, &record.acceptance_criteria[*index]))
         .collect::<Vec<_>>();
     let verification = AcceptanceVerification {
         goal_id: id.into(),
-        all_satisfied: !results.is_empty(),
+        all_satisfied: results.len() == record.acceptance_criteria.len()
+            && results
+                .iter()
+                .all(|result| result.status == CriterionStatus::Satisfied),
         summary: format!("independent verification for {id}"),
         results,
     };
@@ -76,7 +90,7 @@ fn lifecycle_updates_snapshot_and_appends_revision_ordered_events() {
     let mut goal = new_goal("goal-lifecycle", "Ship lifecycle", 1, base);
     goal.description = "A durable goal".into();
     goal.acceptance_criteria = vec![
-        AcceptanceCriterion::new("test-passes", "workspace"),
+        AcceptanceCriterion::new("custom", "cmd:true"),
         AcceptanceCriterion::new("manual-confirm", "release owner approves"),
     ];
 
@@ -126,10 +140,7 @@ fn lifecycle_updates_snapshot_and_appends_revision_ordered_events() {
         OWNER_A,
         &created.id,
         None,
-        &[
-            (0, "test-passes", "workspace"),
-            (1, "manual-confirm", "release owner approves"),
-        ],
+        &[0, 1],
         base + TimeDelta::seconds(5),
     );
     for index in 0..2 {
@@ -1062,7 +1073,7 @@ fn achieved_checkpoint_and_goal_completion_are_one_atomic_transition() {
         OWNER_A,
         "atomic-achieved",
         Some("worker-a"),
-        &[(0, "custom", "cmd:true")],
+        &[0],
         at + TimeDelta::seconds(2),
     );
     let satisfied = store

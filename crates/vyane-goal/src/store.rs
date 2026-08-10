@@ -90,7 +90,9 @@ pub trait GoalStore: Send + Sync {
 
     /// Append one immutable, owner-scoped verification artifact. The goal must
     /// be in progress and an active lease, if present, must belong to
-    /// `worker_id`.
+    /// `worker_id`. Each result must bind the current criterion index, kind,
+    /// target, and criterion key; `Satisfied` command criteria also require
+    /// non-empty command evidence with `exit_code = 0`.
     fn record_verification(
         &self,
         owner: &str,

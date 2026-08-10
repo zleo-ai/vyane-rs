@@ -13,8 +13,8 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    AcceptanceCriterion, AcceptanceVerification, CriterionStatus, GoalContinuityPolicy,
-    GoalContinuitySignal, GoalContinuitySignalResult, GoalContinuityState,
+    AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus,
+    GoalContinuityPolicy, GoalContinuitySignal, GoalContinuitySignalResult, GoalContinuityState,
     GoalContinuityStepStatus, GoalEvent, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
     GoalQuotaEvent, GoalRecord, GoalRecoveryCursor, GoalRecoveryFilter, GoalRecoveryPage,
     GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact, NewGoal,
@@ -22,6 +22,7 @@ use crate::{
     TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision, TakeoverFinish,
     TakeoverRunStatus, TakeoverSandbox,
     continuity::{ready_approval_target, state_for_event, with_ready_signal, with_step_status},
+    criterion_key,
     model::{
         validate_detail, validate_goal_id, validate_lease_seconds, validate_optional_reason,
         validate_owner, validate_stage, validate_worker,
@@ -481,6 +482,112 @@ fn ensure_lease_holder(
     Ok(())
 }
 
+fn validate_verification_against_goal(
+    goal: &GoalRecord,
+    verification: &AcceptanceVerification,
+) -> Result<()> {
+    if verification.goal_id != goal.id {
+        return Err(GoalStoreError::InvalidInput(
+            "verification goal id does not match the persisted goal".into(),
+        ));
+    }
+    let mut seen = HashSet::new();
+    for result in &verification.results {
+        validate_verification_result(goal, result, &mut seen)?;
+    }
+    let expected_all_satisfied = !goal.acceptance_criteria.is_empty()
+        && verification.results.len() == goal.acceptance_criteria.len()
+        && verification
+            .results
+            .iter()
+            .all(|result| result.status == CriterionStatus::Satisfied);
+    if verification.all_satisfied != expected_all_satisfied {
+        return Err(GoalStoreError::InvalidInput(
+            "verification all_satisfied flag does not match the durable result set".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_verification_result(
+    goal: &GoalRecord,
+    result: &CriterionResult,
+    seen: &mut HashSet<usize>,
+) -> Result<()> {
+    if !seen.insert(result.criterion_index) {
+        return Err(GoalStoreError::InvalidInput(format!(
+            "verification result index {} is duplicated",
+            result.criterion_index
+        )));
+    }
+    let Some(criterion) = goal.acceptance_criteria.get(result.criterion_index) else {
+        return Err(GoalStoreError::InvalidInput(format!(
+            "verification result index {} is out of range for {} criteria",
+            result.criterion_index,
+            goal.acceptance_criteria.len()
+        )));
+    };
+    let expected_kind = criterion.kind.trim();
+    let expected_target = criterion.target.trim();
+    if result.kind.trim() != expected_kind || result.target.trim() != expected_target {
+        return Err(GoalStoreError::InvalidInput(format!(
+            "verification result {} is not bound to the current acceptance criterion",
+            result.criterion_index
+        )));
+    }
+    let expected_key = criterion_key(result.criterion_index, criterion);
+    if result.criterion_key != expected_key {
+        return Err(GoalStoreError::InvalidInput(format!(
+            "verification result {} criterion key does not match the current goal",
+            result.criterion_index
+        )));
+    }
+    if result.status == CriterionStatus::Satisfied {
+        validate_satisfied_result_evidence(result)?;
+    }
+    Ok(())
+}
+
+fn validate_satisfied_result_evidence(result: &CriterionResult) -> Result<()> {
+    match result.kind.trim() {
+        "manual-confirm" => {
+            if !result.command.is_empty() || result.exit_code.is_some() {
+                return Err(GoalStoreError::InvalidInput(
+                    "manual-confirm verification cannot carry command evidence".into(),
+                ));
+            }
+            Ok(())
+        }
+        "test-passes" | "custom" => {
+            if !result.target.trim().starts_with("cmd:") {
+                return Err(GoalStoreError::InvalidInput(
+                    "command acceptance criteria require a cmd: target".into(),
+                ));
+            }
+            if result.command.is_empty() {
+                return Err(GoalStoreError::InvalidInput(
+                    "satisfied command verification requires a non-empty command".into(),
+                ));
+            }
+            if result.exit_code != Some(0) {
+                return Err(GoalStoreError::InvalidInput(
+                    "satisfied command verification requires exit_code 0".into(),
+                ));
+            }
+            if result.cwd.trim().is_empty() {
+                return Err(GoalStoreError::InvalidInput(
+                    "satisfied command verification requires a non-empty cwd".into(),
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(GoalStoreError::InvalidInput(format!(
+            "unsupported acceptance criterion kind `{}` cannot be marked satisfied",
+            result.kind.trim()
+        ))),
+    }
+}
+
 /// Indices of acceptance criteria that have durable independent verifier
 /// evidence (`CriterionStatus::Satisfied` in at least one verification artifact).
 fn verifier_satisfied_indices(
@@ -899,18 +1006,6 @@ impl GoalStore for SqliteGoalStore {
         validate_owner(owner)?;
         validate_goal_id(id)?;
         validate_optional_worker(worker_id)?;
-        if verification.goal_id != id {
-            return Err(GoalStoreError::InvalidInput(
-                "verification goal id does not match the persisted goal".into(),
-            ));
-        }
-        let payload_json = serde_json::to_string(verification)?;
-        if payload_json.len() > MAX_VERIFICATION_PAYLOAD_BYTES {
-            return Err(GoalStoreError::InvalidInput(format!(
-                "verification artifact exceeds {MAX_VERIFICATION_PAYLOAD_BYTES} bytes"
-            )));
-        }
-        let payload_sha256 = hex_digest(payload_json.as_bytes());
         let at = normalize_timestamp(at)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -925,6 +1020,14 @@ impl GoalStore for SqliteGoalStore {
             });
         }
         ensure_lease_holder(&goal, worker_id, recorded_at)?;
+        validate_verification_against_goal(&goal, verification)?;
+        let payload_json = serde_json::to_string(verification)?;
+        if payload_json.len() > MAX_VERIFICATION_PAYLOAD_BYTES {
+            return Err(GoalStoreError::InvalidInput(format!(
+                "verification artifact exceeds {MAX_VERIFICATION_PAYLOAD_BYTES} bytes"
+            )));
+        }
+        let payload_sha256 = hex_digest(payload_json.as_bytes());
         let artifact = GoalVerificationArtifact {
             sequence: 0,
             verification_id: format!("verification-{}", Uuid::now_v7()),
@@ -981,17 +1084,6 @@ impl GoalStore for SqliteGoalStore {
                 "pursuit checkpoint identity does not match the write scope".into(),
             ));
         }
-        if verification.goal_id != id {
-            return Err(GoalStoreError::InvalidInput(
-                "verification goal id does not match the persisted goal".into(),
-            ));
-        }
-        let payload_json = serde_json::to_string(verification)?;
-        if payload_json.len() > MAX_VERIFICATION_PAYLOAD_BYTES {
-            return Err(GoalStoreError::InvalidInput(format!(
-                "verification artifact exceeds {MAX_VERIFICATION_PAYLOAD_BYTES} bytes"
-            )));
-        }
         let occurred_at = normalize_timestamp(at)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1012,6 +1104,13 @@ impl GoalStore for SqliteGoalStore {
             || checkpoint.claim_generation != before.claim_generation
         {
             return Err(GoalStoreError::CheckpointConflict { id: id.to_string() });
+        }
+        validate_verification_against_goal(&before, verification)?;
+        let payload_json = serde_json::to_string(verification)?;
+        if payload_json.len() > MAX_VERIFICATION_PAYLOAD_BYTES {
+            return Err(GoalStoreError::InvalidInput(format!(
+                "verification artifact exceeds {MAX_VERIFICATION_PAYLOAD_BYTES} bytes"
+            )));
         }
         let payload_sha256 = hex_digest(payload_json.as_bytes());
         let mut artifact = GoalVerificationArtifact {

@@ -14,7 +14,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use tempfile::TempDir;
 use vyane_goal::{
     AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalEventKind,
-    GoalStatus, GoalStore, GoalStoreError, NewGoal, SqliteGoalStore,
+    GoalStatus, GoalStore, GoalStoreError, NewGoal, SqliteGoalStore, criterion_key,
 };
 
 const OWNER: &str = "owner-a";
@@ -38,22 +38,32 @@ fn goal_with_criteria(store: &SqliteGoalStore, id: &str, at: DateTime<Utc>) {
     let mut goal = NewGoal::new(format!("Goal {id}"), at);
     goal.id = Some(id.to_string());
     goal.acceptance_criteria = vec![
-        AcceptanceCriterion::new("test-passes", "cargo test -p fixture"),
+        AcceptanceCriterion::new("custom", "cmd:true"),
         AcceptanceCriterion::new("manual-confirm", "release owner approves"),
     ];
     store.create(OWNER, goal).expect("create goal");
 }
 
-fn satisfied_result(index: usize, kind: &str, target: &str) -> CriterionResult {
+fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
+    let command = if criterion.kind == "manual-confirm" {
+        Vec::new()
+    } else {
+        vec!["true".into()]
+    };
+    let exit_code = if criterion.kind == "manual-confirm" {
+        None
+    } else {
+        Some(0)
+    };
     CriterionResult {
         criterion_index: index,
-        criterion_key: format!("{index}:{kind}"),
-        kind: kind.into(),
-        target: target.into(),
+        criterion_key: criterion_key(index, criterion),
+        kind: criterion.kind.clone(),
+        target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
-        command: Vec::new(),
+        command,
         cwd: "/tmp".into(),
-        exit_code: Some(0),
+        exit_code,
         duration_ms: 1,
         stdout_tail: String::new(),
         stderr_tail: String::new(),
@@ -65,16 +75,21 @@ fn record_independent_verification(
     store: &SqliteGoalStore,
     id: &str,
     worker_id: Option<&str>,
-    indices: &[(usize, &str, &str)],
+    indices: &[usize],
     at: DateTime<Utc>,
 ) {
+    let record = store.get(OWNER, id).expect("get").expect("record");
     let results = indices
         .iter()
-        .map(|(index, kind, target)| satisfied_result(*index, kind, target))
+        .map(|index| {
+            let criterion = &record.acceptance_criteria[*index];
+            satisfied_result(*index, criterion)
+        })
         .collect::<Vec<_>>();
     let verification = AcceptanceVerification {
         goal_id: id.into(),
         all_satisfied: !results.is_empty()
+            && results.len() == record.acceptance_criteria.len()
             && results
                 .iter()
                 .all(|result| result.status == CriterionStatus::Satisfied),
@@ -141,10 +156,7 @@ fn done_accepts_path_that_records_real_verifier_results_then_completes() {
         &store,
         "verified-done",
         None,
-        &[
-            (0, "test-passes", "cargo test -p fixture"),
-            (1, "manual-confirm", "release owner approves"),
-        ],
+        &[0, 1],
         at + TimeDelta::seconds(1),
     );
     // Optional enrichment still allowed; completion is gated on durable artifacts.
@@ -187,13 +199,7 @@ fn waiver_still_completes_without_forging_satisfied_at() {
     store.start(OWNER, "waive-path", at).expect("start");
 
     // One criterion independently verified; the other is waived.
-    record_independent_verification(
-        &store,
-        "waive-path",
-        None,
-        &[(0, "test-passes", "cargo test -p fixture")],
-        at + TimeDelta::seconds(1),
-    );
+    record_independent_verification(&store, "waive-path", None, &[0], at + TimeDelta::seconds(1));
     store
         .satisfy_criterion(OWNER, "waive-path", None, 0, at + TimeDelta::seconds(2))
         .expect("persist verified criterion");
@@ -228,6 +234,63 @@ fn waiver_still_completes_without_forging_satisfied_at() {
         "{detail}"
     );
     assert_eq!(waive.to_status, GoalStatus::InProgress);
+}
+
+#[test]
+fn forged_satisfied_artifact_without_command_evidence_is_rejected() {
+    let (_directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    goal_with_criteria(&store, "forged", at);
+    store.start(OWNER, "forged", at).expect("start");
+    let record = store.get(OWNER, "forged").expect("get").expect("record");
+    let criterion = &record.acceptance_criteria[0];
+    let forged = CriterionResult {
+        criterion_index: 0,
+        criterion_key: criterion_key(0, criterion),
+        kind: criterion.kind.clone(),
+        target: criterion.target.clone(),
+        status: CriterionStatus::Satisfied,
+        command: Vec::new(),
+        cwd: String::new(),
+        exit_code: None,
+        duration_ms: 0,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        detail: "hand-written".into(),
+    };
+    let verification = AcceptanceVerification {
+        goal_id: "forged".into(),
+        all_satisfied: false,
+        summary: "forged".into(),
+        results: vec![forged],
+    };
+    assert!(
+        matches!(
+            store.record_verification(
+                OWNER,
+                "forged",
+                None,
+                &verification,
+                at + TimeDelta::seconds(1)
+            ),
+            Err(GoalStoreError::InvalidInput(_))
+        ),
+        "store must reject forged satisfied command results"
+    );
+    assert!(
+        matches!(
+            store.done(
+                OWNER,
+                "forged",
+                None,
+                Some("should stay open"),
+                None,
+                at + TimeDelta::seconds(2),
+            ),
+            Err(GoalStoreError::CriteriaUnsatisfied { remaining: 2, .. })
+        ),
+        "forged artifact must not unlock completion"
+    );
 }
 
 // --- (b) progress lease fence + status guard --------------------------------
