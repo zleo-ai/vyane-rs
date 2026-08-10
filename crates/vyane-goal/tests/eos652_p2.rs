@@ -55,7 +55,10 @@ fn goal_with_manual(store: &SqliteGoalStore, id: &str, at: DateTime<Utc>) {
 }
 
 fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
-    assert_ne!(criterion.kind, "manual-confirm", "manual-confirm must be waived, not forged");
+    assert_ne!(
+        criterion.kind, "manual-confirm",
+        "manual-confirm must be waived, not forged"
+    );
     CriterionResult {
         criterion_index: index,
         criterion_key: criterion_key(index, criterion),
@@ -246,7 +249,10 @@ fn satisfy_then_empty_satisfied_artifact_does_not_unlock_done() {
     store
         .satisfy_criterion(OWNER, "pre-satisfy", None, 0, at + TimeDelta::seconds(1))
         .expect("self-report first");
-    let record = store.get(OWNER, "pre-satisfy").expect("get").expect("record");
+    let record = store
+        .get(OWNER, "pre-satisfy")
+        .expect("get")
+        .expect("record");
     let criterion = &record.acceptance_criteria[0];
     let forged = CriterionResult {
         criterion_index: 0,
@@ -321,7 +327,13 @@ fn mismatched_command_payload_is_rejected_even_with_exit_zero() {
         results: vec![forged],
     };
     assert!(matches!(
-        store.record_verification(OWNER, "mismatch", None, &verification, at + TimeDelta::seconds(1)),
+        store.record_verification(
+            OWNER,
+            "mismatch",
+            None,
+            &verification,
+            at + TimeDelta::seconds(1)
+        ),
         Err(GoalStoreError::InvalidInput(_))
     ));
 }

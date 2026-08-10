@@ -16,8 +16,7 @@ mod sqlite;
 mod store;
 
 pub use acceptance::{
-    AcceptanceVerifier, MAX_OUTPUT_TAIL_BYTES, MAX_VERIFIER_TIMEOUT, criterion_key,
-    parse_command,
+    AcceptanceVerifier, MAX_OUTPUT_TAIL_BYTES, MAX_VERIFIER_TIMEOUT, criterion_key, parse_command,
 };
 pub use approval::{
     MAX_TAKEOVER_TIMEOUT, TakeoverApproval, TakeoverApprovalRequest, TakeoverApprovalStatus,

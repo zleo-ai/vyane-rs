@@ -1,9 +1,9 @@
 use std::collections::HashSet;
-use std::process::{Command, Stdio};
-use std::time::{Duration as StdDuration, Instant};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::Duration;
+use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Utc};
 use rusqlite::types::{Type, Value};
@@ -24,11 +24,12 @@ use crate::{
     TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision, TakeoverFinish,
     TakeoverRunStatus, TakeoverSandbox,
     continuity::{ready_approval_target, state_for_event, with_ready_signal, with_step_status},
-    criterion_key, parse_command,
+    criterion_key,
     model::{
         validate_detail, validate_goal_id, validate_lease_seconds, validate_optional_reason,
         validate_owner, validate_stage, validate_worker,
     },
+    parse_command,
 };
 
 pub const SCHEMA_VERSION: u32 = 8;
