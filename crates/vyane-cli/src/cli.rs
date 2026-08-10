@@ -361,6 +361,9 @@ pub struct GoalProgressArgs {
     /// Human-readable progress detail.
     #[arg(long)]
     pub detail: String,
+    /// Caller-supplied worker identity; required while a lease is active.
+    #[arg(long)]
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -1082,6 +1082,7 @@ fn progress(args: GoalProgressArgs) -> Result<ExitCode> {
         .progress(
             &args.common.owner,
             &args.id,
+            args.worker.as_deref(),
             &args.stage,
             &args.detail,
             Utc::now(),

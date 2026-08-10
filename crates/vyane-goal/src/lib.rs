@@ -2,7 +2,8 @@
 //!
 //! Every lifecycle or progress mutation updates the current goal snapshot and
 //! appends an immutable event in the same transaction. Acceptance criteria are
-//! persisted as descriptors; executing them belongs to a later verifier layer.
+//! persisted as descriptors; independent verification artifacts gate
+//! `completed` (or an explicit auditable waiver).
 
 mod acceptance;
 mod approval;
@@ -15,7 +16,7 @@ mod sqlite;
 mod store;
 
 pub use acceptance::{
-    AcceptanceVerifier, MAX_OUTPUT_TAIL_BYTES, MAX_VERIFIER_TIMEOUT, criterion_key,
+    AcceptanceVerifier, MAX_OUTPUT_TAIL_BYTES, MAX_VERIFIER_TIMEOUT, criterion_key, parse_command,
 };
 pub use approval::{
     MAX_TAKEOVER_TIMEOUT, TakeoverApproval, TakeoverApprovalRequest, TakeoverApprovalStatus,

@@ -7,8 +7,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::Connection;
 use tempfile::TempDir;
 use vyane_goal::{
-    AcceptanceCriterion, GoalEventKind, GoalStatus, GoalStore, GoalStoreError, NewGoal,
-    SqliteGoalStore,
+    AcceptanceCriterion, AcceptanceVerification, CriterionResult, CriterionStatus, GoalEventKind,
+    GoalStatus, GoalStore, GoalStoreError, NewGoal, SqliteGoalStore, criterion_key,
 };
 
 const OWNER: &str = "owner-a";
@@ -315,10 +315,53 @@ fn goal_with_criteria(store: &SqliteGoalStore, id: &str, at: DateTime<Utc>) {
     let mut goal = NewGoal::new(format!("Goal {id}"), at);
     goal.id = Some(id.to_string());
     goal.acceptance_criteria = vec![
-        AcceptanceCriterion::new("test-passes", "cargo test"),
-        AcceptanceCriterion::new("review-approved", "independent reviewer"),
+        AcceptanceCriterion::new("custom", "cmd:true"),
+        AcceptanceCriterion::new("custom", "cmd:true"),
     ];
     store.create(OWNER, goal).expect("create goal");
+}
+
+fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
+    CriterionResult {
+        criterion_index: index,
+        criterion_key: criterion_key(index, criterion),
+        kind: criterion.kind.clone(),
+        target: criterion.target.clone(),
+        status: CriterionStatus::Satisfied,
+        command: vec!["true".into()],
+        cwd: "/tmp".into(),
+        exit_code: Some(0),
+        duration_ms: 1,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        detail: "verified".into(),
+    }
+}
+
+fn record_independent_verification(
+    store: &SqliteGoalStore,
+    id: &str,
+    worker_id: Option<&str>,
+    indices: &[usize],
+    at: DateTime<Utc>,
+) {
+    let record = store.get(OWNER, id).expect("get").expect("record");
+    let results = indices
+        .iter()
+        .map(|index| satisfied_result(*index, &record.acceptance_criteria[*index]))
+        .collect::<Vec<_>>();
+    let verification = AcceptanceVerification {
+        goal_id: id.into(),
+        all_satisfied: results.len() == record.acceptance_criteria.len()
+            && results
+                .iter()
+                .all(|result| result.status == CriterionStatus::Satisfied),
+        summary: format!("independent verification for {id}"),
+        results,
+    };
+    store
+        .record_verification(OWNER, id, worker_id, &verification, at)
+        .expect("record independent verification");
 }
 
 #[test]
@@ -338,21 +381,34 @@ fn done_is_rejected_while_acceptance_criteria_are_unsatisfied() {
     assert_eq!(record.revision, 1);
     assert_eq!(store.events(OWNER, "gated").expect("events").len(), 2);
 
-    // Satisfying one of two is still not enough.
+    // Bare self-report (or partial independent evidence) is still not enough.
     store
         .satisfy_criterion(OWNER, "gated", None, 0, at)
-        .expect("satisfy first");
+        .expect("self-report first");
     assert!(matches!(
         store.done(OWNER, "gated", None, None, None, at),
+        Err(GoalStoreError::CriteriaUnsatisfied { remaining: 2, .. })
+    ));
+    record_independent_verification(&store, "gated", None, &[0], at + TimeDelta::seconds(1));
+    assert!(matches!(
+        store.done(OWNER, "gated", None, None, None, at + TimeDelta::seconds(2)),
         Err(GoalStoreError::CriteriaUnsatisfied { remaining: 1, .. })
     ));
 
-    // All satisfied: completion goes through.
+    // All criteria independently verified: completion goes through.
+    record_independent_verification(&store, "gated", None, &[1], at + TimeDelta::seconds(3));
     store
-        .satisfy_criterion(OWNER, "gated", None, 1, at)
-        .expect("satisfy second");
+        .satisfy_criterion(OWNER, "gated", None, 1, at + TimeDelta::seconds(4))
+        .expect("persist second satisfied_at");
     let completed = store
-        .done(OWNER, "gated", None, Some("verified"), None, at)
+        .done(
+            OWNER,
+            "gated",
+            None,
+            Some("verified"),
+            None,
+            at + TimeDelta::seconds(5),
+        )
         .expect("complete");
     assert_eq!(completed.status, GoalStatus::Completed);
 }
@@ -385,8 +441,8 @@ fn satisfy_criterion_persists_satisfied_at_and_appends_an_event() {
         .iter()
         .find(|event| event.kind == GoalEventKind::CriterionSatisfied)
         .expect("criterion_satisfied event");
-    assert_eq!(satisfied.stage.as_deref(), Some("test-passes"));
-    assert_eq!(satisfied.detail.as_deref(), Some("cargo test"));
+    assert_eq!(satisfied.stage.as_deref(), Some("custom"));
+    assert_eq!(satisfied.detail.as_deref(), Some("cmd:true"));
 
     // A criterion cannot be satisfied twice.
     assert!(matches!(
@@ -453,7 +509,7 @@ fn explicit_waiver_records_an_auditable_event_before_completion() {
     let waive_event = &events[3];
     assert_eq!(waive_event.to_status, GoalStatus::InProgress);
     let detail = waive_event.detail.as_deref().expect("waive detail");
-    assert!(detail.contains("1:review-approved"));
+    assert!(detail.contains("1:custom"));
     assert!(detail.contains("reviewer unavailable before deadline"));
     assert_eq!(
         events
@@ -625,7 +681,29 @@ fn stale_worker_writes_are_fenced_out_after_reclaim() {
             .all(|criterion| criterion.satisfied_at.is_none())
     );
 
-    // The holder itself passes the fence.
+    // The holder itself passes the fence (progress + verification-backed done).
+    store
+        .progress(
+            OWNER,
+            "fenced",
+            Some("worker-b"),
+            "fence",
+            "holder progress",
+            now,
+        )
+        .expect("holder progress");
+    assert!(matches!(
+        store.progress(
+            OWNER,
+            "fenced",
+            Some("worker-a"),
+            "fence",
+            "stale progress",
+            now,
+        ),
+        Err(GoalStoreError::LeaseHeld { held_by, .. }) if held_by == "worker-b"
+    ));
+    record_independent_verification(&store, "fenced", Some("worker-b"), &[0, 1], now);
     store
         .satisfy_criterion(OWNER, "fenced", Some("worker-b"), 0, now)
         .expect("holder satisfies");

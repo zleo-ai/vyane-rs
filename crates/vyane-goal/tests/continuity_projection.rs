@@ -200,6 +200,7 @@ fn projection_moves_from_queue_to_decide_to_execute_without_mutation() {
         .progress(
             "local",
             &goal.id,
+            None,
             "fixture",
             "advance an unrelated durable revision",
             Utc.timestamp_opt(1_006, 0).unwrap(),

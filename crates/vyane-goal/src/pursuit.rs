@@ -579,6 +579,8 @@ where
                 // a restart cannot lose a consumed lifetime failure slot.
                 checkpoint.consecutive_failures = checkpoint.consecutive_failures.saturating_add(1);
             }
+            // Keep checkpoint payload monotonic, but pass wall-clock time into
+            // the store so lease fencing is not evaluated at a future event stamp.
             checkpoint.updated_at = std::cmp::max(verified_at, checkpoint.updated_at);
             let (_, recorded, _) = self.store.record_pursuit_verification(
                 owner,
@@ -587,7 +589,7 @@ where
                 &verification,
                 &checkpoint,
                 &verification.summary,
-                checkpoint.updated_at,
+                verified_at,
             )?;
             checkpoint = recorded;
             previous_verification = Some(verification.clone());
@@ -842,7 +844,10 @@ where
             });
         }
         checkpoint.goal_revision = goal.revision;
-        checkpoint.updated_at = std::cmp::max(Utc::now(), checkpoint.updated_at);
+        let write_at = Utc::now();
+        // Keep checkpoint payload monotonic, but pass wall-clock time into the
+        // store so lease fencing is not evaluated at a future event stamp.
+        checkpoint.updated_at = std::cmp::max(write_at, checkpoint.updated_at);
         let (recorded, _) = self.store.record_pursuit_checkpoint(
             owner,
             goal_id,
@@ -850,7 +855,7 @@ where
             checkpoint,
             stage,
             detail,
-            checkpoint.updated_at,
+            write_at,
         )?;
         *checkpoint = recorded;
         Ok(())
