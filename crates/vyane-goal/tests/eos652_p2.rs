@@ -613,3 +613,56 @@ fn future_progress_timestamp_does_not_false_kill_active_lease() {
         )
         .expect("holder progress at real now");
 }
+
+#[test]
+fn long_running_command_verification_is_accepted_within_verifier_budget() {
+    let (_directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    let mut goal = NewGoal::new("Long command", at);
+    goal.id = Some("long-cmd".into());
+    goal.acceptance_criteria = vec![AcceptanceCriterion::new("custom", "cmd:sleep 6")];
+    store.create(OWNER, goal).expect("create");
+    store.start(OWNER, "long-cmd", at).expect("start");
+    let record = store.get(OWNER, "long-cmd").expect("get").expect("record");
+    let criterion = &record.acceptance_criteria[0];
+    let result = CriterionResult {
+        criterion_index: 0,
+        criterion_key: criterion_key(0, criterion),
+        kind: criterion.kind.clone(),
+        target: criterion.target.clone(),
+        status: CriterionStatus::Satisfied,
+        command: vec!["sleep".into(), "6".into()],
+        cwd: "/tmp".into(),
+        exit_code: Some(0),
+        duration_ms: 6000,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        detail: "slow but valid".into(),
+    };
+    let verification = AcceptanceVerification {
+        goal_id: "long-cmd".into(),
+        all_satisfied: true,
+        summary: "long command".into(),
+        results: vec![result],
+    };
+    store
+        .record_verification(
+            OWNER,
+            "long-cmd",
+            None,
+            &verification,
+            at + TimeDelta::seconds(1),
+        )
+        .expect("long command re-run should stay within verifier budget");
+    let completed = store
+        .done(
+            OWNER,
+            "long-cmd",
+            None,
+            Some("slow verified"),
+            None,
+            at + TimeDelta::seconds(10),
+        )
+        .expect("complete after long command evidence");
+    assert_eq!(completed.status, GoalStatus::Completed);
+}

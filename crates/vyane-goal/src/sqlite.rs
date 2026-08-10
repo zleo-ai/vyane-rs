@@ -19,7 +19,7 @@ use crate::{
     GoalContinuityPolicy, GoalContinuitySignal, GoalContinuitySignalResult, GoalContinuityState,
     GoalContinuityStepStatus, GoalEvent, GoalEventKind, GoalPursuitCheckpoint, GoalQuery,
     GoalQuotaEvent, GoalRecord, GoalRecoveryCursor, GoalRecoveryFilter, GoalRecoveryPage,
-    GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact, NewGoal,
+    GoalStatus, GoalStore, GoalStoreError, GoalVerificationArtifact, MAX_VERIFIER_TIMEOUT, NewGoal,
     PursuitCheckpointStatus, Result, TakeoverApproval, TakeoverApprovalRequest,
     TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision, TakeoverFinish,
     TakeoverRunStatus, TakeoverSandbox,
@@ -621,7 +621,7 @@ fn validate_and_rerun_command_result(result: &CriterionResult) -> Result<()> {
                 "satisfied command verification failed to spawn: {error}"
             ))
         })?;
-    let deadline = Instant::now() + StdDuration::from_secs(5);
+    let deadline = Instant::now() + MAX_VERIFIER_TIMEOUT;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
