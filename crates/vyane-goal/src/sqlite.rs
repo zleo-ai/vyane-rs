@@ -543,7 +543,13 @@ fn validate_verification_result(
         )));
     }
     if result.status == CriterionStatus::Satisfied {
-        validate_satisfied_result_evidence(result)?;
+        // Re-reporting an already-satisfied criterion may omit command evidence
+        // (AcceptanceVerifier does this). Fresh Satisfied results for still-open
+        // command criteria must carry executable evidence so store writers cannot
+        // forge completion unlocks.
+        if criterion.satisfied_at.is_none() {
+            validate_satisfied_result_evidence(result)?;
+        }
     }
     Ok(())
 }
