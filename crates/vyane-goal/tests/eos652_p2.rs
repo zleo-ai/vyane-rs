@@ -39,31 +39,32 @@ fn goal_with_criteria(store: &SqliteGoalStore, id: &str, at: DateTime<Utc>) {
     goal.id = Some(id.to_string());
     goal.acceptance_criteria = vec![
         AcceptanceCriterion::new("custom", "cmd:true"),
+        AcceptanceCriterion::new("custom", "cmd:true"),
+    ];
+    store.create(OWNER, goal).expect("create goal");
+}
+
+fn goal_with_manual(store: &SqliteGoalStore, id: &str, at: DateTime<Utc>) {
+    let mut goal = NewGoal::new(format!("Goal {id}"), at);
+    goal.id = Some(id.to_string());
+    goal.acceptance_criteria = vec![
+        AcceptanceCriterion::new("custom", "cmd:true"),
         AcceptanceCriterion::new("manual-confirm", "release owner approves"),
     ];
     store.create(OWNER, goal).expect("create goal");
 }
 
 fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
-    let command = if criterion.kind == "manual-confirm" {
-        Vec::new()
-    } else {
-        vec!["true".into()]
-    };
-    let exit_code = if criterion.kind == "manual-confirm" {
-        None
-    } else {
-        Some(0)
-    };
+    assert_ne!(criterion.kind, "manual-confirm", "manual-confirm must be waived, not forged");
     CriterionResult {
         criterion_index: index,
         criterion_key: criterion_key(index, criterion),
         kind: criterion.kind.clone(),
         target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
-        command,
+        command: vec!["true".into()],
         cwd: "/tmp".into(),
-        exit_code,
+        exit_code: Some(0),
         duration_ms: 1,
         stdout_tail: String::new(),
         stderr_tail: String::new(),
@@ -195,7 +196,7 @@ fn done_accepts_path_that_records_real_verifier_results_then_completes() {
 fn waiver_still_completes_without_forging_satisfied_at() {
     let (_directory, store) = fixture();
     let at = timestamp(1_700_000_000);
-    goal_with_criteria(&store, "waive-path", at);
+    goal_with_manual(&store, "waive-path", at);
     store.start(OWNER, "waive-path", at).expect("start");
 
     // One criterion independently verified; the other is waived.
@@ -234,6 +235,95 @@ fn waiver_still_completes_without_forging_satisfied_at() {
         "{detail}"
     );
     assert_eq!(waive.to_status, GoalStatus::InProgress);
+}
+
+#[test]
+fn satisfy_then_empty_satisfied_artifact_does_not_unlock_done() {
+    let (_directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    goal_with_criteria(&store, "pre-satisfy", at);
+    store.start(OWNER, "pre-satisfy", at).expect("start");
+    store
+        .satisfy_criterion(OWNER, "pre-satisfy", None, 0, at + TimeDelta::seconds(1))
+        .expect("self-report first");
+    let record = store.get(OWNER, "pre-satisfy").expect("get").expect("record");
+    let criterion = &record.acceptance_criteria[0];
+    let forged = CriterionResult {
+        criterion_index: 0,
+        criterion_key: criterion_key(0, criterion),
+        kind: criterion.kind.clone(),
+        target: criterion.target.clone(),
+        status: CriterionStatus::Satisfied,
+        command: Vec::new(),
+        cwd: String::new(),
+        exit_code: None,
+        duration_ms: 0,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        detail: "criterion already satisfied".into(),
+    };
+    let verification = AcceptanceVerification {
+        goal_id: "pre-satisfy".into(),
+        all_satisfied: false,
+        summary: "forged after satisfy".into(),
+        results: vec![forged],
+    };
+    // Bookkeeping re-report may be accepted after satisfy_at is set, but must not unlock done.
+    let _ = store.record_verification(
+        OWNER,
+        "pre-satisfy",
+        None,
+        &verification,
+        at + TimeDelta::seconds(2),
+    );
+    assert!(
+        matches!(
+            store.done(
+                OWNER,
+                "pre-satisfy",
+                None,
+                Some("should stay open"),
+                None,
+                at + TimeDelta::seconds(3),
+            ),
+            Err(GoalStoreError::CriteriaUnsatisfied { remaining: 2, .. })
+        ),
+        "empty already-satisfied re-report must not unlock completion"
+    );
+}
+
+#[test]
+fn mismatched_command_payload_is_rejected_even_with_exit_zero() {
+    let (_directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    goal_with_criteria(&store, "mismatch", at);
+    store.start(OWNER, "mismatch", at).expect("start");
+    let record = store.get(OWNER, "mismatch").expect("get").expect("record");
+    let criterion = &record.acceptance_criteria[0];
+    let forged = CriterionResult {
+        criterion_index: 0,
+        criterion_key: criterion_key(0, criterion),
+        kind: criterion.kind.clone(),
+        target: criterion.target.clone(),
+        status: CriterionStatus::Satisfied,
+        command: vec!["false".into()],
+        cwd: "/tmp".into(),
+        exit_code: Some(0),
+        duration_ms: 1,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        detail: "forged command".into(),
+    };
+    let verification = AcceptanceVerification {
+        goal_id: "mismatch".into(),
+        all_satisfied: false,
+        summary: "forged".into(),
+        results: vec![forged],
+    };
+    assert!(matches!(
+        store.record_verification(OWNER, "mismatch", None, &verification, at + TimeDelta::seconds(1)),
+        Err(GoalStoreError::InvalidInput(_))
+    ));
 }
 
 #[test]

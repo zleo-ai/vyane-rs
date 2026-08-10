@@ -30,25 +30,15 @@ fn new_goal(id: &str, title: &str, priority: u8, at: DateTime<Utc>) -> NewGoal {
 }
 
 fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
-    let command = if criterion.kind == "manual-confirm" {
-        Vec::new()
-    } else {
-        vec!["true".into()]
-    };
-    let exit_code = if criterion.kind == "manual-confirm" {
-        None
-    } else {
-        Some(0)
-    };
     CriterionResult {
         criterion_index: index,
         criterion_key: criterion_key(index, criterion),
         kind: criterion.kind.clone(),
         target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
-        command,
+        command: vec!["true".into()],
         cwd: "/tmp".into(),
-        exit_code,
+        exit_code: Some(0),
         duration_ms: 1,
         stdout_tail: String::new(),
         stderr_tail: String::new(),
@@ -91,7 +81,7 @@ fn lifecycle_updates_snapshot_and_appends_revision_ordered_events() {
     goal.description = "A durable goal".into();
     goal.acceptance_criteria = vec![
         AcceptanceCriterion::new("custom", "cmd:true"),
-        AcceptanceCriterion::new("manual-confirm", "release owner approves"),
+        AcceptanceCriterion::new("custom", "cmd:true"),
     ];
 
     let created = store.create(OWNER_A, goal).expect("create");

@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::process::{Command, Stdio};
+use std::time::{Duration as StdDuration, Instant};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -22,7 +24,7 @@ use crate::{
     TakeoverApprovalStatus, TakeoverBoundTarget, TakeoverDecision, TakeoverFinish,
     TakeoverRunStatus, TakeoverSandbox,
     continuity::{ready_approval_target, state_for_event, with_ready_signal, with_step_status},
-    criterion_key,
+    criterion_key, parse_command,
     model::{
         validate_detail, validate_goal_id, validate_lease_seconds, validate_optional_reason,
         validate_owner, validate_stage, validate_worker,
@@ -543,49 +545,32 @@ fn validate_verification_result(
         )));
     }
     if result.status == CriterionStatus::Satisfied {
-        // Re-reporting an already-satisfied criterion may omit command evidence
-        // (AcceptanceVerifier does this). Fresh Satisfied results for still-open
-        // command criteria must carry executable evidence so store writers cannot
-        // forge completion unlocks.
-        if criterion.satisfied_at.is_none() {
-            validate_satisfied_result_evidence(result)?;
-        }
+        validate_satisfied_result_for_criterion(criterion, result)?;
     }
     Ok(())
 }
 
-fn validate_satisfied_result_evidence(result: &CriterionResult) -> Result<()> {
+fn validate_satisfied_result_for_criterion(
+    criterion: &AcceptanceCriterion,
+    result: &CriterionResult,
+) -> Result<()> {
     match result.kind.trim() {
-        "manual-confirm" => {
-            if !result.command.is_empty() || result.exit_code.is_some() {
-                return Err(GoalStoreError::InvalidInput(
-                    "manual-confirm verification cannot carry command evidence".into(),
-                ));
-            }
-            Ok(())
-        }
+        "manual-confirm" => Err(GoalStoreError::InvalidInput(
+            "manual-confirm cannot be marked satisfied through verification artifacts; waive the criterion instead".into(),
+        )),
         "test-passes" | "custom" => {
-            if !result.target.trim().starts_with("cmd:") {
-                return Err(GoalStoreError::InvalidInput(
-                    "command acceptance criteria require a cmd: target".into(),
-                ));
+            // AcceptanceVerifier re-reports already-satisfied criteria without
+            // command evidence. Allow that bookkeeping payload only when the
+            // criterion is already marked satisfied; it never unlocks completion
+            // on its own because completion counts only re-runnable evidence.
+            if criterion.satisfied_at.is_some()
+                && result.command.is_empty()
+                && result.exit_code.is_none()
+                && result.detail == "criterion already satisfied"
+            {
+                return Ok(());
             }
-            if result.command.is_empty() {
-                return Err(GoalStoreError::InvalidInput(
-                    "satisfied command verification requires a non-empty command".into(),
-                ));
-            }
-            if result.exit_code != Some(0) {
-                return Err(GoalStoreError::InvalidInput(
-                    "satisfied command verification requires exit_code 0".into(),
-                ));
-            }
-            if result.cwd.trim().is_empty() {
-                return Err(GoalStoreError::InvalidInput(
-                    "satisfied command verification requires a non-empty cwd".into(),
-                ));
-            }
-            Ok(())
+            validate_and_rerun_command_result(result)
         }
         _ => Err(GoalStoreError::InvalidInput(format!(
             "unsupported acceptance criterion kind `{}` cannot be marked satisfied",
@@ -594,8 +579,92 @@ fn validate_satisfied_result_evidence(result: &CriterionResult) -> Result<()> {
     }
 }
 
+fn validate_and_rerun_command_result(result: &CriterionResult) -> Result<()> {
+    let expected = parse_command(result.target.trim()).ok_or_else(|| {
+        GoalStoreError::InvalidInput(
+            "command acceptance criteria require a cmd: target with non-empty argv".into(),
+        )
+    })?;
+    if result.command != expected {
+        return Err(GoalStoreError::InvalidInput(
+            "satisfied command verification command must match the criterion target".into(),
+        ));
+    }
+    if result.exit_code != Some(0) {
+        return Err(GoalStoreError::InvalidInput(
+            "satisfied command verification requires exit_code 0".into(),
+        ));
+    }
+    if result.cwd.trim().is_empty() {
+        return Err(GoalStoreError::InvalidInput(
+            "satisfied command verification requires a non-empty cwd".into(),
+        ));
+    }
+    let cwd = std::path::Path::new(result.cwd.trim());
+    if !cwd.is_dir() {
+        return Err(GoalStoreError::InvalidInput(
+            "satisfied command verification cwd must be an existing directory".into(),
+        ));
+    }
+    // Re-run the claimed command so store writers cannot forge a Satisfied
+    // payload with a fabricated exit_code. Keep the store-side budget tight.
+    let mut child = Command::new(&result.command[0])
+        .args(&result.command[1..])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            GoalStoreError::InvalidInput(format!(
+                "satisfied command verification failed to spawn: {error}"
+            ))
+        })?;
+    let deadline = Instant::now() + StdDuration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(());
+                }
+                return Err(GoalStoreError::InvalidInput(
+                    "satisfied command verification re-run did not exit 0".into(),
+                ));
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(StdDuration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GoalStoreError::InvalidInput(
+                    "satisfied command verification re-run timed out".into(),
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GoalStoreError::InvalidInput(format!(
+                    "satisfied command verification re-run failed: {error}"
+                )));
+            }
+        }
+    }
+}
+
+fn result_unlocks_completion(result: &CriterionResult) -> bool {
+    result.status == CriterionStatus::Satisfied
+        && matches!(result.kind.trim(), "test-passes" | "custom")
+        && !result.command.is_empty()
+        && result.exit_code == Some(0)
+        && !result.cwd.trim().is_empty()
+        && parse_command(result.target.trim()).is_some_and(|expected| expected == result.command)
+}
+
 /// Indices of acceptance criteria that have durable independent verifier
-/// evidence (`CriterionStatus::Satisfied` in at least one verification artifact).
+/// evidence (`CriterionStatus::Satisfied` with re-runnable command evidence).
+/// Empty already-satisfied re-reports and manual-confirm payloads never unlock
+/// completion by themselves.
 fn verifier_satisfied_indices(
     transaction: &Transaction<'_>,
     owner: &str,
@@ -625,7 +694,7 @@ fn verifier_satisfied_indices(
                 ))
             })?;
         for result in verification.results {
-            if result.status == CriterionStatus::Satisfied {
+            if result_unlocks_completion(&result) {
                 satisfied.insert(result.criterion_index);
             }
         }

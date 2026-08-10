@@ -316,31 +316,21 @@ fn goal_with_criteria(store: &SqliteGoalStore, id: &str, at: DateTime<Utc>) {
     goal.id = Some(id.to_string());
     goal.acceptance_criteria = vec![
         AcceptanceCriterion::new("custom", "cmd:true"),
-        AcceptanceCriterion::new("manual-confirm", "release owner approves"),
+        AcceptanceCriterion::new("custom", "cmd:true"),
     ];
     store.create(OWNER, goal).expect("create goal");
 }
 
 fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
-    let command = if criterion.kind == "manual-confirm" {
-        Vec::new()
-    } else {
-        vec!["true".into()]
-    };
-    let exit_code = if criterion.kind == "manual-confirm" {
-        None
-    } else {
-        Some(0)
-    };
     CriterionResult {
         criterion_index: index,
         criterion_key: criterion_key(index, criterion),
         kind: criterion.kind.clone(),
         target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
-        command,
+        command: vec!["true".into()],
         cwd: "/tmp".into(),
-        exit_code,
+        exit_code: Some(0),
         duration_ms: 1,
         stdout_tail: String::new(),
         stderr_tail: String::new(),
@@ -519,7 +509,7 @@ fn explicit_waiver_records_an_auditable_event_before_completion() {
     let waive_event = &events[3];
     assert_eq!(waive_event.to_status, GoalStatus::InProgress);
     let detail = waive_event.detail.as_deref().expect("waive detail");
-    assert!(detail.contains("1:manual-confirm"));
+    assert!(detail.contains("1:custom"));
     assert!(detail.contains("reviewer unavailable before deadline"));
     assert_eq!(
         events

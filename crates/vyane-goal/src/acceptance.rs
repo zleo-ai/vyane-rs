@@ -533,7 +533,7 @@ pub fn criterion_key(index: usize, criterion: &AcceptanceCriterion) -> String {
         .collect()
 }
 
-fn parse_command(target: &str) -> Option<Vec<String>> {
+pub fn parse_command(target: &str) -> Option<Vec<String>> {
     let command = target.strip_prefix("cmd:")?.trim();
     let argv = command
         .split_whitespace()
