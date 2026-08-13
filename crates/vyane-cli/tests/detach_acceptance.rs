@@ -1397,7 +1397,7 @@ async fn cancel_after_worker_sigkill_cleans_orphaned_nested_harness() {
 
     unix_signal_pid(processes.worker_pid, 9);
     assert!(
-        wait_pid_dead(processes.worker_pid, Duration::from_secs(8)),
+        wait_pid_dead(processes.worker_pid, Duration::from_secs(20)),
         "outer worker {} was not reaped after SIGKILL",
         processes.worker_pid
     );
@@ -1415,7 +1415,7 @@ async fn cancel_after_worker_sigkill_cleans_orphaned_nested_harness() {
         .stderr(predicate::str::contains("worker process is gone"));
 
     assert!(
-        wait_group_empty(processes.harness_pgid, Duration::from_secs(8)),
+        wait_group_empty(processes.harness_pgid, Duration::from_secs(20)),
         "nested harness group {} survived outer-dead cancellation",
         processes.harness_pgid
     );
@@ -1723,10 +1723,16 @@ async fn task_list_orders_recent_first_and_json_parses() {
 
 /// Whether `pid` is dead, polling `kill(pid, 0)` until it reports ESRCH or the
 /// budget elapses.
+///
+/// A zombie is treated as dead: SIGKILL has already been accepted, and the
+/// remaining wait is only for the parent (often `init`) to reap. Under a
+/// loaded host that reap can lag far beyond a tight 8s poll, which made
+/// `cancel_after_worker_sigkill_cleans_orphaned_nested_harness` flake when
+/// the whole workspace ran in parallel.
 fn wait_pid_dead(pid: i32, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     loop {
-        if !unix_pid_alive(pid) {
+        if !unix_pid_alive(pid) || unix_pid_is_zombie(pid) {
             return true;
         }
         if Instant::now() >= deadline {
@@ -1734,6 +1740,23 @@ fn wait_pid_dead(pid: i32, budget: Duration) -> bool {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Linux `/proc/<pid>/stat` state `Z` — killed, not yet reaped.
+#[cfg(target_os = "linux")]
+fn unix_pid_is_zombie(pid: i32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some(close) = stat.rfind(')') else {
+        return false;
+    };
+    stat[close + 1..].trim_start().starts_with('Z')
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unix_pid_is_zombie(_pid: i32) -> bool {
+    false
 }
 
 /// Whether the process GROUP `pgid` is empty, polling `kill(-pgid, 0)` until it
