@@ -20,14 +20,14 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest as _, Sha256};
 use vyane_agent::{
     AgentStore, CancelOutcome, CancelRequest, ClaimedRun, ControllerKind, ControllerRef,
-    ExecutionBackend, NewAgentRun, NewRunCompletion, NewWorker, RunLeaseReceipt, RunMode,
+    ExecutionBackend, NewAgentRun, NewRunCompletion, NewWorker, RunLeaseReceipt, RunMode, RunState,
     SqliteAgentStore,
 };
 use vyane_core::{
     AttemptFailureClass, AttemptStatus, BillingModeCategory, CompletionReceipt, CostEvidence,
     EndpointClass, GATE_CI_PACKAGING, GATE_INDEPENDENT_REVIEW, GATE_INTEGRATION, GATE_TRUTH_PROBE,
     GATE_UNIT, GateOutcome, HarnessKind, ModelId, NamedGate, Protocol, ProviderId, ReceiptAttempt,
-    ReceiptError, RecoveryCleanupState, RiskClass, RouteConfig, TaskCase,
+    ReceiptError, ReceiptFinalStatus, RecoveryCleanupState, RiskClass, RouteConfig, TaskCase,
 };
 
 use crate::approval_fsm::{DeliveryEvent, DeliveryPhase};
@@ -337,6 +337,8 @@ pub enum CrashFence {
     AfterEffectBeforeReceipt,
     AfterArtifactBeforeTransition,
     AfterGrantBeforeEffect,
+    /// AgentRun `commit_completion` succeeded; CompletionReceipt still Open.
+    AfterAgentRunCommitBeforeReceipt,
 }
 
 impl DogfoodPath {
@@ -1168,50 +1170,94 @@ impl DogfoodPath {
     }
 
     /// Commit AgentRun completion + CompletionReceipt when gates allow.
+    ///
+    /// If the AgentRun is already `Succeeded` (crash after `commit_completion`)
+    /// the receipt is finalized without re-issuing a lease or recommitting.
     pub fn finish_success(
         &mut self,
         now: DateTime<Utc>,
     ) -> Result<CompletionReceipt, DogfoodError> {
         self.ensure_not_cancelled()?;
-        let claimed = self
-            .claimed
-            .as_ref()
-            .ok_or(DogfoodError::InvalidState("not claimed"))?;
-        let artifact = self
-            .artifact_digest
-            .clone()
-            .ok_or(DogfoodError::InvalidState("no artifact"))?;
-        let permit = self
+        if let Some(existing) = self
+            .kernel
+            .get_receipt(&self.config.owner, &self.config.receipt_id)?
+        {
+            self.receipt_revision = existing.revision;
+            match existing.final_status {
+                ReceiptFinalStatus::Completed => return Ok(existing),
+                ReceiptFinalStatus::Open => {}
+                _ => {
+                    return Err(DogfoodError::InvalidState(
+                        "receipt already terminal; cannot complete as success",
+                    ));
+                }
+            }
+        }
+        let run = self
             .agent
-            .issue_execution_permit(
-                &self.config.owner,
-                &claimed.receipt,
-                &claimed.run.policy_digest,
-            )
-            .map_err(|e| DogfoodError::Agent(e.to_string()))?;
-        let prepared = self
-            .agent
-            .prepare_completion(
-                &self.config.owner,
-                &permit,
-                &NewRunCompletion {
-                    id: format!("cmp-{}", self.config.run_id),
-                    sink_kind: "dogfood-artifact-v1".into(),
-                    publication_key: format!("pub-{}", self.config.run_id),
-                    content_digest: artifact,
-                    content_bytes: self
-                        .artifact_path
-                        .as_ref()
-                        .and_then(|p| fs::metadata(p).ok())
-                        .map(|m| m.len())
-                        .unwrap_or(0),
-                },
-            )
-            .map_err(|e| DogfoodError::Agent(e.to_string()))?;
-        self.agent
-            .commit_completion(&self.config.owner, &prepared.permit)
-            .map_err(|e| DogfoodError::Agent(e.to_string()))?;
+            .get_run(&self.config.owner, &self.config.run_id)
+            .map_err(|e| DogfoodError::Agent(e.to_string()))?
+            .ok_or(DogfoodError::InvalidState("run missing"))?;
+        match run.state {
+            RunState::Succeeded => self.finalize_open_receipt(now),
+            RunState::Failed | RunState::Cancelled | RunState::TimedOut => Err(
+                DogfoodError::InvalidState("agent run already terminal without success"),
+            ),
+            _ => {
+                let claimed = self
+                    .claimed
+                    .as_ref()
+                    .ok_or(DogfoodError::InvalidState("not claimed"))?;
+                let artifact = self
+                    .artifact_digest
+                    .clone()
+                    .ok_or(DogfoodError::InvalidState("no artifact"))?;
+                let permit = self
+                    .agent
+                    .issue_execution_permit(
+                        &self.config.owner,
+                        &claimed.receipt,
+                        &claimed.run.policy_digest,
+                    )
+                    .map_err(|e| DogfoodError::Agent(e.to_string()))?;
+                let prepared = self
+                    .agent
+                    .prepare_completion(
+                        &self.config.owner,
+                        &permit,
+                        &NewRunCompletion {
+                            id: format!("cmp-{}", self.config.run_id),
+                            sink_kind: "dogfood-artifact-v1".into(),
+                            publication_key: format!("pub-{}", self.config.run_id),
+                            content_digest: artifact,
+                            content_bytes: self
+                                .artifact_path
+                                .as_ref()
+                                .and_then(|p| fs::metadata(p).ok())
+                                .map(|m| m.len())
+                                .unwrap_or(0),
+                        },
+                    )
+                    .map_err(|e| DogfoodError::Agent(e.to_string()))?;
+                self.agent
+                    .commit_completion(&self.config.owner, &prepared.permit)
+                    .map_err(|e| DogfoodError::Agent(e.to_string()))?;
+                if self.crash_after == Some(CrashFence::AfterAgentRunCommitBeforeReceipt) {
+                    return Err(DogfoodError::InvalidState(
+                        "injected crash after AgentRun commit before receipt",
+                    ));
+                }
+                self.finalize_open_receipt(now)
+            }
+        }
+    }
 
+    /// Terminalize an Open receipt after the AgentRun is already Succeeded,
+    /// or immediately after a live `commit_completion`. Does not touch AgentStore.
+    fn finalize_open_receipt(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<CompletionReceipt, DogfoodError> {
         // Capture lifecycle inventory before the terminal transition so cleanup
         // fields can land on the still-open receipt.
         let cleanup = self.prepare_cleanup_state(true);
@@ -1369,11 +1415,12 @@ impl DogfoodPath {
             .get_run(&self.config.owner, &self.config.run_id)
             .map_err(|e| DogfoodError::Agent(e.to_string()))?
             .ok_or(DogfoodError::InvalidState("run missing after reopen"))?;
-        use vyane_agent::RunState;
         if matches!(
             run.state,
             RunState::Succeeded | RunState::Failed | RunState::Cancelled | RunState::TimedOut
         ) {
+            // Terminal AgentRun has no live lease. Succeeded + Open receipt is
+            // reconciled by `finish_success` without recommitting the run.
             self.permit_issued = true;
             return Ok(());
         }
@@ -2037,6 +2084,101 @@ mod tests {
             path.execute_process_effect("once-only").unwrap();
         }
         assert_eq!(path.effects().len(), 1);
+    }
+
+    #[test]
+    fn crash_after_agent_run_commit_leaves_succeeded_run_and_open_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let durable = root.path().join("d");
+        let workdir = durable.join("wd");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::write(workdir.join("MARKER"), "PASS").unwrap();
+        let config = sample_config(root.path(), "succr", workdir);
+        let mut path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
+        path.set_crash_after(CrashFence::AfterAgentRunCommitBeforeReceipt);
+        path.create_or_adopt_agent_run(now()).unwrap();
+        path.claim_and_lease().unwrap();
+        path.record_attempt(now()).unwrap();
+        path.evaluate_permission(now()).unwrap();
+        path.execute_process_effect("once-only").unwrap();
+        path.run_truth_probe(now()).unwrap();
+        path.record_local_gates(now()).unwrap();
+        path.publish_artifact("once-only", now()).unwrap();
+        let crash = path.finish_success(now()).unwrap_err();
+        assert!(matches!(crash, DogfoodError::InvalidState(_)));
+        let run = path
+            .agent
+            .get_run(&path.config.owner, &path.config.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, RunState::Succeeded);
+        let receipt = path
+            .kernel
+            .get_receipt(&path.config.owner, &path.config.receipt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.final_status, ReceiptFinalStatus::Open);
+        // Same-process retry must not recommit; it only finalizes the receipt.
+        let completed = path.finish_success(now()).unwrap();
+        assert_eq!(completed.final_status, ReceiptFinalStatus::Completed);
+        assert_eq!(path.effects().len(), 1);
+        let run = path
+            .agent
+            .get_run(&path.config.owner, &path.config.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, RunState::Succeeded);
+    }
+
+    #[test]
+    fn crash_after_agent_run_commit_true_restart_finalizes_open_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let durable = root.path().join("d");
+        let workdir = durable.join("wd");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::write(workdir.join("MARKER"), "PASS").unwrap();
+        let config = sample_config(root.path(), "sucop", workdir);
+        let config_reopen = config.clone();
+        {
+            let mut path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
+            path.set_crash_after(CrashFence::AfterAgentRunCommitBeforeReceipt);
+            path.create_or_adopt_agent_run(now()).unwrap();
+            path.claim_and_lease().unwrap();
+            path.record_attempt(now()).unwrap();
+            path.evaluate_permission(now()).unwrap();
+            path.execute_process_effect("once-only").unwrap();
+            path.run_truth_probe(now()).unwrap();
+            path.record_local_gates(now()).unwrap();
+            path.publish_artifact("once-only", now()).unwrap();
+            let crash = path.finish_success(now()).unwrap_err();
+            assert!(matches!(crash, DogfoodError::InvalidState(_)));
+            let run = path
+                .agent
+                .get_run(&path.config.owner, &path.config.run_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.state, RunState::Succeeded);
+            let receipt = path
+                .kernel
+                .get_receipt(&path.config.owner, &path.config.receipt_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(receipt.final_status, ReceiptFinalStatus::Open);
+        }
+        let mut path = DogfoodPath::reopen(&durable, config_reopen).unwrap();
+        assert!(path.claimed.is_none());
+        let recovered = path.recover_after_crash(now()).unwrap();
+        assert_eq!(recovered.final_status, ReceiptFinalStatus::Completed);
+        assert_eq!(path.effects().len(), 1);
+        let run = path
+            .agent
+            .get_run(&path.config.owner, &path.config.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, RunState::Succeeded);
+        let again = path.finish_success(now()).unwrap();
+        assert_eq!(again.final_status, ReceiptFinalStatus::Completed);
+        assert_eq!(again.receipt_id, recovered.receipt_id);
     }
 
     #[test]
