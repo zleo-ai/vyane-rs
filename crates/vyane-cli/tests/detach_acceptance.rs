@@ -1396,9 +1396,18 @@ async fn cancel_after_worker_sigkill_cleans_orphaned_nested_harness() {
             .await;
 
     unix_signal_pid(processes.worker_pid, 9);
+    // Production cancel uses `pid_alive()` → `kill(pid, 0)`. A Linux zombie
+    // still answers that probe, so this wait must see ESRCH (not `/proc` state
+    // `Z`) before `task cancel` can take the `worker process is gone` path.
+    // The 20s budget is only for a loaded host whose init reap lags.
     assert!(
-        wait_pid_dead(processes.worker_pid, Duration::from_secs(8)),
+        wait_pid_dead(processes.worker_pid, Duration::from_secs(20)),
         "outer worker {} was not reaped after SIGKILL",
+        processes.worker_pid
+    );
+    assert!(
+        !unix_pid_alive(processes.worker_pid),
+        "outer worker {} still answers kill(0); cancel needs ESRCH, not a zombie",
         processes.worker_pid
     );
     assert!(
@@ -1415,7 +1424,7 @@ async fn cancel_after_worker_sigkill_cleans_orphaned_nested_harness() {
         .stderr(predicate::str::contains("worker process is gone"));
 
     assert!(
-        wait_group_empty(processes.harness_pgid, Duration::from_secs(8)),
+        wait_group_empty(processes.harness_pgid, Duration::from_secs(20)),
         "nested harness group {} survived outer-dead cancellation",
         processes.harness_pgid
     );
@@ -1721,8 +1730,13 @@ async fn task_list_orders_recent_first_and_json_parses() {
     }
 }
 
-/// Whether `pid` is dead, polling `kill(pid, 0)` until it reports ESRCH or the
+/// Whether `pid` is gone, polling `kill(pid, 0)` until it reports ESRCH or the
 /// budget elapses.
+///
+/// A Linux zombie (`/proc/<pid>/stat` state `Z`) is still alive for this
+/// helper. Production cancel uses the same `kill(pid, 0)` probe, so treating
+/// `Z` as dead would let tests call `task cancel` while
+/// `verify_controller_identity` still returns `Match`.
 fn wait_pid_dead(pid: i32, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     loop {
