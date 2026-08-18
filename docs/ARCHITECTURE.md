@@ -99,7 +99,7 @@ Two consequences:
 |-------|----------------------------------|------|
 | `vyane-config` | `vyane-provider` | parse TOML, resolve profiles + failover chains → `BoundTarget` |
 | `vyane-provider` | — | provider registry, endpoints, auth styles, env-injection rules |
-| `vyane-protocol` | — | `ChatClient` over HTTP (OpenAI Chat / Responses, Anthropic Messages), including bounded non-streaming OpenAI Chat typed tool turns, a separately authorized OpenAI Chat turn path, and the shared HTTP base validator and endpoint-routing digest |
+| `vyane-protocol` | — | `ChatClient` over HTTP (OpenAI Chat / Responses, Anthropic Messages), including bounded non-streaming OpenAI Chat and Anthropic Messages typed tool turns, separately authorized turn paths for those two protocols, and the shared HTTP base validator and endpoint-routing digest |
 | `vyane-harness` | — | `Harness` wrapping coding CLIs, additive process-local execution context, pinned-workdir child handoff, process-group control, guarded native filesystem tools, and a bounded native turn driver |
 | `vyane-kernel` | — (traits only) | early execution identity, whole-chain capability admission, prepared dispatch, dispatch / broadcast / failover state machine |
 | `vyane-ledger` | — | JSONL `Ledger`, filesystem `SessionStore` with strict revisioned native-session snapshots/CAS transitions, cost table |
@@ -117,21 +117,23 @@ Two consequences:
 `ChatClient::complete_turn` is an additive typed boundary. Its default fallback
 keeps text-only clients source-compatible but delegates only when the request
 is lossless legacy text; request-side tool calls/results, reasoning and refusal
-signals are never flattened. The non-streaming OpenAI Chat override also
-preserves response-side tool, reasoning and refusal signals. Anthropic/Responses
-typed turns, streaming tool envelopes and provider-specific quirk profiles
-remain open. This transport contract is a prerequisite for a native model loop;
-it is not itself a `NativeHarness` implementation.
+signals are never flattened. The non-streaming OpenAI Chat and Anthropic
+Messages overrides also preserve response-side tool, reasoning/thinking and
+refusal/stop signals. OpenAI Responses typed turns, streaming tool envelopes
+and provider-specific quirk profiles remain open. This transport contract is a
+prerequisite for a native model loop; it is not itself a `NativeHarness`
+implementation.
 
 `AuthorizedToolChatClient` is a separate trait with no fallback to the ordinary
-chat path. Its OpenAI Chat implementation asks a live
+chat path. The OpenAI Chat and Anthropic Messages implementations ask a live
 `NativeExecutionAuthority` for every explicit wire attempt immediately before
 `send`; an authority error is returned unchanged and cannot enter the HTTP
 retry policy. Cancellation is observed while waiting for authority, sending,
 reading a success body and backing off. The shared HTTP client follows no
 redirects and performs no implicit client retries, leaving the explicit Vyane
-loop as the sole owner of physical attempt numbering. This guarded entry point
-still has no production native-loop caller.
+loop as the sole owner of physical attempt numbering. The resident Native
+AgentRun lane currently consumes only the authorized OpenAI Chat path;
+Anthropic Messages typed-turn is not wired there yet.
 
 ## Execution identity and capability admission
 

@@ -1,7 +1,11 @@
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use reqwest::RequestBuilder;
-use vyane_core::{ChatClient, ChatOutcome, ChatRequest, Endpoint, Protocol, Result, StreamEvent};
+use vyane_core::{
+    AuthorizedToolChatClient, CancellationToken, ChatClient, ChatOutcome, ChatRequest, Endpoint,
+    ErrorKind, NativeExecutionAuthority, Protocol, Result, StreamEvent, ToolChatOutcome,
+    ToolChatRequest, VyaneError,
+};
 
 use crate::http::{ClientOptions, HttpClient};
 use crate::sse::{StreamProtocol, response_to_stream};
@@ -49,6 +53,21 @@ impl ChatClient for AnthropicMessagesClient {
         response.try_into()
     }
 
+    async fn complete_turn(&self, req: ToolChatRequest) -> Result<ToolChatOutcome> {
+        req.validate().map_err(|error| {
+            VyaneError::new(
+                ErrorKind::Config,
+                format!("invalid typed tool-chat request: {error}"),
+            )
+        })?;
+        let body = wire::anthropic_tool_chat::Request::try_from(&req)?;
+        let response: wire::anthropic_tool_chat::Response = self
+            .http
+            .post_json(PATH, body, |request| self.decorate(request))
+            .await?;
+        response.try_into()
+    }
+
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<StreamEvent>>> {
         let mut body = wire::anthropic::Request::from(&req);
         body.extra
@@ -59,6 +78,41 @@ impl ChatClient for AnthropicMessagesClient {
             .post_stream(PATH, body, |request| self.decorate(request))
             .await?;
         Ok(response_to_stream(response, StreamProtocol::Anthropic))
+    }
+}
+
+#[async_trait]
+impl AuthorizedToolChatClient for AnthropicMessagesClient {
+    fn protocol(&self) -> Protocol {
+        Protocol::AnthropicMessages
+    }
+
+    async fn complete_turn_authorized(
+        &self,
+        req: ToolChatRequest,
+        turn: u32,
+        authority: &dyn NativeExecutionAuthority,
+        cancel: &CancellationToken,
+    ) -> Result<ToolChatOutcome> {
+        req.validate().map_err(|error| {
+            VyaneError::new(
+                ErrorKind::Config,
+                format!("invalid typed tool-chat request: {error}"),
+            )
+        })?;
+        let body = wire::anthropic_tool_chat::Request::try_from(&req)?;
+        let response: wire::anthropic_tool_chat::Response = self
+            .http
+            .post_json_authorized(
+                PATH,
+                body,
+                |request| self.decorate(request),
+                turn,
+                authority,
+                cancel,
+            )
+            .await?;
+        response.try_into()
     }
 }
 

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
-use serde::de::{self, IgnoredAny, SeqAccess, Visitor};
+use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use vyane_core::{
@@ -71,6 +71,170 @@ where
         field,
         marker: PhantomData,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgumentParseError {
+    Invalid,
+    Limit,
+}
+
+/// Shared resource budget across every arguments object in one response.
+#[derive(Default)]
+struct StrictJsonBudget {
+    nodes: usize,
+    limit_hit: bool,
+}
+
+/// Parse model-supplied arguments without accepting duplicate keys and
+/// without constructing nodes beyond the response-wide resource budget.
+fn parse_object_arguments(
+    raw: &str,
+    budget: &mut StrictJsonBudget,
+) -> std::result::Result<BTreeMap<String, Value>, ArgumentParseError> {
+    if raw.len() > ToolChatLimits::ARGUMENT_BYTES {
+        return Err(ArgumentParseError::Limit);
+    }
+    let mut deserializer = serde_json::Deserializer::from_str(raw);
+    let parsed = StrictJsonSeed { budget, depth: 0 }.deserialize(&mut deserializer);
+    let value = match parsed {
+        Ok(StrictJson(value)) => value,
+        Err(_) if budget.limit_hit => return Err(ArgumentParseError::Limit),
+        Err(_) => return Err(ArgumentParseError::Invalid),
+    };
+    if deserializer.end().is_err() {
+        return Err(ArgumentParseError::Invalid);
+    }
+    match value {
+        Value::Object(values) => Ok(values.into_iter().collect()),
+        _ => Err(ArgumentParseError::Invalid),
+    }
+}
+
+struct StrictJson(Value);
+
+struct StrictJsonSeed<'a> {
+    budget: &'a mut StrictJsonBudget,
+    depth: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for StrictJsonSeed<'_> {
+    type Value = StrictJson;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if self.depth > ToolChatLimits::JSON_DEPTH
+            || self.budget.nodes >= ToolChatLimits::JSON_NODES
+        {
+            self.budget.limit_hit = true;
+            return Err(de::Error::custom("tool arguments exceed structural limits"));
+        }
+        self.budget.nodes = self.budget.nodes.saturating_add(1);
+        deserializer.deserialize_any(StrictJsonVisitor {
+            budget: self.budget,
+            depth: self.depth,
+        })
+    }
+}
+
+struct StrictJsonVisitor<'a> {
+    budget: &'a mut StrictJsonBudget,
+    depth: usize,
+}
+
+impl<'de> Visitor<'de> for StrictJsonVisitor<'_> {
+    type Value = StrictJson;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJson(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJson(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJson(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .map(StrictJson)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_string(value.to_string())
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJson(Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJson(Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJson(Value::Null))
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        StrictJsonSeed {
+            budget: self.budget,
+            depth: self.depth.saturating_add(1),
+        }
+        .deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let remaining = ToolChatLimits::JSON_NODES.saturating_sub(self.budget.nodes);
+        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(remaining));
+        while let Some(StrictJson(value)) = sequence.next_element_seed(StrictJsonSeed {
+            budget: self.budget,
+            depth: self.depth.saturating_add(1),
+        })? {
+            values.push(value);
+        }
+        Ok(StrictJson(Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if values.contains_key(&key) {
+                return Err(de::Error::custom("duplicate JSON object key"));
+            }
+            let StrictJson(value) = map.next_value_seed(StrictJsonSeed {
+                budget: self.budget,
+                depth: self.depth.saturating_add(1),
+            })?;
+            values.insert(key, value);
+        }
+        Ok(StrictJson(Value::Object(values)))
+    }
 }
 
 pub(crate) mod openai_chat {
@@ -358,7 +522,7 @@ pub(crate) mod openai_chat {
 }
 
 pub(crate) mod openai_tool_chat {
-    use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
+    use serde::de::{self, Visitor};
 
     use super::*;
 
@@ -879,170 +1043,6 @@ pub(crate) mod openai_tool_chat {
             }
         }
     }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum ArgumentParseError {
-        Invalid,
-        Limit,
-    }
-
-    /// Shared resource budget across every arguments object in one response.
-    #[derive(Default)]
-    struct StrictJsonBudget {
-        nodes: usize,
-        limit_hit: bool,
-    }
-
-    /// Parse model-supplied arguments without accepting duplicate keys and
-    /// without constructing nodes beyond the response-wide resource budget.
-    fn parse_object_arguments(
-        raw: &str,
-        budget: &mut StrictJsonBudget,
-    ) -> std::result::Result<BTreeMap<String, Value>, ArgumentParseError> {
-        if raw.len() > ToolChatLimits::ARGUMENT_BYTES {
-            return Err(ArgumentParseError::Limit);
-        }
-        let mut deserializer = serde_json::Deserializer::from_str(raw);
-        let parsed = StrictJsonSeed { budget, depth: 0 }.deserialize(&mut deserializer);
-        let value = match parsed {
-            Ok(StrictJson(value)) => value,
-            Err(_) if budget.limit_hit => return Err(ArgumentParseError::Limit),
-            Err(_) => return Err(ArgumentParseError::Invalid),
-        };
-        if deserializer.end().is_err() {
-            return Err(ArgumentParseError::Invalid);
-        }
-        match value {
-            Value::Object(values) => Ok(values.into_iter().collect()),
-            _ => Err(ArgumentParseError::Invalid),
-        }
-    }
-
-    struct StrictJson(Value);
-
-    struct StrictJsonSeed<'a> {
-        budget: &'a mut StrictJsonBudget,
-        depth: usize,
-    }
-
-    impl<'de> DeserializeSeed<'de> for StrictJsonSeed<'_> {
-        type Value = StrictJson;
-
-        fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            if self.depth > ToolChatLimits::JSON_DEPTH
-                || self.budget.nodes >= ToolChatLimits::JSON_NODES
-            {
-                self.budget.limit_hit = true;
-                return Err(de::Error::custom("tool arguments exceed structural limits"));
-            }
-            self.budget.nodes = self.budget.nodes.saturating_add(1);
-            deserializer.deserialize_any(StrictJsonVisitor {
-                budget: self.budget,
-                depth: self.depth,
-            })
-        }
-    }
-
-    struct StrictJsonVisitor<'a> {
-        budget: &'a mut StrictJsonBudget,
-        depth: usize,
-    }
-
-    impl<'de> Visitor<'de> for StrictJsonVisitor<'_> {
-        type Value = StrictJson;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a JSON value without duplicate object keys")
-        }
-
-        fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
-            Ok(StrictJson(Value::Bool(value)))
-        }
-
-        fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
-            Ok(StrictJson(Value::Number(value.into())))
-        }
-
-        fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
-            Ok(StrictJson(Value::Number(value.into())))
-        }
-
-        fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            serde_json::Number::from_f64(value)
-                .map(Value::Number)
-                .map(StrictJson)
-                .ok_or_else(|| E::custom("non-finite JSON number"))
-        }
-
-        fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            self.visit_string(value.to_string())
-        }
-
-        fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
-            Ok(StrictJson(Value::String(value)))
-        }
-
-        fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
-            Ok(StrictJson(Value::Null))
-        }
-
-        fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
-            Ok(StrictJson(Value::Null))
-        }
-
-        fn visit_some<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            StrictJsonSeed {
-                budget: self.budget,
-                depth: self.depth.saturating_add(1),
-            }
-            .deserialize(deserializer)
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            let remaining = ToolChatLimits::JSON_NODES.saturating_sub(self.budget.nodes);
-            let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(remaining));
-            while let Some(StrictJson(value)) = sequence.next_element_seed(StrictJsonSeed {
-                budget: self.budget,
-                depth: self.depth.saturating_add(1),
-            })? {
-                values.push(value);
-            }
-            Ok(StrictJson(Value::Array(values)))
-        }
-
-        fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
-        where
-            A: MapAccess<'de>,
-        {
-            let mut values = Map::new();
-            while let Some(key) = map.next_key::<String>()? {
-                if values.contains_key(&key) {
-                    return Err(de::Error::custom("duplicate JSON object key"));
-                }
-                let StrictJson(value) = map.next_value_seed(StrictJsonSeed {
-                    budget: self.budget,
-                    depth: self.depth.saturating_add(1),
-                })?;
-                values.insert(key, value);
-            }
-            Ok(StrictJson(Value::Object(values)))
-        }
-    }
 }
 
 pub(crate) mod anthropic {
@@ -1176,13 +1176,517 @@ pub(crate) mod anthropic {
         }
     }
 
-    fn effort_budget(effort: Effort) -> u32 {
+    pub(crate) fn effort_budget(effort: Effort) -> u32 {
         match effort {
             Effort::Low => 1024,
             Effort::Medium => 4096,
             Effort::High => 8192,
             Effort::Xhigh => 16384,
         }
+    }
+}
+
+pub(crate) mod anthropic_tool_chat {
+    use super::*;
+
+    #[derive(Debug, Clone, Serialize)]
+    pub(crate) struct Request {
+        pub(crate) model: String,
+        pub(crate) messages: Vec<Message>,
+        pub(crate) max_tokens: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) system: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub(crate) tools: Vec<Tool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) tool_choice: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) temperature: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) top_p: Option<f32>,
+        #[serde(flatten)]
+        pub(crate) extra: Map<String, Value>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub(crate) struct Message {
+        pub(crate) role: &'static str,
+        pub(crate) content: MessageContent,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(untagged)]
+    pub(crate) enum MessageContent {
+        Text(String),
+        Blocks(Vec<ContentBlockRequest>),
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub(crate) enum ContentBlockRequest {
+        Text {
+            text: String,
+        },
+        Thinking {
+            thinking: String,
+        },
+        Refusal {
+            refusal: String,
+        },
+        ToolUse {
+            id: String,
+            name: String,
+            input: Value,
+        },
+        ToolResult {
+            tool_use_id: String,
+            content: String,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            is_error: bool,
+        },
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub(crate) struct Tool {
+        name: String,
+        description: String,
+        input_schema: Value,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub(crate) struct Response {
+        pub(crate) model: Option<String>,
+        pub(crate) role: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_content")]
+        pub(crate) content: Vec<ContentBlock>,
+        pub(crate) stop_reason: Option<String>,
+        pub(crate) usage: Option<anthropic::UsageResponse>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub(crate) struct ContentBlock {
+        #[serde(rename = "type")]
+        pub(crate) kind: Option<String>,
+        pub(crate) text: Option<String>,
+        pub(crate) refusal: Option<String>,
+        pub(crate) thinking: Option<String>,
+        pub(crate) id: Option<String>,
+        pub(crate) name: Option<String>,
+        pub(crate) input: Option<Value>,
+    }
+
+    impl TryFrom<&ToolChatRequest> for Request {
+        type Error = VyaneError;
+
+        fn try_from(req: &ToolChatRequest) -> Result<Self> {
+            const RESERVED: &[&str] = &[
+                "model",
+                "messages",
+                "tools",
+                "tool_choice",
+                "stream",
+                "system",
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "thinking",
+            ];
+            if RESERVED
+                .iter()
+                .any(|field| req.params.extra.contains_key(*field))
+            {
+                return Err(VyaneError::new(
+                    ErrorKind::Config,
+                    "typed Anthropic tool-chat params.extra contains a reserved field",
+                ));
+            }
+            let mut extra = req.params.extra.clone();
+            if let Some(effort) = req.params.effort {
+                extra.entry("thinking".to_string()).or_insert(
+                    json!({ "type": "enabled", "budget_tokens": anthropic::effort_budget(effort) }),
+                );
+            }
+
+            let (system, messages) = messages_from(&req.messages)?;
+            let tools = req
+                .tools
+                .iter()
+                .map(|tool| Tool {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                })
+                .collect::<Vec<_>>();
+            let tool_choice = if tools.is_empty() {
+                None
+            } else {
+                Some(match &req.tool_choice {
+                    ToolChoice::Auto => json!({"type": "auto"}),
+                    ToolChoice::None => json!({"type": "none"}),
+                    ToolChoice::Required => json!({"type": "any"}),
+                    ToolChoice::Named(name) => json!({"type": "tool", "name": name}),
+                })
+            };
+
+            Ok(Self {
+                model: req.model.as_str().to_string(),
+                messages,
+                max_tokens: req
+                    .params
+                    .max_output_tokens
+                    .unwrap_or(anthropic::DEFAULT_MAX_TOKENS),
+                system,
+                tools,
+                tool_choice,
+                temperature: req.params.temperature,
+                top_p: req.params.top_p,
+                extra,
+            })
+        }
+    }
+
+    impl TryFrom<Response> for ToolChatOutcome {
+        type Error = VyaneError;
+
+        fn try_from(response: Response) -> Result<Self> {
+            if response
+                .role
+                .as_deref()
+                .is_some_and(|role| role != "assistant")
+            {
+                return Err(VyaneError::new(
+                    ErrorKind::Protocol,
+                    "Anthropic tool-chat response had a non-assistant message role",
+                ));
+            }
+            if response.content.len() > ToolChatLimits::CONTENT_PARTS {
+                return Err(VyaneError::new(
+                    ErrorKind::Protocol,
+                    "Anthropic tool-chat response exceeded the content-block limit",
+                ));
+            }
+
+            let mut text = String::new();
+            let mut content_parts = Vec::new();
+            let mut reasoning_parts = Vec::new();
+            let mut tool_calls = Vec::new();
+            let mut argument_budget = StrictJsonBudget::default();
+
+            for block in response.content {
+                match classify_block(&block)? {
+                    "text" => {
+                        let value = block.text.unwrap_or_default();
+                        if value.len() > ToolChatLimits::CONTENT_BYTES.saturating_sub(text.len()) {
+                            return Err(VyaneError::new(
+                                ErrorKind::Protocol,
+                                "Anthropic assistant text exceeded the content limit",
+                            ));
+                        }
+                        text.push_str(&value);
+                        content_parts.push(AssistantContentPart::Text { text: value });
+                    }
+                    "refusal" => {
+                        let refusal = block.refusal.or(block.text).ok_or_else(|| {
+                            VyaneError::new(
+                                ErrorKind::Protocol,
+                                "Anthropic refusal content block had no refusal text",
+                            )
+                        })?;
+                        if refusal.len() > ToolChatLimits::CONTENT_BYTES {
+                            return Err(VyaneError::new(
+                                ErrorKind::Protocol,
+                                "Anthropic refusal content exceeded the content limit",
+                            ));
+                        }
+                        content_parts.push(AssistantContentPart::Refusal { refusal });
+                    }
+                    "thinking" => {
+                        let thinking = block.thinking.unwrap_or_default();
+                        if thinking.len()
+                            > ToolChatLimits::CONTENT_BYTES.saturating_sub(
+                                reasoning_parts.iter().map(String::len).sum::<usize>(),
+                            )
+                        {
+                            return Err(VyaneError::new(
+                                ErrorKind::Protocol,
+                                "Anthropic thinking content exceeded the content limit",
+                            ));
+                        }
+                        reasoning_parts.push(thinking);
+                    }
+                    "tool_use" => {
+                        tool_calls.push(tool_call_from(block, &mut argument_budget)?);
+                    }
+                    _ => {
+                        return Err(unsupported_content_block());
+                    }
+                }
+            }
+
+            if tool_calls.len() > ToolChatLimits::CALLS_PER_TURN {
+                return Err(VyaneError::new(
+                    ErrorKind::Protocol,
+                    "Anthropic tool-chat response exceeded the tool-call limit",
+                ));
+            }
+
+            // A lone text block is stored as `text` only so a text-only turn
+            // round-trips as a string, matching the OpenAI typed-turn contract.
+            if content_parts.len() == 1
+                && matches!(content_parts[0], AssistantContentPart::Text { .. })
+                && tool_calls.is_empty()
+            {
+                content_parts.clear();
+            }
+
+            let outcome = ToolChatOutcome {
+                assistant: AssistantToolTurn {
+                    text,
+                    content_parts,
+                    reasoning: if reasoning_parts.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning_parts.join(""))
+                    },
+                    refusal: None,
+                    tool_calls,
+                },
+                usage: response.usage.map(anthropic::usage_from_response),
+                model_echo: response.model,
+                finish_reason: response.stop_reason,
+            };
+            outcome.validate().map_err(|error| {
+                VyaneError::new(
+                    ErrorKind::Protocol,
+                    format!("invalid Anthropic tool-chat response: {error}"),
+                )
+            })?;
+            Ok(outcome)
+        }
+    }
+
+    fn messages_from(messages: &[ToolChatMessage]) -> Result<(Option<String>, Vec<Message>)> {
+        let system = messages.iter().find_map(|message| match message {
+            ToolChatMessage::Text(message) if message.role == Role::System => {
+                Some(message.content.clone())
+            }
+            _ => None,
+        });
+        let mut out: Vec<Message> = Vec::new();
+        for message in messages {
+            if matches!(message, ToolChatMessage::Text(text) if text.role == Role::System) {
+                continue;
+            }
+            let mapped = message_from(message)?;
+            if let Some(last) = out.last_mut()
+                && last.role == mapped.role
+            {
+                merge_message(last, mapped);
+                continue;
+            }
+            out.push(mapped);
+        }
+        Ok((system, out))
+    }
+
+    fn message_from(message: &ToolChatMessage) -> Result<Message> {
+        match message {
+            ToolChatMessage::Text(message) => {
+                let role = match message.role {
+                    Role::Assistant => "assistant",
+                    Role::System | Role::User => "user",
+                };
+                Ok(Message {
+                    role,
+                    content: MessageContent::Text(message.content.clone()),
+                })
+            }
+            ToolChatMessage::Assistant(turn) => Ok(Message {
+                role: "assistant",
+                content: assistant_content(turn)?,
+            }),
+            ToolChatMessage::ToolResult(result) => Ok(Message {
+                role: "user",
+                content: MessageContent::Blocks(vec![ContentBlockRequest::ToolResult {
+                    tool_use_id: result.tool_call_id.clone(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                }]),
+            }),
+        }
+    }
+
+    fn assistant_content(turn: &AssistantToolTurn) -> Result<MessageContent> {
+        let mut blocks = Vec::new();
+        if let Some(reasoning) = turn
+            .reasoning
+            .as_deref()
+            .filter(|reasoning| !reasoning.is_empty())
+        {
+            blocks.push(ContentBlockRequest::Thinking {
+                thinking: reasoning.to_string(),
+            });
+        }
+        if !turn.content_parts.is_empty() {
+            for part in &turn.content_parts {
+                match part {
+                    AssistantContentPart::Text { text } => {
+                        blocks.push(ContentBlockRequest::Text { text: text.clone() });
+                    }
+                    AssistantContentPart::Refusal { refusal } => {
+                        blocks.push(ContentBlockRequest::Refusal {
+                            refusal: refusal.clone(),
+                        });
+                    }
+                }
+            }
+        } else if !turn.text.is_empty() {
+            blocks.push(ContentBlockRequest::Text {
+                text: turn.text.clone(),
+            });
+        }
+        for call in &turn.tool_calls {
+            blocks.push(ContentBlockRequest::ToolUse {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                input: tool_use_input(call)?,
+            });
+        }
+        Ok(match blocks.as_slice() {
+            [] => MessageContent::Text(String::new()),
+            [ContentBlockRequest::Text { text }] => MessageContent::Text(text.clone()),
+            _ => MessageContent::Blocks(blocks),
+        })
+    }
+
+    fn tool_use_input(call: &ModelToolCall) -> Result<Value> {
+        match &call.arguments {
+            ToolCallArguments::Object(arguments) => {
+                serde_json::to_value(arguments).map_err(|error| {
+                    VyaneError::with_source(
+                        ErrorKind::Config,
+                        "could not serialize typed tool-call arguments",
+                        error,
+                    )
+                })
+            }
+            ToolCallArguments::InvalidJson { raw } => match serde_json::from_str::<Value>(raw) {
+                Ok(Value::Object(values)) => Ok(Value::Object(values)),
+                Ok(_) | Err(_) => Err(VyaneError::new(
+                    ErrorKind::Config,
+                    "typed Anthropic tool-chat cannot represent non-object tool arguments",
+                )),
+            },
+        }
+    }
+
+    fn merge_message(left: &mut Message, right: Message) {
+        let mut blocks = content_blocks(std::mem::replace(
+            &mut left.content,
+            MessageContent::Blocks(Vec::new()),
+        ));
+        blocks.extend(content_blocks(right.content));
+        left.content = match blocks.as_slice() {
+            [ContentBlockRequest::Text { text }] => MessageContent::Text(text.clone()),
+            _ => MessageContent::Blocks(blocks),
+        };
+    }
+
+    fn content_blocks(content: MessageContent) -> Vec<ContentBlockRequest> {
+        match content {
+            MessageContent::Text(text) if text.is_empty() => Vec::new(),
+            MessageContent::Text(text) => vec![ContentBlockRequest::Text { text }],
+            MessageContent::Blocks(blocks) => blocks,
+        }
+    }
+
+    fn classify_block(block: &ContentBlock) -> Result<&'static str> {
+        match block.kind.as_deref() {
+            Some("text") => Ok("text"),
+            Some("refusal") => Ok("refusal"),
+            Some("thinking") => Ok("thinking"),
+            Some("tool_use") => Ok("tool_use"),
+            Some(_) => Err(unsupported_content_block()),
+            None => {
+                let has_tool = block.name.is_some() || block.input.is_some();
+                let has_thinking = block.thinking.is_some();
+                let has_refusal = block.refusal.is_some();
+                let has_text = block.text.is_some();
+                match (has_tool, has_thinking, has_refusal, has_text) {
+                    (true, false, false, false) => Ok("tool_use"),
+                    (false, true, false, false) => Ok("thinking"),
+                    (false, false, true, false) => Ok("refusal"),
+                    (false, false, false, _) => Ok("text"),
+                    _ => Err(unsupported_content_block()),
+                }
+            }
+        }
+    }
+
+    fn tool_call_from(block: ContentBlock, budget: &mut StrictJsonBudget) -> Result<ModelToolCall> {
+        let arguments = match block.input {
+            Some(Value::Object(values)) => {
+                let raw = serde_json::to_string(&values).map_err(|error| {
+                    VyaneError::with_source(
+                        ErrorKind::Protocol,
+                        "could not reserialize Anthropic tool-use input",
+                        error,
+                    )
+                })?;
+                match parse_object_arguments(&raw, budget) {
+                    Ok(arguments) => ToolCallArguments::Object(arguments),
+                    Err(ArgumentParseError::Invalid) => ToolCallArguments::InvalidJson { raw },
+                    Err(ArgumentParseError::Limit) => {
+                        return Err(VyaneError::new(
+                            ErrorKind::Protocol,
+                            "Anthropic tool-chat arguments exceeded structural limits",
+                        ));
+                    }
+                }
+            }
+            Some(other) => {
+                let raw = serde_json::to_string(&other).map_err(|error| {
+                    VyaneError::with_source(
+                        ErrorKind::Protocol,
+                        "could not reserialize Anthropic tool-use input",
+                        error,
+                    )
+                })?;
+                if raw.len() > ToolChatLimits::ARGUMENT_BYTES {
+                    return Err(VyaneError::new(
+                        ErrorKind::Protocol,
+                        "Anthropic tool-chat arguments exceeded structural limits",
+                    ));
+                }
+                ToolCallArguments::InvalidJson { raw }
+            }
+            None => ToolCallArguments::InvalidJson { raw: String::new() },
+        };
+        Ok(ModelToolCall {
+            id: block.id.unwrap_or_default(),
+            name: block.name.unwrap_or_default(),
+            arguments,
+        })
+    }
+
+    fn deserialize_content<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<Vec<ContentBlock>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserialize_bounded_sequence(
+            deserializer,
+            ToolChatLimits::CONTENT_PARTS,
+            "Anthropic content blocks",
+        )
+    }
+
+    fn unsupported_content_block() -> VyaneError {
+        VyaneError::new(
+            ErrorKind::Protocol,
+            "Anthropic tool-chat response contained an unsupported content block",
+        )
     }
 }
 
