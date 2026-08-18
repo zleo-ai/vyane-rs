@@ -45,7 +45,7 @@
 ## Partial / residual (pilot, not production)
 
 - Formal Claude/Codex/Grok product harness wiring remains in adapter plane / existing daemon acceptance.
-- `DecideApproval`/`DenyApproval` without a resolvable `kernel.sqlite` (no `dogfood_root` / registered durable root, or no matching receipt/approval row) fail closed and do **not** emit Approved/Denied. Durable grant still requires a pending ask plus binding; this is not native one-shot consumption, expiry, drift check, or production resume.
+- `DecideApproval`/`DenyApproval` without a resolvable `kernel.sqlite` (no `dogfood_root` / registered durable root, or no matching receipt/approval row) fail closed and do **not** emit Approved/Denied. Durable grant still requires a pending ask plus binding. Delivery-phase update after a successful store write is best-effort and does **not** set the receipt approval gate, consume a native ask, check expiry/drift, or resume execution. A Denied event is not receipt Failed.
 - Effect apply is record-then-side-effect (at-most-once / no duplicate); crash between CAS and OS child may leave identity without side effect — recovery does not invent success without truth probe.
 - Multi-writer race probe uses concurrent threads on one SQLite file (Immediate txn); schema init hardened under load.
 - No multi-tenant production service, no production cutover, no crates.io/tag/release.
