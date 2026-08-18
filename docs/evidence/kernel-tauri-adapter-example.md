@@ -22,6 +22,8 @@ KernelEvent / KernelProjection  — UI may show display_hint but MUST use projec
 only when the command carries a resolvable durable root and a matching pending
 ask (plus grant binding for approve). Missing store or binding fails closed.
 Do not treat an Approved/Denied event as authority without the store row.
+Denied is the approval decision; it does not fail the receipt. Delivery-phase
+update is best-effort and is not native resume.
 
 ## Command map (minimum)
 

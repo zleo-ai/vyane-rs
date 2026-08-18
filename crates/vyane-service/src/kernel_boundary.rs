@@ -26,8 +26,11 @@ use vyane_core::{
     RouteConfig, TaskCase,
 };
 
+use crate::approval_fsm::DeliveryEvent;
 use crate::dogfood::run_successful_dogfood;
-use crate::kernel_store::{ApprovalGrantBinding, KernelStore, KernelStoreError};
+use crate::kernel_store::{
+    ApprovalDecisionKind, ApprovalGrantBinding, KernelStore, KernelStoreError,
+};
 
 /// Frozen local boundary protocol version.
 pub const KERNEL_BOUNDARY_VERSION: u32 = 1;
@@ -455,16 +458,21 @@ impl LocalKernelAdapter {
             return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
         };
         if !command.approval_granted.unwrap_or(false) {
-            return self.push_event(
-                KernelEventKind::ApprovalRequired,
-                now,
-                Some(receipt_id),
-                command.agent_run_id,
-                None,
-                None,
-                Some(KernelErrorCode::ApprovalRequired),
-                Some("approval still required".into()),
-            );
+            return match store.get_approval(&self.principal.owner, &receipt_id) {
+                Ok(Some(row)) if row.decision == ApprovalDecisionKind::Pending => self.push_event(
+                    KernelEventKind::ApprovalRequired,
+                    now,
+                    Some(receipt_id),
+                    command.agent_run_id,
+                    None,
+                    None,
+                    Some(KernelErrorCode::ApprovalRequired),
+                    Some("approval still required".into()),
+                ),
+                Ok(Some(_)) => self.error_event(now, KernelErrorCode::Conflict, Some(receipt_id)),
+                Ok(None) => self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id)),
+                Err(err) => self.error_event(now, Self::map_store_error(err), Some(receipt_id)),
+            };
         }
         let Some(run_id) = command.agent_run_id.clone() else {
             return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
@@ -484,19 +492,14 @@ impl LocalKernelAdapter {
         };
         match store.grant_approval(&grant, now) {
             Ok(decision) => {
-                if let Ok(Some((_, phase_rev))) =
-                    store.get_delivery_phase(&self.principal.owner, &receipt_id)
-                {
-                    let _ = store.set_delivery_phase(
-                        &self.principal.owner,
-                        &receipt_id,
-                        &run_id,
-                        phase_rev,
-                        crate::approval_fsm::DeliveryEvent::GrantAccepted,
-                        Some(&decision.approval_id),
-                        now,
-                    );
-                }
+                self.advance_delivery_phase(
+                    &store,
+                    &receipt_id,
+                    Some(run_id.as_str()),
+                    DeliveryEvent::GrantAccepted,
+                    Some(decision.approval_id.as_str()),
+                    now,
+                );
                 if let Some(root) = command.dogfood_root.as_deref() {
                     self.register_durable_root(root);
                 }
@@ -547,29 +550,25 @@ impl LocalKernelAdapter {
             now,
         ) {
             Ok(_) => {
-                if let Some(run_id) = command.agent_run_id.clone()
-                    && let Ok(Some((_, phase_rev))) =
-                        store.get_delivery_phase(&self.principal.owner, &receipt_id)
-                {
-                    let _ = store.set_delivery_phase(
-                        &self.principal.owner,
-                        &receipt_id,
-                        &run_id,
-                        phase_rev,
-                        crate::approval_fsm::DeliveryEvent::DenyAccepted,
-                        None,
-                        now,
-                    );
-                }
+                self.advance_delivery_phase(
+                    &store,
+                    &receipt_id,
+                    command.agent_run_id.as_deref(),
+                    DeliveryEvent::DenyAccepted,
+                    None,
+                    now,
+                );
                 if let Some(root) = command.dogfood_root.as_deref() {
                     self.register_durable_root(root);
                 }
+                // Denied is the approval decision. Receipt status stays whatever
+                // KernelStore already recorded (usually Open) — do not invent Failed.
                 self.push_event(
                     KernelEventKind::Denied,
                     now,
                     Some(receipt_id),
                     command.agent_run_id,
-                    Some(ReceiptFinalStatus::Failed),
+                    None,
                     Some(KernelProjection::Ownership {
                         owner: self.principal.owner.clone(),
                         lease_owner: Some(self.principal.principal_id.clone()),
@@ -912,6 +911,35 @@ impl LocalKernelAdapter {
             .filter(|e| e.sequence > after_sequence)
             .cloned()
             .collect()
+    }
+
+    /// Best-effort FSM advance after a durable grant/deny. The approval row is
+    /// already committed; a phase miss must not invent Approved/Denied.
+    fn advance_delivery_phase(
+        &self,
+        store: &KernelStore,
+        receipt_id: &str,
+        run_id: Option<&str>,
+        event: DeliveryEvent,
+        approval_id: Option<&str>,
+        now: DateTime<Utc>,
+    ) {
+        let Some(run_id) = run_id else {
+            return;
+        };
+        if let Ok(Some((_, phase_rev))) =
+            store.get_delivery_phase(&self.principal.owner, receipt_id)
+        {
+            let _ = store.set_delivery_phase(
+                &self.principal.owner,
+                receipt_id,
+                run_id,
+                phase_rev,
+                event,
+                approval_id,
+                now,
+            );
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1529,6 +1557,11 @@ mod tests {
             row.decision,
             crate::kernel_store::ApprovalDecisionKind::Approved
         );
+        let (phase, _) = store
+            .get_delivery_phase(&principal().owner, "rcpt-grant")
+            .unwrap()
+            .expect("delivery phase after grant");
+        assert_eq!(phase, crate::approval_fsm::DeliveryPhase::Approved);
 
         let fresh = LocalKernelAdapter::new(principal());
         let status = fresh.handle(
@@ -1601,6 +1634,10 @@ mod tests {
         );
         assert_eq!(denied.error, None, "expected durable deny, got {denied:?}");
         assert_eq!(denied.kind, KernelEventKind::Denied);
+        assert_eq!(
+            denied.final_status, None,
+            "deny must not invent receipt Failed"
+        );
         let row = store
             .get_approval(&principal().owner, "rcpt-deny")
             .unwrap()
@@ -1609,6 +1646,11 @@ mod tests {
             row.decision,
             crate::kernel_store::ApprovalDecisionKind::Denied
         );
+        let (phase, _) = store
+            .get_delivery_phase(&principal().owner, "rcpt-deny")
+            .unwrap()
+            .expect("delivery phase after deny");
+        assert_eq!(phase, crate::approval_fsm::DeliveryPhase::Denied);
 
         let granted = adapter.handle(
             approval_cmd(
@@ -1707,6 +1749,297 @@ mod tests {
         assert!(
             decoy_row.is_none(),
             "empty sibling sqlite must not receive the grant"
+        );
+    }
+
+    #[test]
+    fn decide_approval_missing_fields_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) = seed_pending_ask(root.path(), "rcpt-miss", "run-miss", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+
+        let no_receipt = adapter.handle(
+            approval_cmd(
+                "ap-no-rcpt",
+                KernelCommandKind::DecideApproval,
+                None,
+                Some("run-miss"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(no_receipt.kind, KernelEventKind::Error);
+        assert_eq!(no_receipt.error, Some(KernelErrorCode::InvalidCommand));
+
+        let no_run = adapter.handle(
+            approval_cmd(
+                "ap-no-run",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-miss"),
+                None,
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(no_run.kind, KernelEventKind::Error);
+        assert_eq!(no_run.error, Some(KernelErrorCode::InvalidCommand));
+
+        let no_binding = adapter.handle(
+            approval_cmd(
+                "ap-no-bind",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-miss"),
+                Some("run-miss"),
+                Some(true),
+                Some(&root_s),
+                None,
+            ),
+            now(),
+        );
+        assert_eq!(no_binding.kind, KernelEventKind::Error);
+        assert_eq!(no_binding.error, Some(KernelErrorCode::InvalidCommand));
+
+        let row = store
+            .get_approval(&principal().owner, "rcpt-miss")
+            .unwrap()
+            .expect("pending retained");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+    }
+
+    #[test]
+    fn decide_approval_mismatch_and_missing_ask_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) = seed_pending_ask(root.path(), "rcpt-mis", "run-mis", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+
+        let bad_digest = adapter.handle(
+            approval_cmd(
+                "ap-digest",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-mis"),
+                Some("run-mis"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest_hex("cd"), 1)),
+            ),
+            now(),
+        );
+        assert_eq!(bad_digest.kind, KernelEventKind::Error);
+        assert_eq!(bad_digest.error, Some(KernelErrorCode::NotFound));
+
+        let bad_run = adapter.handle(
+            approval_cmd(
+                "ap-run",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-mis"),
+                Some("run-other"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(bad_run.kind, KernelEventKind::Error);
+        assert_eq!(bad_run.error, Some(KernelErrorCode::Conflict));
+
+        let mut bad_gen = binding_for(&digest, 1);
+        bad_gen.generation = 9;
+        let bad_generation = adapter.handle(
+            approval_cmd(
+                "ap-gen",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-mis"),
+                Some("run-mis"),
+                Some(true),
+                Some(&root_s),
+                Some(bad_gen),
+            ),
+            now(),
+        );
+        assert_eq!(bad_generation.kind, KernelEventKind::Error);
+        assert_eq!(bad_generation.error, Some(KernelErrorCode::Conflict));
+
+        let no_ask_id = "rcpt-noask";
+        let receipt =
+            CompletionReceipt::open(no_ask_id, principal().owner, task(), route(), now()).unwrap();
+        store.insert_open_receipt(&receipt).unwrap();
+        let no_ask = adapter.handle(
+            approval_cmd(
+                "ap-noask",
+                KernelCommandKind::DecideApproval,
+                Some(no_ask_id),
+                Some("run-noask"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest_hex("ab"), 1)),
+            ),
+            now(),
+        );
+        assert_eq!(no_ask.kind, KernelEventKind::Error);
+        assert_eq!(no_ask.error, Some(KernelErrorCode::NotFound));
+
+        let row = store
+            .get_approval(&principal().owner, "rcpt-mis")
+            .unwrap()
+            .expect("pending retained");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+    }
+
+    #[test]
+    fn decide_approval_regrant_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) = seed_pending_ask(root.path(), "rcpt-idemp", "run-idemp", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let first = adapter.handle(
+            approval_cmd(
+                "ap-idemp-1",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-idemp"),
+                Some("run-idemp"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(first.kind, KernelEventKind::Approved);
+        let second = adapter.handle(
+            approval_cmd(
+                "ap-idemp-2",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-idemp"),
+                Some("run-idemp"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(second.kind, KernelEventKind::Approved);
+        let row = store
+            .get_approval(&principal().owner, "rcpt-idemp")
+            .unwrap()
+            .expect("approved row");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Approved
+        );
+    }
+
+    #[test]
+    fn decide_approval_not_granted_retains_pending() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) = seed_pending_ask(root.path(), "rcpt-hold", "run-hold", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let event = adapter.handle(
+            approval_cmd(
+                "ap-hold",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-hold"),
+                Some("run-hold"),
+                Some(false),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(event.kind, KernelEventKind::ApprovalRequired);
+        assert_eq!(event.error, Some(KernelErrorCode::ApprovalRequired));
+        let row = store
+            .get_approval(&principal().owner, "rcpt-hold")
+            .unwrap()
+            .expect("pending retained");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+    }
+
+    #[test]
+    fn deny_without_binding_uses_pending_row() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, _digest) = seed_pending_ask(root.path(), "rcpt-nobind", "run-nobind", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let denied = adapter.handle(
+            approval_cmd(
+                "dn-nobind",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-nobind"),
+                Some("run-nobind"),
+                None,
+                Some(&root_s),
+                None,
+            ),
+            now(),
+        );
+        assert_eq!(denied.kind, KernelEventKind::Denied);
+        assert_eq!(denied.final_status, None);
+        let row = store
+            .get_approval(&principal().owner, "rcpt-nobind")
+            .unwrap()
+            .expect("denied row");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Denied
+        );
+    }
+
+    #[test]
+    fn deny_after_approve_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) = seed_pending_ask(root.path(), "rcpt-post", "run-post", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-post",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-post"),
+                Some("run-post"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Approved);
+        let denied = adapter.handle(
+            approval_cmd(
+                "dn-post",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-post"),
+                Some("run-post"),
+                None,
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_ne!(denied.kind, KernelEventKind::Denied);
+        assert_eq!(denied.kind, KernelEventKind::Error);
+        assert_eq!(denied.error, Some(KernelErrorCode::Conflict));
+        let row = store
+            .get_approval(&principal().owner, "rcpt-post")
+            .unwrap()
+            .expect("still approved");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Approved
         );
     }
 }
