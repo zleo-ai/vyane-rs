@@ -10,6 +10,8 @@ use vyane_goal::{
 
 const OWNER_A: &str = "owner-a";
 const OWNER_B: &str = "owner-b";
+#[cfg(unix)]
+const WAL_PERMISSION_PROBE_CHILD: &str = "VYANE_GOAL_WAL_PERMISSION_PROBE_CHILD";
 
 fn timestamp(seconds: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(seconds, 0).expect("valid test timestamp")
@@ -27,6 +29,94 @@ fn new_goal(id: &str, title: &str, priority: u8, at: DateTime<Utc>) -> NewGoal {
     goal.id = Some(id.to_string());
     goal.priority = priority;
     goal
+}
+
+#[cfg(unix)]
+fn sqlite_sidecar(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    value.into()
+}
+
+#[cfg(unix)]
+#[test]
+fn wal_sidecars_are_private_with_umask_022_in_a_public_directory() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Command;
+
+    if std::env::var_os(WAL_PERMISSION_PROBE_CHILD).is_none() {
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                concat!(
+                    "umask 022; exec \"$1\" --exact ",
+                    "wal_sidecars_are_private_with_umask_022_in_a_public_directory --nocapture"
+                ),
+                "sh",
+            ])
+            .arg(std::env::current_exe().expect("resolve test executable"))
+            .env(WAL_PERMISSION_PROBE_CHILD, "1")
+            .output()
+            .expect("run isolated umask probe");
+        assert!(
+            output.status.success(),
+            "isolated umask probe failed with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let directory = TempDir::new().expect("tempdir");
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755))
+        .expect("make database directory publicly readable");
+    let path = directory.path().join("goals.sqlite3");
+    let store = SqliteGoalStore::open(&path).expect("open goal store");
+
+    // Keep one WAL reader alive while the store opens short-lived writer
+    // connections. This prevents SQLite's final-connection cleanup from
+    // deleting the sidecars before their modes can be inspected.
+    let keeper = Connection::open(&path).expect("open WAL keeper");
+    keeper
+        .pragma_update(None, "journal_mode", "WAL")
+        .expect("keep WAL mode");
+    keeper
+        .pragma_update(None, "wal_autocheckpoint", 0)
+        .expect("disable automatic checkpoint for probe");
+
+    let base = timestamp(1_700_000_000);
+    for index in 0..128 {
+        store
+            .create(
+                OWNER_A,
+                new_goal(
+                    &format!("wal-permission-{index}"),
+                    "force WAL pages",
+                    2,
+                    base + TimeDelta::milliseconds(index),
+                ),
+            )
+            .expect("write goal into WAL");
+    }
+    let count: i64 = keeper
+        .query_row("SELECT COUNT(*) FROM goals", [], |row| row.get(0))
+        .expect("read through WAL keeper");
+    assert_eq!(count, 128);
+
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = sqlite_sidecar(&path, suffix);
+        let metadata = fs::symlink_metadata(&sidecar)
+            .unwrap_or_else(|error| panic!("inspect {}: {error}", sidecar.display()));
+        assert!(metadata.is_file(), "{} must be a file", sidecar.display());
+        assert_eq!(
+            metadata.permissions().mode() & 0o7777,
+            0o600,
+            "{} must not expose goal data",
+            sidecar.display()
+        );
+    }
 }
 
 fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
