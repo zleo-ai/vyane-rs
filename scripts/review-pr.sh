@@ -9,6 +9,10 @@
 # Not a GitHub Actions job — credentials stay off repository secrets, and
 # this public repo does not attach a self-hosted runner.
 #
+# Strict tier depends on the maintainer-side vyane review pipeline
+# (`VYANE_PROJECT`, overridable). External contributors cannot run it
+# themselves; a maintainer runs that round on their behalf.
+#
 # Usage:
 #   scripts/review-pr.sh <PR> [--tier light|standard|strict]
 #                              [--reviewer claude|codex|grok]
@@ -363,17 +367,21 @@ post_or_print() {
     echo "===== end dry-run ====="
     return 0
   fi
-  local body_bytes
-  body_bytes="$(wc -c <"$BODY_FILE" | tr -d ' ')"
-  if [[ "$body_bytes" -gt "$GITHUB_BODY_LIMIT" ]]; then
-    head -c "$((GITHUB_BODY_LIMIT - 80))" "$BODY_FILE" >"${BODY_FILE}.kept"
-    {
-      cat "${BODY_FILE}.kept"
-      echo
-      echo "[review body truncated to GitHub's size limit]"
-    } >"$BODY_FILE"
-    rm -f "${BODY_FILE}.kept"
-  fi
+  python3 - "$BODY_FILE" "$GITHUB_BODY_LIMIT" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+limit = int(sys.argv[2])
+raw = path.read_bytes()
+if len(raw) <= limit:
+    raise SystemExit(0)
+notice = "\n[review body truncated to GitHub's size limit]\n"
+budget = max(0, limit - len(notice.encode("utf-8")))
+# Slice by bytes, then drop a trailing incomplete UTF-8 sequence.
+text = raw[:budget].decode("utf-8", errors="ignore")
+path.write_text(text + notice, encoding="utf-8")
+PY
   gh api "repos/${REPO}/pulls/${PR}/reviews" \
     -f event=COMMENT \
     -f "commit_id=${HEAD_SHA}" \
@@ -455,7 +463,7 @@ EOF
     claude)
       require_cmd claude
       set +e
-      claude -p --output-format text "$(cat "$PROMPT_FILE")" \
+      claude -p --output-format text <"$PROMPT_FILE" \
         >"$REVIEW_RAW" 2>"$REVIEW_ERR"
       local status=$?
       set -e
@@ -468,11 +476,13 @@ EOF
     codex)
       require_cmd codex
       set +e
-      # Flag name confirmed via `codex exec --help`: --sandbox <SANDBOX_MODE>.
+      # `codex exec --help`: PROMPT omitted or `-` reads instructions from
+      # stdin. Do not pass both a prompt argument and a pipe — stdin would
+      # then be appended as a `<stdin>` block instead of replacing argv.
       # --output-last-message captures the review text instead of event noise.
       codex exec --sandbox read-only --color never \
         --output-last-message "$REVIEW_RAW" \
-        "$(cat "$PROMPT_FILE")" \
+        - <"$PROMPT_FILE" \
         >"${WORKDIR}/codex.stdout" 2>"$REVIEW_ERR"
       local status=$?
       set -e

@@ -138,7 +138,10 @@ touches.
   scripts (`publish.yml`, the release gate), or data migrations →
   adversarial multi-round review; do not merge until review is clean — CI
   green alone is not sufficient. Implementer, reviewer, and merger must be
-  three separate agent runs.
+  three separate agent runs. Strict-tier review depends on the
+  maintainer-side vyane pipeline (`VYANE_PROJECT`, overridable); external
+  contributors cannot run it themselves — a maintainer runs that round on
+  their behalf.
 
 ### When and how to run it
 
