@@ -2,15 +2,17 @@
 
 //! Same-process multi-connection hammer for `SqliteAgentStore`.
 //!
-//! The resident broker's agent projection loop is only one writer/reader
-//! against this file, but the store uses the same `SQLITE_OPEN_NO_MUTEX`
-//! connection-per-call shape plus a `.write-lock` flock on writes. This hammer
-//! overlaps reads (`unprojected_events`, `get_run`) with writes (`mark_projected`,
-//! `enqueue_run`) on one `agent.sqlite3`.
+//! The store uses the same `SQLITE_OPEN_NO_MUTEX` connection-per-call shape
+//! plus a `.write-lock` flock on writes. Readers (`unprojected_events`,
+//! `get_run`) never take that flock, so a read connection can overlap a write
+//! connection and park both threads in `futex_wait` past the 5s busy timeout.
 //!
 //! This test is a hammer, not a deterministic reproducer. The deadlock is
-//! probabilistic. Default runtime is a few seconds for CI; raise
-//! `VYANE_STORE_HAMMER_MS` for longer probes.
+//! probabilistic. Linux reproduction without store serialization: 2 threads
+//! (`unprojected_events` vs `mark_projected`) stalled at 2742 ops / 1.35s with
+//! both workers in `futex_do_wait`; also observed organically at 8 threads
+//! during `cargo test --workspace` (stall detector, 32.51s). Default runtime
+//! is a few seconds for CI; raise `VYANE_STORE_HAMMER_MS` for longer probes.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -31,7 +33,10 @@ const PROJECTOR: &str = "vyane.event-log.agent-lifecycle.v1";
 const WORKER_ID: &str = "worker";
 const DEFAULT_DURATION_MS: u64 = 2_500;
 const DEFAULT_STALL_MS: u64 = 30_000;
-const DEFAULT_THREADS: usize = 8;
+/// Two threads (`unprojected_events` reader vs `mark_projected` writer) is the
+/// pairing that reproduced the same-process SQLite stall on Linux. More threads
+/// still overlap, but the two-connection case is the regression probe.
+const DEFAULT_THREADS: usize = 2;
 const LOG_CAP: usize = 64;
 
 struct Probe {
