@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -4045,14 +4045,22 @@ fn open_database(path: &Path) -> Result<Connection> {
 
 fn process_connection_lock(path: &Path) -> Result<Arc<Mutex<()>>> {
     let key = connection_lock_key(path)?;
-    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
     let mut locks = LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Ok(Arc::clone(
-        locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))),
-    ))
+    // The store holds the strong Arc; the registry only keeps Weak so the
+    // mutex dies with the last store. Retain live Weaks on every lookup so
+    // dead PathBuf keys cannot accumulate. The map is one entry per distinct
+    // DB path, so the sweep is cheap.
+    locks.retain(|_, weak| weak.upgrade().is_some());
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    Ok(lock)
 }
 
 /// Key the process lock on the canonical parent plus the file name.
@@ -4479,6 +4487,40 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&a.op_lock, &d.op_lock),
             "distinct database files must not share the process lock"
+        );
+    }
+
+    #[test]
+    fn process_connection_lock_is_reclaimed_after_last_store_drops() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reclaim.sqlite3");
+        let other = directory.path().join("other.sqlite3");
+
+        let store = SqliteMessageStore::open(&path).unwrap();
+        let stale = Arc::downgrade(&store.op_lock);
+        drop(store);
+
+        assert!(
+            stale.upgrade().is_none(),
+            "registry must not keep the mutex alive after the last store drops"
+        );
+
+        // A later lookup sweeps dead Weak entries. Neither an unrelated path
+        // nor reopening the same path may resurrect the dropped mutex.
+        let _probe = process_connection_lock(&other).unwrap();
+        assert!(
+            stale.upgrade().is_none(),
+            "a later registry probe must not resurrect the dropped mutex"
+        );
+
+        let again = process_connection_lock(&path).unwrap();
+        assert!(
+            stale.upgrade().is_none(),
+            "reopening the same path must not revive the dropped mutex"
+        );
+        assert!(
+            !stale.ptr_eq(&Arc::downgrade(&again)),
+            "reopening the same path after reclamation must allocate a new mutex"
         );
     }
 
