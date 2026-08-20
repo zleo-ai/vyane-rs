@@ -357,6 +357,24 @@ fn worker_loop(store: SqliteMessageStore, shared: Arc<Shared>, probe: Arc<Probe>
     }
 }
 
+fn await_workers(
+    joins: Vec<thread::JoinHandle<()>>,
+    shared: &Shared,
+    probes: &[Arc<Probe>],
+    stall: Duration,
+) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        for join in joins {
+            let _ = join.join();
+        }
+        let _ = tx.send(());
+    });
+    if rx.recv_timeout(stall).is_err() && !shared.stalled.load(Ordering::SeqCst) {
+        record_stall(shared, probes, "workers did not exit after stop");
+    }
+}
+
 fn check_stall(shared: &Shared, probes: &[Arc<Probe>]) -> bool {
     let now = elapsed_ms(shared.origin);
     for (id, probe) in probes.iter().enumerate() {
@@ -444,16 +462,7 @@ fn hammer(threads: usize, duration: Duration, stall: Duration) {
         }
         thread::sleep(Duration::from_millis(50));
     }
-    let (tx, rx) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        for join in joins {
-            let _ = join.join();
-        }
-        let _ = tx.send(());
-    });
-    if rx.recv_timeout(stall).is_err() && !shared.stalled.load(Ordering::SeqCst) {
-        record_stall(&shared, &probes, "workers did not exit after stop");
-    }
+    await_workers(joins, &shared, &probes, stall);
     assert!(
         !shared.stalled.load(Ordering::SeqCst),
         "same-process message-store connections stalled past the 5s busy/write-lock timeout"
@@ -543,9 +552,12 @@ fn clock_advance_keeps_expire_due_writing_against_readers() {
         thread::sleep(Duration::from_millis(50));
     }
     shared.stop.store(true, Ordering::SeqCst);
-    for join in joins {
-        let _ = join.join();
-    }
+    await_workers(
+        joins,
+        &shared,
+        &probes,
+        Duration::from_millis(DEFAULT_STALL_MS),
+    );
     assert!(!shared.stalled.load(Ordering::SeqCst));
     assert!(shared.max_in_flight.load(Ordering::SeqCst) >= 2);
 }

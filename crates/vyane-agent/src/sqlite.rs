@@ -303,7 +303,7 @@ impl SqliteAgentStore {
     pub fn open_with_clock(path: impl Into<PathBuf>, clock: Arc<dyn AgentClock>) -> Result<Self> {
         let path = path.into();
         let store = Self {
-            op_lock: process_connection_lock(&path),
+            op_lock: process_connection_lock(&path)?,
             path,
             clock,
         };
@@ -5188,17 +5188,40 @@ fn open_database(path: &Path) -> Result<Connection> {
     Ok(Connection::open_with_flags(path, flags)?)
 }
 
-fn process_connection_lock(path: &Path) -> Arc<Mutex<()>> {
+fn process_connection_lock(path: &Path) -> Result<Arc<Mutex<()>>> {
+    let key = connection_lock_key(path)?;
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
     let mut locks = LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Arc::clone(
-        locks
-            .entry(path.to_path_buf())
-            .or_insert_with(|| Arc::new(Mutex::new(()))),
-    )
+    Ok(Arc::clone(
+        locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))),
+    ))
+}
+
+/// Key the process lock on the canonical parent plus the file name.
+///
+/// `open_with_clock` takes this lock before `initialize`, so the database file
+/// may not exist yet. Creating the parent and canonicalizing it still collapses
+/// `.` / `..` and relative vs absolute spellings. Symlink aliases are rejected
+/// later by `reject_symlink_components`. A failed normalization is returned as
+/// a store error; the raw path is never used as a fallback.
+fn connection_lock_key(path: &Path) -> Result<PathBuf> {
+    let parent = database_parent(path);
+    ensure_parent_directory(parent)?;
+    let Some(file_name) = path.file_name() else {
+        return Err(AgentStoreError::InvalidInput(
+            "agent database path must include a file name".into(),
+        ));
+    };
+    Ok(std::fs::canonicalize(parent)?.join(file_name))
+}
+
+fn database_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn acquire_op_lock(lock: &Mutex<()>) -> MutexGuard<'_, ()> {
@@ -5254,18 +5277,20 @@ fn companion_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn prepare_database_path(path: &Path) -> Result<()> {
+fn ensure_parent_directory(parent: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let parent = path
-        .parent()
-        .filter(|value| !value.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
     if !parent.try_exists()? {
         std::fs::create_dir_all(parent)?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
-    validate_private_directory(parent)?;
+    validate_private_directory(parent)
+}
+
+#[cfg(unix)]
+fn prepare_database_path(path: &Path) -> Result<()> {
+    let parent = database_parent(path);
+    ensure_parent_directory(parent)?;
     reject_symlink_components(path)?;
     reject_existing_sidecar_symlinks(path)?;
     // Never expose the final SQLite path while this process still owns a raw
@@ -5345,10 +5370,16 @@ fn publish_database_candidate(candidate: &Path, path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn prepare_database_path(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
+fn ensure_parent_directory(parent: &Path) -> Result<()> {
+    if parent != Path::new(".") {
         std::fs::create_dir_all(parent)?;
     }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_database_path(path: &Path) -> Result<()> {
+    ensure_parent_directory(database_parent(path))?;
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -5569,6 +5600,35 @@ mod tests {
         assert!(status.success(), "external WAL writer acquired the lock");
 
         transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn aliased_paths_share_the_process_connection_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let direct = directory.path().join("x.sqlite3");
+        let dotted = directory.path().join(".").join("x.sqlite3");
+        let via_parent = directory.path().join("nested").join("..").join("x.sqlite3");
+        let other = directory.path().join("y.sqlite3");
+        assert_ne!(direct.as_os_str(), dotted.as_os_str());
+        assert_ne!(direct.as_os_str(), via_parent.as_os_str());
+
+        let a = SqliteAgentStore::open(&direct).unwrap();
+        let b = SqliteAgentStore::open(&dotted).unwrap();
+        let c = SqliteAgentStore::open(&via_parent).unwrap();
+        let d = SqliteAgentStore::open(&other).unwrap();
+
+        assert!(
+            Arc::ptr_eq(&a.op_lock, &b.op_lock),
+            "dir/x.sqlite3 and dir/./x.sqlite3 must share the process lock"
+        );
+        assert!(
+            Arc::ptr_eq(&a.op_lock, &c.op_lock),
+            "dir/x.sqlite3 and dir/nested/../x.sqlite3 must share the process lock"
+        );
+        assert!(
+            !Arc::ptr_eq(&a.op_lock, &d.op_lock),
+            "distinct database files must not share the process lock"
+        );
     }
 
     #[test]
