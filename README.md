@@ -52,10 +52,12 @@ what actually held up in daily use, not a greenfield guess.
 This repo is developed by an orchestrated fleet of AI coding agents: different
 frontier models write the code, adversarially cross-review each other's work,
 and fix what the review turns up, all under a human-owned architecture and
-integration gate. Every merge passes independent cross-model review plus the
-`cargo fmt` / `clippy` / `cargo test` gates described in
-[CONTRIBUTING.md](CONTRIBUTING.md) — no change lands on the say-so of the
-model that wrote it.
+integration gate. Code changes go through [tiered independent
+review](CONTRIBUTING.md#independent-review-three-tiers) — docs merge on CI
+green, standard code gets one independent model review, high-risk surfaces
+get adversarial multi-round review — plus the `cargo fmt` / `clippy` /
+`cargo test` gates described in [CONTRIBUTING.md](CONTRIBUTING.md). No
+product change lands on the say-so of the model that wrote it.
 
 ## Status
 

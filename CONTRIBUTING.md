@@ -120,6 +120,80 @@ Test placement:
 - **Keep the docs in sync.** If you change a public type or config shape, update
   the affected docs and `profiles.example.toml` in the same PR.
 
+## Independent review (three tiers)
+
+Review depth follows the surfaces a change actually touches, not the
+repository. The tiers align with Eosphor review-tiering as it applies to
+`vyane-rs`. A PR that mixes tiers is reviewed at the **highest** tier it
+touches.
+
+- **Light**: docs, samples, prototypes, comments/wording-only changes → CI
+  green merges; no independent review required.
+- **Standard**: product/feature/regular code → one independent review
+  (a different model than the implementer, preferred) before merge.
+  Non-blocking findings are recorded on the issue tracker and do not block
+  the merge. Target same-day turnaround.
+- **Strict**: anything touching money/billing, credentials/secrets, routing,
+  security boundaries (sandbox/policy), privacy data, production release
+  scripts (`publish.yml`, the release gate), or data migrations →
+  adversarial multi-round review; do not merge until review is clean — CI
+  green alone is not sufficient. Implementer, reviewer, and merger must be
+  three separate agent runs. Strict-tier review depends on the
+  maintainer-side vyane pipeline (`VYANE_PROJECT`, overridable); external
+  contributors cannot run it themselves — a maintainer runs that round on
+  their behalf.
+
+### When and how to run it
+
+After the PR is opened and before merge, on a developer machine that already
+has model credentials, run:
+
+```sh
+scripts/review-pr.sh <PR>
+```
+
+That defaults to standard (or the path heuristic's suggestion when `--tier`
+is omitted). Override with `--tier light|standard|strict`. The heuristic is
+advisory; human/agent judgment is authoritative.
+
+The merge-relevant verdict is the **first line of the review comment**:
+`结论：APPROVE`, `结论：REQUEST_CHANGES`, or `结论：COMMENT`. All agents share
+one GitHub account, so GitHub will not accept a self-`APPROVE` /
+`REQUEST_CHANGES` review event on our own PRs; the script always posts
+`event=COMMENT` and puts the verdict in the body. Machine-readable merge
+blocking is a CI required-check concern, not a GitHub review-event vote.
+
+Reviews do not run on GitHub Actions: model credentials must not enter
+repository secrets, and this public repository does not attach a
+self-hosted runner.
+
+### TDD / regression probe (required for fixes)
+
+Any fix PR must ship a regression test and must show that the test was
+**red on the pre-fix baseline** and **green after the fix**. Record the red
+evidence in the PR description: baseline commit plus a summary of the
+failing output. For load-bearing invariants, mutate the bug back in; the
+test must go red.
+
+### CI tiers
+
+Everyday PRs run the existing CI matrix (fmt/clippy/test on both OSes,
+MSRV, coverage, release-gate smoke). Milestone and release work
+additionally run the full verification path (publish-workflow token-free
+preflight, release-gate drill). This is policy; it does not change
+`ci.yml`.
+
+### GitHub Copilot code review
+
+GitHub Copilot code review is **retired from this repository's review
+pipeline** and is optional only. From 2026-08 every PR has been left with
+an "unable to review (quota limit)" comment because the quota stays
+exhausted; the README's former claim that every merge passed independent
+cross-model review did not match what actually ran. Automatic Copilot
+review requests come from the account setting (not repository
+configuration). You can still request Copilot manually, but that does
+**not** count as independent review for any of the three tiers.
+
 ## Releases
 
 Crates.io publication is manual and requires authority distinct from merging,
