@@ -294,15 +294,12 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
     const SECRET_CANARY: &str = "CANARY_WIRE_SECRET";
     const TASK_CANARY: &str = "CANARY_WIRE_TASK";
 
-    let root = std::env::temp_dir().join(format!(
-        "vyane-mcp-wire-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root)?;
-    let config_path = root.join(PATH_CANARY);
+    // Exclusive directory: pid + clock-nanos collides when tests in this
+    // binary start in the same realtime tick (macOS CI is microsecond-quantized).
+    let root = tempfile::Builder::new()
+        .prefix("vyane-mcp-wire-")
+        .tempdir()?;
+    let config_path = root.path().join(PATH_CANARY);
     std::fs::write(
         &config_path,
         format!(
@@ -322,13 +319,13 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
         ),
     )?;
     std::fs::write(
-        root.join("secrets.env"),
+        root.path().join("secrets.env"),
         format!("{ENV_CANARY}={SECRET_CANARY}\n"),
     )?;
     let loaded = vyane_service::load_config(Some(&config_path))?;
     let service = vyane_service::VyaneService::from_loaded_with_paths(
         loaded,
-        vyane_service::StoragePaths::from_data_dir(root.join("data")),
+        vyane_service::StoragePaths::from_data_dir(root.path().join("data")),
     )?;
     let now = chrono::Utc::now();
     let target = vyane_core::Target {
@@ -589,22 +586,18 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
 
     client.cancel().await?;
     server_handle.await??;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[tokio::test]
 async fn diagnostics_config_row_overflow_is_a_static_wire_error() -> anyhow::Result<()> {
     const ID_CANARY: &str = "CANARY_OVERFLOW_PROVIDER";
-    let root = std::env::temp_dir().join(format!(
-        "vyane-mcp-budget-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root)?;
-    let config_path = root.join("budget.toml");
+    // Exclusive directory: pid + clock-nanos collides when tests in this
+    // binary start in the same realtime tick (macOS CI is microsecond-quantized).
+    let root = tempfile::Builder::new()
+        .prefix("vyane-mcp-budget-")
+        .tempdir()?;
+    let config_path = root.path().join("budget.toml");
     let mut config = String::new();
     for index in 0..=vyane_service::DIAGNOSTIC_MAX_CONFIG_ITEMS {
         config.push_str(&format!(
@@ -621,7 +614,7 @@ async fn diagnostics_config_row_overflow_is_a_static_wire_error() -> anyhow::Res
     let loaded = vyane_service::load_config(Some(&config_path))?;
     let service = vyane_service::VyaneService::from_loaded_with_paths(
         loaded,
-        vyane_service::StoragePaths::from_data_dir(root.join("data")),
+        vyane_service::StoragePaths::from_data_dir(root.path().join("data")),
     )?;
     let observer = service.clone();
 
@@ -661,22 +654,18 @@ async fn diagnostics_config_row_overflow_is_a_static_wire_error() -> anyhow::Res
 
     client.cancel().await?;
     server_handle.await??;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[tokio::test]
 async fn diagnostics_invalid_endpoint_is_a_redacted_static_wire_error() -> anyhow::Result<()> {
     const URL_CANARY: &str = "CANARY_ENDPOINT_VALUE";
-    let root = std::env::temp_dir().join(format!(
-        "vyane-mcp-endpoint-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root)?;
-    let config_path = root.join("endpoint.toml");
+    // Exclusive directory: pid + clock-nanos collides when tests in this
+    // binary start in the same realtime tick (macOS CI is microsecond-quantized).
+    let root = tempfile::Builder::new()
+        .prefix("vyane-mcp-endpoint-")
+        .tempdir()?;
+    let config_path = root.path().join("endpoint.toml");
     std::fs::write(
         &config_path,
         format!(
@@ -696,7 +685,7 @@ async fn diagnostics_invalid_endpoint_is_a_redacted_static_wire_error() -> anyho
     let loaded = vyane_service::load_config(Some(&config_path))?;
     let service = vyane_service::VyaneService::from_loaded_with_paths(
         loaded,
-        vyane_service::StoragePaths::from_data_dir(root.join("data")),
+        vyane_service::StoragePaths::from_data_dir(root.path().join("data")),
     )?;
     let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
     let server_handle = tokio::spawn(async move {
@@ -727,7 +716,6 @@ async fn diagnostics_invalid_endpoint_is_a_redacted_static_wire_error() -> anyho
 
     client.cancel().await?;
     server_handle.await??;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
