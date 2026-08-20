@@ -3,7 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
 
 permissions:
   contents: read
@@ -15,7 +21,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  release-gate:
+  # Merged from the former release-gate (~4s) and msrv (~34s) jobs: both ran on
+  # ubuntu-latest and were short, so they now share one checkout and one job
+  # slot instead of queueing for two.
+  gates:
     runs-on: ubuntu-latest
     steps:
       # actions/checkout v6.0.2 (resolved from the official repository).
@@ -23,11 +32,6 @@ jobs:
 
       - name: Test release authorization gate
         run: bash .github/scripts/test-release-gate.sh
-
-  msrv:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - uses: dtolnay/rust-toolchain@1.88.0
 
@@ -418,7 +422,11 @@ jobs:
             submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
             -- --exact
 
+  # Coverage is measurement-only (no threshold gate), so it runs on pushes to
+  # main rather than on every PR: the trend stays visible on the merged result
+  # and no PR-stage gating signal is lost.
   coverage:
+    if: github.event_name == 'push'
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
