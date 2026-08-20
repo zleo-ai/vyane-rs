@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::fs::File;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -95,6 +96,33 @@ impl MessageClock for SystemMessageClock {
 pub struct SqliteMessageStore {
     path: PathBuf,
     clock: Arc<dyn MessageClock>,
+    /// Serializes every same-process use of this database file.
+    ///
+    /// `SQLITE_OPEN_NO_MUTEX` plus a new rusqlite `Connection` per call can
+    /// deadlock two overlapping POSIX-lock states past the 5s busy timeout.
+    /// The companion `.write-lock` flock does not close that window: it is
+    /// taken only after `connection()` already opened a SQLite handle, and
+    /// readers never take it. This mutex is held for the connection's life.
+    op_lock: Arc<Mutex<()>>,
+}
+
+struct LockedConnection<'store> {
+    connection: Connection,
+    _op: MutexGuard<'store, ()>,
+}
+
+impl Deref for LockedConnection<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl DerefMut for LockedConnection<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
+    }
 }
 
 struct WriteTransaction<'connection> {
@@ -134,8 +162,10 @@ impl SqliteMessageStore {
     }
 
     pub fn open_with_clock(path: impl Into<PathBuf>, clock: Arc<dyn MessageClock>) -> Result<Self> {
+        let path = path.into();
         let store = Self {
-            path: path.into(),
+            op_lock: process_connection_lock(&path),
+            path,
             clock,
         };
         store.initialize()?;
@@ -152,6 +182,7 @@ impl SqliteMessageStore {
     }
 
     fn initialize(&self) -> Result<()> {
+        let _op = acquire_op_lock(&self.op_lock);
         prepare_database_path(&self.path)?;
         let mut connection = open_database(&self.path)?;
         connection.busy_timeout(BUSY_TIMEOUT)?;
@@ -187,7 +218,8 @@ impl SqliteMessageStore {
         validate_database_files(&self.path)
     }
 
-    fn connection(&self) -> Result<Connection> {
+    fn connection(&self) -> Result<LockedConnection<'_>> {
+        let op = acquire_op_lock(&self.op_lock);
         let connection = open_database(&self.path)?;
         connection.busy_timeout(BUSY_TIMEOUT)?;
         configure_connection(&connection)?;
@@ -200,7 +232,10 @@ impl SqliteMessageStore {
         }
         validate_schema_definition(&connection)?;
         validate_database_files(&self.path)?;
-        Ok(connection)
+        Ok(LockedConnection {
+            connection,
+            _op: op,
+        })
     }
 
     fn begin_locked_transaction<'connection>(
@@ -214,9 +249,9 @@ impl SqliteMessageStore {
 
     fn write_transaction<'connection>(
         &self,
-        connection: &'connection mut Connection,
+        connection: &'connection mut LockedConnection<'_>,
     ) -> Result<WriteTransaction<'connection>> {
-        let transaction = self.begin_locked_transaction(connection)?;
+        let transaction = self.begin_locked_transaction(&mut connection.connection)?;
         let found = user_version(&transaction)?;
         if found != SCHEMA_VERSION {
             return Err(MessageStoreError::UnsupportedSchema {
@@ -263,7 +298,7 @@ impl SqliteMessageStore {
     /// Runs the expensive whole-database consistency audit on demand.
     pub fn audit_integrity(&self) -> Result<()> {
         let mut connection = self.connection()?;
-        let transaction = self.begin_locked_transaction(&mut connection)?;
+        let transaction = self.begin_locked_transaction(&mut connection.connection)?;
         audit_database_integrity(&transaction)?;
         transaction.commit()
     }
@@ -4006,6 +4041,24 @@ fn open_database(path: &Path) -> Result<Connection> {
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
     Ok(Connection::open_with_flags(path, flags)?)
+}
+
+fn process_connection_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(
+        locks
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+}
+
+fn acquire_op_lock(lock: &Mutex<()>) -> MutexGuard<'_, ()> {
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn acquire_write_lock(path: &Path) -> Result<File> {
