@@ -42,7 +42,7 @@ use axum::{
 use futures::{FutureExt as _, stream::Stream};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use vyane_core::{CancellationToken, ErrorKind, RunStatus, Sandbox, VyaneError};
 use vyane_kernel::{DispatchOutcome, StreamDispatchEvent};
 use vyane_service::{
@@ -180,6 +180,12 @@ impl std::error::Error for TaskCallError {}
 #[derive(Clone)]
 struct TaskSupervisor {
     store: Arc<dyn TaskStore>,
+    /// Serializes connection-per-call SQLite work. Two `spawn_blocking`
+    /// connections in one process can deadlock on POSIX fcntl locks; SQLite's
+    /// busy timeout does not recover from that state. An owned guard is moved
+    /// into the blocking task so cancelling or timing out the async `call()`
+    /// future cannot release the lock while SQLite is still running.
+    store_lock: Arc<Mutex<()>>,
     live_tokens: Arc<dashmap::DashMap<(String, u64), CancellationToken>>,
     live_dispatches: Arc<dashmap::DashMap<(String, u64), RuntimeDispatch>>,
     dispatch_finished: Arc<Notify>,
@@ -244,6 +250,7 @@ impl TaskSupervisor {
     fn from_store(store: Arc<dyn TaskStore>) -> Self {
         Self {
             store,
+            store_lock: Arc::new(Mutex::new(())),
             live_tokens: Arc::new(dashmap::DashMap::new()),
             live_dispatches: Arc::new(dashmap::DashMap::new()),
             dispatch_finished: Arc::new(Notify::new()),
@@ -285,10 +292,14 @@ impl TaskSupervisor {
         F: FnOnce(&dyn TaskStore) -> vyane_task::Result<T> + Send + 'static,
     {
         let store = Arc::clone(&self.store);
-        tokio::task::spawn_blocking(move || operation(store.as_ref()))
-            .await
-            .map_err(TaskCallError::Join)?
-            .map_err(TaskCallError::Store)
+        let guard = Arc::clone(&self.store_lock).lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            operation(store.as_ref())
+        })
+        .await
+        .map_err(TaskCallError::Join)?
+        .map_err(TaskCallError::Store)
     }
 
     async fn get(&self, id: &str) -> std::result::Result<Option<TaskRecord>, TaskCallError> {
@@ -4577,6 +4588,112 @@ mod tests {
         );
         assert!(!supervisor.live_dispatches.contains_key(&key));
         assert!(!supervisor.live_tokens.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn call_serializes_overlapping_store_operations() {
+        let (_directory, supervisor) = temp_supervisor().await;
+        let events = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let (entered_tx, entered_rx) = oneshot::channel();
+
+        let first_events = Arc::clone(&events);
+        let first = {
+            let supervisor = supervisor.clone();
+            tokio::spawn(async move {
+                supervisor
+                    .call(move |_store| {
+                        first_events.lock().unwrap().push("enter1");
+                        let _ = entered_tx.send(());
+                        std::thread::sleep(Duration::from_millis(100));
+                        first_events.lock().unwrap().push("exit1");
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+
+        entered_rx.await.unwrap();
+
+        let second_events = Arc::clone(&events);
+        supervisor
+            .call(move |_store| {
+                second_events.lock().unwrap().push("enter2");
+                second_events.lock().unwrap().push("exit2");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        first.await.unwrap().unwrap();
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["enter1", "exit1", "enter2", "exit2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_call_holds_store_lock_until_blocking_work_finishes() {
+        let (_directory, supervisor) = temp_supervisor().await;
+        let events = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let first_events = Arc::clone(&events);
+        let first = {
+            let supervisor = supervisor.clone();
+            tokio::spawn(async move {
+                supervisor
+                    .call(move |_store| {
+                        first_events.lock().unwrap().push("enter1");
+                        let _ = entered_tx.send(());
+                        let _ = release_rx.recv();
+                        first_events.lock().unwrap().push("exit1");
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+
+        entered_rx.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        events.lock().unwrap().push("dropped");
+
+        let (second_entered_tx, second_entered_rx) = oneshot::channel();
+        let second_events = Arc::clone(&events);
+        let second = {
+            let supervisor = supervisor.clone();
+            tokio::spawn(async move {
+                supervisor
+                    .call(move |_store| {
+                        second_events.lock().unwrap().push("enter2");
+                        let _ = second_entered_tx.send(());
+                        second_events.lock().unwrap().push("exit2");
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+
+        // If the async guard was dropped on cancel, #2 enters while #1's
+        // blocking work is still running. The owned-guard fix keeps #2 parked.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), second_entered_rx)
+                .await
+                .is_err(),
+            "call #2 entered while call #1's blocking work still held the store lock"
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["enter1", "dropped", "exit1", "enter2", "exit2"]
+        );
     }
 
     #[tokio::test]
