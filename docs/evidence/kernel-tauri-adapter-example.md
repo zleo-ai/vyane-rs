@@ -23,7 +23,9 @@ only when the command carries a resolvable durable root and a matching pending
 ask plus caller binding. Missing store or binding fails closed.
 Do not treat an Approved/Denied event as authority without the store row.
 Denied is the approval decision; it does not fail the receipt. Delivery-phase
-update is best-effort and is not native resume.
+advance uses the durable row's run id and reports a missing phase or lost CAS
+instead of emitting Approved/Denied against a wedged FSM. This is still not
+native resume.
 
 ## Command map (minimum)
 

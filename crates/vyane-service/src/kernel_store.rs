@@ -206,6 +206,30 @@ impl KernelStore {
         Ok(store)
     }
 
+    /// Open an existing sqlite file. Missing paths are not created.
+    ///
+    /// Probe paths (approve/deny discovery) must use this so a candidate miss
+    /// cannot materialize an empty `kernel.sqlite`.
+    pub fn open_existing(path: impl Into<PathBuf>) -> KernelStoreResult<Self> {
+        let path = path.into();
+        if !path.is_file() {
+            return Err(KernelStoreError::Io(format!(
+                "kernel sqlite does not exist: {}",
+                path.display()
+            )));
+        }
+        let store = Self { path };
+        store.initialize()?;
+        Ok(store)
+    }
+
+    /// Attach to a sqlite path this process already initialized.
+    /// Skips schema work; the file must already exist.
+    #[must_use]
+    pub(crate) fn reuse(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -1276,6 +1300,15 @@ mod tests {
             billing_mode_category: BillingModeCategory::Unknown,
         };
         CompletionReceipt::open(id, owner, task, route, now()).unwrap()
+    }
+
+    #[test]
+    fn open_existing_does_not_create_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel.sqlite");
+        let err = KernelStore::open_existing(&path).unwrap_err();
+        assert!(matches!(err, KernelStoreError::Io(_)), "{err:?}");
+        assert!(!path.exists(), "open_existing must not create the sqlite");
     }
 
     #[test]

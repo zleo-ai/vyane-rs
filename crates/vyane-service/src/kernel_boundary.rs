@@ -12,10 +12,13 @@
 //!   [`KernelCommandKind::DecideApproval`] / [`KernelCommandKind::DenyApproval`]
 //!   persist grant/deny only through that store.
 //! - Approve/deny without a `dogfood_root` or registered durable store fail
-//!   closed. Deny without a caller digest fails closed. Events remain
+//!   closed. Deny without a caller digest fails closed. Deny may omit
+//!   `agent_run_id`; the delivery FSM and ownership projection use the
+//!   durable row's run id. A missing delivery phase or lost CAS is reported
+//!   rather than emitting Approved/Denied against a wedged FSM. Events remain
 //!   rebuildable; they are not a second authority.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -312,6 +315,10 @@ pub struct LocalKernelAdapter {
     receipts: Mutex<MemoryReceiptLedger>,
     /// Durable dogfood roots (`…/durable-*` or roots containing `kernel.sqlite`).
     durable_roots: Mutex<Vec<PathBuf>>,
+    /// sqlite paths whose schema was initialized in this process.
+    initialized_stores: Mutex<HashSet<PathBuf>>,
+    /// `receipt_id` → sqlite path that last held the matching approval row.
+    receipt_store_index: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl LocalKernelAdapter {
@@ -323,6 +330,8 @@ impl LocalKernelAdapter {
             next_sequence: Mutex::new(1),
             receipts: Mutex::new(MemoryReceiptLedger::new()),
             durable_roots: Mutex::new(Vec::new()),
+            initialized_stores: Mutex::new(HashSet::new()),
+            receipt_store_index: Mutex::new(HashMap::new()),
         }
     }
 
@@ -389,15 +398,68 @@ impl LocalKernelAdapter {
         None
     }
 
+    fn remember_receipt_store(&self, receipt_id: &str, path: PathBuf) {
+        if let Ok(mut index) = self.receipt_store_index.lock() {
+            index.insert(receipt_id.to_string(), path);
+        }
+    }
+
+    fn mark_initialized(&self, path: &Path) {
+        if let Ok(mut guard) = self.initialized_stores.lock() {
+            guard.insert(path.to_path_buf());
+        }
+    }
+
+    fn store_for_existing_path(&self, path: &Path) -> Option<KernelStore> {
+        if !path.is_file() {
+            return None;
+        }
+        if let Ok(guard) = self.initialized_stores.lock()
+            && guard.contains(path)
+        {
+            return Some(KernelStore::reuse(path));
+        }
+        match KernelStore::open_existing(path) {
+            Ok(store) => {
+                self.mark_initialized(store.path());
+                Some(store)
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn indexed_store(&self, receipt_id: &str) -> Option<KernelStore> {
+        let path = {
+            let Ok(index) = self.receipt_store_index.lock() else {
+                return None;
+            };
+            index.get(receipt_id).cloned()?
+        };
+        self.store_for_existing_path(&path)
+    }
+
     fn open_durable_store(
         &self,
         receipt_id: &str,
         dogfood_root: Option<&str>,
     ) -> Option<KernelStore> {
+        // Named roots stay exclusive. The index only short-circuits the
+        // unbounded registered-root scan so a later decoy cannot steal a
+        // receipt this adapter already resolved.
+        if dogfood_root.is_none()
+            && let Some(store) = self.indexed_store(receipt_id)
+            && matches!(
+                store.get_approval(&self.principal.owner, receipt_id),
+                Ok(Some(_))
+            )
+        {
+            return Some(store);
+        }
+
         let mut candidates: Vec<PathBuf> = Vec::new();
         if let Some(root) = dogfood_root.map(PathBuf::from) {
-            // A named root is exclusive. Union + lexicographic sort lets a
-            // sibling registered sqlite win the grant/deny write.
+            // A named root is exclusive so a sibling registered sqlite cannot
+            // steal the grant/deny write.
             push_kernel_candidates(&root, receipt_id, &mut candidates);
         } else if let Ok(roots) = self.durable_roots.lock() {
             for root in roots.iter() {
@@ -408,16 +470,14 @@ impl LocalKernelAdapter {
         candidates.retain(|path| seen.insert(path.clone()));
         let mut receipt_hit = None;
         for path in candidates {
-            if !path.exists() {
-                continue;
-            }
-            let Ok(store) = KernelStore::open(&path) else {
+            let Some(store) = self.store_for_existing_path(&path) else {
                 continue;
             };
             if matches!(
                 store.get_approval(&self.principal.owner, receipt_id),
                 Ok(Some(_))
             ) {
+                self.remember_receipt_store(receipt_id, store.path().to_path_buf());
                 return Some(store);
             }
             if receipt_hit.is_none()
@@ -429,7 +489,11 @@ impl LocalKernelAdapter {
                 receipt_hit = Some(store);
             }
         }
-        receipt_hit
+        if let Some(store) = receipt_hit {
+            self.remember_receipt_store(receipt_id, store.path().to_path_buf());
+            return Some(store);
+        }
+        None
     }
 
     fn map_store_error(err: KernelStoreError) -> KernelErrorCode {
@@ -494,23 +558,25 @@ impl LocalKernelAdapter {
         };
         match store.grant_approval(&grant, now) {
             Ok(decision) => {
-                self.advance_delivery_phase(
+                if let Err(code) = self.advance_delivery_phase(
                     &store,
                     &receipt_id,
-                    Some(run_id.as_str()),
+                    Some(decision.run_id.as_str()),
                     DeliveryEvent::GrantAccepted,
                     Some(decision.approval_id.as_str()),
                     now,
-                );
+                ) {
+                    return self.error_event(now, code, Some(receipt_id));
+                }
                 if let Some(root) = command.dogfood_root.as_deref() {
                     self.register_durable_root(root);
                 }
-                let projection = self.ownership_from_store(&store, Some(run_id.as_str()));
+                let projection = self.ownership_from_store(&store, Some(decision.run_id.as_str()));
                 self.push_event(
                     KernelEventKind::Approved,
                     now,
                     Some(receipt_id),
-                    Some(run_id),
+                    Some(decision.run_id),
                     None,
                     Some(projection),
                     None,
@@ -539,29 +605,31 @@ impl LocalKernelAdapter {
             &self.principal.principal_id,
             now,
         ) {
-            Ok(_) => {
-                self.advance_delivery_phase(
+            Ok(decision) => {
+                if let Err(code) = self.advance_delivery_phase(
                     &store,
                     &receipt_id,
-                    command.agent_run_id.as_deref(),
+                    Some(decision.run_id.as_str()),
                     DeliveryEvent::DenyAccepted,
                     None,
                     now,
-                );
+                ) {
+                    return self.error_event(now, code, Some(receipt_id));
+                }
                 if let Some(root) = command.dogfood_root.as_deref() {
                     self.register_durable_root(root);
                 }
                 // Denied is the approval decision. Receipt status stays whatever
                 // KernelStore already recorded (usually Open) — do not invent Failed.
-                // Ownership comes from the durable lease fence, not the caller
-                // principal/binding: deny does not steal or grant a lease.
+                // Ownership and the delivery FSM use the durable row's run id,
+                // not the caller-supplied agent_run_id (which may be omitted).
                 self.push_event(
                     KernelEventKind::Denied,
                     now,
                     Some(receipt_id),
-                    command.agent_run_id.clone(),
+                    Some(decision.run_id.clone()),
                     None,
-                    Some(self.ownership_from_store(&store, command.agent_run_id.as_deref())),
+                    Some(self.ownership_from_store(&store, Some(decision.run_id.as_str()))),
                     None,
                     Some("approval denied".into()),
                 )
@@ -901,8 +969,6 @@ impl LocalKernelAdapter {
             .collect()
     }
 
-    /// Best-effort FSM advance after a durable grant/deny. The approval row is
-    /// already committed; a phase miss must not invent Approved/Denied.
     fn ownership_from_store(&self, store: &KernelStore, run_id: Option<&str>) -> KernelProjection {
         let fence = run_id.and_then(|run_id| {
             store
@@ -917,6 +983,11 @@ impl LocalKernelAdapter {
         }
     }
 
+    /// Advance the delivery FSM after a durable grant/deny.
+    ///
+    /// The approval row is already committed. A missing phase row or a lost
+    /// CAS is reported so the caller does not emit Approved/Denied against a
+    /// wedged FSM. Stale revision is retried.
     fn advance_delivery_phase(
         &self,
         store: &KernelStore,
@@ -925,23 +996,33 @@ impl LocalKernelAdapter {
         event: DeliveryEvent,
         approval_id: Option<&str>,
         now: DateTime<Utc>,
-    ) {
-        let Some(run_id) = run_id else {
-            return;
+    ) -> Result<(), KernelErrorCode> {
+        let Some(run_id) = run_id.filter(|id| !id.is_empty()) else {
+            return Err(KernelErrorCode::InvalidCommand);
         };
-        if let Ok(Some((_, phase_rev))) =
-            store.get_delivery_phase(&self.principal.owner, receipt_id)
-        {
-            let _ = store.set_delivery_phase(
-                &self.principal.owner,
-                receipt_id,
-                run_id,
-                phase_rev,
-                event,
-                approval_id,
-                now,
-            );
+        const MAX_CAS_ATTEMPTS: u32 = 4;
+        for _ in 0..MAX_CAS_ATTEMPTS {
+            match store.get_delivery_phase(&self.principal.owner, receipt_id) {
+                Ok(None) => return Err(KernelErrorCode::NotFound),
+                Err(err) => return Err(Self::map_store_error(err)),
+                Ok(Some((_, phase_rev))) => {
+                    match store.set_delivery_phase(
+                        &self.principal.owner,
+                        receipt_id,
+                        run_id,
+                        phase_rev,
+                        event,
+                        approval_id,
+                        now,
+                    ) {
+                        Ok(_) => return Ok(()),
+                        Err(KernelStoreError::StaleRevision { .. }) => continue,
+                        Err(err) => return Err(Self::map_store_error(err)),
+                    }
+                }
+            }
         }
+        Err(KernelErrorCode::Conflict)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1774,8 +1855,7 @@ mod tests {
             other => panic!("expected ownership projection, got {other:?}"),
         }
 
-        let (_store2, digest2) =
-            seed_pending_ask(root.path(), "rcpt-own-norun", "run-own-norun", 1);
+        let (store2, digest2) = seed_pending_ask(root.path(), "rcpt-own-norun", "run-own-norun", 1);
         let no_run = adapter.handle(
             approval_cmd(
                 "dn-own-norun",
@@ -1789,17 +1869,26 @@ mod tests {
             now(),
         );
         assert_eq!(no_run.kind, KernelEventKind::Denied, "{no_run:?}");
+        assert_eq!(no_run.agent_run_id.as_deref(), Some("run-own-norun"));
         match no_run.projection.unwrap() {
             KernelProjection::Ownership {
                 lease_owner,
                 generation,
                 ..
             } => {
-                assert_eq!(lease_owner, None);
-                assert_eq!(generation, None);
+                assert_eq!(
+                    lease_owner.as_deref(),
+                    Some(principal().principal_id.as_str())
+                );
+                assert_eq!(generation, Some(1));
             }
-            other => panic!("expected ownership without lease, got {other:?}"),
+            other => panic!("expected ownership from store run id, got {other:?}"),
         }
+        let (phase, _) = store2
+            .get_delivery_phase(&principal().owner, "rcpt-own-norun")
+            .unwrap()
+            .expect("delivery phase after deny without command run id");
+        assert_eq!(phase, crate::approval_fsm::DeliveryPhase::Denied);
     }
 
     #[test]
@@ -2312,6 +2401,152 @@ mod tests {
         assert_eq!(
             row.decision,
             crate::kernel_store::ApprovalDecisionKind::Approved
+        );
+    }
+
+    #[test]
+    fn decide_approval_does_not_create_missing_candidate_sqlite() {
+        let root = tempfile::tempdir().unwrap();
+        let ghost = root.path().join("durable-ghost");
+        std::fs::create_dir_all(&ghost).unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (_store, digest) = seed_pending_ask(root.path(), "rcpt-ghost", "run-ghost", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-ghost",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-ghost"),
+                Some("run-ghost"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Approved, "{granted:?}");
+        assert!(
+            !ghost.join("kernel.sqlite").exists(),
+            "probe must not create missing kernel.sqlite candidates"
+        );
+    }
+
+    #[test]
+    fn decide_approval_indexed_store_skips_later_unbounded_scan() {
+        let parent = tempfile::tempdir().unwrap();
+        let decoy = parent.path().join("decoy");
+        let named = parent.path().join("named");
+        std::fs::create_dir_all(&decoy).unwrap();
+        std::fs::create_dir_all(&named).unwrap();
+        let (named_store, digest) = seed_pending_ask(&named, "rcpt-idx", "run-idx", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        adapter.register_durable_root(&decoy);
+        let named_s = named.to_string_lossy().into_owned();
+        let first = adapter.handle(
+            approval_cmd(
+                "ap-idx-1",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-idx"),
+                Some("run-idx"),
+                Some(true),
+                Some(&named_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(first.kind, KernelEventKind::Approved, "{first:?}");
+
+        let (decoy_store, _decoy_digest) = seed_pending_ask(&decoy, "rcpt-idx", "run-idx", 1);
+        let second = adapter.handle(
+            approval_cmd(
+                "ap-idx-2",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-idx"),
+                Some("run-idx"),
+                Some(true),
+                None,
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(second.kind, KernelEventKind::Approved, "{second:?}");
+        let named_row = named_store
+            .get_approval(&principal().owner, "rcpt-idx")
+            .unwrap()
+            .expect("named store keeps the grant");
+        assert_eq!(
+            named_row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Approved
+        );
+        let decoy_row = decoy_store
+            .get_approval(&principal().owner, "rcpt-idx")
+            .unwrap()
+            .expect("decoy must stay pending");
+        assert_eq!(
+            decoy_row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+    }
+
+    fn seed_pending_ask_without_delivery(
+        root: &std::path::Path,
+        receipt_id: &str,
+        run_id: &str,
+        revision: u64,
+    ) -> (KernelStore, String) {
+        let store = KernelStore::open(root.join("kernel.sqlite")).unwrap();
+        let receipt =
+            CompletionReceipt::open(receipt_id, principal().owner, task(), route(), now()).unwrap();
+        store.insert_open_receipt(&receipt).unwrap();
+        let digest = digest_hex("ab");
+        store
+            .record_approval_required(
+                &principal().owner,
+                &format!("appr-{receipt_id}"),
+                receipt_id,
+                run_id,
+                &digest,
+                revision,
+                now(),
+            )
+            .unwrap();
+        (store, digest)
+    }
+
+    #[test]
+    fn deny_without_delivery_phase_is_reported() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) =
+            seed_pending_ask_without_delivery(root.path(), "rcpt-nophase", "run-nophase", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let denied = adapter.handle(
+            approval_cmd(
+                "dn-nophase",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-nophase"),
+                Some("run-nophase"),
+                None,
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(denied.kind, KernelEventKind::Error, "{denied:?}");
+        assert_eq!(denied.error, Some(KernelErrorCode::NotFound));
+        let row = store
+            .get_approval(&principal().owner, "rcpt-nophase")
+            .unwrap()
+            .expect("deny still committed");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Denied
+        );
+        assert!(
+            store
+                .get_delivery_phase(&principal().owner, "rcpt-nophase")
+                .unwrap()
+                .is_none()
         );
     }
 }
