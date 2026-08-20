@@ -20,7 +20,7 @@ KernelEvent / KernelProjection  — UI may show display_hint but MUST use projec
 
 **Honest residual:** `DecideApproval` / `DenyApproval` persist through KernelStore
 only when the command carries a resolvable durable root and a matching pending
-ask (plus grant binding for approve). Missing store or binding fails closed.
+ask plus caller binding. Missing store or binding fails closed.
 Do not treat an Approved/Denied event as authority without the store row.
 Denied is the approval decision; it does not fail the receipt. Delivery-phase
 update is best-effort and is not native resume.
@@ -47,7 +47,8 @@ update is best-effort and is not native resume.
    `LocalKernelAdapter` loads `kernel.sqlite` under that root — not memory alone.
 4. Duplicate command_id handling is idempotent or fail-closed Conflict — never a second effect.
 5. `DecideApproval` requires `approval_binding` (digest, revision, lease owner, generation).
-   `DenyApproval` may omit the binding only when a pending KernelStore row already exists.
+   `DenyApproval` requires `approval_binding.request_digest`; omitting it fails closed.
+   Deny does not invent the digest from the pending row.
 
 ## Not in kernel
 
