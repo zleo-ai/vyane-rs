@@ -24,6 +24,9 @@ and **not** to resume the WP-179–465 pure-formatter residual train.
 - **Plan of record:** [`docs/plan/DECISION-GRADE-KERNEL.md`](plan/DECISION-GRADE-KERNEL.md)
   (parity classification a–e, assumptions, stop conditions, semantic
   milestones M0–M5).
+- **2026-08-20 alignment audit:** [`docs/evidence/EOS-753-KERNEL-ALIGNMENT-AUDIT.md`](evidence/EOS-753-KERNEL-ALIGNMENT-AUDIT.md)
+  (current public impl vs Python / Horus / Tauri plans; names the next kernel
+  work package without implementing it).
 - **Capability counts remain honest:** after LED-05 moved to `partial` on
   hermetic receipt/dogfood evidence, the 53-item matrix is
   7 implemented / 23 partial / 12 missing / 9 different / 2 planned. No
