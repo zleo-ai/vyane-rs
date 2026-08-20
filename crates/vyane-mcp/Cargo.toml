@@ -25,3 +25,4 @@ tracing = { workspace = true }
 [dev-dependencies]
 chrono = { workspace = true }
 rmcp = { workspace = true, features = ["client"] }
+tempfile = { workspace = true }

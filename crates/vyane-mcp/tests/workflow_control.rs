@@ -134,7 +134,7 @@ impl WorkflowControl for SucceededWorkflowControl {
 #[tokio::test]
 async fn optional_workflow_port_preserves_six_tool_default_and_enables_strict_control_tools()
 -> anyhow::Result<()> {
-    let (service, root) = test_service()?;
+    let (service, _root) = test_service()?;
     let default_tools = list_tools(VyaneMcpServer::new(service.clone())).await?;
     assert_eq!(default_tools.len(), 6);
     assert!(!default_tools.iter().any(|name| name.contains("workflow")));
@@ -249,13 +249,12 @@ async fn optional_workflow_port_preserves_six_tool_default_and_enables_strict_co
 
     client.cancel().await?;
     server_handle.await??;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[tokio::test]
 async fn succeeded_status_projects_bounded_output_and_omits_on_oversized() -> anyhow::Result<()> {
-    let (service, root) = test_service()?;
+    let (service, _root) = test_service()?;
     let fake = Arc::new(SucceededWorkflowControl {
         answer: "mcp daemon answer".into(),
     });
@@ -282,7 +281,6 @@ async fn succeeded_status_projects_bounded_output_and_omits_on_oversized() -> an
 
     client.cancel().await?;
     server_handle.await??;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -323,16 +321,13 @@ fn result_payload(result: CallToolResult) -> serde_json::Value {
     serde_json::from_str(wire["content"][0]["text"].as_str().unwrap()).unwrap()
 }
 
-fn test_service() -> anyhow::Result<(VyaneService, std::path::PathBuf)> {
-    let root = std::env::temp_dir().join(format!(
-        "vyane-mcp-workflow-port-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root)?;
-    let config = root.join("config.toml");
+fn test_service() -> anyhow::Result<(VyaneService, tempfile::TempDir)> {
+    // Exclusive directory: pid + clock-nanos collides when both tests in this
+    // binary start in the same realtime tick (macOS CI is microsecond-quantized).
+    let root = tempfile::Builder::new()
+        .prefix("vyane-mcp-workflow-port-")
+        .tempdir()?;
+    let config = root.path().join("config.toml");
     std::fs::write(
         &config,
         r#"
@@ -351,7 +346,7 @@ fn test_service() -> anyhow::Result<(VyaneService, std::path::PathBuf)> {
     let loaded = vyane_service::load_config(Some(&config))?;
     let service = VyaneService::from_loaded_with_paths(
         loaded,
-        StoragePaths::from_data_dir(root.join("data")),
+        StoragePaths::from_data_dir(root.path().join("data")),
     )?;
     Ok((service, root))
 }
