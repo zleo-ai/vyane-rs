@@ -42,7 +42,7 @@ use axum::{
 use futures::{FutureExt as _, stream::Stream};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use vyane_core::{CancellationToken, ErrorKind, RunStatus, Sandbox, VyaneError};
 use vyane_kernel::{DispatchOutcome, StreamDispatchEvent};
 use vyane_service::{
@@ -180,6 +180,10 @@ impl std::error::Error for TaskCallError {}
 #[derive(Clone)]
 struct TaskSupervisor {
     store: Arc<dyn TaskStore>,
+    /// Serializes connection-per-call SQLite work. Two `spawn_blocking`
+    /// connections in one process can deadlock on POSIX fcntl locks; SQLite's
+    /// busy timeout does not recover from that state.
+    store_lock: Arc<Mutex<()>>,
     live_tokens: Arc<dashmap::DashMap<(String, u64), CancellationToken>>,
     live_dispatches: Arc<dashmap::DashMap<(String, u64), RuntimeDispatch>>,
     dispatch_finished: Arc<Notify>,
@@ -244,6 +248,7 @@ impl TaskSupervisor {
     fn from_store(store: Arc<dyn TaskStore>) -> Self {
         Self {
             store,
+            store_lock: Arc::new(Mutex::new(())),
             live_tokens: Arc::new(dashmap::DashMap::new()),
             live_dispatches: Arc::new(dashmap::DashMap::new()),
             dispatch_finished: Arc::new(Notify::new()),
@@ -285,6 +290,7 @@ impl TaskSupervisor {
         F: FnOnce(&dyn TaskStore) -> vyane_task::Result<T> + Send + 'static,
     {
         let store = Arc::clone(&self.store);
+        let _store_lock = self.store_lock.lock().await;
         tokio::task::spawn_blocking(move || operation(store.as_ref()))
             .await
             .map_err(TaskCallError::Join)?
