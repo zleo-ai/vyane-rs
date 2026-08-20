@@ -563,17 +563,15 @@ impl LocalKernelAdapter {
                 }
                 // Denied is the approval decision. Receipt status stays whatever
                 // KernelStore already recorded (usually Open) — do not invent Failed.
+                // Ownership comes from the durable lease fence, not the caller
+                // principal/binding: deny does not steal or grant a lease.
                 self.push_event(
                     KernelEventKind::Denied,
                     now,
                     Some(receipt_id),
-                    command.agent_run_id,
+                    command.agent_run_id.clone(),
                     None,
-                    Some(KernelProjection::Ownership {
-                        owner: self.principal.owner.clone(),
-                        lease_owner: Some(self.principal.principal_id.clone()),
-                        generation: command.approval_binding.as_ref().map(|b| b.generation),
-                    }),
+                    Some(self.ownership_from_store(&store, command.agent_run_id.as_deref())),
                     None,
                     Some("approval denied".into()),
                 )
@@ -915,6 +913,20 @@ impl LocalKernelAdapter {
 
     /// Best-effort FSM advance after a durable grant/deny. The approval row is
     /// already committed; a phase miss must not invent Approved/Denied.
+    fn ownership_from_store(&self, store: &KernelStore, run_id: Option<&str>) -> KernelProjection {
+        let fence = run_id.and_then(|run_id| {
+            store
+                .get_lease_fence(&self.principal.owner, run_id)
+                .ok()
+                .flatten()
+        });
+        KernelProjection::Ownership {
+            owner: self.principal.owner.clone(),
+            lease_owner: fence.as_ref().map(|f| f.lease_owner.clone()),
+            generation: fence.as_ref().map(|f| f.generation),
+        }
+    }
+
     fn advance_delivery_phase(
         &self,
         store: &KernelStore,
@@ -1433,6 +1445,24 @@ mod tests {
         run_id: &str,
         revision: u64,
     ) -> (KernelStore, String) {
+        seed_pending_ask_with_lease(
+            root,
+            receipt_id,
+            run_id,
+            revision,
+            &principal().principal_id,
+            1,
+        )
+    }
+
+    fn seed_pending_ask_with_lease(
+        root: &std::path::Path,
+        receipt_id: &str,
+        run_id: &str,
+        revision: u64,
+        lease_owner: &str,
+        generation: u64,
+    ) -> (KernelStore, String) {
         let store = KernelStore::open(root.join("kernel.sqlite")).unwrap();
         let receipt =
             CompletionReceipt::open(receipt_id, principal().owner, task(), route(), now()).unwrap();
@@ -1454,8 +1484,8 @@ mod tests {
                 &crate::kernel_store::LeaseFence {
                     owner: principal().owner,
                     run_id: run_id.into(),
-                    lease_owner: principal().principal_id,
-                    generation: 1,
+                    lease_owner: lease_owner.into(),
+                    generation,
                     revision: 1,
                     token: "tok".into(),
                     policy_digest: digest_hex("cd"),
@@ -1638,6 +1668,20 @@ mod tests {
             denied.final_status, None,
             "deny must not invent receipt Failed"
         );
+        match denied.projection.as_ref() {
+            Some(KernelProjection::Ownership {
+                lease_owner,
+                generation,
+                ..
+            }) => {
+                assert_eq!(
+                    lease_owner.as_deref(),
+                    Some(principal().principal_id.as_str())
+                );
+                assert_eq!(*generation, Some(1));
+            }
+            other => panic!("deny must project store ownership, got {other:?}"),
+        }
         let row = store
             .get_approval(&principal().owner, "rcpt-deny")
             .unwrap()
@@ -1675,6 +1719,70 @@ mod tests {
             row.decision,
             crate::kernel_store::ApprovalDecisionKind::Denied
         );
+    }
+
+    #[test]
+    fn deny_ownership_projection_reads_store_lease_fence() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (_store, digest) =
+            seed_pending_ask_with_lease(root.path(), "rcpt-own", "run-own", 1, "worker-a", 4);
+        let adapter = LocalKernelAdapter::new(principal());
+        let mut binding = binding_for(&digest, 1);
+        binding.lease_owner = principal().principal_id.clone();
+        binding.generation = 99;
+        let denied = adapter.handle(
+            approval_cmd(
+                "dn-own",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-own"),
+                Some("run-own"),
+                None,
+                Some(&root_s),
+                Some(binding),
+            ),
+            now(),
+        );
+        assert_eq!(denied.kind, KernelEventKind::Denied, "{denied:?}");
+        match denied.projection.unwrap() {
+            KernelProjection::Ownership {
+                owner,
+                lease_owner,
+                generation,
+            } => {
+                assert_eq!(owner, principal().owner);
+                assert_eq!(lease_owner.as_deref(), Some("worker-a"));
+                assert_eq!(generation, Some(4));
+            }
+            other => panic!("expected ownership projection, got {other:?}"),
+        }
+
+        let (_store2, digest2) =
+            seed_pending_ask(root.path(), "rcpt-own-norun", "run-own-norun", 1);
+        let no_run = adapter.handle(
+            approval_cmd(
+                "dn-own-norun",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-own-norun"),
+                None,
+                None,
+                Some(&root_s),
+                Some(binding_for(&digest2, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(no_run.kind, KernelEventKind::Denied, "{no_run:?}");
+        match no_run.projection.unwrap() {
+            KernelProjection::Ownership {
+                lease_owner,
+                generation,
+                ..
+            } => {
+                assert_eq!(lease_owner, None);
+                assert_eq!(generation, None);
+            }
+            other => panic!("expected ownership without lease, got {other:?}"),
+        }
     }
 
     #[test]
