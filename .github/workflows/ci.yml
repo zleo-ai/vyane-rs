@@ -151,6 +151,7 @@ jobs:
             --skip restart_settles_expired_native_controller_without_replaying_private_input \
             --skip restart_recovers_exact_controller_without_replay \
             --skip enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first \
+            --skip daemon_restart_adopts_running_checkpoint_without_implicit_pause \
             --skip graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay \
             --skip native_write_permission_reaches_the_real_resident_tool_lane \
             --skip native_web_search_uses_the_separate_frozen_responses_target \
@@ -418,6 +419,13 @@ jobs:
           cargo test -p vyane-cli --test daemon_goal_acceptance \
             enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first \
             -- --exact
+          # Stopping the first daemon of the restart-adoption fixture can fail
+          # fast under suite load on macOS (stop's descriptor identity check
+          # resolves against a daemon that is mid-segment) even though the body
+          # is stable alone.
+          cargo test -p vyane-cli --test daemon_goal_acceptance \
+            daemon_restart_adopts_running_checkpoint_without_implicit_pause \
+            -- --exact
           cargo test -p vyane-cli --test daemon_workflow_acceptance \
             submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent \
             -- --exact
@@ -504,6 +512,7 @@ jobs:
             --skip native_agent_submit_uses_the_shared_resident_lane \
             --skip restart_settles_expired_native_controller_without_replaying_private_input \
             --skip enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first \
+            --skip daemon_restart_adopts_running_checkpoint_without_implicit_pause \
             --skip graceful_stop_cancels_active_native_wire_and_restart_settles_without_replay \
             --skip native_write_permission_reaches_the_real_resident_tool_lane \
             --skip native_web_search_uses_the_separate_frozen_responses_target \
@@ -687,6 +696,9 @@ jobs:
             --exact
           cargo llvm-cov --no-report -p vyane-cli --test daemon_goal_acceptance \
             -- enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first \
+            --exact
+          cargo llvm-cov --no-report -p vyane-cli --test daemon_goal_acceptance \
+            -- daemon_restart_adopts_running_checkpoint_without_implicit_pause \
             --exact
           # Drop incremental debris after the full instrumented suite so the
           # long dual-path workflow fixture is not disk- or fd-starved while
