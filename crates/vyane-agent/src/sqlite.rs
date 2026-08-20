@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::File;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -238,6 +239,33 @@ impl AgentClock for SystemAgentClock {
 pub struct SqliteAgentStore {
     path: PathBuf,
     clock: Arc<dyn AgentClock>,
+    /// Serializes every same-process use of this database file.
+    ///
+    /// `SQLITE_OPEN_NO_MUTEX` plus a new rusqlite `Connection` per call can
+    /// deadlock two overlapping POSIX-lock states past the 5s busy timeout.
+    /// The companion `.write-lock` flock does not close that window: it is
+    /// taken only after `connection()` already opened a SQLite handle, and
+    /// readers never take it. This mutex is held for the connection's life.
+    op_lock: Arc<Mutex<()>>,
+}
+
+struct LockedConnection<'store> {
+    connection: Connection,
+    _op: MutexGuard<'store, ()>,
+}
+
+impl Deref for LockedConnection<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl DerefMut for LockedConnection<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
+    }
 }
 
 impl std::fmt::Debug for SqliteAgentStore {
@@ -273,8 +301,10 @@ impl SqliteAgentStore {
     }
 
     pub fn open_with_clock(path: impl Into<PathBuf>, clock: Arc<dyn AgentClock>) -> Result<Self> {
+        let path = path.into();
         let store = Self {
-            path: path.into(),
+            op_lock: process_connection_lock(&path)?,
+            path,
             clock,
         };
         store.initialize()?;
@@ -288,7 +318,7 @@ impl SqliteAgentStore {
 
     pub fn audit_integrity(&self) -> Result<()> {
         let mut connection = self.connection()?;
-        let transaction = self.begin_locked_transaction(&mut connection)?;
+        let transaction = self.begin_locked_transaction(&mut connection.connection)?;
         audit_database_integrity(transaction.transaction())?;
         transaction.commit()
     }
@@ -315,6 +345,7 @@ impl SqliteAgentStore {
     }
 
     fn initialize(&self) -> Result<()> {
+        let _op = acquire_op_lock(&self.op_lock);
         prepare_database_path(&self.path)?;
         let mut connection = open_database(&self.path)?;
         connection.busy_timeout(BUSY_TIMEOUT)?;
@@ -375,7 +406,8 @@ impl SqliteAgentStore {
         transaction.commit()
     }
 
-    fn connection(&self) -> Result<Connection> {
+    fn connection(&self) -> Result<LockedConnection<'_>> {
+        let op = acquire_op_lock(&self.op_lock);
         let connection = open_database(&self.path)?;
         connection.busy_timeout(BUSY_TIMEOUT)?;
         configure_connection(&connection)?;
@@ -388,7 +420,10 @@ impl SqliteAgentStore {
         }
         validate_schema_definition(&connection)?;
         validate_database_files(&self.path)?;
-        Ok(connection)
+        Ok(LockedConnection {
+            connection,
+            _op: op,
+        })
     }
 
     fn begin_locked_transaction<'connection>(
@@ -402,9 +437,9 @@ impl SqliteAgentStore {
 
     fn write_transaction<'connection>(
         &self,
-        connection: &'connection mut Connection,
+        connection: &'connection mut LockedConnection<'_>,
     ) -> Result<WriteTransaction<'connection>> {
-        let transaction = self.begin_locked_transaction(connection)?;
+        let transaction = self.begin_locked_transaction(&mut connection.connection)?;
         let found = user_version(transaction.transaction())?;
         if found != SCHEMA_VERSION {
             return Err(AgentStoreError::UnsupportedSchema {
@@ -5153,6 +5188,55 @@ fn open_database(path: &Path) -> Result<Connection> {
     Ok(Connection::open_with_flags(path, flags)?)
 }
 
+fn process_connection_lock(path: &Path) -> Result<Arc<Mutex<()>>> {
+    let key = connection_lock_key(path)?;
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // The store holds the strong Arc; the registry only keeps Weak so the
+    // mutex dies with the last store. Retain live Weaks on every lookup so
+    // dead PathBuf keys cannot accumulate. The map is one entry per distinct
+    // DB path, so the sweep is cheap.
+    locks.retain(|_, weak| weak.upgrade().is_some());
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+/// Key the process lock on the canonical parent plus the file name.
+///
+/// `open_with_clock` takes this lock before `initialize`, so the database file
+/// may not exist yet. Creating the parent and canonicalizing it still collapses
+/// `.` / `..` and relative vs absolute spellings. Symlink aliases are rejected
+/// later by `reject_symlink_components`. A failed normalization is returned as
+/// a store error; the raw path is never used as a fallback.
+fn connection_lock_key(path: &Path) -> Result<PathBuf> {
+    let parent = database_parent(path);
+    ensure_parent_directory(parent)?;
+    let Some(file_name) = path.file_name() else {
+        return Err(AgentStoreError::InvalidInput(
+            "agent database path must include a file name".into(),
+        ));
+    };
+    Ok(std::fs::canonicalize(parent)?.join(file_name))
+}
+
+fn database_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn acquire_op_lock(lock: &Mutex<()>) -> MutexGuard<'_, ()> {
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn acquire_write_lock(path: &Path) -> Result<File> {
     let lock_path = companion_path(path, ".write-lock");
     #[cfg(unix)]
@@ -5201,18 +5285,20 @@ fn companion_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn prepare_database_path(path: &Path) -> Result<()> {
+fn ensure_parent_directory(parent: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let parent = path
-        .parent()
-        .filter(|value| !value.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
     if !parent.try_exists()? {
         std::fs::create_dir_all(parent)?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
-    validate_private_directory(parent)?;
+    validate_private_directory(parent)
+}
+
+#[cfg(unix)]
+fn prepare_database_path(path: &Path) -> Result<()> {
+    let parent = database_parent(path);
+    ensure_parent_directory(parent)?;
     reject_symlink_components(path)?;
     reject_existing_sidecar_symlinks(path)?;
     // Never expose the final SQLite path while this process still owns a raw
@@ -5292,10 +5378,16 @@ fn publish_database_candidate(candidate: &Path, path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn prepare_database_path(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
+fn ensure_parent_directory(parent: &Path) -> Result<()> {
+    if parent != Path::new(".") {
         std::fs::create_dir_all(parent)?;
     }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_database_path(path: &Path) -> Result<()> {
+    ensure_parent_directory(database_parent(path))?;
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -5516,6 +5608,69 @@ mod tests {
         assert!(status.success(), "external WAL writer acquired the lock");
 
         transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn aliased_paths_share_the_process_connection_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let direct = directory.path().join("x.sqlite3");
+        let dotted = directory.path().join(".").join("x.sqlite3");
+        let via_parent = directory.path().join("nested").join("..").join("x.sqlite3");
+        let other = directory.path().join("y.sqlite3");
+        assert_ne!(direct.as_os_str(), dotted.as_os_str());
+        assert_ne!(direct.as_os_str(), via_parent.as_os_str());
+
+        let a = SqliteAgentStore::open(&direct).unwrap();
+        let b = SqliteAgentStore::open(&dotted).unwrap();
+        let c = SqliteAgentStore::open(&via_parent).unwrap();
+        let d = SqliteAgentStore::open(&other).unwrap();
+
+        assert!(
+            Arc::ptr_eq(&a.op_lock, &b.op_lock),
+            "dir/x.sqlite3 and dir/./x.sqlite3 must share the process lock"
+        );
+        assert!(
+            Arc::ptr_eq(&a.op_lock, &c.op_lock),
+            "dir/x.sqlite3 and dir/nested/../x.sqlite3 must share the process lock"
+        );
+        assert!(
+            !Arc::ptr_eq(&a.op_lock, &d.op_lock),
+            "distinct database files must not share the process lock"
+        );
+    }
+
+    #[test]
+    fn process_connection_lock_is_reclaimed_after_last_store_drops() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reclaim.sqlite3");
+        let other = directory.path().join("other.sqlite3");
+
+        let store = SqliteAgentStore::open(&path).unwrap();
+        let stale = Arc::downgrade(&store.op_lock);
+        drop(store);
+
+        assert!(
+            stale.upgrade().is_none(),
+            "registry must not keep the mutex alive after the last store drops"
+        );
+
+        // A later lookup sweeps dead Weak entries. Neither an unrelated path
+        // nor reopening the same path may resurrect the dropped mutex.
+        let _probe = process_connection_lock(&other).unwrap();
+        assert!(
+            stale.upgrade().is_none(),
+            "a later registry probe must not resurrect the dropped mutex"
+        );
+
+        let again = process_connection_lock(&path).unwrap();
+        assert!(
+            stale.upgrade().is_none(),
+            "reopening the same path must not revive the dropped mutex"
+        );
+        assert!(
+            !stale.ptr_eq(&Arc::downgrade(&again)),
+            "reopening the same path after reclamation must allocate a new mutex"
+        );
     }
 
     #[test]
