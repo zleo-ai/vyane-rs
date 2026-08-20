@@ -12,9 +12,10 @@
 //!   [`KernelCommandKind::DecideApproval`] / [`KernelCommandKind::DenyApproval`]
 //!   persist grant/deny only through that store.
 //! - Approve/deny without a `dogfood_root` or registered durable store fail
-//!   closed. Events remain rebuildable; they are not a second authority.
+//!   closed. Deny without a caller digest fails closed. Events remain
+//!   rebuildable; they are not a second authority.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -395,15 +396,16 @@ impl LocalKernelAdapter {
     ) -> Option<KernelStore> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         if let Some(root) = dogfood_root.map(PathBuf::from) {
+            // A named root is exclusive. Union + lexicographic sort lets a
+            // sibling registered sqlite win the grant/deny write.
             push_kernel_candidates(&root, receipt_id, &mut candidates);
-        }
-        if let Ok(roots) = self.durable_roots.lock() {
+        } else if let Ok(roots) = self.durable_roots.lock() {
             for root in roots.iter() {
                 push_kernel_candidates(root, receipt_id, &mut candidates);
             }
         }
-        candidates.sort();
-        candidates.dedup();
+        let mut seen = HashSet::new();
+        candidates.retain(|path| seen.insert(path.clone()));
         let mut receipt_hit = None;
         for path in candidates {
             if !path.exists() {
@@ -503,17 +505,14 @@ impl LocalKernelAdapter {
                 if let Some(root) = command.dogfood_root.as_deref() {
                     self.register_durable_root(root);
                 }
+                let projection = self.ownership_from_store(&store, Some(run_id.as_str()));
                 self.push_event(
                     KernelEventKind::Approved,
                     now,
                     Some(receipt_id),
                     Some(run_id),
                     None,
-                    Some(KernelProjection::Ownership {
-                        owner: self.principal.owner.clone(),
-                        lease_owner: Some(grant.lease_owner),
-                        generation: Some(grant.generation),
-                    }),
+                    Some(projection),
                     None,
                     Some("approval granted".into()),
                 )
@@ -530,22 +529,13 @@ impl LocalKernelAdapter {
         else {
             return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
         };
-        let digest = match command.approval_binding.as_ref() {
-            Some(binding) => binding.request_digest.clone(),
-            None => match store.get_approval(&self.principal.owner, &receipt_id) {
-                Ok(Some(row)) => row.request_digest,
-                Ok(None) => {
-                    return self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id));
-                }
-                Err(err) => {
-                    return self.error_event(now, Self::map_store_error(err), Some(receipt_id));
-                }
-            },
+        let Some(binding) = command.approval_binding.as_ref() else {
+            return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
         };
         match store.deny_approval(
             &self.principal.owner,
             &receipt_id,
-            &digest,
+            &binding.request_digest,
             &self.principal.principal_id,
             now,
         ) {
@@ -1463,6 +1453,31 @@ mod tests {
         lease_owner: &str,
         generation: u64,
     ) -> (KernelStore, String) {
+        seed_pending_ask_maybe_lease(
+            root,
+            receipt_id,
+            run_id,
+            revision,
+            Some((lease_owner, generation)),
+        )
+    }
+
+    fn seed_pending_ask_without_lease(
+        root: &std::path::Path,
+        receipt_id: &str,
+        run_id: &str,
+        revision: u64,
+    ) -> (KernelStore, String) {
+        seed_pending_ask_maybe_lease(root, receipt_id, run_id, revision, None)
+    }
+
+    fn seed_pending_ask_maybe_lease(
+        root: &std::path::Path,
+        receipt_id: &str,
+        run_id: &str,
+        revision: u64,
+        lease: Option<(&str, u64)>,
+    ) -> (KernelStore, String) {
         let store = KernelStore::open(root.join("kernel.sqlite")).unwrap();
         let receipt =
             CompletionReceipt::open(receipt_id, principal().owner, task(), route(), now()).unwrap();
@@ -1479,21 +1494,23 @@ mod tests {
                 now(),
             )
             .unwrap();
-        store
-            .put_lease_fence(
-                &crate::kernel_store::LeaseFence {
-                    owner: principal().owner,
-                    run_id: run_id.into(),
-                    lease_owner: lease_owner.into(),
-                    generation,
-                    revision: 1,
-                    token: "tok".into(),
-                    policy_digest: digest_hex("cd"),
-                    expires_at_ms: None,
-                },
-                now(),
-            )
-            .unwrap();
+        if let Some((lease_owner, generation)) = lease {
+            store
+                .put_lease_fence(
+                    &crate::kernel_store::LeaseFence {
+                        owner: principal().owner,
+                        run_id: run_id.into(),
+                        lease_owner: lease_owner.into(),
+                        generation,
+                        revision: 1,
+                        token: "tok".into(),
+                        policy_digest: digest_hex("cd"),
+                        expires_at_ms: None,
+                    },
+                    now(),
+                )
+                .unwrap();
+        }
         let (_, phase_rev) = store
             .ensure_delivery_running(&principal().owner, receipt_id, run_id, now())
             .unwrap();
@@ -2078,7 +2095,7 @@ mod tests {
     }
 
     #[test]
-    fn deny_without_binding_uses_pending_row() {
+    fn deny_without_binding_fails_closed() {
         let root = tempfile::tempdir().unwrap();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, _digest) = seed_pending_ask(root.path(), "rcpt-nobind", "run-nobind", 1);
@@ -2095,15 +2112,162 @@ mod tests {
             ),
             now(),
         );
-        assert_eq!(denied.kind, KernelEventKind::Denied);
-        assert_eq!(denied.final_status, None);
+        assert_ne!(denied.kind, KernelEventKind::Denied);
+        assert_eq!(denied.kind, KernelEventKind::Error);
+        assert_eq!(denied.error, Some(KernelErrorCode::InvalidCommand));
         let row = store
             .get_approval(&principal().owner, "rcpt-nobind")
             .unwrap()
-            .expect("denied row");
+            .expect("pending retained");
         assert_eq!(
             row.decision,
-            crate::kernel_store::ApprovalDecisionKind::Denied
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+    }
+
+    #[test]
+    fn deny_digest_mismatch_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, _digest) = seed_pending_ask(root.path(), "rcpt-baddig", "run-baddig", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let denied = adapter.handle(
+            approval_cmd(
+                "dn-baddig",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-baddig"),
+                Some("run-baddig"),
+                None,
+                Some(&root_s),
+                Some(binding_for(&digest_hex("cd"), 1)),
+            ),
+            now(),
+        );
+        assert_ne!(denied.kind, KernelEventKind::Denied);
+        assert_eq!(denied.kind, KernelEventKind::Error);
+        assert_eq!(denied.error, Some(KernelErrorCode::NotFound));
+        let row = store
+            .get_approval(&principal().owner, "rcpt-baddig")
+            .unwrap()
+            .expect("pending retained");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+    }
+
+    #[test]
+    fn grant_ownership_projection_reads_store_lease_fence() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (_store, digest) =
+            seed_pending_ask_with_lease(root.path(), "rcpt-gown", "run-gown", 1, "worker-a", 4);
+        let adapter = LocalKernelAdapter::new(principal());
+        let mut binding = binding_for(&digest, 1);
+        binding.lease_owner = "worker-a".into();
+        binding.generation = 4;
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-gown",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-gown"),
+                Some("run-gown"),
+                Some(true),
+                Some(&root_s),
+                Some(binding),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Approved, "{granted:?}");
+        match granted.projection.unwrap() {
+            KernelProjection::Ownership {
+                owner,
+                lease_owner,
+                generation,
+            } => {
+                assert_eq!(owner, principal().owner);
+                assert_eq!(lease_owner.as_deref(), Some("worker-a"));
+                assert_eq!(generation, Some(4));
+            }
+            other => panic!("expected ownership projection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grant_ownership_projection_omits_lease_when_fence_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (_store, digest) =
+            seed_pending_ask_without_lease(root.path(), "rcpt-nofence", "run-nofence", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-nofence",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-nofence"),
+                Some("run-nofence"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Approved, "{granted:?}");
+        match granted.projection.unwrap() {
+            KernelProjection::Ownership {
+                lease_owner,
+                generation,
+                ..
+            } => {
+                assert_eq!(lease_owner, None);
+                assert_eq!(generation, None);
+            }
+            other => panic!("expected ownership without lease, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_approval_named_dogfood_root_is_not_stolen_by_sorted_sibling() {
+        let parent = tempfile::tempdir().unwrap();
+        let early = parent.path().join("aaa");
+        let named = parent.path().join("zzz");
+        std::fs::create_dir_all(&early).unwrap();
+        std::fs::create_dir_all(&named).unwrap();
+        let (early_store, _early_digest) =
+            seed_pending_ask(&early, "rcpt-collide", "run-collide", 1);
+        let (named_store, named_digest) =
+            seed_pending_ask(&named, "rcpt-collide", "run-collide", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        adapter.register_durable_root(&early);
+        let named_s = named.to_string_lossy().into_owned();
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-named-root",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-collide"),
+                Some("run-collide"),
+                Some(true),
+                Some(&named_s),
+                Some(binding_for(&named_digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Approved, "{granted:?}");
+        let named_row = named_store
+            .get_approval(&principal().owner, "rcpt-collide")
+            .unwrap()
+            .expect("named store must receive the grant");
+        assert_eq!(
+            named_row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Approved
+        );
+        let early_row = early_store
+            .get_approval(&principal().owner, "rcpt-collide")
+            .unwrap()
+            .expect("early sibling must stay pending");
+        assert_eq!(
+            early_row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
         );
     }
 
