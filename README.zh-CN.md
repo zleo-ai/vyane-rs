@@ -35,8 +35,10 @@ completion，只是 target 上的一个字段——不是另一个工具、另�
 ## 这个仓库是怎么写出来的
 
 由一支被编排调度的 AI coding agent 舰队开发：不同的前沿模型负责写代码、互相对抗性
-交叉审查、再修复审查中发现的问题。每一次合并都经过独立的跨模型审查 + `cargo fmt` /
-`clippy` / `cargo test` 三道关卡。
+交叉审查、再修复审查中发现的问题。代码改动按
+[CONTRIBUTING.md](CONTRIBUTING.md#independent-review-three-tiers)
+的三档独立审查执行（文档类 CI 绿即合；常规代码一轮独立模型审查；高风险面对抗式多轮审查），
+再加上 `cargo fmt` / `clippy` / `cargo test` 三道关卡——产品改动不会只凭写代码的那个模型自己说了算。
 
 ## 状态
 
