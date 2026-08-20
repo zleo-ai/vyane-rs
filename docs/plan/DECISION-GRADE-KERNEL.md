@@ -6,7 +6,7 @@
 **Runtime identity for this program:** runtime=`grok-build`, harness=`grok-build`, model=`grok-4.5`, reasoning_effort=`high`  
 **Non-goal:** resume WP-179–465 pure-formatter residual work (hard stop remains)
 
-**Follow-on:** multi-process `kernel.sqlite` authority, approval resume FSM, hermetic harness lifecycle binary — see [`KERNEL-INTEGRATION-PILOT.md`](./KERNEL-INTEGRATION-PILOT.md) and `docs/evidence/KERNEL-INTEGRATION-RECEIPT.md`.
+**Follow-on:** multi-process `kernel.sqlite` authority, approval resume FSM, hermetic harness lifecycle binary — see [`KERNEL-INTEGRATION-PILOT.md`](./KERNEL-INTEGRATION-PILOT.md) and `docs/evidence/KERNEL-INTEGRATION-RECEIPT.md`. **2026-08-20 alignment audit** (current public impl vs Python / Horus / Tauri plans, next-package recommendation only): [`docs/evidence/EOS-753-KERNEL-ALIGNMENT-AUDIT.md`](../evidence/EOS-753-KERNEL-ALIGNMENT-AUDIT.md).
 
 ## 1. Why this program exists
 

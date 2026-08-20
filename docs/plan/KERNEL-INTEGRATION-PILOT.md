@@ -102,3 +102,12 @@ as `partial` improvements only.
 
 Same as `DECISION-GRADE-KERNEL.md` §6 plus: overlapping writer ownership;
 truth probe cannot fail on intentional broken baseline; paid provider required.
+
+## 9. Post-G6 alignment audit (2026-08-20)
+
+Public-tree refresh of the current impl vs Python / Horus / Tauri plans:
+[`docs/evidence/EOS-753-KERNEL-ALIGNMENT-AUDIT.md`](../evidence/EOS-753-KERNEL-ALIGNMENT-AUDIT.md).
+Anchored at `c040333f2b4b8d2c4c37430cc7b2ac8ea1fb7fb5`. It does **not** change
+G0–G6 status or the 53-item headline counts. The recommended next kernel work
+package (bind boundary `DecideApproval` / `DenyApproval` to `KernelStore`) is
+named there and is not implemented by that document.
