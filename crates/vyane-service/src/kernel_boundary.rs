@@ -23,7 +23,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -303,102 +303,40 @@ impl KernelErrorCode {
     }
 }
 
-/// In-process adapter exercising the transport-neutral contract.
+/// Locates the durable [`KernelStore`] authoritative for a receipt.
 ///
-/// Process-local event queue is rebuildable. Durable receipt and approval
-/// authority is [`KernelStore`] under registered / command `dogfood_root`
-/// paths — Status/ReadReceipt discard memory and re-read facts. Approve/deny
-/// without that store fail closed as [`KernelErrorCode::NotFound`], not
-/// [`KernelErrorCode::InvalidCommand`].
-pub struct LocalKernelAdapter {
-    principal: KernelPrincipal,
-    events: Mutex<VecDeque<KernelEvent>>,
-    next_sequence: Mutex<u64>,
-    /// Fenced receipt ledger for pure boundary submit/cancel (non-dogfood).
-    receipts: Mutex<MemoryReceiptLedger>,
-    /// Durable dogfood roots (`…/durable-*` or roots containing `kernel.sqlite`).
+/// Approve/deny consume this seam instead of probing sqlite paths inside the
+/// transport adapter. `None` is unknown (mapped to [`KernelErrorCode::NotFound`]).
+pub trait KernelStoreResolver: Send + Sync {
+    fn resolve(
+        &self,
+        owner: &str,
+        receipt_id: &str,
+        dogfood_root: Option<&str>,
+    ) -> Option<KernelStore>;
+}
+
+struct DurableStoreIndex {
     durable_roots: Mutex<Vec<PathBuf>>,
-    /// sqlite paths whose schema was initialized in this process.
     initialized_stores: Mutex<HashSet<PathBuf>>,
-    /// `receipt_id` → sqlite path that last held the matching approval row.
     receipt_store_index: Mutex<HashMap<String, PathBuf>>,
 }
 
-impl LocalKernelAdapter {
-    #[must_use]
-    pub fn new(principal: KernelPrincipal) -> Self {
+impl DurableStoreIndex {
+    fn new() -> Self {
         Self {
-            principal,
-            events: Mutex::new(VecDeque::new()),
-            next_sequence: Mutex::new(1),
-            receipts: Mutex::new(MemoryReceiptLedger::new()),
             durable_roots: Mutex::new(Vec::new()),
             initialized_stores: Mutex::new(HashSet::new()),
             receipt_store_index: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Register a durable root so later Status/ReadReceipt can rebuild without
-    /// an in-process receipt cache (discard-and-rebuild).
-    pub fn register_durable_root(&self, root: impl Into<PathBuf>) {
-        let root = root.into();
+    fn register_root(&self, root: PathBuf) {
         if let Ok(mut guard) = self.durable_roots.lock()
             && !guard.iter().any(|p| p == &root)
         {
             guard.push(root);
         }
-    }
-
-    /// Drop process-local receipt cache (events kept). Used by rebuild tests.
-    pub fn discard_in_memory_receipts(&self) {
-        if let Ok(mut guard) = self.receipts.lock() {
-            *guard = MemoryReceiptLedger::new();
-        }
-    }
-
-    /// Load receipt: memory first, then durable KernelStore under dogfood roots.
-    fn load_receipt(
-        &self,
-        receipt_id: &str,
-        dogfood_root: Option<&str>,
-    ) -> Option<CompletionReceipt> {
-        if let Ok(guard) = self.receipts.lock()
-            && let Some(r) = guard.get_for_owner(&self.principal.owner, receipt_id)
-        {
-            return Some(r.clone());
-        }
-        self.load_receipt_from_durable(receipt_id, dogfood_root)
-    }
-
-    fn load_receipt_from_durable(
-        &self,
-        receipt_id: &str,
-        dogfood_root: Option<&str>,
-    ) -> Option<CompletionReceipt> {
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        if let Some(root) = dogfood_root.map(PathBuf::from) {
-            push_kernel_candidates(&root, receipt_id, &mut candidates);
-        }
-        if let Ok(roots) = self.durable_roots.lock() {
-            for root in roots.iter() {
-                push_kernel_candidates(root, receipt_id, &mut candidates);
-            }
-        }
-        // Dedup paths.
-        candidates.sort();
-        candidates.dedup();
-        for path in candidates {
-            if !path.exists() {
-                continue;
-            }
-            let Ok(store) = KernelStore::open(&path) else {
-                continue;
-            };
-            if let Ok(Some(receipt)) = store.get_receipt(&self.principal.owner, receipt_id) {
-                return Some(receipt);
-            }
-        }
-        None
     }
 
     fn remember_receipt_store(&self, receipt_id: &str, path: PathBuf) {
@@ -440,9 +378,18 @@ impl LocalKernelAdapter {
         };
         self.store_for_existing_path(&path)
     }
+}
 
-    fn open_durable_store(
+/// Default resolver: candidate `kernel.sqlite` paths under registered /
+/// command `dogfood_root`s. Named roots stay exclusive.
+struct FilesystemKernelStoreResolver {
+    index: Arc<DurableStoreIndex>,
+}
+
+impl KernelStoreResolver for FilesystemKernelStoreResolver {
+    fn resolve(
         &self,
+        owner: &str,
         receipt_id: &str,
         dogfood_root: Option<&str>,
     ) -> Option<KernelStore> {
@@ -450,11 +397,8 @@ impl LocalKernelAdapter {
         // unbounded registered-root scan so a later decoy cannot steal a
         // receipt this adapter already resolved.
         if dogfood_root.is_none()
-            && let Some(store) = self.indexed_store(receipt_id)
-            && matches!(
-                store.get_approval(&self.principal.owner, receipt_id),
-                Ok(Some(_))
-            )
+            && let Some(store) = self.index.indexed_store(receipt_id)
+            && matches!(store.get_approval(owner, receipt_id), Ok(Some(_)))
         {
             return Some(store);
         }
@@ -464,7 +408,7 @@ impl LocalKernelAdapter {
             // A named root is exclusive so a sibling registered sqlite cannot
             // steal the grant/deny write.
             push_kernel_candidates(&root, receipt_id, &mut candidates);
-        } else if let Ok(roots) = self.durable_roots.lock() {
+        } else if let Ok(roots) = self.index.durable_roots.lock() {
             for root in roots.iter() {
                 push_kernel_candidates(root, receipt_id, &mut candidates);
             }
@@ -473,30 +417,149 @@ impl LocalKernelAdapter {
         candidates.retain(|path| seen.insert(path.clone()));
         let mut receipt_hit = None;
         for path in candidates {
-            let Some(store) = self.store_for_existing_path(&path) else {
+            let Some(store) = self.index.store_for_existing_path(&path) else {
                 continue;
             };
-            if matches!(
-                store.get_approval(&self.principal.owner, receipt_id),
-                Ok(Some(_))
-            ) {
-                self.remember_receipt_store(receipt_id, store.path().to_path_buf());
+            if matches!(store.get_approval(owner, receipt_id), Ok(Some(_))) {
+                self.index
+                    .remember_receipt_store(receipt_id, store.path().to_path_buf());
                 return Some(store);
             }
-            if receipt_hit.is_none()
-                && matches!(
-                    store.get_receipt(&self.principal.owner, receipt_id),
-                    Ok(Some(_))
-                )
+            if receipt_hit.is_none() && matches!(store.get_receipt(owner, receipt_id), Ok(Some(_)))
             {
                 receipt_hit = Some(store);
             }
         }
         if let Some(store) = receipt_hit {
-            self.remember_receipt_store(receipt_id, store.path().to_path_buf());
+            self.index
+                .remember_receipt_store(receipt_id, store.path().to_path_buf());
             return Some(store);
         }
         None
+    }
+}
+
+/// In-process adapter exercising the transport-neutral contract.
+///
+/// Process-local event queue is rebuildable. Durable receipt and approval
+/// authority is [`KernelStore`] under registered / command `dogfood_root`
+/// paths — Status/ReadReceipt discard memory and re-read facts. Approve/deny
+/// resolve the store through [`KernelStoreResolver`] and fail closed as
+/// [`KernelErrorCode::NotFound`], not [`KernelErrorCode::InvalidCommand`].
+pub struct LocalKernelAdapter {
+    principal: KernelPrincipal,
+    events: Mutex<VecDeque<KernelEvent>>,
+    next_sequence: Mutex<u64>,
+    /// Fenced receipt ledger for pure boundary submit/cancel (non-dogfood).
+    receipts: Mutex<MemoryReceiptLedger>,
+    index: Arc<DurableStoreIndex>,
+    store_resolver: Arc<dyn KernelStoreResolver>,
+}
+
+impl LocalKernelAdapter {
+    #[must_use]
+    pub fn new(principal: KernelPrincipal) -> Self {
+        let index = Arc::new(DurableStoreIndex::new());
+        let store_resolver = Arc::new(FilesystemKernelStoreResolver {
+            index: Arc::clone(&index),
+        });
+        Self::with_index(principal, index, store_resolver)
+    }
+
+    /// Construct with an injected store locator. Approve/deny use this
+    /// resolver exclusively and do not fall back to filesystem probing.
+    #[must_use]
+    pub fn with_store_resolver(
+        principal: KernelPrincipal,
+        store_resolver: Arc<dyn KernelStoreResolver>,
+    ) -> Self {
+        Self::with_index(
+            principal,
+            Arc::new(DurableStoreIndex::new()),
+            store_resolver,
+        )
+    }
+
+    fn with_index(
+        principal: KernelPrincipal,
+        index: Arc<DurableStoreIndex>,
+        store_resolver: Arc<dyn KernelStoreResolver>,
+    ) -> Self {
+        Self {
+            principal,
+            events: Mutex::new(VecDeque::new()),
+            next_sequence: Mutex::new(1),
+            receipts: Mutex::new(MemoryReceiptLedger::new()),
+            index,
+            store_resolver,
+        }
+    }
+
+    /// Register a durable root so later Status/ReadReceipt can rebuild without
+    /// an in-process receipt cache (discard-and-rebuild).
+    pub fn register_durable_root(&self, root: impl Into<PathBuf>) {
+        self.index.register_root(root.into());
+    }
+
+    /// Drop process-local receipt cache (events kept). Used by rebuild tests.
+    pub fn discard_in_memory_receipts(&self) {
+        if let Ok(mut guard) = self.receipts.lock() {
+            *guard = MemoryReceiptLedger::new();
+        }
+    }
+
+    /// Load receipt: memory first, then durable KernelStore under dogfood roots.
+    fn load_receipt(
+        &self,
+        receipt_id: &str,
+        dogfood_root: Option<&str>,
+    ) -> Option<CompletionReceipt> {
+        if let Ok(guard) = self.receipts.lock()
+            && let Some(r) = guard.get_for_owner(&self.principal.owner, receipt_id)
+        {
+            return Some(r.clone());
+        }
+        self.load_receipt_from_durable(receipt_id, dogfood_root)
+    }
+
+    fn load_receipt_from_durable(
+        &self,
+        receipt_id: &str,
+        dogfood_root: Option<&str>,
+    ) -> Option<CompletionReceipt> {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(root) = dogfood_root.map(PathBuf::from) {
+            push_kernel_candidates(&root, receipt_id, &mut candidates);
+        }
+        if let Ok(roots) = self.index.durable_roots.lock() {
+            for root in roots.iter() {
+                push_kernel_candidates(root, receipt_id, &mut candidates);
+            }
+        }
+        // Dedup paths.
+        candidates.sort();
+        candidates.dedup();
+        for path in candidates {
+            if !path.exists() {
+                continue;
+            }
+            let Ok(store) = KernelStore::open(&path) else {
+                continue;
+            };
+            if let Ok(Some(receipt)) = store.get_receipt(&self.principal.owner, receipt_id) {
+                return Some(receipt);
+            }
+        }
+        None
+    }
+
+    fn open_durable_store(
+        &self,
+        receipt_id: &str,
+        dogfood_root: Option<&str>,
+    ) -> Option<KernelStore> {
+        self.store_resolver
+            .resolve(&self.principal.owner, receipt_id, dogfood_root)
     }
 
     fn map_store_error(err: KernelStoreError) -> KernelErrorCode {
@@ -1713,6 +1776,99 @@ mod tests {
         );
         assert_eq!(malformed.kind, KernelEventKind::Error);
         assert_eq!(malformed.error, Some(KernelErrorCode::InvalidCommand));
+    }
+
+    struct FixedStoreResolver {
+        store: KernelStore,
+    }
+
+    impl KernelStoreResolver for FixedStoreResolver {
+        fn resolve(
+            &self,
+            _owner: &str,
+            _receipt_id: &str,
+            _dogfood_root: Option<&str>,
+        ) -> Option<KernelStore> {
+            Some(self.store.clone())
+        }
+    }
+
+    struct EmptyStoreResolver;
+
+    impl KernelStoreResolver for EmptyStoreResolver {
+        fn resolve(
+            &self,
+            _owner: &str,
+            _receipt_id: &str,
+            _dogfood_root: Option<&str>,
+        ) -> Option<KernelStore> {
+            None
+        }
+    }
+
+    #[test]
+    fn injected_store_resolver_grants_without_filesystem_probe() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, digest) = seed_pending_ask(root.path(), "rcpt-inject", "run-inject", 1);
+        let adapter = LocalKernelAdapter::with_store_resolver(
+            principal(),
+            Arc::new(FixedStoreResolver {
+                store: store.clone(),
+            }),
+        );
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-inject",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-inject"),
+                Some("run-inject"),
+                Some(true),
+                None,
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Approved, "{granted:?}");
+        let row = store
+            .get_approval(&principal().owner, "rcpt-inject")
+            .unwrap()
+            .expect("injected store must receive the grant");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Approved
+        );
+    }
+
+    #[test]
+    fn injected_store_resolver_is_exclusive_of_filesystem_probe() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) = seed_pending_ask(root.path(), "rcpt-reject", "run-reject", 1);
+        let adapter =
+            LocalKernelAdapter::with_store_resolver(principal(), Arc::new(EmptyStoreResolver));
+        adapter.register_durable_root(root.path());
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-reject",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-reject"),
+                Some("run-reject"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Error, "{granted:?}");
+        assert_eq!(granted.error, Some(KernelErrorCode::NotFound));
+        let row = store
+            .get_approval(&principal().owner, "rcpt-reject")
+            .unwrap()
+            .expect("pending ask must stay pending");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
     }
 
     #[test]
