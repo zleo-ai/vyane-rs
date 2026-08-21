@@ -1659,6 +1659,80 @@ mod tests {
     }
 
     #[test]
+    fn map_store_error_maps_every_kernel_store_error_arm() {
+        let cases = [
+            (KernelStoreError::NotFound, KernelErrorCode::NotFound),
+            (
+                KernelStoreError::OwnerMismatch,
+                KernelErrorCode::OwnerMismatch,
+            ),
+            (
+                KernelStoreError::ApprovalDeniedFinal,
+                KernelErrorCode::Conflict,
+            ),
+            (
+                KernelStoreError::ApprovalBindingMismatch,
+                KernelErrorCode::Conflict,
+            ),
+            (
+                KernelStoreError::Conflict("cas".into()),
+                KernelErrorCode::Conflict,
+            ),
+            (
+                KernelStoreError::StaleRevision {
+                    expected: 2,
+                    actual: 1,
+                },
+                KernelErrorCode::Conflict,
+            ),
+            (
+                KernelStoreError::TerminalImmutable,
+                KernelErrorCode::Conflict,
+            ),
+            (
+                KernelStoreError::UnsupportedSchema {
+                    found: 9,
+                    supported: 1,
+                },
+                KernelErrorCode::UnsupportedVersion,
+            ),
+            (
+                KernelStoreError::InvalidInput("bad field"),
+                KernelErrorCode::InvalidCommand,
+            ),
+            (
+                KernelStoreError::Io("disk".into()),
+                KernelErrorCode::Unavailable,
+            ),
+            (
+                KernelStoreError::Sqlite("busy".into()),
+                KernelErrorCode::Unavailable,
+            ),
+            (
+                KernelStoreError::Receipt("json".into()),
+                KernelErrorCode::Unavailable,
+            ),
+            (
+                KernelStoreError::Delivery("phase".into()),
+                KernelErrorCode::Unavailable,
+            ),
+            (
+                KernelStoreError::DuplicateEffect {
+                    effect_id: "eff-1".into(),
+                },
+                KernelErrorCode::Unavailable,
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(
+                LocalKernelAdapter::map_store_error(err.clone()),
+                expected,
+                "{err:?} must map to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
     fn decide_approval_persists_grant_visible_to_fresh_adapter() {
         let root = tempfile::tempdir().unwrap();
         let root_s = root.path().to_string_lossy().into_owned();
