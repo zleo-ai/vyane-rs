@@ -49,8 +49,9 @@ native resume.
    `LocalKernelAdapter` loads `kernel.sqlite` under that root — not memory alone.
 4. Duplicate command_id handling is idempotent or fail-closed Conflict — never a second effect.
 5. `DecideApproval` requires `approval_binding` (digest, revision, lease owner, generation).
-   `DenyApproval` requires `approval_binding.request_digest`; omitting it fails closed.
-   Deny does not invent the digest from the pending row.
+   `DenyApproval` requires the same binding fields; omitting the binding or digest fails closed.
+   Deny does not invent the digest from the pending row. Stale revision or a
+   mismatched lease fence fails closed (Conflict), same as grant.
 
 ## Not in kernel
 

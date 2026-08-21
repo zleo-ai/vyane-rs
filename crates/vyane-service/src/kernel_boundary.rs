@@ -12,11 +12,13 @@
 //!   [`KernelCommandKind::DecideApproval`] / [`KernelCommandKind::DenyApproval`]
 //!   persist grant/deny only through that store.
 //! - Approve/deny without a `dogfood_root` or registered durable store fail
-//!   closed. Deny without a caller digest fails closed. Deny may omit
-//!   `agent_run_id`; the delivery FSM and ownership projection use the
-//!   durable row's run id. A missing delivery phase or lost CAS is reported
-//!   rather than emitting Approved/Denied against a wedged FSM. Events remain
-//!   rebuildable; they are not a second authority.
+//!   closed. Deny without a caller digest fails closed. Deny fences
+//!   `expected_revision` / `lease_owner` / `generation` the same way grant
+//!   does (lease fence checked when present). Deny may omit `agent_run_id`;
+//!   the delivery FSM and ownership projection use the durable row's run id.
+//!   A missing delivery phase or lost CAS is reported rather than emitting
+//!   Approved/Denied against a wedged FSM. Events remain rebuildable; they
+//!   are not a second authority.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -33,7 +35,7 @@ use vyane_core::{
 use crate::approval_fsm::DeliveryEvent;
 use crate::dogfood::run_successful_dogfood;
 use crate::kernel_store::{
-    ApprovalDecisionKind, ApprovalGrantBinding, KernelStore, KernelStoreError,
+    ApprovalDecisionKind, ApprovalDenyBinding, ApprovalGrantBinding, KernelStore, KernelStoreError,
 };
 
 /// Frozen local boundary protocol version.
@@ -595,16 +597,19 @@ impl LocalKernelAdapter {
         else {
             return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
         };
-        let Some(binding) = command.approval_binding.as_ref() else {
+        let Some(binding) = command.approval_binding.clone() else {
             return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
         };
-        match store.deny_approval(
-            &self.principal.owner,
-            &receipt_id,
-            &binding.request_digest,
-            &self.principal.principal_id,
-            now,
-        ) {
+        let deny = ApprovalDenyBinding {
+            owner: self.principal.owner.clone(),
+            receipt_id: receipt_id.clone(),
+            request_digest: binding.request_digest,
+            expected_revision: binding.expected_revision,
+            lease_owner: binding.lease_owner,
+            generation: binding.generation,
+            decided_by: self.principal.principal_id.clone(),
+        };
+        match store.deny_approval(&deny, now) {
             Ok(decision) => {
                 if let Err(code) = self.advance_delivery_phase(
                     &store,
@@ -1827,8 +1832,8 @@ mod tests {
             seed_pending_ask_with_lease(root.path(), "rcpt-own", "run-own", 1, "worker-a", 4);
         let adapter = LocalKernelAdapter::new(principal());
         let mut binding = binding_for(&digest, 1);
-        binding.lease_owner = principal().principal_id.clone();
-        binding.generation = 99;
+        binding.lease_owner = "worker-a".into();
+        binding.generation = 4;
         let denied = adapter.handle(
             approval_cmd(
                 "dn-own",
@@ -1889,6 +1894,62 @@ mod tests {
             .unwrap()
             .expect("delivery phase after deny without command run id");
         assert_eq!(phase, crate::approval_fsm::DeliveryPhase::Denied);
+    }
+
+    #[test]
+    fn deny_revision_and_lease_fence_mismatch_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) =
+            seed_pending_ask_with_lease(root.path(), "rcpt-dfence", "run-dfence", 1, "worker-a", 4);
+        let adapter = LocalKernelAdapter::new(principal());
+
+        let mut bad_gen = binding_for(&digest, 1);
+        bad_gen.lease_owner = "worker-a".into();
+        bad_gen.generation = 99;
+        let gen_mismatch = adapter.handle(
+            approval_cmd(
+                "dn-bad-gen",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-dfence"),
+                Some("run-dfence"),
+                None,
+                Some(&root_s),
+                Some(bad_gen),
+            ),
+            now(),
+        );
+        assert_ne!(gen_mismatch.kind, KernelEventKind::Denied);
+        assert_eq!(gen_mismatch.kind, KernelEventKind::Error);
+        assert_eq!(gen_mismatch.error, Some(KernelErrorCode::Conflict));
+
+        let mut bad_rev = binding_for(&digest, 99);
+        bad_rev.lease_owner = "worker-a".into();
+        bad_rev.generation = 4;
+        let rev_mismatch = adapter.handle(
+            approval_cmd(
+                "dn-bad-rev",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-dfence"),
+                Some("run-dfence"),
+                None,
+                Some(&root_s),
+                Some(bad_rev),
+            ),
+            now(),
+        );
+        assert_ne!(rev_mismatch.kind, KernelEventKind::Denied);
+        assert_eq!(rev_mismatch.kind, KernelEventKind::Error);
+        assert_eq!(rev_mismatch.error, Some(KernelErrorCode::Conflict));
+
+        let row = store
+            .get_approval(&principal().owner, "rcpt-dfence")
+            .unwrap()
+            .expect("pending retained");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
     }
 
     #[test]

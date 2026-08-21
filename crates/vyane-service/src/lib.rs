@@ -135,8 +135,8 @@ pub use kernel_boundary::{
     KernelProjection, LocalKernelAdapter, ReplayCursor, SubscribeRequest,
 };
 pub use kernel_store::{
-    ApprovalDecision, ApprovalDecisionKind, ApprovalGrantBinding, ArtifactMeta, KernelStore,
-    KernelStoreError, LeaseFence,
+    ApprovalDecision, ApprovalDecisionKind, ApprovalDenyBinding, ApprovalGrantBinding,
+    ArtifactMeta, KernelStore, KernelStoreError, LeaseFence,
 };
 pub use message::{
     AgentMessageCompletionReadError, AgentMessageCompletionStageError, MessageComponents,
