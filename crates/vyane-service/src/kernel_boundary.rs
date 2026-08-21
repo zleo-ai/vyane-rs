@@ -308,7 +308,8 @@ impl KernelErrorCode {
 /// Process-local event queue is rebuildable. Durable receipt and approval
 /// authority is [`KernelStore`] under registered / command `dogfood_root`
 /// paths — Status/ReadReceipt discard memory and re-read facts. Approve/deny
-/// without that store fail closed.
+/// without that store fail closed as [`KernelErrorCode::NotFound`], not
+/// [`KernelErrorCode::InvalidCommand`].
 pub struct LocalKernelAdapter {
     principal: KernelPrincipal,
     events: Mutex<VecDeque<KernelEvent>>,
@@ -523,7 +524,10 @@ impl LocalKernelAdapter {
         };
         let Some(store) = self.open_durable_store(&receipt_id, command.dogfood_root.as_deref())
         else {
-            return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
+            // Well-formed approve whose receipt is not in any candidate store
+            // is unknown, not malformed. InvalidCommand stays for missing
+            // receipt_id / run_id / binding.
+            return self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id));
         };
         if !command.approval_granted.unwrap_or(false) {
             return match store.get_approval(&self.principal.owner, &receipt_id) {
@@ -595,7 +599,7 @@ impl LocalKernelAdapter {
         };
         let Some(store) = self.open_durable_store(&receipt_id, command.dogfood_root.as_deref())
         else {
-            return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
+            return self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id));
         };
         let Some(binding) = command.approval_binding.clone() else {
             return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
@@ -1635,7 +1639,7 @@ mod tests {
             "grant without KernelStore must not emit Approved"
         );
         assert_eq!(event.kind, KernelEventKind::Error);
-        assert_eq!(event.error, Some(KernelErrorCode::InvalidCommand));
+        assert_eq!(event.error, Some(KernelErrorCode::NotFound));
     }
 
     #[test]
@@ -1655,7 +1659,60 @@ mod tests {
         );
         assert_ne!(event.kind, KernelEventKind::Denied);
         assert_eq!(event.kind, KernelEventKind::Error);
-        assert_eq!(event.error, Some(KernelErrorCode::InvalidCommand));
+        assert_eq!(event.error, Some(KernelErrorCode::NotFound));
+    }
+
+    #[test]
+    fn unresolvable_named_root_is_not_found_not_invalid_command() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let adapter = LocalKernelAdapter::new(principal());
+        let grant = adapter.handle(
+            approval_cmd(
+                "ap-empty-root",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-empty-root"),
+                Some("run-empty-root"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest_hex("ab"), 1)),
+            ),
+            now(),
+        );
+        assert_eq!(grant.kind, KernelEventKind::Error);
+        assert_eq!(grant.error, Some(KernelErrorCode::NotFound));
+        assert_ne!(grant.kind, KernelEventKind::Approved);
+
+        let deny = adapter.handle(
+            approval_cmd(
+                "dn-empty-root",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-empty-root"),
+                Some("run-empty-root"),
+                None,
+                Some(&root_s),
+                Some(binding_for(&digest_hex("ab"), 1)),
+            ),
+            now(),
+        );
+        assert_eq!(deny.kind, KernelEventKind::Error);
+        assert_eq!(deny.error, Some(KernelErrorCode::NotFound));
+        assert_ne!(deny.kind, KernelEventKind::Denied);
+
+        let malformed = adapter.handle(
+            approval_cmd(
+                "ap-no-rcpt-empty",
+                KernelCommandKind::DecideApproval,
+                None,
+                Some("run-empty-root"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest_hex("ab"), 1)),
+            ),
+            now(),
+        );
+        assert_eq!(malformed.kind, KernelEventKind::Error);
+        assert_eq!(malformed.error, Some(KernelErrorCode::InvalidCommand));
     }
 
     #[test]
