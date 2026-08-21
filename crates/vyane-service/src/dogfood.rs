@@ -32,8 +32,8 @@ use vyane_core::{
 
 use crate::approval_fsm::{DeliveryEvent, DeliveryPhase};
 use crate::kernel_store::{
-    ApprovalDecisionKind, ApprovalGrantBinding, ArtifactMeta, KernelStore, KernelStoreError,
-    LeaseFence,
+    ApprovalDecisionKind, ApprovalDenyBinding, ApprovalGrantBinding, ArtifactMeta, KernelStore,
+    KernelStoreError, LeaseFence,
 };
 
 /// Stable dogfood task type recorded on receipts.
@@ -675,13 +675,32 @@ impl DogfoodPath {
             .approval_request_digest
             .clone()
             .ok_or(DogfoodError::InvalidState("no pending approval request"))?;
-        self.kernel.deny_approval(
-            &self.config.owner,
-            &self.config.receipt_id,
-            &digest,
-            &self.config.lease_owner,
-            now,
-        )?;
+        let generation = self
+            .claimed
+            .as_ref()
+            .map(|c| c.receipt.generation)
+            .or_else(|| {
+                self.kernel
+                    .get_lease_fence(&self.config.owner, &self.config.run_id)
+                    .ok()
+                    .flatten()
+                    .map(|f| f.generation)
+            })
+            .ok_or(DogfoodError::InvalidState("no lease generation for deny"))?;
+        let binding = ApprovalDenyBinding {
+            owner: self.config.owner.clone(),
+            receipt_id: self.config.receipt_id.clone(),
+            request_digest: digest,
+            expected_revision: self
+                .kernel
+                .get_approval(&self.config.owner, &self.config.receipt_id)?
+                .map(|a| a.bound_revision)
+                .unwrap_or(self.receipt_revision),
+            lease_owner: self.config.lease_owner.clone(),
+            generation,
+            decided_by: self.config.lease_owner.clone(),
+        };
+        self.kernel.deny_approval(&binding, now)?;
         let (phase, rev) = self.kernel.set_delivery_phase(
             &self.config.owner,
             &self.config.receipt_id,

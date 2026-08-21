@@ -177,6 +177,19 @@ pub struct ApprovalGrantBinding {
     pub decided_by: String,
 }
 
+/// Binding required for a successful deny. Run id comes from the durable row
+/// so a caller may omit `agent_run_id`; revision and lease fence still apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalDenyBinding {
+    pub owner: String,
+    pub receipt_id: String,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub lease_owner: String,
+    pub generation: u64,
+    pub decided_by: String,
+}
+
 /// Artifact metadata row (bytes live on disk under workdir).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactMeta {
@@ -763,21 +776,13 @@ impl KernelStore {
                 if run_id != binding.run_id {
                     return Err(KernelStoreError::ApprovalBindingMismatch);
                 }
-                // First grant must match durable lease fence when present.
-                let fence: Option<(String, i64)> = tx
-                    .query_row(
-                        "SELECT lease_owner, generation FROM kernel_lease_fences
-                         WHERE owner = ?1 AND run_id = ?2",
-                        params![binding.owner, binding.run_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()?;
-                if let Some((fence_owner, fence_gen)) = fence
-                    && (fence_owner != binding.lease_owner
-                        || u64::try_from(fence_gen).unwrap_or(0) != binding.generation)
-                {
-                    return Err(KernelStoreError::ApprovalBindingMismatch);
-                }
+                assert_optional_lease_fence(
+                    &tx,
+                    &binding.owner,
+                    &run_id,
+                    &binding.lease_owner,
+                    binding.generation,
+                )?;
                 let ms = now.timestamp_millis();
                 let n = tx.execute(
                     "UPDATE kernel_approvals
@@ -805,48 +810,93 @@ impl KernelStore {
         }
     }
 
+    /// Bound deny. Idempotent if already denied with the same binding.
     pub fn deny_approval(
         &self,
-        owner: &str,
-        receipt_id: &str,
-        request_digest: &str,
-        decided_by: &str,
+        binding: &ApprovalDenyBinding,
         now: DateTime<Utc>,
     ) -> KernelStoreResult<ApprovalDecision> {
+        validate_owner(&binding.owner)?;
+        validate_digest(&binding.request_digest)?;
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String)> = tx
+        #[allow(clippy::type_complexity)]
+        type ExistingDenyRow = (String, String, String, i64, Option<String>, Option<i64>);
+        let existing: Option<ExistingDenyRow> = tx
             .query_row(
-                "SELECT approval_id, decision FROM kernel_approvals
+                "SELECT approval_id, decision, run_id, bound_revision, bound_lease_owner, bound_generation
+                 FROM kernel_approvals
                  WHERE owner = ?1 AND receipt_id = ?2 AND request_digest = ?3",
-                params![owner, receipt_id, request_digest],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                params![binding.owner, binding.receipt_id, binding.request_digest],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((approval_id, decision)) = existing else {
+        let Some((approval_id, decision, run_id, bound_rev, bound_lo, bound_gen)) = existing else {
             return Err(KernelStoreError::NotFound);
         };
         let kind = ApprovalDecisionKind::parse(&decision)?;
-        if kind == ApprovalDecisionKind::Denied {
-            let row = load_approval(&tx, owner, &approval_id)?;
-            tx.commit()?;
-            return Ok(row);
-        }
-        if kind == ApprovalDecisionKind::Approved {
-            return Err(KernelStoreError::Conflict(
+        match kind {
+            ApprovalDecisionKind::Approved => Err(KernelStoreError::Conflict(
                 "cannot deny an already approved decision".into(),
-            ));
+            )),
+            ApprovalDecisionKind::Denied => {
+                let rev_ok = u64::try_from(bound_rev).unwrap_or(0) == binding.expected_revision;
+                let lo_ok = bound_lo.as_deref() == Some(binding.lease_owner.as_str());
+                let gen_ok =
+                    bound_gen.map(|g| u64::try_from(g).unwrap_or(0)) == Some(binding.generation);
+                if rev_ok && lo_ok && gen_ok {
+                    let row = load_approval(&tx, &binding.owner, &approval_id)?;
+                    tx.commit()?;
+                    Ok(row)
+                } else {
+                    Err(KernelStoreError::ApprovalBindingMismatch)
+                }
+            }
+            ApprovalDecisionKind::Pending => {
+                if u64::try_from(bound_rev).unwrap_or(0) != binding.expected_revision {
+                    return Err(KernelStoreError::ApprovalBindingMismatch);
+                }
+                assert_optional_lease_fence(
+                    &tx,
+                    &binding.owner,
+                    &run_id,
+                    &binding.lease_owner,
+                    binding.generation,
+                )?;
+                let ms = now.timestamp_millis();
+                let n = tx.execute(
+                    "UPDATE kernel_approvals
+                     SET decision = 'denied', decided_by = ?1, bound_lease_owner = ?2,
+                         bound_generation = ?3, decided_at_ms = ?4, updated_at_ms = ?4
+                     WHERE owner = ?5 AND approval_id = ?6 AND decision = 'pending'",
+                    params![
+                        binding.decided_by,
+                        binding.lease_owner,
+                        binding.generation as i64,
+                        ms,
+                        binding.owner,
+                        approval_id
+                    ],
+                )?;
+                if n != 1 {
+                    return Err(KernelStoreError::Conflict(
+                        "approval deny CAS failed".into(),
+                    ));
+                }
+                let row = load_approval(&tx, &binding.owner, &approval_id)?;
+                tx.commit()?;
+                Ok(row)
+            }
         }
-        let ms = now.timestamp_millis();
-        tx.execute(
-            "UPDATE kernel_approvals
-             SET decision = 'denied', decided_by = ?1, decided_at_ms = ?2, updated_at_ms = ?2
-             WHERE owner = ?3 AND approval_id = ?4 AND decision = 'pending'",
-            params![decided_by, ms, owner, approval_id],
-        )?;
-        let row = load_approval(&tx, owner, &approval_id)?;
-        tx.commit()?;
-        Ok(row)
     }
 
     pub fn get_approval(
@@ -1236,6 +1286,29 @@ fn final_status_str(status: ReceiptFinalStatus) -> &'static str {
     }
 }
 
+fn assert_optional_lease_fence(
+    tx: &rusqlite::Transaction<'_>,
+    owner: &str,
+    run_id: &str,
+    lease_owner: &str,
+    generation: u64,
+) -> KernelStoreResult<()> {
+    let fence: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT lease_owner, generation FROM kernel_lease_fences
+             WHERE owner = ?1 AND run_id = ?2",
+            params![owner, run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((fence_owner, fence_gen)) = fence
+        && (fence_owner != lease_owner || u64::try_from(fence_gen).unwrap_or(0) != generation)
+    {
+        return Err(KernelStoreError::ApprovalBindingMismatch);
+    }
+    Ok(())
+}
+
 fn validate_owner(owner: &str) -> KernelStoreResult<()> {
     if owner.is_empty() || owner.len() > 128 {
         return Err(KernelStoreError::InvalidInput("owner"));
@@ -1502,14 +1575,65 @@ mod tests {
         let d2 = store.grant_approval(&ok, now()).unwrap();
         assert_eq!(d2.decision, ApprovalDecisionKind::Approved);
 
-        // Fresh deny path
+        // Fresh deny path — revision/lease/generation fence like grant.
         let dig2 = "b".repeat(64);
         store
             .record_approval_required("o", "ap2", "rcpt2", "run2", &dig2, 1, now())
             .unwrap();
         store
-            .deny_approval("o", "rcpt2", &dig2, "principal", now())
+            .put_lease_fence(
+                &LeaseFence {
+                    owner: "o".into(),
+                    run_id: "run2".into(),
+                    lease_owner: "lease".into(),
+                    generation: 4,
+                    revision: 1,
+                    token: "tok".into(),
+                    policy_digest: "c".repeat(64),
+                    expires_at_ms: None,
+                },
+                now(),
+            )
             .unwrap();
+        let deny_stale = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt2".into(),
+            request_digest: dig2.clone(),
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 99,
+            decided_by: "principal".into(),
+        };
+        assert!(matches!(
+            store.deny_approval(&deny_stale, now()).unwrap_err(),
+            KernelStoreError::ApprovalBindingMismatch
+        ));
+        let deny_rev = ApprovalDenyBinding {
+            expected_revision: 9,
+            generation: 4,
+            ..deny_stale.clone()
+        };
+        assert!(matches!(
+            store.deny_approval(&deny_rev, now()).unwrap_err(),
+            KernelStoreError::ApprovalBindingMismatch
+        ));
+        let deny_ok = ApprovalDenyBinding {
+            expected_revision: 1,
+            generation: 4,
+            ..deny_stale
+        };
+        let denied = store.deny_approval(&deny_ok, now()).unwrap();
+        assert_eq!(denied.decision, ApprovalDecisionKind::Denied);
+        let denied_again = store.deny_approval(&deny_ok, now()).unwrap();
+        assert_eq!(denied_again.decision, ApprovalDecisionKind::Denied);
+        let deny_other_gen = ApprovalDenyBinding {
+            generation: 5,
+            ..deny_ok.clone()
+        };
+        assert!(matches!(
+            store.deny_approval(&deny_other_gen, now()).unwrap_err(),
+            KernelStoreError::ApprovalBindingMismatch
+        ));
         let grant_after_deny = ApprovalGrantBinding {
             owner: "o".into(),
             receipt_id: "rcpt2".into(),
@@ -1517,7 +1641,7 @@ mod tests {
             request_digest: dig2,
             expected_revision: 1,
             lease_owner: "lease".into(),
-            generation: 1,
+            generation: 4,
             decided_by: "principal".into(),
         };
         assert!(matches!(
