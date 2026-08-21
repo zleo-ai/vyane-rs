@@ -720,94 +720,35 @@ impl KernelStore {
         binding: &ApprovalGrantBinding,
         now: DateTime<Utc>,
     ) -> KernelStoreResult<ApprovalDecision> {
-        validate_owner(&binding.owner)?;
-        validate_digest(&binding.request_digest)?;
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        #[allow(clippy::type_complexity)]
-        type ExistingApprovalRow = (String, String, i64, Option<String>, Option<i64>);
-        let existing: Option<ExistingApprovalRow> = tx
-            .query_row(
-                "SELECT approval_id, decision, bound_revision, bound_lease_owner, bound_generation
-                 FROM kernel_approvals
-                 WHERE owner = ?1 AND receipt_id = ?2 AND request_digest = ?3",
-                params![binding.owner, binding.receipt_id, binding.request_digest],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((approval_id, decision, bound_rev, bound_lo, bound_gen)) = existing else {
-            return Err(KernelStoreError::NotFound);
-        };
-        let kind = ApprovalDecisionKind::parse(&decision)?;
-        match kind {
-            ApprovalDecisionKind::Denied => Err(KernelStoreError::ApprovalDeniedFinal),
-            ApprovalDecisionKind::Approved => {
-                // Idempotent only when binding matches.
-                let rev_ok = u64::try_from(bound_rev).unwrap_or(0) == binding.expected_revision;
-                let lo_ok = bound_lo.as_deref() == Some(binding.lease_owner.as_str());
-                let gen_ok =
-                    bound_gen.map(|g| u64::try_from(g).unwrap_or(0)) == Some(binding.generation);
-                if rev_ok && lo_ok && gen_ok {
-                    let row = load_approval(&tx, &binding.owner, &approval_id)?;
-                    tx.commit()?;
-                    Ok(row)
-                } else {
-                    Err(KernelStoreError::ApprovalBindingMismatch)
-                }
-            }
-            ApprovalDecisionKind::Pending => {
-                if u64::try_from(bound_rev).unwrap_or(0) != binding.expected_revision {
-                    return Err(KernelStoreError::ApprovalBindingMismatch);
-                }
-                // Also require run_id match from row.
-                let run_id: String = tx.query_row(
-                    "SELECT run_id FROM kernel_approvals WHERE owner = ?1 AND approval_id = ?2",
-                    params![binding.owner, approval_id],
-                    |row| row.get(0),
-                )?;
-                if run_id != binding.run_id {
-                    return Err(KernelStoreError::ApprovalBindingMismatch);
-                }
-                assert_optional_lease_fence(
-                    &tx,
-                    &binding.owner,
-                    &run_id,
-                    &binding.lease_owner,
-                    binding.generation,
-                )?;
-                let ms = now.timestamp_millis();
-                let n = tx.execute(
-                    "UPDATE kernel_approvals
-                     SET decision = 'approved', decided_by = ?1, bound_lease_owner = ?2,
-                         bound_generation = ?3, decided_at_ms = ?4, updated_at_ms = ?4
-                     WHERE owner = ?5 AND approval_id = ?6 AND decision = 'pending'",
-                    params![
-                        binding.decided_by,
-                        binding.lease_owner,
-                        binding.generation as i64,
-                        ms,
-                        binding.owner,
-                        approval_id
-                    ],
-                )?;
-                if n != 1 {
-                    return Err(KernelStoreError::Conflict(
-                        "approval grant CAS failed".into(),
-                    ));
-                }
-                let row = load_approval(&tx, &binding.owner, &approval_id)?;
-                tx.commit()?;
-                Ok(row)
-            }
-        }
+        let row = grant_approval_in_tx(&tx, binding, now)?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// Bound grant plus delivery `GrantAccepted` in one Immediate transaction.
+    ///
+    /// A missing delivery row fails closed and does not persist the decision.
+    pub fn grant_approval_and_transition(
+        &self,
+        binding: &ApprovalGrantBinding,
+        now: DateTime<Utc>,
+    ) -> KernelStoreResult<ApprovalDecision> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = grant_approval_in_tx(&tx, binding, now)?;
+        apply_existing_delivery_event_in_tx(
+            &tx,
+            &binding.owner,
+            &binding.receipt_id,
+            &row.run_id,
+            DeliveryEvent::GrantAccepted,
+            Some(row.approval_id.as_str()),
+            now,
+        )?;
+        tx.commit()?;
+        Ok(row)
     }
 
     /// Bound deny. Idempotent if already denied with the same binding.
@@ -816,87 +757,35 @@ impl KernelStore {
         binding: &ApprovalDenyBinding,
         now: DateTime<Utc>,
     ) -> KernelStoreResult<ApprovalDecision> {
-        validate_owner(&binding.owner)?;
-        validate_digest(&binding.request_digest)?;
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        #[allow(clippy::type_complexity)]
-        type ExistingDenyRow = (String, String, String, i64, Option<String>, Option<i64>);
-        let existing: Option<ExistingDenyRow> = tx
-            .query_row(
-                "SELECT approval_id, decision, run_id, bound_revision, bound_lease_owner, bound_generation
-                 FROM kernel_approvals
-                 WHERE owner = ?1 AND receipt_id = ?2 AND request_digest = ?3",
-                params![binding.owner, binding.receipt_id, binding.request_digest],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((approval_id, decision, run_id, bound_rev, bound_lo, bound_gen)) = existing else {
-            return Err(KernelStoreError::NotFound);
-        };
-        let kind = ApprovalDecisionKind::parse(&decision)?;
-        match kind {
-            ApprovalDecisionKind::Approved => Err(KernelStoreError::Conflict(
-                "cannot deny an already approved decision".into(),
-            )),
-            ApprovalDecisionKind::Denied => {
-                let rev_ok = u64::try_from(bound_rev).unwrap_or(0) == binding.expected_revision;
-                let lo_ok = bound_lo.as_deref() == Some(binding.lease_owner.as_str());
-                let gen_ok =
-                    bound_gen.map(|g| u64::try_from(g).unwrap_or(0)) == Some(binding.generation);
-                if rev_ok && lo_ok && gen_ok {
-                    let row = load_approval(&tx, &binding.owner, &approval_id)?;
-                    tx.commit()?;
-                    Ok(row)
-                } else {
-                    Err(KernelStoreError::ApprovalBindingMismatch)
-                }
-            }
-            ApprovalDecisionKind::Pending => {
-                if u64::try_from(bound_rev).unwrap_or(0) != binding.expected_revision {
-                    return Err(KernelStoreError::ApprovalBindingMismatch);
-                }
-                assert_optional_lease_fence(
-                    &tx,
-                    &binding.owner,
-                    &run_id,
-                    &binding.lease_owner,
-                    binding.generation,
-                )?;
-                let ms = now.timestamp_millis();
-                let n = tx.execute(
-                    "UPDATE kernel_approvals
-                     SET decision = 'denied', decided_by = ?1, bound_lease_owner = ?2,
-                         bound_generation = ?3, decided_at_ms = ?4, updated_at_ms = ?4
-                     WHERE owner = ?5 AND approval_id = ?6 AND decision = 'pending'",
-                    params![
-                        binding.decided_by,
-                        binding.lease_owner,
-                        binding.generation as i64,
-                        ms,
-                        binding.owner,
-                        approval_id
-                    ],
-                )?;
-                if n != 1 {
-                    return Err(KernelStoreError::Conflict(
-                        "approval deny CAS failed".into(),
-                    ));
-                }
-                let row = load_approval(&tx, &binding.owner, &approval_id)?;
-                tx.commit()?;
-                Ok(row)
-            }
-        }
+        let row = deny_approval_in_tx(&tx, binding, now)?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// Bound deny plus delivery `DenyAccepted` in one Immediate transaction.
+    ///
+    /// A missing delivery row fails closed and does not persist the decision.
+    pub fn deny_approval_and_transition(
+        &self,
+        binding: &ApprovalDenyBinding,
+        now: DateTime<Utc>,
+    ) -> KernelStoreResult<ApprovalDecision> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = deny_approval_in_tx(&tx, binding, now)?;
+        apply_existing_delivery_event_in_tx(
+            &tx,
+            &binding.owner,
+            &binding.receipt_id,
+            &row.run_id,
+            DeliveryEvent::DenyAccepted,
+            None,
+            now,
+        )?;
+        tx.commit()?;
+        Ok(row)
     }
 
     pub fn get_approval(
@@ -1284,6 +1173,241 @@ fn final_status_str(status: ReceiptFinalStatus) -> &'static str {
         ReceiptFinalStatus::Unresolved => "unresolved",
         _ => "unresolved",
     }
+}
+
+fn grant_approval_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &ApprovalGrantBinding,
+    now: DateTime<Utc>,
+) -> KernelStoreResult<ApprovalDecision> {
+    validate_owner(&binding.owner)?;
+    validate_digest(&binding.request_digest)?;
+    #[allow(clippy::type_complexity)]
+    type ExistingApprovalRow = (String, String, i64, Option<String>, Option<i64>);
+    let existing: Option<ExistingApprovalRow> = tx
+        .query_row(
+            "SELECT approval_id, decision, bound_revision, bound_lease_owner, bound_generation
+             FROM kernel_approvals
+             WHERE owner = ?1 AND receipt_id = ?2 AND request_digest = ?3",
+            params![binding.owner, binding.receipt_id, binding.request_digest],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((approval_id, decision, bound_rev, bound_lo, bound_gen)) = existing else {
+        return Err(KernelStoreError::NotFound);
+    };
+    let kind = ApprovalDecisionKind::parse(&decision)?;
+    match kind {
+        ApprovalDecisionKind::Denied => Err(KernelStoreError::ApprovalDeniedFinal),
+        ApprovalDecisionKind::Approved => {
+            let rev_ok = u64::try_from(bound_rev).unwrap_or(0) == binding.expected_revision;
+            let lo_ok = bound_lo.as_deref() == Some(binding.lease_owner.as_str());
+            let gen_ok =
+                bound_gen.map(|g| u64::try_from(g).unwrap_or(0)) == Some(binding.generation);
+            if rev_ok && lo_ok && gen_ok {
+                load_approval(tx, &binding.owner, &approval_id)
+            } else {
+                Err(KernelStoreError::ApprovalBindingMismatch)
+            }
+        }
+        ApprovalDecisionKind::Pending => {
+            if u64::try_from(bound_rev).unwrap_or(0) != binding.expected_revision {
+                return Err(KernelStoreError::ApprovalBindingMismatch);
+            }
+            let run_id: String = tx.query_row(
+                "SELECT run_id FROM kernel_approvals WHERE owner = ?1 AND approval_id = ?2",
+                params![binding.owner, approval_id],
+                |row| row.get(0),
+            )?;
+            if run_id != binding.run_id {
+                return Err(KernelStoreError::ApprovalBindingMismatch);
+            }
+            assert_optional_lease_fence(
+                tx,
+                &binding.owner,
+                &run_id,
+                &binding.lease_owner,
+                binding.generation,
+            )?;
+            let ms = now.timestamp_millis();
+            let n = tx.execute(
+                "UPDATE kernel_approvals
+                 SET decision = 'approved', decided_by = ?1, bound_lease_owner = ?2,
+                     bound_generation = ?3, decided_at_ms = ?4, updated_at_ms = ?4
+                 WHERE owner = ?5 AND approval_id = ?6 AND decision = 'pending'",
+                params![
+                    binding.decided_by,
+                    binding.lease_owner,
+                    binding.generation as i64,
+                    ms,
+                    binding.owner,
+                    approval_id
+                ],
+            )?;
+            if n != 1 {
+                return Err(KernelStoreError::Conflict(
+                    "approval grant CAS failed".into(),
+                ));
+            }
+            load_approval(tx, &binding.owner, &approval_id)
+        }
+    }
+}
+
+fn deny_approval_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &ApprovalDenyBinding,
+    now: DateTime<Utc>,
+) -> KernelStoreResult<ApprovalDecision> {
+    validate_owner(&binding.owner)?;
+    validate_digest(&binding.request_digest)?;
+    #[allow(clippy::type_complexity)]
+    type ExistingDenyRow = (String, String, String, i64, Option<String>, Option<i64>);
+    let existing: Option<ExistingDenyRow> = tx
+        .query_row(
+            "SELECT approval_id, decision, run_id, bound_revision, bound_lease_owner, bound_generation
+             FROM kernel_approvals
+             WHERE owner = ?1 AND receipt_id = ?2 AND request_digest = ?3",
+            params![binding.owner, binding.receipt_id, binding.request_digest],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((approval_id, decision, run_id, bound_rev, bound_lo, bound_gen)) = existing else {
+        return Err(KernelStoreError::NotFound);
+    };
+    let kind = ApprovalDecisionKind::parse(&decision)?;
+    match kind {
+        ApprovalDecisionKind::Approved => Err(KernelStoreError::Conflict(
+            "cannot deny an already approved decision".into(),
+        )),
+        ApprovalDecisionKind::Denied => {
+            let rev_ok = u64::try_from(bound_rev).unwrap_or(0) == binding.expected_revision;
+            let lo_ok = bound_lo.as_deref() == Some(binding.lease_owner.as_str());
+            let gen_ok =
+                bound_gen.map(|g| u64::try_from(g).unwrap_or(0)) == Some(binding.generation);
+            if rev_ok && lo_ok && gen_ok {
+                load_approval(tx, &binding.owner, &approval_id)
+            } else {
+                Err(KernelStoreError::ApprovalBindingMismatch)
+            }
+        }
+        ApprovalDecisionKind::Pending => {
+            if u64::try_from(bound_rev).unwrap_or(0) != binding.expected_revision {
+                return Err(KernelStoreError::ApprovalBindingMismatch);
+            }
+            assert_optional_lease_fence(
+                tx,
+                &binding.owner,
+                &run_id,
+                &binding.lease_owner,
+                binding.generation,
+            )?;
+            let ms = now.timestamp_millis();
+            let n = tx.execute(
+                "UPDATE kernel_approvals
+                 SET decision = 'denied', decided_by = ?1, bound_lease_owner = ?2,
+                     bound_generation = ?3, decided_at_ms = ?4, updated_at_ms = ?4
+                 WHERE owner = ?5 AND approval_id = ?6 AND decision = 'pending'",
+                params![
+                    binding.decided_by,
+                    binding.lease_owner,
+                    binding.generation as i64,
+                    ms,
+                    binding.owner,
+                    approval_id
+                ],
+            )?;
+            if n != 1 {
+                return Err(KernelStoreError::Conflict(
+                    "approval deny CAS failed".into(),
+                ));
+            }
+            load_approval(tx, &binding.owner, &approval_id)
+        }
+    }
+}
+
+/// Advance an existing delivery row. Missing rows fail closed; already-at-target
+/// grant/deny is idempotent so a retry does not hit terminal-immutable.
+fn apply_existing_delivery_event_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    owner: &str,
+    receipt_id: &str,
+    run_id: &str,
+    event: DeliveryEvent,
+    approval_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> KernelStoreResult<(DeliveryPhase, u64)> {
+    let row: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT phase, revision FROM kernel_delivery
+             WHERE owner = ?1 AND receipt_id = ?2",
+            params![owner, receipt_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((phase_s, rev_i)) = row else {
+        return Err(KernelStoreError::NotFound);
+    };
+    let rev = u64::try_from(rev_i).unwrap_or(0);
+    let current = DeliveryPhase::parse(&phase_s).ok_or(KernelStoreError::InvalidInput(
+        "unknown delivery phase in store",
+    ))?;
+    let already_applied = matches!(
+        (current, event),
+        (DeliveryPhase::Approved, DeliveryEvent::GrantAccepted)
+            | (DeliveryPhase::Denied, DeliveryEvent::DenyAccepted)
+    );
+    if already_applied {
+        return Ok((current, rev));
+    }
+    let next = approval_fsm::transition(current, event)?;
+    if next == current {
+        return Ok((current, rev));
+    }
+    let next_rev = rev
+        .checked_add(1)
+        .ok_or(KernelStoreError::InvalidInput("phase revision overflow"))?;
+    let n = tx.execute(
+        "UPDATE kernel_delivery
+         SET phase = ?1, revision = ?2, approval_id = COALESCE(?3, approval_id),
+             run_id = ?4, updated_at_ms = ?5
+         WHERE owner = ?6 AND receipt_id = ?7 AND revision = ?8",
+        params![
+            next.as_str(),
+            next_rev as i64,
+            approval_id,
+            run_id,
+            now.timestamp_millis(),
+            owner,
+            receipt_id,
+            rev as i64
+        ],
+    )?;
+    if n != 1 {
+        return Err(KernelStoreError::StaleRevision {
+            expected: rev,
+            actual: rev,
+        });
+    }
+    Ok((next, next_rev))
 }
 
 fn assert_optional_lease_fence(
@@ -1694,6 +1818,160 @@ mod tests {
             )
             .unwrap();
         assert_eq!(p, DeliveryPhase::Resuming);
+    }
+
+    #[test]
+    fn grant_and_transition_rolls_back_decision_without_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "a".repeat(64);
+        store
+            .record_approval_required("o", "ap-g", "rcpt-g", "run-g", &dig, 1, now())
+            .unwrap();
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-g".into(),
+            run_id: "run-g".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .grant_approval_and_transition(&grant, now())
+            .unwrap_err();
+        assert!(matches!(err, KernelStoreError::NotFound), "{err:?}");
+        let row = store
+            .get_approval("o", "rcpt-g")
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        assert!(store.get_delivery_phase("o", "rcpt-g").unwrap().is_none());
+    }
+
+    #[test]
+    fn deny_and_transition_rolls_back_decision_without_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "b".repeat(64);
+        store
+            .record_approval_required("o", "ap-d", "rcpt-d", "run-d", &dig, 1, now())
+            .unwrap();
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-d".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .deny_approval_and_transition(&deny, now())
+            .unwrap_err();
+        assert!(matches!(err, KernelStoreError::NotFound), "{err:?}");
+        let row = store
+            .get_approval("o", "rcpt-d")
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        assert!(store.get_delivery_phase("o", "rcpt-d").unwrap().is_none());
+    }
+
+    #[test]
+    fn grant_and_transition_commits_decision_and_delivery_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "c".repeat(64);
+        store
+            .record_approval_required("o", "ap-ok", "rcpt-ok", "run-ok", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-ok", "run-ok", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-ok",
+                "run-ok",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-ok"),
+                now(),
+            )
+            .unwrap();
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-ok".into(),
+            run_id: "run-ok".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-ok")
+            .unwrap()
+            .expect("delivery advanced");
+        assert_eq!(phase, DeliveryPhase::Approved);
+        let again = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Approved);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-ok")
+            .unwrap()
+            .expect("idempotent delivery");
+        assert_eq!(phase, DeliveryPhase::Approved);
+    }
+
+    #[test]
+    fn deny_and_transition_commits_decision_and_delivery_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "d".repeat(64);
+        store
+            .record_approval_required("o", "ap-dn", "rcpt-dn", "run-dn", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-dn", "run-dn", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-dn",
+                "run-dn",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-dn"),
+                now(),
+            )
+            .unwrap();
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-dn".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.deny_approval_and_transition(&deny, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Denied);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-dn")
+            .unwrap()
+            .expect("delivery denied");
+        assert_eq!(phase, DeliveryPhase::Denied);
+        let again = store.deny_approval_and_transition(&deny, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Denied);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-dn")
+            .unwrap()
+            .expect("idempotent deny delivery");
+        assert_eq!(phase, DeliveryPhase::Denied);
     }
 
     #[test]
