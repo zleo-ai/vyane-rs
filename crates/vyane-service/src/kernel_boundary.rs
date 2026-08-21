@@ -16,9 +16,9 @@
 //!   `expected_revision` / `lease_owner` / `generation` the same way grant
 //!   does (lease fence checked when present). Deny may omit `agent_run_id`;
 //!   the delivery FSM and ownership projection use the durable row's run id.
-//!   A missing delivery phase or lost CAS is reported rather than emitting
-//!   Approved/Denied against a wedged FSM. Events remain rebuildable; they
-//!   are not a second authority.
+//!   Grant/deny and the delivery transition commit in one KernelStore
+//!   transaction; a missing delivery row fails closed and does not persist
+//!   the decision. Events remain rebuildable; they are not a second authority.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -32,7 +32,6 @@ use vyane_core::{
     RouteConfig, TaskCase,
 };
 
-use crate::approval_fsm::DeliveryEvent;
 use crate::dogfood::run_successful_dogfood;
 use crate::kernel_store::{
     ApprovalDecisionKind, ApprovalDenyBinding, ApprovalGrantBinding, KernelStore, KernelStoreError,
@@ -625,18 +624,8 @@ impl LocalKernelAdapter {
             generation: binding.generation,
             decided_by: self.principal.principal_id.clone(),
         };
-        match store.grant_approval(&grant, now) {
+        match store.grant_approval_and_transition(&grant, now) {
             Ok(decision) => {
-                if let Err(code) = self.advance_delivery_phase(
-                    &store,
-                    &receipt_id,
-                    Some(decision.run_id.as_str()),
-                    DeliveryEvent::GrantAccepted,
-                    Some(decision.approval_id.as_str()),
-                    now,
-                ) {
-                    return self.error_event(now, code, Some(receipt_id));
-                }
                 if let Some(root) = command.dogfood_root.as_deref() {
                     self.register_durable_root(root);
                 }
@@ -676,18 +665,8 @@ impl LocalKernelAdapter {
             generation: binding.generation,
             decided_by: self.principal.principal_id.clone(),
         };
-        match store.deny_approval(&deny, now) {
+        match store.deny_approval_and_transition(&deny, now) {
             Ok(decision) => {
-                if let Err(code) = self.advance_delivery_phase(
-                    &store,
-                    &receipt_id,
-                    Some(decision.run_id.as_str()),
-                    DeliveryEvent::DenyAccepted,
-                    None,
-                    now,
-                ) {
-                    return self.error_event(now, code, Some(receipt_id));
-                }
                 if let Some(root) = command.dogfood_root.as_deref() {
                     self.register_durable_root(root);
                 }
@@ -1053,48 +1032,6 @@ impl LocalKernelAdapter {
             lease_owner: fence.as_ref().map(|f| f.lease_owner.clone()),
             generation: fence.as_ref().map(|f| f.generation),
         }
-    }
-
-    /// Advance the delivery FSM after a durable grant/deny.
-    ///
-    /// The approval row is already committed. A missing phase row or a lost
-    /// CAS is reported so the caller does not emit Approved/Denied against a
-    /// wedged FSM. Stale revision is retried.
-    fn advance_delivery_phase(
-        &self,
-        store: &KernelStore,
-        receipt_id: &str,
-        run_id: Option<&str>,
-        event: DeliveryEvent,
-        approval_id: Option<&str>,
-        now: DateTime<Utc>,
-    ) -> Result<(), KernelErrorCode> {
-        let Some(run_id) = run_id.filter(|id| !id.is_empty()) else {
-            return Err(KernelErrorCode::InvalidCommand);
-        };
-        const MAX_CAS_ATTEMPTS: u32 = 4;
-        for _ in 0..MAX_CAS_ATTEMPTS {
-            match store.get_delivery_phase(&self.principal.owner, receipt_id) {
-                Ok(None) => return Err(KernelErrorCode::NotFound),
-                Err(err) => return Err(Self::map_store_error(err)),
-                Ok(Some((_, phase_rev))) => {
-                    match store.set_delivery_phase(
-                        &self.principal.owner,
-                        receipt_id,
-                        run_id,
-                        phase_rev,
-                        event,
-                        approval_id,
-                        now,
-                    ) {
-                        Ok(_) => return Ok(()),
-                        Err(KernelStoreError::StaleRevision { .. }) => continue,
-                        Err(err) => return Err(Self::map_store_error(err)),
-                    }
-                }
-            }
-        }
-        Err(KernelErrorCode::Conflict)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2862,7 +2799,7 @@ mod tests {
     }
 
     #[test]
-    fn deny_without_delivery_phase_is_reported() {
+    fn deny_without_delivery_phase_fails_closed() {
         let root = tempfile::tempdir().unwrap();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) =
@@ -2885,14 +2822,51 @@ mod tests {
         let row = store
             .get_approval(&principal().owner, "rcpt-nophase")
             .unwrap()
-            .expect("deny still committed");
+            .expect("ask retained");
         assert_eq!(
             row.decision,
-            crate::kernel_store::ApprovalDecisionKind::Denied
+            crate::kernel_store::ApprovalDecisionKind::Pending
         );
         assert!(
             store
                 .get_delivery_phase(&principal().owner, "rcpt-nophase")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn grant_without_delivery_phase_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) =
+            seed_pending_ask_without_delivery(root.path(), "rcpt-nogrant", "run-nogrant", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-nogrant",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-nogrant"),
+                Some("run-nogrant"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Error, "{granted:?}");
+        assert_eq!(granted.error, Some(KernelErrorCode::NotFound));
+        let row = store
+            .get_approval(&principal().owner, "rcpt-nogrant")
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+        assert!(
+            store
+                .get_delivery_phase(&principal().owner, "rcpt-nogrant")
                 .unwrap()
                 .is_none()
         );
