@@ -132,7 +132,7 @@ pub use inprocess_agent::{
 pub use kernel_boundary::{
     KERNEL_BOUNDARY_VERSION, KernelApprovalBinding, KernelCapability, KernelCommand,
     KernelCommandKind, KernelErrorCode, KernelEvent, KernelEventKind, KernelPrincipal,
-    KernelProjection, LocalKernelAdapter, ReplayCursor, SubscribeRequest,
+    KernelProjection, KernelStoreResolver, LocalKernelAdapter, ReplayCursor, SubscribeRequest,
 };
 pub use kernel_store::{
     ApprovalDecision, ApprovalDecisionKind, ApprovalDenyBinding, ApprovalGrantBinding,
