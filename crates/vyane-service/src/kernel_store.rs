@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use vyane_core::{
     CompletionReceipt, GATE_CI_PACKAGING, GATE_INDEPENDENT_REVIEW, GATE_INTEGRATION,
@@ -205,6 +205,9 @@ pub struct ArtifactMeta {
 #[derive(Debug, Clone)]
 pub struct KernelStore {
     path: PathBuf,
+    /// When false, SQLite opens without CREATE so a probe cannot materialize
+    /// an empty `kernel.sqlite` after a missing-file race.
+    allow_create: bool,
 }
 
 impl KernelStore {
@@ -214,7 +217,10 @@ impl KernelStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| KernelStoreError::Io(e.to_string()))?;
         }
-        let store = Self { path };
+        let store = Self {
+            path,
+            allow_create: true,
+        };
         store.initialize()?;
         Ok(store)
     }
@@ -222,7 +228,9 @@ impl KernelStore {
     /// Open an existing sqlite file. Missing paths are not created.
     ///
     /// Probe paths (approve/deny discovery) must use this so a candidate miss
-    /// cannot materialize an empty `kernel.sqlite`.
+    /// cannot materialize an empty `kernel.sqlite`. SQLite is opened without
+    /// `CREATE`, so `is_file()` is not the existence guarantee: a deleted or
+    /// replaced path fails closed instead of creating a new empty database.
     pub fn open_existing(path: impl Into<PathBuf>) -> KernelStoreResult<Self> {
         let path = path.into();
         if !path.is_file() {
@@ -231,7 +239,10 @@ impl KernelStore {
                 path.display()
             )));
         }
-        let store = Self { path };
+        let store = Self {
+            path,
+            allow_create: false,
+        };
         store.initialize()?;
         Ok(store)
     }
@@ -240,7 +251,10 @@ impl KernelStore {
     /// Skips schema work; the file must already exist.
     #[must_use]
     pub(crate) fn reuse(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            allow_create: false,
+        }
     }
 
     #[must_use]
@@ -253,8 +267,18 @@ impl KernelStore {
         SCHEMA_VERSION
     }
 
+    fn existing_open_flags() -> OpenFlags {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW
+    }
+
     fn connect(&self) -> KernelStoreResult<Connection> {
-        let conn = Connection::open(&self.path)?;
+        let conn = if self.allow_create {
+            Connection::open(&self.path)?
+        } else {
+            Connection::open_with_flags(&self.path, Self::existing_open_flags())?
+        };
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         Ok(conn)
@@ -1518,6 +1542,43 @@ mod tests {
         let err = KernelStore::open_existing(&path).unwrap_err();
         assert!(matches!(err, KernelStoreError::Io(_)), "{err:?}");
         assert!(!path.exists(), "open_existing must not create the sqlite");
+    }
+
+    #[test]
+    fn open_existing_reopens_existing_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel.sqlite");
+        let store = KernelStore::open(&path).unwrap();
+        let dig = "c".repeat(64);
+        assert!(
+            store
+                .apply_effect_once("o", "effect:1", &dig, Some("run"), Some("r"), now())
+                .unwrap()
+        );
+        drop(store);
+        let store = KernelStore::open_existing(&path).unwrap();
+        assert_eq!(store.path(), path.as_path());
+        assert!(store.was_effect_applied("o", "effect:1"));
+        assert_eq!(store.effect_count("o").unwrap(), 1);
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn open_existing_does_not_recreate_unlinked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel.sqlite");
+        KernelStore::open(&path).unwrap();
+        let store = KernelStore::open_existing(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let err = store.effect_count("o").unwrap_err();
+        assert!(
+            matches!(err, KernelStoreError::Io(_) | KernelStoreError::Sqlite(_)),
+            "{err:?}"
+        );
+        assert!(
+            !path.exists(),
+            "open_existing handle must not recreate sqlite"
+        );
     }
 
     #[test]
