@@ -1924,6 +1924,44 @@ mod tests {
     }
 
     #[test]
+    fn grant_and_transition_rolls_back_when_delivery_is_still_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "9".repeat(64);
+        store
+            .record_approval_required("o", "ap-run", "rcpt-run", "run-run", &dig, 1, now())
+            .unwrap();
+        let (phase, _) = store
+            .ensure_delivery_running("o", "rcpt-run", "run-run", now())
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::Running);
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-run".into(),
+            run_id: "run-run".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .grant_approval_and_transition(&grant, now())
+            .unwrap_err();
+        assert!(matches!(err, KernelStoreError::Delivery(_)), "{err:?}");
+        let row = store
+            .get_approval("o", "rcpt-run")
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-run")
+            .unwrap()
+            .expect("delivery retained");
+        assert_eq!(phase, DeliveryPhase::Running);
+    }
+
+    #[test]
     fn deny_and_transition_rolls_back_decision_without_delivery() {
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
