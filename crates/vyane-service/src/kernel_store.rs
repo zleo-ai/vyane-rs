@@ -1348,8 +1348,8 @@ fn deny_approval_in_tx(
 /// grant/deny is idempotent so a retry does not hit terminal-immutable.
 ///
 /// `GrantAccepted` is already applied at `Approved` (FSM self-loop) and at
-/// same-identity `Resuming` (Approved downstream after `ResumeStarted`; FSM
-/// would otherwise return `GrantRequiresAsk`).
+/// same-identity `Resuming` / `Verified` (Approved downstream; FSM would
+/// otherwise return `GrantRequiresAsk`).
 fn apply_existing_delivery_event_in_tx(
     tx: &rusqlite::Transaction<'_>,
     owner: &str,
@@ -2000,6 +2000,72 @@ mod tests {
         assert_eq!(phase, DeliveryPhase::Resuming);
         let row = store
             .get_approval("o", "rcpt-rs")
+            .unwrap()
+            .expect("approval retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+    }
+
+    #[test]
+    fn grant_and_transition_after_verified_is_already_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "f".repeat(64);
+        store
+            .record_approval_required("o", "ap-vf", "rcpt-vf", "run-vf", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-vf", "run-vf", now())
+            .unwrap();
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                "rcpt-vf",
+                "run-vf",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-vf"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::ApprovalRequired);
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-vf".into(),
+            run_id: "run-vf".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+        let (phase, rev) = store
+            .get_delivery_phase("o", "rcpt-vf")
+            .unwrap()
+            .expect("granted delivery");
+        assert_eq!(phase, DeliveryPhase::Approved);
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                "rcpt-vf",
+                "run-vf",
+                rev,
+                DeliveryEvent::Verified,
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::Verified);
+        let again = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Approved);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-vf")
+            .unwrap()
+            .expect("verified retained");
+        assert_eq!(phase, DeliveryPhase::Verified);
+        let row = store
+            .get_approval("o", "rcpt-vf")
             .unwrap()
             .expect("approval retained");
         assert_eq!(row.decision, ApprovalDecisionKind::Approved);

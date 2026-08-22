@@ -80,13 +80,13 @@ impl DeliveryPhase {
 
     /// Grant retry is a no-op at these phases when identity matches.
     ///
-    /// `Approved` is an FSM self-loop on `GrantAccepted`. `Resuming` is the
-    /// Approved-downstream phase after `ResumeStarted`; the FSM rejects
+    /// `Approved` is an FSM self-loop on `GrantAccepted`. `Resuming` and
+    /// `Verified` are Approved-downstream phases; the FSM rejects
     /// `GrantAccepted` there, so the store must treat a same-identity retry
     /// as already applied instead of calling [`transition`].
     #[must_use]
     pub const fn grant_retry_already_applied(self) -> bool {
-        matches!(self, Self::Approved | Self::Resuming)
+        matches!(self, Self::Approved | Self::Resuming | Self::Verified)
     }
 }
 
@@ -253,6 +253,17 @@ mod tests {
         let p = transition(p, DeliveryEvent::ResumeStarted).unwrap();
         assert_eq!(p, DeliveryPhase::Resuming);
         assert!(DeliveryPhase::Resuming.grant_retry_already_applied());
+        let err = transition(p, DeliveryEvent::GrantAccepted).unwrap_err();
+        assert_eq!(err, DeliveryTransitionError::GrantRequiresAsk);
+    }
+
+    #[test]
+    fn verified_then_grant_is_rejected_by_fsm() {
+        let p = transition(DeliveryPhase::Running, DeliveryEvent::AskRequired).unwrap();
+        let p = transition(p, DeliveryEvent::GrantAccepted).unwrap();
+        let p = transition(p, DeliveryEvent::Verified).unwrap();
+        assert_eq!(p, DeliveryPhase::Verified);
+        assert!(DeliveryPhase::Verified.grant_retry_already_applied());
         let err = transition(p, DeliveryEvent::GrantAccepted).unwrap_err();
         assert_eq!(err, DeliveryTransitionError::GrantRequiresAsk);
     }
