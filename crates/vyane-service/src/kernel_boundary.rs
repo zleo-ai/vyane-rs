@@ -2871,4 +2871,53 @@ mod tests {
                 .is_none()
         );
     }
+
+    fn seed_pending_ask_with_running_delivery(
+        root: &std::path::Path,
+        receipt_id: &str,
+        run_id: &str,
+        revision: u64,
+    ) -> (KernelStore, String) {
+        let (store, digest) = seed_pending_ask_without_delivery(root, receipt_id, run_id, revision);
+        store
+            .ensure_delivery_running(&principal().owner, receipt_id, run_id, now())
+            .unwrap();
+        (store, digest)
+    }
+
+    #[test]
+    fn grant_while_delivery_still_running_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) =
+            seed_pending_ask_with_running_delivery(root.path(), "rcpt-running", "run-running", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-running",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-running"),
+                Some("run-running"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Error, "{granted:?}");
+        assert_eq!(granted.error, Some(KernelErrorCode::Unavailable));
+        let row = store
+            .get_approval(&principal().owner, "rcpt-running")
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+        let (phase, _) = store
+            .get_delivery_phase(&principal().owner, "rcpt-running")
+            .unwrap()
+            .expect("delivery retained");
+        assert_eq!(phase, crate::approval_fsm::DeliveryPhase::Running);
+    }
 }
