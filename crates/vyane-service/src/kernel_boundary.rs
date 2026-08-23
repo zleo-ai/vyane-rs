@@ -2181,6 +2181,54 @@ mod tests {
     }
 
     #[test]
+    fn deny_ownership_projection_omits_lease_when_fence_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) =
+            seed_pending_ask_without_lease(root.path(), "rcpt-dnofence", "run-dnofence", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let denied = adapter.handle(
+            approval_cmd(
+                "dn-nofence",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-dnofence"),
+                Some("run-dnofence"),
+                None,
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(denied.kind, KernelEventKind::Denied, "{denied:?}");
+        assert_eq!(denied.agent_run_id.as_deref(), Some("run-dnofence"));
+        match denied.projection.unwrap() {
+            KernelProjection::Ownership {
+                owner,
+                lease_owner,
+                generation,
+            } => {
+                assert_eq!(owner, principal().owner);
+                assert_eq!(lease_owner, None);
+                assert_eq!(generation, None);
+            }
+            other => panic!("expected ownership without lease, got {other:?}"),
+        }
+        let row = store
+            .get_approval(&principal().owner, "rcpt-dnofence")
+            .unwrap()
+            .expect("denied");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Denied
+        );
+        let (phase, _) = store
+            .get_delivery_phase(&principal().owner, "rcpt-dnofence")
+            .unwrap()
+            .expect("delivery after deny");
+        assert_eq!(phase, crate::approval_fsm::DeliveryPhase::Denied);
+    }
+
+    #[test]
     fn deny_ignores_conflicting_caller_run_id() {
         let root = tempfile::tempdir().unwrap();
         let root_s = root.path().to_string_lossy().into_owned();
