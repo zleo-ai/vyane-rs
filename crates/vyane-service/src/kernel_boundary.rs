@@ -584,14 +584,25 @@ impl LocalKernelAdapter {
         let Some(receipt_id) = command.receipt_id.clone() else {
             return self.error_event(now, KernelErrorCode::InvalidCommand, None);
         };
+        // Missing run_id/binding is malformed even when no store is resolvable.
+        // InvalidCommand stays for those fields; NotFound is only for a
+        // well-formed approve whose receipt is not in any candidate store.
+        let granted_binding = if command.approval_granted.unwrap_or(false) {
+            let Some(run_id) = command.agent_run_id.clone() else {
+                return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
+            };
+            let Some(binding) = command.approval_binding.clone() else {
+                return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
+            };
+            Some((run_id, binding))
+        } else {
+            None
+        };
         let Some(store) = self.open_durable_store(&receipt_id, command.dogfood_root.as_deref())
         else {
-            // Well-formed approve whose receipt is not in any candidate store
-            // is unknown, not malformed. InvalidCommand stays for missing
-            // receipt_id / run_id / binding.
             return self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id));
         };
-        if !command.approval_granted.unwrap_or(false) {
+        let Some((run_id, binding)) = granted_binding else {
             return match store.get_approval(&self.principal.owner, &receipt_id) {
                 Ok(Some(row)) if row.decision == ApprovalDecisionKind::Pending => self.push_event(
                     KernelEventKind::ApprovalRequired,
@@ -607,17 +618,11 @@ impl LocalKernelAdapter {
                 Ok(None) => self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id)),
                 Err(err) => self.error_event(now, Self::map_store_error(err), Some(receipt_id)),
             };
-        }
-        let Some(run_id) = command.agent_run_id.clone() else {
-            return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
-        };
-        let Some(binding) = command.approval_binding.clone() else {
-            return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
         };
         let grant = ApprovalGrantBinding {
             owner: self.principal.owner.clone(),
             receipt_id: receipt_id.clone(),
-            run_id: run_id.clone(),
+            run_id,
             request_digest: binding.request_digest,
             expected_revision: binding.expected_revision,
             lease_owner: binding.lease_owner.clone(),
@@ -649,12 +654,12 @@ impl LocalKernelAdapter {
         let Some(receipt_id) = command.receipt_id.clone() else {
             return self.error_event(now, KernelErrorCode::InvalidCommand, None);
         };
+        let Some(binding) = command.approval_binding.clone() else {
+            return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
+        };
         let Some(store) = self.open_durable_store(&receipt_id, command.dogfood_root.as_deref())
         else {
             return self.error_event(now, KernelErrorCode::NotFound, Some(receipt_id));
-        };
-        let Some(binding) = command.approval_binding.clone() else {
-            return self.error_event(now, KernelErrorCode::InvalidCommand, Some(receipt_id));
         };
         let deny = ApprovalDenyBinding {
             owner: self.principal.owner.clone(),
@@ -1713,6 +1718,61 @@ mod tests {
         );
         assert_eq!(malformed.kind, KernelEventKind::Error);
         assert_eq!(malformed.error, Some(KernelErrorCode::InvalidCommand));
+    }
+
+    #[test]
+    fn malformed_approve_deny_is_invalid_even_without_store() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let adapter = LocalKernelAdapter::new(principal());
+
+        let deny = adapter.handle(
+            approval_cmd(
+                "dn-nobind-empty",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-empty-bind"),
+                Some("run-empty-bind"),
+                None,
+                Some(&root_s),
+                None,
+            ),
+            now(),
+        );
+        assert_eq!(deny.kind, KernelEventKind::Error);
+        assert_eq!(deny.error, Some(KernelErrorCode::InvalidCommand));
+        assert_ne!(deny.error, Some(KernelErrorCode::NotFound));
+
+        let grant_no_bind = adapter.handle(
+            approval_cmd(
+                "ap-nobind-empty",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-empty-bind"),
+                Some("run-empty-bind"),
+                Some(true),
+                Some(&root_s),
+                None,
+            ),
+            now(),
+        );
+        assert_eq!(grant_no_bind.kind, KernelEventKind::Error);
+        assert_eq!(grant_no_bind.error, Some(KernelErrorCode::InvalidCommand));
+        assert_ne!(grant_no_bind.error, Some(KernelErrorCode::NotFound));
+
+        let grant_no_run = adapter.handle(
+            approval_cmd(
+                "ap-norun-empty",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-empty-bind"),
+                None,
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest_hex("ab"), 1)),
+            ),
+            now(),
+        );
+        assert_eq!(grant_no_run.kind, KernelEventKind::Error);
+        assert_eq!(grant_no_run.error, Some(KernelErrorCode::InvalidCommand));
+        assert_ne!(grant_no_run.error, Some(KernelErrorCode::NotFound));
     }
 
     struct FixedStoreResolver {
