@@ -2181,6 +2181,79 @@ mod tests {
     }
 
     #[test]
+    fn deny_ignores_conflicting_caller_run_id() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) = seed_pending_ask_with_lease(
+            root.path(),
+            "rcpt-deny-run",
+            "run-durable",
+            1,
+            "worker-a",
+            4,
+        );
+        store
+            .put_lease_fence(
+                &crate::kernel_store::LeaseFence {
+                    owner: principal().owner,
+                    run_id: "run-spoof".into(),
+                    lease_owner: "worker-spoof".into(),
+                    generation: 99,
+                    revision: 1,
+                    token: "tok-spoof".into(),
+                    policy_digest: digest_hex("cd"),
+                    expires_at_ms: None,
+                },
+                now(),
+            )
+            .unwrap();
+        let adapter = LocalKernelAdapter::new(principal());
+        let mut binding = binding_for(&digest, 1);
+        binding.lease_owner = "worker-a".into();
+        binding.generation = 4;
+        let denied = adapter.handle(
+            approval_cmd(
+                "dn-spoof-run",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-deny-run"),
+                Some("run-spoof"),
+                None,
+                Some(&root_s),
+                Some(binding),
+            ),
+            now(),
+        );
+        assert_eq!(denied.kind, KernelEventKind::Denied, "{denied:?}");
+        assert_ne!(denied.agent_run_id.as_deref(), Some("run-spoof"));
+        assert_eq!(denied.agent_run_id.as_deref(), Some("run-durable"));
+        match denied.projection.unwrap() {
+            KernelProjection::Ownership {
+                lease_owner,
+                generation,
+                ..
+            } => {
+                assert_eq!(lease_owner.as_deref(), Some("worker-a"));
+                assert_eq!(generation, Some(4));
+            }
+            other => panic!("expected durable-run ownership, got {other:?}"),
+        }
+        let row = store
+            .get_approval(&principal().owner, "rcpt-deny-run")
+            .unwrap()
+            .expect("denied");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Denied
+        );
+        assert_eq!(row.run_id, "run-durable");
+        let (phase, _) = store
+            .get_delivery_phase(&principal().owner, "rcpt-deny-run")
+            .unwrap()
+            .expect("delivery after deny");
+        assert_eq!(phase, crate::approval_fsm::DeliveryPhase::Denied);
+    }
+
+    #[test]
     fn deny_revision_and_lease_fence_mismatch_fail_closed() {
         let root = tempfile::tempdir().unwrap();
         let root_s = root.path().to_string_lossy().into_owned();
