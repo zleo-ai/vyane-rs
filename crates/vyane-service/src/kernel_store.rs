@@ -2284,6 +2284,141 @@ mod tests {
     }
 
     #[test]
+    fn grant_and_deny_lease_owner_mismatch_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+
+        let grant_dig = "1".repeat(64);
+        store
+            .record_approval_required(
+                "o",
+                "ap-lo-g",
+                "rcpt-lo-g",
+                "run-lo-g",
+                &grant_dig,
+                1,
+                now(),
+            )
+            .unwrap();
+        store
+            .put_lease_fence(
+                &LeaseFence {
+                    owner: "o".into(),
+                    run_id: "run-lo-g".into(),
+                    lease_owner: "worker-a".into(),
+                    generation: 4,
+                    revision: 1,
+                    token: "tok-g".into(),
+                    policy_digest: "p".repeat(64),
+                    expires_at_ms: None,
+                },
+                now(),
+            )
+            .unwrap();
+        let (_, grant_rev) = store
+            .ensure_delivery_running("o", "rcpt-lo-g", "run-lo-g", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-lo-g",
+                "run-lo-g",
+                grant_rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-lo-g"),
+                now(),
+            )
+            .unwrap();
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-lo-g".into(),
+            run_id: "run-lo-g".into(),
+            request_digest: grant_dig,
+            expected_revision: 1,
+            lease_owner: "worker-b".into(),
+            generation: 4,
+            decided_by: "principal".into(),
+        };
+        let grant_err = store
+            .grant_approval_and_transition(&grant, now())
+            .unwrap_err();
+        assert!(
+            matches!(grant_err, KernelStoreError::ApprovalBindingMismatch),
+            "{grant_err:?}"
+        );
+        let grant_row = store
+            .get_approval("o", "rcpt-lo-g")
+            .unwrap()
+            .expect("grant ask retained");
+        assert_eq!(grant_row.decision, ApprovalDecisionKind::Pending);
+        let (grant_phase, _) = store
+            .get_delivery_phase("o", "rcpt-lo-g")
+            .unwrap()
+            .expect("grant delivery retained");
+        assert_eq!(grant_phase, DeliveryPhase::ApprovalRequired);
+
+        let deny_dig = "2".repeat(64);
+        store
+            .record_approval_required("o", "ap-lo-d", "rcpt-lo-d", "run-lo-d", &deny_dig, 1, now())
+            .unwrap();
+        store
+            .put_lease_fence(
+                &LeaseFence {
+                    owner: "o".into(),
+                    run_id: "run-lo-d".into(),
+                    lease_owner: "worker-a".into(),
+                    generation: 4,
+                    revision: 1,
+                    token: "tok-d".into(),
+                    policy_digest: "q".repeat(64),
+                    expires_at_ms: None,
+                },
+                now(),
+            )
+            .unwrap();
+        let (_, deny_rev) = store
+            .ensure_delivery_running("o", "rcpt-lo-d", "run-lo-d", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-lo-d",
+                "run-lo-d",
+                deny_rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-lo-d"),
+                now(),
+            )
+            .unwrap();
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-lo-d".into(),
+            request_digest: deny_dig,
+            expected_revision: 1,
+            lease_owner: "worker-b".into(),
+            generation: 4,
+            decided_by: "principal".into(),
+        };
+        let deny_err = store
+            .deny_approval_and_transition(&deny, now())
+            .unwrap_err();
+        assert!(
+            matches!(deny_err, KernelStoreError::ApprovalBindingMismatch),
+            "{deny_err:?}"
+        );
+        let deny_row = store
+            .get_approval("o", "rcpt-lo-d")
+            .unwrap()
+            .expect("deny ask retained");
+        assert_eq!(deny_row.decision, ApprovalDecisionKind::Pending);
+        let (deny_phase, _) = store
+            .get_delivery_phase("o", "rcpt-lo-d")
+            .unwrap()
+            .expect("deny delivery retained");
+        assert_eq!(deny_phase, DeliveryPhase::ApprovalRequired);
+    }
+
+    #[test]
     fn unknown_cost_not_zero_on_receipt_attempt_path() {
         // CostEvidence default keeps actual_micro_units = None (not 0).
         let dir = tempfile::tempdir().unwrap();

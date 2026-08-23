@@ -2237,6 +2237,87 @@ mod tests {
     }
 
     #[test]
+    fn lease_owner_mismatch_fails_closed_for_grant_and_deny() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let adapter = LocalKernelAdapter::new(principal());
+
+        let (grant_store, grant_digest) =
+            seed_pending_ask_with_lease(root.path(), "rcpt-lo-g", "run-lo-g", 1, "worker-a", 4);
+        let mut grant_binding = binding_for(&grant_digest, 1);
+        grant_binding.lease_owner = "worker-b".into();
+        grant_binding.generation = 4;
+        let grant_mismatch = adapter.handle(
+            approval_cmd(
+                "ap-bad-lease",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-lo-g"),
+                Some("run-lo-g"),
+                Some(true),
+                Some(&root_s),
+                Some(grant_binding),
+            ),
+            now(),
+        );
+        assert_ne!(grant_mismatch.kind, KernelEventKind::Approved);
+        assert_eq!(grant_mismatch.kind, KernelEventKind::Error);
+        assert_eq!(grant_mismatch.error, Some(KernelErrorCode::Conflict));
+        let grant_row = grant_store
+            .get_approval(&principal().owner, "rcpt-lo-g")
+            .unwrap()
+            .expect("grant ask retained");
+        assert_eq!(
+            grant_row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+        let (grant_phase, _) = grant_store
+            .get_delivery_phase(&principal().owner, "rcpt-lo-g")
+            .unwrap()
+            .expect("grant delivery retained");
+        assert_eq!(
+            grant_phase,
+            crate::approval_fsm::DeliveryPhase::ApprovalRequired
+        );
+
+        let (deny_store, deny_digest) =
+            seed_pending_ask_with_lease(root.path(), "rcpt-lo-d", "run-lo-d", 1, "worker-a", 4);
+        let mut deny_binding = binding_for(&deny_digest, 1);
+        deny_binding.lease_owner = "worker-b".into();
+        deny_binding.generation = 4;
+        let deny_mismatch = adapter.handle(
+            approval_cmd(
+                "dn-bad-lease",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-lo-d"),
+                Some("run-lo-d"),
+                None,
+                Some(&root_s),
+                Some(deny_binding),
+            ),
+            now(),
+        );
+        assert_ne!(deny_mismatch.kind, KernelEventKind::Denied);
+        assert_eq!(deny_mismatch.kind, KernelEventKind::Error);
+        assert_eq!(deny_mismatch.error, Some(KernelErrorCode::Conflict));
+        let deny_row = deny_store
+            .get_approval(&principal().owner, "rcpt-lo-d")
+            .unwrap()
+            .expect("deny ask retained");
+        assert_eq!(
+            deny_row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+        let (deny_phase, _) = deny_store
+            .get_delivery_phase(&principal().owner, "rcpt-lo-d")
+            .unwrap()
+            .expect("deny delivery retained");
+        assert_eq!(
+            deny_phase,
+            crate::approval_fsm::DeliveryPhase::ApprovalRequired
+        );
+    }
+
+    #[test]
     fn wrong_approval_binding_fails_closed() {
         let root = tempfile::tempdir().unwrap();
         let root_s = root.path().to_string_lossy().into_owned();
