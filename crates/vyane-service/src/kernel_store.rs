@@ -2493,6 +2493,101 @@ mod tests {
     }
 
     #[test]
+    fn deny_and_transition_mismatched_redeny_binding_fails_closed() {
+        // Bound deny is idempotent only with the same revision / lease_owner /
+        // generation stored on the Denied row. Same-binding retry is pinned
+        // above; deny_other_gen only covers generation via deny_approval.
+        // This pins the atomic negative for all three fields. Denied fast-path
+        // delivery identity stays remapped — not 753.2 current fail-closed.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "generation",
+                "rcpt-rd-gen",
+                "ap-rd-gen",
+                "run-rd-gen",
+                "6".repeat(64),
+            ),
+            (
+                "lease_owner",
+                "rcpt-rd-lo",
+                "ap-rd-lo",
+                "run-rd-lo",
+                "7".repeat(64),
+            ),
+            (
+                "revision",
+                "rcpt-rd-rev",
+                "ap-rd-rev",
+                "run-rd-rev",
+                "8".repeat(64),
+            ),
+        ];
+        for (label, receipt, approval_id, run_id, dig) in cases {
+            store
+                .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+                .unwrap();
+            let (_, rev) = store
+                .ensure_delivery_running("o", receipt, run_id, now())
+                .unwrap();
+            store
+                .set_delivery_phase(
+                    "o",
+                    receipt,
+                    run_id,
+                    rev,
+                    DeliveryEvent::AskRequired,
+                    Some(approval_id),
+                    now(),
+                )
+                .unwrap();
+            let ok = ApprovalDenyBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let row = store.deny_approval_and_transition(&ok, now()).unwrap();
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Denied,
+                "{label} first deny"
+            );
+            let before = delivery_identity(&store, "o", receipt);
+            assert_eq!(before.0, DeliveryPhase::Denied, "{label}");
+            assert_eq!(before.2, run_id, "{label}");
+            assert_eq!(before.3.as_deref(), Some(approval_id), "{label}");
+            let mut bad = ok.clone();
+            match label {
+                "generation" => bad.generation = 2,
+                "lease_owner" => bad.lease_owner = "other".into(),
+                "revision" => bad.expected_revision = 9,
+                other => panic!("unexpected case {other}"),
+            }
+            let err = store.deny_approval_and_transition(&bad, now()).unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::ApprovalBindingMismatch),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("denied retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Denied,
+                "{label} approval must stay denied"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
     fn grant_and_deny_lease_owner_mismatch_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
