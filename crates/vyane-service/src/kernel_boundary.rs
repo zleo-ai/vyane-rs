@@ -2731,6 +2731,105 @@ mod tests {
     }
 
     #[test]
+    fn decide_approval_not_granted_after_approve_is_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) = seed_pending_ask(root.path(), "rcpt-hold-ap", "run-hold-ap", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-hold-ap",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-hold-ap"),
+                Some("run-hold-ap"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Approved, "{granted:?}");
+        let held = adapter.handle(
+            approval_cmd(
+                "ap-hold-ap-false",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-hold-ap"),
+                Some("run-hold-ap"),
+                Some(false),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_ne!(held.kind, KernelEventKind::Approved);
+        assert_eq!(held.kind, KernelEventKind::Error);
+        assert_eq!(held.error, Some(KernelErrorCode::Conflict));
+        let row = store
+            .get_approval(&principal().owner, "rcpt-hold-ap")
+            .unwrap()
+            .expect("still approved");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Approved
+        );
+        let (phase, _) = store
+            .get_delivery_phase(&principal().owner, "rcpt-hold-ap")
+            .unwrap()
+            .expect("delivery retained");
+        assert_eq!(phase, crate::approval_fsm::DeliveryPhase::Approved);
+    }
+
+    #[test]
+    fn decide_approval_not_granted_after_deny_is_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) = seed_pending_ask(root.path(), "rcpt-hold-dn", "run-hold-dn", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        let denied = adapter.handle(
+            approval_cmd(
+                "dn-hold-dn",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-hold-dn"),
+                Some("run-hold-dn"),
+                None,
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(denied.kind, KernelEventKind::Denied, "{denied:?}");
+        let held = adapter.handle(
+            approval_cmd(
+                "ap-hold-dn-false",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-hold-dn"),
+                Some("run-hold-dn"),
+                Some(false),
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_ne!(held.kind, KernelEventKind::Denied);
+        assert_ne!(held.kind, KernelEventKind::Approved);
+        assert_eq!(held.kind, KernelEventKind::Error);
+        assert_eq!(held.error, Some(KernelErrorCode::Conflict));
+        let row = store
+            .get_approval(&principal().owner, "rcpt-hold-dn")
+            .unwrap()
+            .expect("still denied");
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Denied
+        );
+        let (phase, _) = store
+            .get_delivery_phase(&principal().owner, "rcpt-hold-dn")
+            .unwrap()
+            .expect("delivery retained");
+        assert_eq!(phase, crate::approval_fsm::DeliveryPhase::Denied);
+    }
+
+    #[test]
     fn deny_without_binding_fails_closed() {
         let root = tempfile::tempdir().unwrap();
         let root_s = root.path().to_string_lossy().into_owned();
