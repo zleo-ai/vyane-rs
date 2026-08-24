@@ -2588,6 +2588,89 @@ mod tests {
     }
 
     #[test]
+    fn deny_and_transition_terminal_delivery_fails_closed() {
+        // DenyAccepted is legal from Running and ApprovalRequired, and
+        // already-applied at Denied. Completed / Failed / Cancelled are
+        // terminal: the combined deny+delivery transaction must fail closed
+        // so a pending ask is not persisted as Denied against a finished
+        // delivery. This is the deny counterpart of grant-while-running
+        // rollback. It is not the HIGH-003 claim that Running deny must
+        // fail — FSM (Running, DenyAccepted) → Denied is legal and not
+        // 753.2 current fail-closed.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "completed",
+                "rcpt-dn-term-cp",
+                "ap-dn-term-cp",
+                "run-dn-term-cp",
+                "a".repeat(64),
+                DeliveryEvent::Complete,
+                DeliveryPhase::Completed,
+            ),
+            (
+                "failed",
+                "rcpt-dn-term-fl",
+                "ap-dn-term-fl",
+                "run-dn-term-fl",
+                "b".repeat(64),
+                DeliveryEvent::Fail,
+                DeliveryPhase::Failed,
+            ),
+            (
+                "cancelled",
+                "rcpt-dn-term-cn",
+                "ap-dn-term-cn",
+                "run-dn-term-cn",
+                "c".repeat(64),
+                DeliveryEvent::Cancel,
+                DeliveryPhase::Cancelled,
+            ),
+        ];
+        for (label, receipt, approval_id, run_id, dig, event, phase) in cases {
+            store
+                .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+                .unwrap();
+            let (_, rev) = store
+                .ensure_delivery_running("o", receipt, run_id, now())
+                .unwrap();
+            let (got, _) = store
+                .set_delivery_phase("o", receipt, run_id, rev, event, Some(approval_id), now())
+                .unwrap();
+            assert_eq!(got, phase, "{label} seed");
+            let before = delivery_identity(&store, "o", receipt);
+            let deny = ApprovalDenyBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let err = store
+                .deny_approval_and_transition(&deny, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::TerminalImmutable),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("ask retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Pending,
+                "{label} approval must stay pending"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
     fn grant_and_deny_lease_owner_mismatch_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
