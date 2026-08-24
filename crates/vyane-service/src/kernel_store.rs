@@ -2039,6 +2039,105 @@ mod tests {
     }
 
     #[test]
+    fn grant_and_transition_mismatched_regrant_binding_fails_closed() {
+        // Bound grant is idempotent only with the same revision / lease_owner /
+        // generation stored on the Approved row. Same-binding retry is pinned
+        // above; this pins the negative. Deny already pins the Denied analog
+        // (`deny_other_gen` in approval_grant_binding_and_deny_final).
+        // Delivery identity on the Approved self-loop is unchanged and stays
+        // remapped — not 753.2 current fail-closed.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "generation",
+                "rcpt-rg-gen",
+                "ap-rg-gen",
+                "run-rg-gen",
+                "3".repeat(64),
+            ),
+            (
+                "lease_owner",
+                "rcpt-rg-lo",
+                "ap-rg-lo",
+                "run-rg-lo",
+                "4".repeat(64),
+            ),
+            (
+                "revision",
+                "rcpt-rg-rev",
+                "ap-rg-rev",
+                "run-rg-rev",
+                "5".repeat(64),
+            ),
+        ];
+        for (label, receipt, approval_id, run_id, dig) in cases {
+            store
+                .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+                .unwrap();
+            let (_, rev) = store
+                .ensure_delivery_running("o", receipt, run_id, now())
+                .unwrap();
+            store
+                .set_delivery_phase(
+                    "o",
+                    receipt,
+                    run_id,
+                    rev,
+                    DeliveryEvent::AskRequired,
+                    Some(approval_id),
+                    now(),
+                )
+                .unwrap();
+            let ok = ApprovalGrantBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                run_id: run_id.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let row = store.grant_approval_and_transition(&ok, now()).unwrap();
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Approved,
+                "{label} first grant"
+            );
+            let before = delivery_identity(&store, "o", receipt);
+            assert_eq!(before.0, DeliveryPhase::Approved, "{label}");
+            assert_eq!(before.2, run_id, "{label}");
+            assert_eq!(before.3.as_deref(), Some(approval_id), "{label}");
+            let mut bad = ok.clone();
+            match label {
+                "generation" => bad.generation = 2,
+                "lease_owner" => bad.lease_owner = "other".into(),
+                "revision" => bad.expected_revision = 9,
+                other => panic!("unexpected case {other}"),
+            }
+            let err = store
+                .grant_approval_and_transition(&bad, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::ApprovalBindingMismatch),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("approved retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Approved,
+                "{label} approval must stay approved"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
     fn grant_and_transition_after_resume_is_already_applied() {
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
