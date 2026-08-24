@@ -2671,6 +2671,80 @@ mod tests {
     }
 
     #[test]
+    fn grant_and_transition_failed_or_cancelled_delivery_fails_closed() {
+        // GrantAccepted is already applied at Approved and at same-identity
+        // Resuming / Verified / Completed. Failed / Cancelled are not in that
+        // set: a pending ask plus GrantAccepted must fail closed so the ask is
+        // not persisted as Approved against a finished delivery. This is the
+        // grant counterpart of deny-on-terminal rollback. It is not Failed
+        // same-identity retry after Approved (not 753.2 current fail-closed),
+        // and not Completed (already_applied still holds).
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "failed",
+                "rcpt-g-term-fl",
+                "ap-g-term-fl",
+                "run-g-term-fl",
+                "d".repeat(64),
+                DeliveryEvent::Fail,
+                DeliveryPhase::Failed,
+            ),
+            (
+                "cancelled",
+                "rcpt-g-term-cn",
+                "ap-g-term-cn",
+                "run-g-term-cn",
+                "e".repeat(64),
+                DeliveryEvent::Cancel,
+                DeliveryPhase::Cancelled,
+            ),
+        ];
+        for (label, receipt, approval_id, run_id, dig, event, phase) in cases {
+            store
+                .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+                .unwrap();
+            let (_, rev) = store
+                .ensure_delivery_running("o", receipt, run_id, now())
+                .unwrap();
+            let (got, _) = store
+                .set_delivery_phase("o", receipt, run_id, rev, event, Some(approval_id), now())
+                .unwrap();
+            assert_eq!(got, phase, "{label} seed");
+            let before = delivery_identity(&store, "o", receipt);
+            let grant = ApprovalGrantBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                run_id: run_id.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let err = store
+                .grant_approval_and_transition(&grant, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::Delivery(_)),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("ask retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Pending,
+                "{label} approval must stay pending"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
     fn grant_and_deny_lease_owner_mismatch_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
