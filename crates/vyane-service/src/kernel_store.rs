@@ -2446,6 +2446,158 @@ mod tests {
     }
 
     #[test]
+    fn grant_and_transition_mismatched_resuming_or_completed_identity_fails_closed() {
+        // same_grant_identity is the already-applied gate for Resuming /
+        // Verified / Completed. Verified negatives are pinned above; this
+        // pins the remaining two phases. A public delivery row at Resuming
+        // or Completed with a different run_id or approval_id must not count
+        // as already applied, must not persist the grant, and must leave
+        // delivery identity unchanged. Approved self-loop still does not
+        // compare run_id — not 753.2 current fail-closed.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "resuming-run_id",
+                DeliveryPhase::Resuming,
+                "rcpt-mm-rs-run",
+                "ap-grant-rs-run",
+                "run-grant-rs",
+                "run-other-rs",
+                Some("ap-grant-rs-run"),
+                "6".repeat(64),
+            ),
+            (
+                "resuming-approval_id",
+                DeliveryPhase::Resuming,
+                "rcpt-mm-rs-ap",
+                "ap-grant-rs-ap",
+                "run-grant-rs-ap",
+                "run-grant-rs-ap",
+                Some("ap-other-rs"),
+                "7".repeat(64),
+            ),
+            (
+                "completed-run_id",
+                DeliveryPhase::Completed,
+                "rcpt-mm-cp-run",
+                "ap-grant-cp-run",
+                "run-grant-cp",
+                "run-other-cp",
+                Some("ap-grant-cp-run"),
+                "8".repeat(64),
+            ),
+            (
+                "completed-approval_id",
+                DeliveryPhase::Completed,
+                "rcpt-mm-cp-ap",
+                "ap-grant-cp-ap",
+                "run-grant-cp-ap",
+                "run-grant-cp-ap",
+                Some("ap-other-cp"),
+                "9".repeat(64),
+            ),
+        ];
+        for (label, phase, receipt, approval_id, grant_run, delivery_run, delivery_ap, dig) in cases
+        {
+            let (got, rev) = store
+                .ensure_delivery_running("o", receipt, delivery_run, now())
+                .unwrap();
+            assert_eq!(got, DeliveryPhase::Running, "{label}");
+            match phase {
+                DeliveryPhase::Completed => {
+                    let (got, _) = store
+                        .set_delivery_phase(
+                            "o",
+                            receipt,
+                            delivery_run,
+                            rev,
+                            DeliveryEvent::Complete,
+                            delivery_ap,
+                            now(),
+                        )
+                        .unwrap();
+                    assert_eq!(got, DeliveryPhase::Completed, "{label}");
+                }
+                DeliveryPhase::Resuming => {
+                    let (got, rev) = store
+                        .set_delivery_phase(
+                            "o",
+                            receipt,
+                            delivery_run,
+                            rev,
+                            DeliveryEvent::AskRequired,
+                            delivery_ap,
+                            now(),
+                        )
+                        .unwrap();
+                    assert_eq!(got, DeliveryPhase::ApprovalRequired, "{label}");
+                    let (got, rev) = store
+                        .set_delivery_phase(
+                            "o",
+                            receipt,
+                            delivery_run,
+                            rev,
+                            DeliveryEvent::GrantAccepted,
+                            delivery_ap,
+                            now(),
+                        )
+                        .unwrap();
+                    assert_eq!(got, DeliveryPhase::Approved, "{label}");
+                    let (got, _) = store
+                        .set_delivery_phase(
+                            "o",
+                            receipt,
+                            delivery_run,
+                            rev,
+                            DeliveryEvent::ResumeStarted,
+                            None,
+                            now(),
+                        )
+                        .unwrap();
+                    assert_eq!(got, DeliveryPhase::Resuming, "{label}");
+                }
+                other => panic!("{label}: unsupported seed phase {other:?}"),
+            }
+            store
+                .record_approval_required("o", approval_id, receipt, grant_run, &dig, 1, now())
+                .unwrap();
+            let before = delivery_identity(&store, "o", receipt);
+            assert_eq!(before.0, phase, "{label}");
+            assert_eq!(before.2, delivery_run, "{label}");
+            assert_eq!(before.3.as_deref(), delivery_ap, "{label}");
+            let grant = ApprovalGrantBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                run_id: grant_run.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let err = store
+                .grant_approval_and_transition(&grant, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::Delivery(_)),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("ask retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Pending,
+                "{label} approval must stay pending"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
     fn deny_and_transition_commits_decision_and_delivery_together() {
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
