@@ -2810,6 +2810,123 @@ mod tests {
     }
 
     #[test]
+    fn deny_and_transition_approved_downstream_delivery_fails_closed() {
+        // DenyAccepted is legal from Running and ApprovalRequired, and
+        // already-applied at Denied. Completed / Failed / Cancelled are
+        // terminal (deny_and_transition_terminal_delivery_fails_closed).
+        // Approved / Resuming / Verified are not terminal; DenyAccepted is
+        // IllegalTransition there. A pending ask plus deny against those
+        // phases must fail closed so the ask is not persisted as Denied
+        // against a delivery that already accepted a grant.
+        // deny_after_approve is different: the approval row is already
+        // Approved, so deny_approval_in_tx returns Conflict before delivery
+        // apply. Widening already_applied to DenyAccepted at
+        // Approved/Resuming/Verified would keep existing tests green.
+        // Running+DenyAccepted remains legal FSM and is not 753.2 current
+        // fail-closed.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "approved",
+                "rcpt-dn-ad-ap",
+                "ap-dn-ad-ap",
+                "run-dn-ad-ap",
+                "3".repeat(64),
+                None,
+                DeliveryPhase::Approved,
+            ),
+            (
+                "resuming",
+                "rcpt-dn-ad-rs",
+                "ap-dn-ad-rs",
+                "run-dn-ad-rs",
+                "4".repeat(64),
+                Some(DeliveryEvent::ResumeStarted),
+                DeliveryPhase::Resuming,
+            ),
+            (
+                "verified",
+                "rcpt-dn-ad-vf",
+                "ap-dn-ad-vf",
+                "run-dn-ad-vf",
+                "5".repeat(64),
+                Some(DeliveryEvent::Verified),
+                DeliveryPhase::Verified,
+            ),
+        ];
+        for (label, receipt, approval_id, run_id, dig, extra, phase) in cases {
+            store
+                .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+                .unwrap();
+            let (_, rev) = store
+                .ensure_delivery_running("o", receipt, run_id, now())
+                .unwrap();
+            let (got, rev) = store
+                .set_delivery_phase(
+                    "o",
+                    receipt,
+                    run_id,
+                    rev,
+                    DeliveryEvent::AskRequired,
+                    Some(approval_id),
+                    now(),
+                )
+                .unwrap();
+            assert_eq!(got, DeliveryPhase::ApprovalRequired, "{label} ask");
+            let (got, rev) = store
+                .set_delivery_phase(
+                    "o",
+                    receipt,
+                    run_id,
+                    rev,
+                    DeliveryEvent::GrantAccepted,
+                    Some(approval_id),
+                    now(),
+                )
+                .unwrap();
+            assert_eq!(got, DeliveryPhase::Approved, "{label} grant seed");
+            if let Some(extra) = extra {
+                let (got, _) = store
+                    .set_delivery_phase("o", receipt, run_id, rev, extra, None, now())
+                    .unwrap();
+                assert_eq!(got, phase, "{label} seed");
+            }
+            let before = delivery_identity(&store, "o", receipt);
+            assert_eq!(before.0, phase, "{label}");
+            assert_eq!(before.2, run_id, "{label}");
+            assert_eq!(before.3.as_deref(), Some(approval_id), "{label}");
+            let deny = ApprovalDenyBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let err = store
+                .deny_approval_and_transition(&deny, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::Delivery(_)),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("ask retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Pending,
+                "{label} approval must stay pending"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
     fn grant_and_deny_lease_owner_mismatch_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
