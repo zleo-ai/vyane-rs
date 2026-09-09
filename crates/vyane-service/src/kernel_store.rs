@@ -739,7 +739,8 @@ impl KernelStore {
         Ok(row)
     }
 
-    /// Bound grant. Idempotent if already approved with same binding.
+    /// Bound grant. Idempotent if already approved with the same run_id,
+    /// revision, lease_owner, and generation.
     pub fn grant_approval(
         &self,
         binding: &ApprovalGrantBinding,
@@ -1208,10 +1209,10 @@ fn grant_approval_in_tx(
     validate_owner(&binding.owner)?;
     validate_digest(&binding.request_digest)?;
     #[allow(clippy::type_complexity)]
-    type ExistingApprovalRow = (String, String, i64, Option<String>, Option<i64>);
+    type ExistingApprovalRow = (String, String, String, i64, Option<String>, Option<i64>);
     let existing: Option<ExistingApprovalRow> = tx
         .query_row(
-            "SELECT approval_id, decision, bound_revision, bound_lease_owner, bound_generation
+            "SELECT approval_id, decision, run_id, bound_revision, bound_lease_owner, bound_generation
              FROM kernel_approvals
              WHERE owner = ?1 AND receipt_id = ?2 AND request_digest = ?3",
             params![binding.owner, binding.receipt_id, binding.request_digest],
@@ -1222,22 +1223,24 @@ fn grant_approval_in_tx(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((approval_id, decision, bound_rev, bound_lo, bound_gen)) = existing else {
+    let Some((approval_id, decision, run_id, bound_rev, bound_lo, bound_gen)) = existing else {
         return Err(KernelStoreError::NotFound);
     };
     let kind = ApprovalDecisionKind::parse(&decision)?;
     match kind {
         ApprovalDecisionKind::Denied => Err(KernelStoreError::ApprovalDeniedFinal),
         ApprovalDecisionKind::Approved => {
+            let run_ok = run_id == binding.run_id;
             let rev_ok = u64::try_from(bound_rev).unwrap_or(0) == binding.expected_revision;
             let lo_ok = bound_lo.as_deref() == Some(binding.lease_owner.as_str());
             let gen_ok =
                 bound_gen.map(|g| u64::try_from(g).unwrap_or(0)) == Some(binding.generation);
-            if rev_ok && lo_ok && gen_ok {
+            if run_ok && rev_ok && lo_ok && gen_ok {
                 load_approval(tx, &binding.owner, &approval_id)
             } else {
                 Err(KernelStoreError::ApprovalBindingMismatch)
@@ -1247,11 +1250,6 @@ fn grant_approval_in_tx(
             if u64::try_from(bound_rev).unwrap_or(0) != binding.expected_revision {
                 return Err(KernelStoreError::ApprovalBindingMismatch);
             }
-            let run_id: String = tx.query_row(
-                "SELECT run_id FROM kernel_approvals WHERE owner = ?1 AND approval_id = ?2",
-                params![binding.owner, approval_id],
-                |row| row.get(0),
-            )?;
             if run_id != binding.run_id {
                 return Err(KernelStoreError::ApprovalBindingMismatch);
             }
@@ -1372,9 +1370,10 @@ fn deny_approval_in_tx(
 /// Advance an existing delivery row. Missing rows fail closed; already-at-target
 /// grant/deny is idempotent so a retry does not hit terminal-immutable.
 ///
-/// `GrantAccepted` is already applied at `Approved` (FSM self-loop) and at
-/// same-identity `Resuming` / `Verified` / `Completed` (Approved downstream;
-/// FSM would otherwise return `GrantRequiresAsk`).
+/// `GrantAccepted` is already applied only at same-identity `Approved` (FSM
+/// self-loop) and same-identity `Resuming` / `Verified` / `Completed` (Approved
+/// downstream; FSM would otherwise return `GrantRequiresAsk`). A mismatched
+/// identity at `Approved` fails closed instead of taking the self-loop.
 /// `DenyAccepted` is already applied at `Denied` only when `stored_run_id`
 /// matches; the UPDATE is fenced on `run_id` so another run's delivery cannot
 /// be rewritten.
@@ -1407,7 +1406,6 @@ fn apply_existing_delivery_event_in_tx(
         && stored_approval_id.is_some()
         && stored_approval_id.as_deref() == approval_id;
     let already_applied = match event {
-        DeliveryEvent::GrantAccepted if current == DeliveryPhase::Approved => true,
         DeliveryEvent::GrantAccepted
             if current.grant_retry_already_applied() && same_grant_identity =>
         {
@@ -1423,6 +1421,11 @@ fn apply_existing_delivery_event_in_tx(
     }
     let next = approval_fsm::transition(current, event)?;
     if next == current {
+        if event == DeliveryEvent::GrantAccepted && !same_grant_identity {
+            return Err(KernelStoreError::Delivery(
+                "delivery run_id does not match approval run".into(),
+            ));
+        }
         return Ok((current, rev));
     }
     let next_rev = rev
@@ -2113,12 +2116,12 @@ mod tests {
 
     #[test]
     fn grant_and_transition_mismatched_regrant_binding_fails_closed() {
-        // Bound grant is idempotent only with the same revision / lease_owner /
-        // generation stored on the Approved row. Same-binding retry is pinned
-        // above; this pins the negative. Deny already pins the Denied analog
-        // (`deny_other_gen` in approval_grant_binding_and_deny_final).
-        // Delivery identity on the Approved self-loop is unchanged and stays
-        // remapped — not 753.2 current fail-closed.
+        // Bound grant is idempotent only with the same run_id / revision /
+        // lease_owner / generation stored on the Approved row. Same-binding
+        // retry is pinned above; this pins the negative. Deny already pins
+        // the Denied analog (`deny_other_gen` in
+        // approval_grant_binding_and_deny_final) for revision/lease/generation;
+        // grant also fences run_id because ApprovalGrantBinding carries it.
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [
@@ -2142,6 +2145,13 @@ mod tests {
                 "ap-rg-rev",
                 "run-rg-rev",
                 "5".repeat(64),
+            ),
+            (
+                "run_id",
+                "rcpt-rg-run",
+                "ap-rg-run",
+                "run-rg-run",
+                "b".repeat(64),
             ),
         ];
         for (label, receipt, approval_id, run_id, dig) in cases {
@@ -2187,6 +2197,7 @@ mod tests {
                 "generation" => bad.generation = 2,
                 "lease_owner" => bad.lease_owner = "other".into(),
                 "revision" => bad.expected_revision = 9,
+                "run_id" => bad.run_id = "run-other-rg".into(),
                 other => panic!("unexpected case {other}"),
             }
             let err = store
@@ -2525,8 +2536,8 @@ mod tests {
         // pins the remaining two phases. A public delivery row at Resuming
         // or Completed with a different run_id or approval_id must not count
         // as already applied, must not persist the grant, and must leave
-        // delivery identity unchanged. Approved self-loop still does not
-        // compare run_id — not 753.2 current fail-closed.
+        // delivery identity unchanged. Approved self-loop identity is pinned
+        // in grant_and_transition_approved_fast_path_requires_same_run.
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [
@@ -2668,6 +2679,88 @@ mod tests {
             let after = delivery_identity(&store, "o", receipt);
             assert_eq!(after, before, "{label} delivery identity must not change");
         }
+    }
+
+    #[test]
+    fn grant_and_transition_approved_fast_path_requires_same_run() {
+        // Already-applied GrantAccepted at Approved must compare run/approval
+        // identity. An Approved delivery owned by old-run must not count as
+        // success for a new-run grant; the new ask stays Pending and delivery
+        // identity is unchanged. Without this fence the Approved self-loop
+        // would commit the new approval while leaving delivery on old-run.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let receipt = "rcpt-g-fp-run";
+        let (_, rev) = store
+            .ensure_delivery_running("o", receipt, "old-run", now())
+            .unwrap();
+        let (phase, rev) = store
+            .set_delivery_phase(
+                "o",
+                receipt,
+                "old-run",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-old"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::ApprovalRequired);
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                receipt,
+                "old-run",
+                rev,
+                DeliveryEvent::GrantAccepted,
+                Some("ap-old"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::Approved);
+        let new_dig = "c".repeat(64);
+        store
+            .record_approval_required("o", "ap-new", receipt, "new-run", &new_dig, 1, now())
+            .unwrap();
+        let before = delivery_identity(&store, "o", receipt);
+        assert_eq!(before.0, DeliveryPhase::Approved);
+        assert_eq!(before.2, "old-run");
+        assert_eq!(before.3.as_deref(), Some("ap-old"));
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: receipt.into(),
+            run_id: "new-run".into(),
+            request_digest: new_dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .grant_approval_and_transition(&grant, now())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KernelStoreError::Delivery(_)
+                    | KernelStoreError::Conflict(_)
+                    | KernelStoreError::NotFound
+                    | KernelStoreError::StaleRevision { .. }
+                    | KernelStoreError::TerminalImmutable
+            ),
+            "{err:?}"
+        );
+        let row = store
+            .get_approval("o", receipt)
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        assert_eq!(row.run_id, "new-run");
+        assert_eq!(row.approval_id, "ap-new");
+        let after = delivery_identity(&store, "o", receipt);
+        assert_eq!(after, before, "delivery identity must not change");
+        assert_eq!(after.2, "old-run");
+        assert_eq!(after.3.as_deref(), Some("ap-old"));
     }
 
     #[test]
@@ -3069,13 +3162,13 @@ mod tests {
 
     #[test]
     fn grant_and_transition_failed_or_cancelled_delivery_fails_closed() {
-        // GrantAccepted is already applied at Approved and at same-identity
-        // Resuming / Verified / Completed. Failed / Cancelled are not in that
-        // set: a pending ask plus GrantAccepted must fail closed so the ask is
-        // not persisted as Approved against a finished delivery. This is the
-        // grant counterpart of deny-on-terminal rollback. It is not Failed
-        // same-identity retry after Approved (not 753.2 current fail-closed),
-        // and not Completed (already_applied still holds).
+        // GrantAccepted is already applied at same-identity Approved and at
+        // same-identity Resuming / Verified / Completed. Failed / Cancelled
+        // are not in that set: a pending ask plus GrantAccepted must fail
+        // closed so the ask is not persisted as Approved against a finished
+        // delivery. This is the grant counterpart of deny-on-terminal rollback.
+        // It is not Failed same-identity retry after Approved, and not
+        // Completed (already_applied still holds).
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [
