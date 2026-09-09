@@ -2155,7 +2155,6 @@ fn signal_group(pgid: i32, sig: i32) {
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::io::Write as _;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc as StdArc, Mutex as StdMutex};
 
