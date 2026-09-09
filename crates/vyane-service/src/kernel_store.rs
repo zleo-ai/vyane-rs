@@ -177,8 +177,9 @@ pub struct ApprovalGrantBinding {
     pub decided_by: String,
 }
 
-/// Binding required for a successful deny. Run id comes from the durable row
-/// so a caller may omit `agent_run_id`; revision and lease fence still apply.
+/// Binding required for a successful deny. Run id is read from the durable
+/// approval row (this struct has no run-id field); revision and lease fence
+/// still apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalDenyBinding {
     pub owner: String,
@@ -2051,6 +2052,66 @@ mod tests {
     }
 
     #[test]
+    fn grant_and_transition_catch_up_after_standalone_grant() {
+        // Standalone grant_approval persists Approved while delivery stays at
+        // ApprovalRequired. grant_approval_and_transition must advance phase
+        // exactly once, then retry is idempotent.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "e".repeat(64);
+        store
+            .record_approval_required("o", "ap-cu-g", "rcpt-cu-g", "run-cu-g", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-cu-g", "run-cu-g", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-cu-g",
+                "run-cu-g",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-cu-g"),
+                now(),
+            )
+            .unwrap();
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-cu-g".into(),
+            run_id: "run-cu-g".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.grant_approval(&grant, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+        let (phase, rev_before) = store
+            .get_delivery_phase("o", "rcpt-cu-g")
+            .unwrap()
+            .expect("delivery still waiting");
+        assert_eq!(phase, DeliveryPhase::ApprovalRequired);
+        let row = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+        let (phase, rev_after) = store
+            .get_delivery_phase("o", "rcpt-cu-g")
+            .unwrap()
+            .expect("delivery caught up");
+        assert_eq!(phase, DeliveryPhase::Approved);
+        assert_eq!(rev_after, rev_before + 1);
+        let again = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Approved);
+        let (phase, rev_retry) = store
+            .get_delivery_phase("o", "rcpt-cu-g")
+            .unwrap()
+            .expect("idempotent catch-up");
+        assert_eq!(phase, DeliveryPhase::Approved);
+        assert_eq!(rev_retry, rev_after);
+    }
+
+    #[test]
     fn grant_and_transition_mismatched_regrant_binding_fails_closed() {
         // Bound grant is idempotent only with the same revision / lease_owner /
         // generation stored on the Approved row. Same-binding retry is pinned
@@ -2654,6 +2715,65 @@ mod tests {
             .unwrap()
             .expect("idempotent deny delivery");
         assert_eq!(phase, DeliveryPhase::Denied);
+    }
+
+    #[test]
+    fn deny_and_transition_catch_up_after_standalone_deny() {
+        // Standalone deny_approval persists Denied while delivery stays at
+        // ApprovalRequired. deny_approval_and_transition must advance phase
+        // exactly once, then retry is idempotent.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "f".repeat(64);
+        store
+            .record_approval_required("o", "ap-cu-d", "rcpt-cu-d", "run-cu-d", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-cu-d", "run-cu-d", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-cu-d",
+                "run-cu-d",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-cu-d"),
+                now(),
+            )
+            .unwrap();
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-cu-d".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.deny_approval(&deny, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Denied);
+        let (phase, rev_before) = store
+            .get_delivery_phase("o", "rcpt-cu-d")
+            .unwrap()
+            .expect("delivery still waiting");
+        assert_eq!(phase, DeliveryPhase::ApprovalRequired);
+        let row = store.deny_approval_and_transition(&deny, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Denied);
+        let (phase, rev_after) = store
+            .get_delivery_phase("o", "rcpt-cu-d")
+            .unwrap()
+            .expect("delivery caught up");
+        assert_eq!(phase, DeliveryPhase::Denied);
+        assert_eq!(rev_after, rev_before + 1);
+        let again = store.deny_approval_and_transition(&deny, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Denied);
+        let (phase, rev_retry) = store
+            .get_delivery_phase("o", "rcpt-cu-d")
+            .unwrap()
+            .expect("idempotent catch-up");
+        assert_eq!(phase, DeliveryPhase::Denied);
+        assert_eq!(rev_retry, rev_after);
     }
 
     #[test]

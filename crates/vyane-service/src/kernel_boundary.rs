@@ -159,12 +159,16 @@ pub struct KernelCommand {
     /// Durable dogfood root for [`KernelCommandKind::DriveDogfood`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dogfood_root: Option<String>,
-    /// Grant/deny binding. Required for durable [`KernelCommandKind::DecideApproval`].
+    /// Grant/deny binding. Required for granted [`KernelCommandKind::DecideApproval`]
+    /// (`approval_granted = true`) and for every [`KernelCommandKind::DenyApproval`].
+    /// Not required when DecideApproval has `approval_granted = false` or `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_binding: Option<KernelApprovalBinding>,
 }
 
-/// Binding for durable approve/deny. Optional on the wire; missing grant binding fails closed.
+/// Binding for durable approve/deny. Required on granted DecideApproval and
+/// every DenyApproval (missing there fails closed). DecideApproval with
+/// `approval_granted = false` or `None` does not need it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelApprovalBinding {
     pub request_digest: String,
@@ -2767,32 +2771,54 @@ mod tests {
 
     #[test]
     fn decide_approval_not_granted_retains_pending() {
-        let root = tempfile::tempdir().unwrap();
-        let root_s = root.path().to_string_lossy().into_owned();
-        let (store, digest) = seed_pending_ask(root.path(), "rcpt-hold", "run-hold", 1);
-        let adapter = LocalKernelAdapter::new(principal());
-        let event = adapter.handle(
-            approval_cmd(
-                "ap-hold",
-                KernelCommandKind::DecideApproval,
-                Some("rcpt-hold"),
-                Some("run-hold"),
+        // approval_granted None and Some(false) both keep a pending ask.
+        // Binding is optional on this path.
+        let cases: [(&str, &str, &str, Option<bool>); 2] = [
+            (
+                "rcpt-hold-false",
+                "run-hold-false",
+                "ap-hold-false",
                 Some(false),
-                Some(&root_s),
-                Some(binding_for(&digest, 1)),
             ),
-            now(),
-        );
-        assert_eq!(event.kind, KernelEventKind::ApprovalRequired);
-        assert_eq!(event.error, Some(KernelErrorCode::ApprovalRequired));
-        let row = store
-            .get_approval(&principal().owner, "rcpt-hold")
-            .unwrap()
-            .expect("pending retained");
-        assert_eq!(
-            row.decision,
-            crate::kernel_store::ApprovalDecisionKind::Pending
-        );
+            ("rcpt-hold-none", "run-hold-none", "ap-hold-none", None),
+        ];
+        for (receipt, run_id, command_id, granted) in cases {
+            let root = tempfile::tempdir().unwrap();
+            let root_s = root.path().to_string_lossy().into_owned();
+            let (store, digest) = seed_pending_ask(root.path(), receipt, run_id, 1);
+            let adapter = LocalKernelAdapter::new(principal());
+            let event = adapter.handle(
+                approval_cmd(
+                    command_id,
+                    KernelCommandKind::DecideApproval,
+                    Some(receipt),
+                    Some(run_id),
+                    granted,
+                    Some(&root_s),
+                    Some(binding_for(&digest, 1)),
+                ),
+                now(),
+            );
+            assert_eq!(
+                event.kind,
+                KernelEventKind::ApprovalRequired,
+                "granted={granted:?}"
+            );
+            assert_eq!(
+                event.error,
+                Some(KernelErrorCode::ApprovalRequired),
+                "granted={granted:?}"
+            );
+            let row = store
+                .get_approval(&principal().owner, receipt)
+                .unwrap()
+                .expect("pending retained");
+            assert_eq!(
+                row.decision,
+                crate::kernel_store::ApprovalDecisionKind::Pending,
+                "granted={granted:?}"
+            );
+        }
     }
 
     #[test]
