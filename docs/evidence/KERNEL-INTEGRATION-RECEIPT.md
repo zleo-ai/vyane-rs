@@ -27,7 +27,7 @@
 2. **Crash/restart no-duplicate-effects**: dogfood reopen after `AfterEffectBeforeReceipt` completes once; effect count remains 1. Grant-then-crash-before-effect resumes without duplicate.
 3. **Approval FSM product path**: Running → ApprovalRequired → Approved|Denied → Resuming → … → Completed. Ask-only entry; deny terminal; grant binds task/run/owner/revision/digest; idempotent re-grant; wrong revision fails closed; approval gate on receipt.
 4. **Hermetic harness lifecycle binary** `vyane_harness_lifecycle`: spawn → events → approval wait → grant resume → effect → artifact → completed; dual-run consistency; kill/cancel; crash-after-start injector. **Not** formal vendor harness integration.
-5. **Versioned kernel boundary**: commands submit/status/approve/deny/cancel/read artifact|receipt/DriveDogfood; events covering accepted through completion_receipt_finalized / canceled|failed; display_hint non-authoritative; principal authz before mutation. **Durable multi-process path** is DriveDogfood → KernelStore; in-process approve/deny without dogfood are event stubs (see residual).
+5. **Versioned kernel boundary**: commands submit/status/approve/deny/cancel/read artifact|receipt/DriveDogfood; events covering accepted through completion_receipt_finalized / canceled|failed; display_hint non-authoritative; principal authz before mutation. **Durable multi-process path** is DriveDogfood plus bound `DecideApproval`/`DenyApproval` through KernelStore. Approve/deny without a resolvable store fail closed (see residual).
 6. **Composition**: reuses `SqliteAgentStore` for AgentRun claim/lease; does **not** fork a second runtime.
 
 ## Skeptic-gap repairs (post #172 merge)
@@ -40,11 +40,12 @@
 | Harness not linked to CompletionReceipt | `run_dogfood_with_hermetic_harness` + integration test; Unix process groups on effect children |
 | concurrent_schema_init flaky | longer busy_timeout, 64 retries, exponential backoff; 5× stress green |
 | approval-suite.log | captured under implementer scratch + CI suite |
+| In-process approve/deny were event stubs | `DecideApproval`/`DenyApproval` persist grant/deny through KernelStore when a dogfood/durable root contains the pending ask; missing store/binding fails closed |
 
 ## Partial / residual (pilot, not production)
 
 - Formal Claude/Codex/Grok product harness wiring remains in adapter plane / existing daemon acceptance.
-- In-process `DecideApproval`/`DenyApproval` without KernelStore are **not** multi-process durable authority (dogfood/KernelStore grant path is).
+- `DecideApproval`/`DenyApproval` without a resolvable `kernel.sqlite` (no `dogfood_root` / registered durable root, or no matching receipt/approval row) fail closed and do **not** emit Approved/Denied. Durable grant still requires a pending ask plus binding. Durable deny requires the caller digest plus the same revision/lease/generation fence as grant (lease fence checked when present); the adapter does not copy the digest from the pending row. Grant/deny and the delivery-phase transition commit in one KernelStore transaction; a missing delivery row fails closed and does **not** persist the decision. The boundary still does **not** set the receipt approval gate, consume a native ask, check expiry/drift, or resume execution. A Denied event is not receipt Failed. `receipt_store_index` is an unbounded in-process map; `LocalKernelAdapter` is not a resident service, so a cap is left to EOS-753. `open_existing` does not pin inode between `is_file` and the SQLite open (trusted local path).
 - Effect apply is record-then-side-effect (at-most-once / no duplicate); crash between CAS and OS child may leave identity without side effect — recovery does not invent success without truth probe.
 - Multi-writer race probe uses concurrent threads on one SQLite file (Immediate txn); schema init hardened under load.
 - No multi-tenant production service, no production cutover, no crates.io/tag/release.

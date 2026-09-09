@@ -77,6 +77,20 @@ impl DeliveryPhase {
             Self::Running | Self::Resuming | Self::Approved | Self::Verified
         )
     }
+
+    /// Grant retry is a no-op at these phases when identity matches.
+    ///
+    /// `Approved` is an FSM self-loop on `GrantAccepted`. `Resuming`,
+    /// `Verified`, and `Completed` are Approved-downstream phases; the FSM
+    /// rejects `GrantAccepted` there, so the store must treat a same-identity
+    /// retry as already applied instead of calling [`transition`].
+    #[must_use]
+    pub const fn grant_retry_already_applied(self) -> bool {
+        matches!(
+            self,
+            Self::Approved | Self::Resuming | Self::Verified | Self::Completed
+        )
+    }
 }
 
 /// Event that may advance the approval/delivery FSM.
@@ -232,6 +246,40 @@ mod tests {
         let p = transition(p, DeliveryEvent::GrantAccepted).unwrap();
         let p2 = transition(p, DeliveryEvent::GrantAccepted).unwrap();
         assert_eq!(p2, DeliveryPhase::Approved);
+        assert!(DeliveryPhase::Approved.grant_retry_already_applied());
+    }
+
+    #[test]
+    fn resuming_then_grant_is_rejected_by_fsm() {
+        let p = transition(DeliveryPhase::Running, DeliveryEvent::AskRequired).unwrap();
+        let p = transition(p, DeliveryEvent::GrantAccepted).unwrap();
+        let p = transition(p, DeliveryEvent::ResumeStarted).unwrap();
+        assert_eq!(p, DeliveryPhase::Resuming);
+        assert!(DeliveryPhase::Resuming.grant_retry_already_applied());
+        let err = transition(p, DeliveryEvent::GrantAccepted).unwrap_err();
+        assert_eq!(err, DeliveryTransitionError::GrantRequiresAsk);
+    }
+
+    #[test]
+    fn verified_then_grant_is_rejected_by_fsm() {
+        let p = transition(DeliveryPhase::Running, DeliveryEvent::AskRequired).unwrap();
+        let p = transition(p, DeliveryEvent::GrantAccepted).unwrap();
+        let p = transition(p, DeliveryEvent::Verified).unwrap();
+        assert_eq!(p, DeliveryPhase::Verified);
+        assert!(DeliveryPhase::Verified.grant_retry_already_applied());
+        let err = transition(p, DeliveryEvent::GrantAccepted).unwrap_err();
+        assert_eq!(err, DeliveryTransitionError::GrantRequiresAsk);
+    }
+
+    #[test]
+    fn completed_then_grant_is_rejected_by_fsm() {
+        let p = transition(DeliveryPhase::Running, DeliveryEvent::AskRequired).unwrap();
+        let p = transition(p, DeliveryEvent::GrantAccepted).unwrap();
+        let p = transition(p, DeliveryEvent::Complete).unwrap();
+        assert_eq!(p, DeliveryPhase::Completed);
+        assert!(DeliveryPhase::Completed.grant_retry_already_applied());
+        let err = transition(p, DeliveryEvent::GrantAccepted).unwrap_err();
+        assert_eq!(err, DeliveryTransitionError::GrantRequiresAsk);
     }
 
     #[test]

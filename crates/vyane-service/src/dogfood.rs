@@ -32,8 +32,8 @@ use vyane_core::{
 
 use crate::approval_fsm::{DeliveryEvent, DeliveryPhase};
 use crate::kernel_store::{
-    ApprovalDecisionKind, ApprovalGrantBinding, ArtifactMeta, KernelStore, KernelStoreError,
-    LeaseFence,
+    ApprovalDecisionKind, ApprovalDenyBinding, ApprovalGrantBinding, ArtifactMeta, KernelStore,
+    KernelStoreError, LeaseFence,
 };
 
 /// Stable dogfood task type recorded on receipts.
@@ -581,6 +581,21 @@ impl DogfoodPath {
         self.cancel = true;
     }
 
+    /// Lease generation for a bound grant/deny.
+    ///
+    /// In-memory claim wins. Otherwise the durable fence is required. A store
+    /// read error is propagated; only a true miss is `InvalidState`.
+    fn lease_generation(&self, missing: &'static str) -> Result<u64, DogfoodError> {
+        if let Some(claimed) = self.claimed.as_ref() {
+            return Ok(claimed.receipt.generation);
+        }
+        Ok(self
+            .kernel
+            .get_lease_fence(&self.config.owner, &self.config.run_id)?
+            .ok_or(DogfoodError::InvalidState(missing))?
+            .generation)
+    }
+
     /// Bound grant for a pending approval request.
     ///
     /// Requires a prior ask (`evaluate_permission` → ApprovalRequired) that
@@ -591,18 +606,7 @@ impl DogfoodPath {
             .approval_request_digest
             .clone()
             .ok_or(DogfoodError::InvalidState("no pending approval request"))?;
-        let generation = self
-            .claimed
-            .as_ref()
-            .map(|c| c.receipt.generation)
-            .or_else(|| {
-                self.kernel
-                    .get_lease_fence(&self.config.owner, &self.config.run_id)
-                    .ok()
-                    .flatten()
-                    .map(|f| f.generation)
-            })
-            .ok_or(DogfoodError::InvalidState("no lease generation for grant"))?;
+        let generation = self.lease_generation("no lease generation for grant")?;
         let binding = ApprovalGrantBinding {
             owner: self.config.owner.clone(),
             receipt_id: self.config.receipt_id.clone(),
@@ -675,13 +679,21 @@ impl DogfoodPath {
             .approval_request_digest
             .clone()
             .ok_or(DogfoodError::InvalidState("no pending approval request"))?;
-        self.kernel.deny_approval(
-            &self.config.owner,
-            &self.config.receipt_id,
-            &digest,
-            &self.config.lease_owner,
-            now,
-        )?;
+        let generation = self.lease_generation("no lease generation for deny")?;
+        let binding = ApprovalDenyBinding {
+            owner: self.config.owner.clone(),
+            receipt_id: self.config.receipt_id.clone(),
+            request_digest: digest,
+            expected_revision: self
+                .kernel
+                .get_approval(&self.config.owner, &self.config.receipt_id)?
+                .map(|a| a.bound_revision)
+                .unwrap_or(self.receipt_revision),
+            lease_owner: self.config.lease_owner.clone(),
+            generation,
+            decided_by: self.config.lease_owner.clone(),
+        };
+        self.kernel.deny_approval(&binding, now)?;
         let (phase, rev) = self.kernel.set_delivery_phase(
             &self.config.owner,
             &self.config.receipt_id,
@@ -1908,6 +1920,134 @@ mod tests {
         );
         assert!(path.effects().is_empty());
         assert_eq!(path.delivery_phase(), Some(DeliveryPhase::Denied));
+    }
+
+    fn open_ask_path(id: &str) -> (tempfile::TempDir, PathBuf, DogfoodPath) {
+        let root = tempfile::tempdir().unwrap();
+        let durable = root.path().join("d");
+        let workdir = durable.join("wd");
+        fs::create_dir_all(&workdir).unwrap();
+        let mut config = sample_config(root.path(), id, workdir);
+        config.require_approval = true;
+        config.permission = PermissionDecision::Ask;
+        let path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
+        (root, durable, path)
+    }
+
+    #[test]
+    fn deny_uses_claimed_generation_before_lease_fence() {
+        let (_root, _durable, mut path) = open_ask_path("dclaim");
+        path.create_or_adopt_agent_run(now()).unwrap();
+        path.claim_and_lease().unwrap();
+        path.record_attempt(now()).unwrap();
+        assert_eq!(
+            path.evaluate_permission(now()).unwrap_err(),
+            DogfoodError::ApprovalRequired
+        );
+        let claimed_gen = path.claimed.as_ref().unwrap().receipt.generation;
+        let fence = path
+            .kernel
+            .get_lease_fence(&path.config.owner, &path.config.run_id)
+            .unwrap()
+            .expect("claim persists a lease fence");
+        assert_eq!(fence.generation, claimed_gen);
+        let mut bumped = fence.clone();
+        bumped.generation = claimed_gen + 1;
+        path.kernel.put_lease_fence(&bumped, now()).unwrap();
+
+        let err = path.deny_approval(now()).unwrap_err();
+        assert_eq!(
+            err,
+            DogfoodError::Kernel("approval binding mismatch".into()),
+            "claimed generation must be sent to deny, so a newer fence fails closed"
+        );
+        let approval = path
+            .kernel
+            .get_approval(&path.config.owner, &path.config.receipt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(approval.decision, ApprovalDecisionKind::Pending);
+        assert_eq!(path.delivery_phase(), Some(DeliveryPhase::ApprovalRequired));
+    }
+
+    #[test]
+    fn deny_falls_back_to_lease_fence_generation_without_claim() {
+        let (_root, durable, mut path) = open_ask_path("dfence");
+        path.create_or_adopt_agent_run(now()).unwrap();
+        path.claim_and_lease().unwrap();
+        path.record_attempt(now()).unwrap();
+        assert_eq!(
+            path.evaluate_permission(now()).unwrap_err(),
+            DogfoodError::ApprovalRequired
+        );
+        let fence_gen = path
+            .kernel
+            .get_lease_fence(&path.config.owner, &path.config.run_id)
+            .unwrap()
+            .expect("claim persists a lease fence")
+            .generation;
+        let config = path.config.clone();
+        drop(path);
+        let mut path = DogfoodPath::reopen(&durable, config).unwrap();
+        assert!(path.claimed.is_none());
+        assert_eq!(
+            path.deny_approval(now()).unwrap_err(),
+            DogfoodError::ApprovalDenied
+        );
+        let approval = path
+            .kernel
+            .get_approval(&path.config.owner, &path.config.receipt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(approval.decision, ApprovalDecisionKind::Denied);
+        assert_eq!(approval.bound_generation, Some(fence_gen));
+        assert_eq!(path.delivery_phase(), Some(DeliveryPhase::Denied));
+    }
+
+    #[test]
+    fn deny_without_claim_or_lease_fence_is_invalid_state() {
+        let (_root, _durable, mut path) = open_ask_path("dmiss");
+        assert_eq!(
+            path.evaluate_permission(now()).unwrap_err(),
+            DogfoodError::ApprovalRequired
+        );
+        assert!(path.claimed.is_none());
+        assert!(
+            path.kernel
+                .get_lease_fence(&path.config.owner, &path.config.run_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            path.deny_approval(now()).unwrap_err(),
+            DogfoodError::InvalidState("no lease generation for deny")
+        );
+        let approval = path
+            .kernel
+            .get_approval(&path.config.owner, &path.config.receipt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(approval.decision, ApprovalDecisionKind::Pending);
+        assert_eq!(path.delivery_phase(), Some(DeliveryPhase::ApprovalRequired));
+    }
+
+    #[test]
+    fn deny_propagates_lease_fence_store_error() {
+        let (_root, _durable, mut path) = open_ask_path("dferr");
+        assert_eq!(
+            path.evaluate_permission(now()).unwrap_err(),
+            DogfoodError::ApprovalRequired
+        );
+        assert!(path.claimed.is_none());
+        let sqlite = path.kernel.path().to_path_buf();
+        let _ = fs::remove_file(PathBuf::from(format!("{}-wal", sqlite.display())));
+        let _ = fs::remove_file(PathBuf::from(format!("{}-shm", sqlite.display())));
+        fs::write(&sqlite, b"not-a-sqlite-database").unwrap();
+        let err = path.deny_approval(now()).unwrap_err();
+        assert!(
+            matches!(err, DogfoodError::Kernel(_)),
+            "store failure must not become InvalidState, got {err:?}"
+        );
     }
 
     #[test]

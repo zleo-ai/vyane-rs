@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use vyane_core::{
     CompletionReceipt, GATE_CI_PACKAGING, GATE_INDEPENDENT_REVIEW, GATE_INTEGRATION,
@@ -177,6 +177,20 @@ pub struct ApprovalGrantBinding {
     pub decided_by: String,
 }
 
+/// Binding required for a successful deny. Run id is read from the durable
+/// approval row (this struct has no run-id field); revision and lease fence
+/// still apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalDenyBinding {
+    pub owner: String,
+    pub receipt_id: String,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub lease_owner: String,
+    pub generation: u64,
+    pub decided_by: String,
+}
+
 /// Artifact metadata row (bytes live on disk under workdir).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactMeta {
@@ -192,6 +206,9 @@ pub struct ArtifactMeta {
 #[derive(Debug, Clone)]
 pub struct KernelStore {
     path: PathBuf,
+    /// When false, SQLite opens without CREATE so a probe cannot materialize
+    /// an empty `kernel.sqlite` after a missing-file race.
+    allow_create: bool,
 }
 
 impl KernelStore {
@@ -201,9 +218,44 @@ impl KernelStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| KernelStoreError::Io(e.to_string()))?;
         }
-        let store = Self { path };
+        let store = Self {
+            path,
+            allow_create: true,
+        };
         store.initialize()?;
         Ok(store)
+    }
+
+    /// Open an existing sqlite file. Missing paths are not created.
+    ///
+    /// Probe paths (approve/deny discovery) must use this so a candidate miss
+    /// cannot materialize an empty `kernel.sqlite`. SQLite is opened without
+    /// `CREATE`, so `is_file()` is not the existence guarantee: a deleted or
+    /// replaced path fails closed instead of creating a new empty database.
+    pub fn open_existing(path: impl Into<PathBuf>) -> KernelStoreResult<Self> {
+        let path = path.into();
+        if !path.is_file() {
+            return Err(KernelStoreError::Io(format!(
+                "kernel sqlite does not exist: {}",
+                path.display()
+            )));
+        }
+        let store = Self {
+            path,
+            allow_create: false,
+        };
+        store.initialize()?;
+        Ok(store)
+    }
+
+    /// Attach to a sqlite path this process already initialized.
+    /// Skips schema work; the file must already exist.
+    #[must_use]
+    pub(crate) fn reuse(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            allow_create: false,
+        }
     }
 
     #[must_use]
@@ -216,8 +268,18 @@ impl KernelStore {
         SCHEMA_VERSION
     }
 
+    fn existing_open_flags() -> OpenFlags {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW
+    }
+
     fn connect(&self) -> KernelStoreResult<Connection> {
-        let conn = Connection::open(&self.path)?;
+        let conn = if self.allow_create {
+            Connection::open(&self.path)?
+        } else {
+            Connection::open_with_flags(&self.path, Self::existing_open_flags())?
+        };
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         Ok(conn)
@@ -677,150 +739,77 @@ impl KernelStore {
         Ok(row)
     }
 
-    /// Bound grant. Idempotent if already approved with same binding.
+    /// Bound grant. Idempotent if already approved with the same run_id,
+    /// revision, lease_owner, and generation.
     pub fn grant_approval(
         &self,
         binding: &ApprovalGrantBinding,
         now: DateTime<Utc>,
     ) -> KernelStoreResult<ApprovalDecision> {
-        validate_owner(&binding.owner)?;
-        validate_digest(&binding.request_digest)?;
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        #[allow(clippy::type_complexity)]
-        type ExistingApprovalRow = (String, String, i64, Option<String>, Option<i64>);
-        let existing: Option<ExistingApprovalRow> = tx
-            .query_row(
-                "SELECT approval_id, decision, bound_revision, bound_lease_owner, bound_generation
-                 FROM kernel_approvals
-                 WHERE owner = ?1 AND receipt_id = ?2 AND request_digest = ?3",
-                params![binding.owner, binding.receipt_id, binding.request_digest],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((approval_id, decision, bound_rev, bound_lo, bound_gen)) = existing else {
-            return Err(KernelStoreError::NotFound);
-        };
-        let kind = ApprovalDecisionKind::parse(&decision)?;
-        match kind {
-            ApprovalDecisionKind::Denied => Err(KernelStoreError::ApprovalDeniedFinal),
-            ApprovalDecisionKind::Approved => {
-                // Idempotent only when binding matches.
-                let rev_ok = u64::try_from(bound_rev).unwrap_or(0) == binding.expected_revision;
-                let lo_ok = bound_lo.as_deref() == Some(binding.lease_owner.as_str());
-                let gen_ok =
-                    bound_gen.map(|g| u64::try_from(g).unwrap_or(0)) == Some(binding.generation);
-                if rev_ok && lo_ok && gen_ok {
-                    let row = load_approval(&tx, &binding.owner, &approval_id)?;
-                    tx.commit()?;
-                    Ok(row)
-                } else {
-                    Err(KernelStoreError::ApprovalBindingMismatch)
-                }
-            }
-            ApprovalDecisionKind::Pending => {
-                if u64::try_from(bound_rev).unwrap_or(0) != binding.expected_revision {
-                    return Err(KernelStoreError::ApprovalBindingMismatch);
-                }
-                // Also require run_id match from row.
-                let run_id: String = tx.query_row(
-                    "SELECT run_id FROM kernel_approvals WHERE owner = ?1 AND approval_id = ?2",
-                    params![binding.owner, approval_id],
-                    |row| row.get(0),
-                )?;
-                if run_id != binding.run_id {
-                    return Err(KernelStoreError::ApprovalBindingMismatch);
-                }
-                // First grant must match durable lease fence when present.
-                let fence: Option<(String, i64)> = tx
-                    .query_row(
-                        "SELECT lease_owner, generation FROM kernel_lease_fences
-                         WHERE owner = ?1 AND run_id = ?2",
-                        params![binding.owner, binding.run_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()?;
-                if let Some((fence_owner, fence_gen)) = fence
-                    && (fence_owner != binding.lease_owner
-                        || u64::try_from(fence_gen).unwrap_or(0) != binding.generation)
-                {
-                    return Err(KernelStoreError::ApprovalBindingMismatch);
-                }
-                let ms = now.timestamp_millis();
-                let n = tx.execute(
-                    "UPDATE kernel_approvals
-                     SET decision = 'approved', decided_by = ?1, bound_lease_owner = ?2,
-                         bound_generation = ?3, decided_at_ms = ?4, updated_at_ms = ?4
-                     WHERE owner = ?5 AND approval_id = ?6 AND decision = 'pending'",
-                    params![
-                        binding.decided_by,
-                        binding.lease_owner,
-                        binding.generation as i64,
-                        ms,
-                        binding.owner,
-                        approval_id
-                    ],
-                )?;
-                if n != 1 {
-                    return Err(KernelStoreError::Conflict(
-                        "approval grant CAS failed".into(),
-                    ));
-                }
-                let row = load_approval(&tx, &binding.owner, &approval_id)?;
-                tx.commit()?;
-                Ok(row)
-            }
-        }
+        let row = grant_approval_in_tx(&tx, binding, now)?;
+        tx.commit()?;
+        Ok(row)
     }
 
-    pub fn deny_approval(
+    /// Bound grant plus delivery `GrantAccepted` in one Immediate transaction.
+    ///
+    /// A missing delivery row fails closed and does not persist the decision.
+    pub fn grant_approval_and_transition(
         &self,
-        owner: &str,
-        receipt_id: &str,
-        request_digest: &str,
-        decided_by: &str,
+        binding: &ApprovalGrantBinding,
         now: DateTime<Utc>,
     ) -> KernelStoreResult<ApprovalDecision> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String)> = tx
-            .query_row(
-                "SELECT approval_id, decision FROM kernel_approvals
-                 WHERE owner = ?1 AND receipt_id = ?2 AND request_digest = ?3",
-                params![owner, receipt_id, request_digest],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let Some((approval_id, decision)) = existing else {
-            return Err(KernelStoreError::NotFound);
-        };
-        let kind = ApprovalDecisionKind::parse(&decision)?;
-        if kind == ApprovalDecisionKind::Denied {
-            let row = load_approval(&tx, owner, &approval_id)?;
-            tx.commit()?;
-            return Ok(row);
-        }
-        if kind == ApprovalDecisionKind::Approved {
-            return Err(KernelStoreError::Conflict(
-                "cannot deny an already approved decision".into(),
-            ));
-        }
-        let ms = now.timestamp_millis();
-        tx.execute(
-            "UPDATE kernel_approvals
-             SET decision = 'denied', decided_by = ?1, decided_at_ms = ?2, updated_at_ms = ?2
-             WHERE owner = ?3 AND approval_id = ?4 AND decision = 'pending'",
-            params![decided_by, ms, owner, approval_id],
+        let row = grant_approval_in_tx(&tx, binding, now)?;
+        apply_existing_delivery_event_in_tx(
+            &tx,
+            &binding.owner,
+            &binding.receipt_id,
+            &row.run_id,
+            DeliveryEvent::GrantAccepted,
+            Some(row.approval_id.as_str()),
+            now,
         )?;
-        let row = load_approval(&tx, owner, &approval_id)?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// Bound deny. Idempotent if already denied with the same binding.
+    pub fn deny_approval(
+        &self,
+        binding: &ApprovalDenyBinding,
+        now: DateTime<Utc>,
+    ) -> KernelStoreResult<ApprovalDecision> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = deny_approval_in_tx(&tx, binding, now)?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// Bound deny plus delivery `DenyAccepted` in one Immediate transaction.
+    ///
+    /// A missing delivery row fails closed and does not persist the decision.
+    pub fn deny_approval_and_transition(
+        &self,
+        binding: &ApprovalDenyBinding,
+        now: DateTime<Utc>,
+    ) -> KernelStoreResult<ApprovalDecision> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = deny_approval_in_tx(&tx, binding, now)?;
+        apply_existing_delivery_event_in_tx(
+            &tx,
+            &binding.owner,
+            &binding.receipt_id,
+            &row.run_id,
+            DeliveryEvent::DenyAccepted,
+            None,
+            now,
+        )?;
         tx.commit()?;
         Ok(row)
     }
@@ -1212,6 +1201,290 @@ fn final_status_str(status: ReceiptFinalStatus) -> &'static str {
     }
 }
 
+fn grant_approval_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &ApprovalGrantBinding,
+    now: DateTime<Utc>,
+) -> KernelStoreResult<ApprovalDecision> {
+    validate_owner(&binding.owner)?;
+    validate_digest(&binding.request_digest)?;
+    #[allow(clippy::type_complexity)]
+    type ExistingApprovalRow = (String, String, String, i64, Option<String>, Option<i64>);
+    let existing: Option<ExistingApprovalRow> = tx
+        .query_row(
+            "SELECT approval_id, decision, run_id, bound_revision, bound_lease_owner, bound_generation
+             FROM kernel_approvals
+             WHERE owner = ?1 AND receipt_id = ?2 AND request_digest = ?3",
+            params![binding.owner, binding.receipt_id, binding.request_digest],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((approval_id, decision, run_id, bound_rev, bound_lo, bound_gen)) = existing else {
+        return Err(KernelStoreError::NotFound);
+    };
+    let kind = ApprovalDecisionKind::parse(&decision)?;
+    match kind {
+        ApprovalDecisionKind::Denied => Err(KernelStoreError::ApprovalDeniedFinal),
+        ApprovalDecisionKind::Approved => {
+            let run_ok = run_id == binding.run_id;
+            let rev_ok = u64::try_from(bound_rev).unwrap_or(0) == binding.expected_revision;
+            let lo_ok = bound_lo.as_deref() == Some(binding.lease_owner.as_str());
+            let gen_ok =
+                bound_gen.map(|g| u64::try_from(g).unwrap_or(0)) == Some(binding.generation);
+            if run_ok && rev_ok && lo_ok && gen_ok {
+                load_approval(tx, &binding.owner, &approval_id)
+            } else {
+                Err(KernelStoreError::ApprovalBindingMismatch)
+            }
+        }
+        ApprovalDecisionKind::Pending => {
+            if u64::try_from(bound_rev).unwrap_or(0) != binding.expected_revision {
+                return Err(KernelStoreError::ApprovalBindingMismatch);
+            }
+            if run_id != binding.run_id {
+                return Err(KernelStoreError::ApprovalBindingMismatch);
+            }
+            assert_optional_lease_fence(
+                tx,
+                &binding.owner,
+                &run_id,
+                &binding.lease_owner,
+                binding.generation,
+            )?;
+            let ms = now.timestamp_millis();
+            let n = tx.execute(
+                "UPDATE kernel_approvals
+                 SET decision = 'approved', decided_by = ?1, bound_lease_owner = ?2,
+                     bound_generation = ?3, decided_at_ms = ?4, updated_at_ms = ?4
+                 WHERE owner = ?5 AND approval_id = ?6 AND decision = 'pending'",
+                params![
+                    binding.decided_by,
+                    binding.lease_owner,
+                    binding.generation as i64,
+                    ms,
+                    binding.owner,
+                    approval_id
+                ],
+            )?;
+            if n != 1 {
+                return Err(KernelStoreError::Conflict(
+                    "approval grant CAS failed".into(),
+                ));
+            }
+            load_approval(tx, &binding.owner, &approval_id)
+        }
+    }
+}
+
+fn deny_approval_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &ApprovalDenyBinding,
+    now: DateTime<Utc>,
+) -> KernelStoreResult<ApprovalDecision> {
+    validate_owner(&binding.owner)?;
+    validate_digest(&binding.request_digest)?;
+    #[allow(clippy::type_complexity)]
+    type ExistingDenyRow = (String, String, String, i64, Option<String>, Option<i64>);
+    let existing: Option<ExistingDenyRow> = tx
+        .query_row(
+            "SELECT approval_id, decision, run_id, bound_revision, bound_lease_owner, bound_generation
+             FROM kernel_approvals
+             WHERE owner = ?1 AND receipt_id = ?2 AND request_digest = ?3",
+            params![binding.owner, binding.receipt_id, binding.request_digest],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((approval_id, decision, run_id, bound_rev, bound_lo, bound_gen)) = existing else {
+        return Err(KernelStoreError::NotFound);
+    };
+    let kind = ApprovalDecisionKind::parse(&decision)?;
+    match kind {
+        ApprovalDecisionKind::Approved => Err(KernelStoreError::Conflict(
+            "cannot deny an already approved decision".into(),
+        )),
+        ApprovalDecisionKind::Denied => {
+            let rev_ok = u64::try_from(bound_rev).unwrap_or(0) == binding.expected_revision;
+            let lo_ok = bound_lo.as_deref() == Some(binding.lease_owner.as_str());
+            let gen_ok =
+                bound_gen.map(|g| u64::try_from(g).unwrap_or(0)) == Some(binding.generation);
+            if rev_ok && lo_ok && gen_ok {
+                load_approval(tx, &binding.owner, &approval_id)
+            } else {
+                Err(KernelStoreError::ApprovalBindingMismatch)
+            }
+        }
+        ApprovalDecisionKind::Pending => {
+            if u64::try_from(bound_rev).unwrap_or(0) != binding.expected_revision {
+                return Err(KernelStoreError::ApprovalBindingMismatch);
+            }
+            assert_optional_lease_fence(
+                tx,
+                &binding.owner,
+                &run_id,
+                &binding.lease_owner,
+                binding.generation,
+            )?;
+            let ms = now.timestamp_millis();
+            let n = tx.execute(
+                "UPDATE kernel_approvals
+                 SET decision = 'denied', decided_by = ?1, bound_lease_owner = ?2,
+                     bound_generation = ?3, decided_at_ms = ?4, updated_at_ms = ?4
+                 WHERE owner = ?5 AND approval_id = ?6 AND decision = 'pending'",
+                params![
+                    binding.decided_by,
+                    binding.lease_owner,
+                    binding.generation as i64,
+                    ms,
+                    binding.owner,
+                    approval_id
+                ],
+            )?;
+            if n != 1 {
+                return Err(KernelStoreError::Conflict(
+                    "approval deny CAS failed".into(),
+                ));
+            }
+            load_approval(tx, &binding.owner, &approval_id)
+        }
+    }
+}
+
+/// Advance an existing delivery row. Missing rows fail closed; already-at-target
+/// grant/deny is idempotent so a retry does not hit terminal-immutable.
+///
+/// `GrantAccepted` is already applied only at same-identity `Approved` (FSM
+/// self-loop) and same-identity `Resuming` / `Verified` / `Completed` (Approved
+/// downstream; FSM would otherwise return `GrantRequiresAsk`). A mismatched
+/// identity at `Approved` fails closed instead of taking the self-loop.
+/// `DenyAccepted` is already applied at `Denied` only when `stored_run_id`
+/// matches; the UPDATE is fenced on `run_id` so another run's delivery cannot
+/// be rewritten.
+fn apply_existing_delivery_event_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    owner: &str,
+    receipt_id: &str,
+    run_id: &str,
+    event: DeliveryEvent,
+    approval_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> KernelStoreResult<(DeliveryPhase, u64)> {
+    let row: Option<(String, i64, Option<String>, String)> = tx
+        .query_row(
+            "SELECT phase, revision, approval_id, run_id FROM kernel_delivery
+             WHERE owner = ?1 AND receipt_id = ?2",
+            params![owner, receipt_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((phase_s, rev_i, stored_approval_id, stored_run_id)) = row else {
+        return Err(KernelStoreError::NotFound);
+    };
+    let rev = u64::try_from(rev_i).unwrap_or(0);
+    let current = DeliveryPhase::parse(&phase_s).ok_or(KernelStoreError::InvalidInput(
+        "unknown delivery phase in store",
+    ))?;
+    let same_run_identity = stored_run_id == run_id;
+    let same_grant_identity = same_run_identity
+        && stored_approval_id.is_some()
+        && stored_approval_id.as_deref() == approval_id;
+    let already_applied = match event {
+        DeliveryEvent::GrantAccepted
+            if current.grant_retry_already_applied() && same_grant_identity =>
+        {
+            true
+        }
+        DeliveryEvent::DenyAccepted if current == DeliveryPhase::Denied && same_run_identity => {
+            true
+        }
+        _ => false,
+    };
+    if already_applied {
+        return Ok((current, rev));
+    }
+    let next = approval_fsm::transition(current, event)?;
+    if next == current {
+        if event == DeliveryEvent::GrantAccepted && !same_grant_identity {
+            return Err(KernelStoreError::Delivery(
+                "delivery run_id does not match approval run".into(),
+            ));
+        }
+        return Ok((current, rev));
+    }
+    let next_rev = rev
+        .checked_add(1)
+        .ok_or(KernelStoreError::InvalidInput("phase revision overflow"))?;
+    let n = tx.execute(
+        "UPDATE kernel_delivery
+         SET phase = ?1, revision = ?2, approval_id = COALESCE(?3, approval_id),
+             run_id = ?4, updated_at_ms = ?5
+         WHERE owner = ?6 AND receipt_id = ?7 AND revision = ?8 AND run_id = ?9",
+        params![
+            next.as_str(),
+            next_rev as i64,
+            approval_id,
+            run_id,
+            now.timestamp_millis(),
+            owner,
+            receipt_id,
+            rev as i64,
+            run_id,
+        ],
+    )?;
+    if n != 1 {
+        if !same_run_identity {
+            return Err(KernelStoreError::Delivery(
+                "delivery run_id does not match approval run".into(),
+            ));
+        }
+        return Err(KernelStoreError::StaleRevision {
+            expected: rev,
+            actual: rev,
+        });
+    }
+    Ok((next, next_rev))
+}
+
+fn assert_optional_lease_fence(
+    tx: &rusqlite::Transaction<'_>,
+    owner: &str,
+    run_id: &str,
+    lease_owner: &str,
+    generation: u64,
+) -> KernelStoreResult<()> {
+    let fence: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT lease_owner, generation FROM kernel_lease_fences
+             WHERE owner = ?1 AND run_id = ?2",
+            params![owner, run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((fence_owner, fence_gen)) = fence
+        && (fence_owner != lease_owner || u64::try_from(fence_gen).unwrap_or(0) != generation)
+    {
+        return Err(KernelStoreError::ApprovalBindingMismatch);
+    }
+    Ok(())
+}
+
 fn validate_owner(owner: &str) -> KernelStoreResult<()> {
     if owner.is_empty() || owner.len() > 128 {
         return Err(KernelStoreError::InvalidInput("owner"));
@@ -1276,6 +1549,52 @@ mod tests {
             billing_mode_category: BillingModeCategory::Unknown,
         };
         CompletionReceipt::open(id, owner, task, route, now()).unwrap()
+    }
+
+    #[test]
+    fn open_existing_does_not_create_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel.sqlite");
+        let err = KernelStore::open_existing(&path).unwrap_err();
+        assert!(matches!(err, KernelStoreError::Io(_)), "{err:?}");
+        assert!(!path.exists(), "open_existing must not create the sqlite");
+    }
+
+    #[test]
+    fn open_existing_reopens_existing_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel.sqlite");
+        let store = KernelStore::open(&path).unwrap();
+        let dig = "c".repeat(64);
+        assert!(
+            store
+                .apply_effect_once("o", "effect:1", &dig, Some("run"), Some("r"), now())
+                .unwrap()
+        );
+        drop(store);
+        let store = KernelStore::open_existing(&path).unwrap();
+        assert_eq!(store.path(), path.as_path());
+        assert!(store.was_effect_applied("o", "effect:1"));
+        assert_eq!(store.effect_count("o").unwrap(), 1);
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn open_existing_does_not_recreate_unlinked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel.sqlite");
+        KernelStore::open(&path).unwrap();
+        let store = KernelStore::open_existing(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let err = store.effect_count("o").unwrap_err();
+        assert!(
+            matches!(err, KernelStoreError::Io(_) | KernelStoreError::Sqlite(_)),
+            "{err:?}"
+        );
+        assert!(
+            !path.exists(),
+            "open_existing handle must not recreate sqlite"
+        );
     }
 
     #[test]
@@ -1469,14 +1788,65 @@ mod tests {
         let d2 = store.grant_approval(&ok, now()).unwrap();
         assert_eq!(d2.decision, ApprovalDecisionKind::Approved);
 
-        // Fresh deny path
+        // Fresh deny path — revision/lease/generation fence like grant.
         let dig2 = "b".repeat(64);
         store
             .record_approval_required("o", "ap2", "rcpt2", "run2", &dig2, 1, now())
             .unwrap();
         store
-            .deny_approval("o", "rcpt2", &dig2, "principal", now())
+            .put_lease_fence(
+                &LeaseFence {
+                    owner: "o".into(),
+                    run_id: "run2".into(),
+                    lease_owner: "lease".into(),
+                    generation: 4,
+                    revision: 1,
+                    token: "tok".into(),
+                    policy_digest: "c".repeat(64),
+                    expires_at_ms: None,
+                },
+                now(),
+            )
             .unwrap();
+        let deny_stale = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt2".into(),
+            request_digest: dig2.clone(),
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 99,
+            decided_by: "principal".into(),
+        };
+        assert!(matches!(
+            store.deny_approval(&deny_stale, now()).unwrap_err(),
+            KernelStoreError::ApprovalBindingMismatch
+        ));
+        let deny_rev = ApprovalDenyBinding {
+            expected_revision: 9,
+            generation: 4,
+            ..deny_stale.clone()
+        };
+        assert!(matches!(
+            store.deny_approval(&deny_rev, now()).unwrap_err(),
+            KernelStoreError::ApprovalBindingMismatch
+        ));
+        let deny_ok = ApprovalDenyBinding {
+            expected_revision: 1,
+            generation: 4,
+            ..deny_stale
+        };
+        let denied = store.deny_approval(&deny_ok, now()).unwrap();
+        assert_eq!(denied.decision, ApprovalDecisionKind::Denied);
+        let denied_again = store.deny_approval(&deny_ok, now()).unwrap();
+        assert_eq!(denied_again.decision, ApprovalDecisionKind::Denied);
+        let deny_other_gen = ApprovalDenyBinding {
+            generation: 5,
+            ..deny_ok.clone()
+        };
+        assert!(matches!(
+            store.deny_approval(&deny_other_gen, now()).unwrap_err(),
+            KernelStoreError::ApprovalBindingMismatch
+        ));
         let grant_after_deny = ApprovalGrantBinding {
             owner: "o".into(),
             receipt_id: "rcpt2".into(),
@@ -1484,7 +1854,7 @@ mod tests {
             request_digest: dig2,
             expected_revision: 1,
             lease_owner: "lease".into(),
-            generation: 1,
+            generation: 4,
             decided_by: "principal".into(),
         };
         assert!(matches!(
@@ -1537,6 +1907,1648 @@ mod tests {
             )
             .unwrap();
         assert_eq!(p, DeliveryPhase::Resuming);
+    }
+
+    #[test]
+    fn grant_and_transition_rolls_back_decision_without_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "a".repeat(64);
+        store
+            .record_approval_required("o", "ap-g", "rcpt-g", "run-g", &dig, 1, now())
+            .unwrap();
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-g".into(),
+            run_id: "run-g".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .grant_approval_and_transition(&grant, now())
+            .unwrap_err();
+        assert!(matches!(err, KernelStoreError::NotFound), "{err:?}");
+        let row = store
+            .get_approval("o", "rcpt-g")
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        assert!(store.get_delivery_phase("o", "rcpt-g").unwrap().is_none());
+    }
+
+    #[test]
+    fn grant_and_transition_rolls_back_when_delivery_is_still_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "9".repeat(64);
+        store
+            .record_approval_required("o", "ap-run", "rcpt-run", "run-run", &dig, 1, now())
+            .unwrap();
+        let (phase, _) = store
+            .ensure_delivery_running("o", "rcpt-run", "run-run", now())
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::Running);
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-run".into(),
+            run_id: "run-run".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .grant_approval_and_transition(&grant, now())
+            .unwrap_err();
+        assert!(matches!(err, KernelStoreError::Delivery(_)), "{err:?}");
+        let row = store
+            .get_approval("o", "rcpt-run")
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-run")
+            .unwrap()
+            .expect("delivery retained");
+        assert_eq!(phase, DeliveryPhase::Running);
+    }
+
+    #[test]
+    fn deny_and_transition_rolls_back_decision_without_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "b".repeat(64);
+        store
+            .record_approval_required("o", "ap-d", "rcpt-d", "run-d", &dig, 1, now())
+            .unwrap();
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-d".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .deny_approval_and_transition(&deny, now())
+            .unwrap_err();
+        assert!(matches!(err, KernelStoreError::NotFound), "{err:?}");
+        let row = store
+            .get_approval("o", "rcpt-d")
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        assert!(store.get_delivery_phase("o", "rcpt-d").unwrap().is_none());
+    }
+
+    #[test]
+    fn grant_and_transition_commits_decision_and_delivery_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "c".repeat(64);
+        store
+            .record_approval_required("o", "ap-ok", "rcpt-ok", "run-ok", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-ok", "run-ok", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-ok",
+                "run-ok",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-ok"),
+                now(),
+            )
+            .unwrap();
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-ok".into(),
+            run_id: "run-ok".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-ok")
+            .unwrap()
+            .expect("delivery advanced");
+        assert_eq!(phase, DeliveryPhase::Approved);
+        let again = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Approved);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-ok")
+            .unwrap()
+            .expect("idempotent delivery");
+        assert_eq!(phase, DeliveryPhase::Approved);
+    }
+
+    #[test]
+    fn grant_and_transition_catch_up_after_standalone_grant() {
+        // Standalone grant_approval persists Approved while delivery stays at
+        // ApprovalRequired. grant_approval_and_transition must advance phase
+        // exactly once, then retry is idempotent.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "e".repeat(64);
+        store
+            .record_approval_required("o", "ap-cu-g", "rcpt-cu-g", "run-cu-g", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-cu-g", "run-cu-g", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-cu-g",
+                "run-cu-g",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-cu-g"),
+                now(),
+            )
+            .unwrap();
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-cu-g".into(),
+            run_id: "run-cu-g".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.grant_approval(&grant, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+        let (phase, rev_before) = store
+            .get_delivery_phase("o", "rcpt-cu-g")
+            .unwrap()
+            .expect("delivery still waiting");
+        assert_eq!(phase, DeliveryPhase::ApprovalRequired);
+        let row = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+        let (phase, rev_after) = store
+            .get_delivery_phase("o", "rcpt-cu-g")
+            .unwrap()
+            .expect("delivery caught up");
+        assert_eq!(phase, DeliveryPhase::Approved);
+        assert_eq!(rev_after, rev_before + 1);
+        let again = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Approved);
+        let (phase, rev_retry) = store
+            .get_delivery_phase("o", "rcpt-cu-g")
+            .unwrap()
+            .expect("idempotent catch-up");
+        assert_eq!(phase, DeliveryPhase::Approved);
+        assert_eq!(rev_retry, rev_after);
+    }
+
+    #[test]
+    fn grant_and_transition_mismatched_regrant_binding_fails_closed() {
+        // Bound grant is idempotent only with the same run_id / revision /
+        // lease_owner / generation stored on the Approved row. Same-binding
+        // retry is pinned above; this pins the negative. Deny already pins
+        // the Denied analog (`deny_other_gen` in
+        // approval_grant_binding_and_deny_final) for revision/lease/generation;
+        // grant also fences run_id because ApprovalGrantBinding carries it.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "generation",
+                "rcpt-rg-gen",
+                "ap-rg-gen",
+                "run-rg-gen",
+                "3".repeat(64),
+            ),
+            (
+                "lease_owner",
+                "rcpt-rg-lo",
+                "ap-rg-lo",
+                "run-rg-lo",
+                "4".repeat(64),
+            ),
+            (
+                "revision",
+                "rcpt-rg-rev",
+                "ap-rg-rev",
+                "run-rg-rev",
+                "5".repeat(64),
+            ),
+            (
+                "run_id",
+                "rcpt-rg-run",
+                "ap-rg-run",
+                "run-rg-run",
+                "b".repeat(64),
+            ),
+        ];
+        for (label, receipt, approval_id, run_id, dig) in cases {
+            store
+                .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+                .unwrap();
+            let (_, rev) = store
+                .ensure_delivery_running("o", receipt, run_id, now())
+                .unwrap();
+            store
+                .set_delivery_phase(
+                    "o",
+                    receipt,
+                    run_id,
+                    rev,
+                    DeliveryEvent::AskRequired,
+                    Some(approval_id),
+                    now(),
+                )
+                .unwrap();
+            let ok = ApprovalGrantBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                run_id: run_id.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let row = store.grant_approval_and_transition(&ok, now()).unwrap();
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Approved,
+                "{label} first grant"
+            );
+            let before = delivery_identity(&store, "o", receipt);
+            assert_eq!(before.0, DeliveryPhase::Approved, "{label}");
+            assert_eq!(before.2, run_id, "{label}");
+            assert_eq!(before.3.as_deref(), Some(approval_id), "{label}");
+            let mut bad = ok.clone();
+            match label {
+                "generation" => bad.generation = 2,
+                "lease_owner" => bad.lease_owner = "other".into(),
+                "revision" => bad.expected_revision = 9,
+                "run_id" => bad.run_id = "run-other-rg".into(),
+                other => panic!("unexpected case {other}"),
+            }
+            let err = store
+                .grant_approval_and_transition(&bad, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::ApprovalBindingMismatch),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("approved retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Approved,
+                "{label} approval must stay approved"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
+    fn grant_and_transition_after_resume_is_already_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "e".repeat(64);
+        store
+            .record_approval_required("o", "ap-rs", "rcpt-rs", "run-rs", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-rs", "run-rs", now())
+            .unwrap();
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                "rcpt-rs",
+                "run-rs",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-rs"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::ApprovalRequired);
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-rs".into(),
+            run_id: "run-rs".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+        let (phase, rev) = store
+            .get_delivery_phase("o", "rcpt-rs")
+            .unwrap()
+            .expect("granted delivery");
+        assert_eq!(phase, DeliveryPhase::Approved);
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                "rcpt-rs",
+                "run-rs",
+                rev,
+                DeliveryEvent::ResumeStarted,
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::Resuming);
+        let again = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Approved);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-rs")
+            .unwrap()
+            .expect("resuming retained");
+        assert_eq!(phase, DeliveryPhase::Resuming);
+        let row = store
+            .get_approval("o", "rcpt-rs")
+            .unwrap()
+            .expect("approval retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+    }
+
+    #[test]
+    fn grant_and_transition_after_verified_is_already_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "f".repeat(64);
+        store
+            .record_approval_required("o", "ap-vf", "rcpt-vf", "run-vf", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-vf", "run-vf", now())
+            .unwrap();
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                "rcpt-vf",
+                "run-vf",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-vf"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::ApprovalRequired);
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-vf".into(),
+            run_id: "run-vf".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+        let (phase, rev) = store
+            .get_delivery_phase("o", "rcpt-vf")
+            .unwrap()
+            .expect("granted delivery");
+        assert_eq!(phase, DeliveryPhase::Approved);
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                "rcpt-vf",
+                "run-vf",
+                rev,
+                DeliveryEvent::Verified,
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::Verified);
+        let again = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Approved);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-vf")
+            .unwrap()
+            .expect("verified retained");
+        assert_eq!(phase, DeliveryPhase::Verified);
+        let row = store
+            .get_approval("o", "rcpt-vf")
+            .unwrap()
+            .expect("approval retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+    }
+
+    #[test]
+    fn grant_and_transition_after_completed_is_already_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "c".repeat(64);
+        store
+            .record_approval_required("o", "ap-cp", "rcpt-cp", "run-cp", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-cp", "run-cp", now())
+            .unwrap();
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                "rcpt-cp",
+                "run-cp",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-cp"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::ApprovalRequired);
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-cp".into(),
+            run_id: "run-cp".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+        let (phase, rev) = store
+            .get_delivery_phase("o", "rcpt-cp")
+            .unwrap()
+            .expect("granted delivery");
+        assert_eq!(phase, DeliveryPhase::Approved);
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                "rcpt-cp",
+                "run-cp",
+                rev,
+                DeliveryEvent::Complete,
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::Completed);
+        let again = store.grant_approval_and_transition(&grant, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Approved);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-cp")
+            .unwrap()
+            .expect("completed retained");
+        assert_eq!(phase, DeliveryPhase::Completed);
+        let row = store
+            .get_approval("o", "rcpt-cp")
+            .unwrap()
+            .expect("approval retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Approved);
+    }
+
+    fn delivery_identity(
+        store: &KernelStore,
+        owner: &str,
+        receipt_id: &str,
+    ) -> (DeliveryPhase, u64, String, Option<String>) {
+        let conn = Connection::open(store.path()).unwrap();
+        conn.query_row(
+            "SELECT phase, revision, run_id, approval_id FROM kernel_delivery
+             WHERE owner = ?1 AND receipt_id = ?2",
+            params![owner, receipt_id],
+            |row| {
+                let phase_s: String = row.get(0)?;
+                let rev: i64 = row.get(1)?;
+                let run_id: String = row.get(2)?;
+                let approval_id: Option<String> = row.get(3)?;
+                Ok((
+                    DeliveryPhase::parse(&phase_s).expect("stored delivery phase"),
+                    u64::try_from(rev).unwrap(),
+                    run_id,
+                    approval_id,
+                ))
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn grant_and_transition_mismatched_downstream_identity_fails_closed() {
+        // same_grant_identity is the already-applied gate for Resuming /
+        // Verified / Completed. Same-identity retries are pinned above; this
+        // pins the negative: a public delivery row at Verified with a different
+        // run_id or approval_id must not count as already applied, must not
+        // persist the grant, and must leave delivery identity unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "run_id",
+                "rcpt-mm-run",
+                "ap-grant-run",
+                "run-grant",
+                "run-other",
+                Some("ap-grant-run"),
+                "1".repeat(64),
+            ),
+            (
+                "approval_id",
+                "rcpt-mm-ap",
+                "ap-grant-ap",
+                "run-grant",
+                "run-grant",
+                Some("ap-other"),
+                "2".repeat(64),
+            ),
+        ];
+        for (label, receipt, approval_id, grant_run, delivery_run, delivery_ap, dig) in cases {
+            let (phase, rev) = store
+                .ensure_delivery_running("o", receipt, delivery_run, now())
+                .unwrap();
+            assert_eq!(phase, DeliveryPhase::Running, "{label}");
+            let (phase, _) = store
+                .set_delivery_phase(
+                    "o",
+                    receipt,
+                    delivery_run,
+                    rev,
+                    DeliveryEvent::Verified,
+                    delivery_ap,
+                    now(),
+                )
+                .unwrap();
+            assert_eq!(phase, DeliveryPhase::Verified, "{label}");
+            store
+                .record_approval_required("o", approval_id, receipt, grant_run, &dig, 1, now())
+                .unwrap();
+            let before = delivery_identity(&store, "o", receipt);
+            assert_eq!(before.0, DeliveryPhase::Verified, "{label}");
+            assert_eq!(before.2, delivery_run, "{label}");
+            assert_eq!(before.3.as_deref(), delivery_ap, "{label}");
+            let grant = ApprovalGrantBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                run_id: grant_run.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let err = store
+                .grant_approval_and_transition(&grant, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::Delivery(_)),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("ask retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Pending,
+                "{label} approval must stay pending"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
+    fn grant_and_transition_mismatched_resuming_or_completed_identity_fails_closed() {
+        // same_grant_identity is the already-applied gate for Resuming /
+        // Verified / Completed. Verified negatives are pinned above; this
+        // pins the remaining two phases. A public delivery row at Resuming
+        // or Completed with a different run_id or approval_id must not count
+        // as already applied, must not persist the grant, and must leave
+        // delivery identity unchanged. Approved self-loop identity is pinned
+        // in grant_and_transition_approved_fast_path_requires_same_run.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "resuming-run_id",
+                DeliveryPhase::Resuming,
+                "rcpt-mm-rs-run",
+                "ap-grant-rs-run",
+                "run-grant-rs",
+                "run-other-rs",
+                Some("ap-grant-rs-run"),
+                "6".repeat(64),
+            ),
+            (
+                "resuming-approval_id",
+                DeliveryPhase::Resuming,
+                "rcpt-mm-rs-ap",
+                "ap-grant-rs-ap",
+                "run-grant-rs-ap",
+                "run-grant-rs-ap",
+                Some("ap-other-rs"),
+                "7".repeat(64),
+            ),
+            (
+                "completed-run_id",
+                DeliveryPhase::Completed,
+                "rcpt-mm-cp-run",
+                "ap-grant-cp-run",
+                "run-grant-cp",
+                "run-other-cp",
+                Some("ap-grant-cp-run"),
+                "8".repeat(64),
+            ),
+            (
+                "completed-approval_id",
+                DeliveryPhase::Completed,
+                "rcpt-mm-cp-ap",
+                "ap-grant-cp-ap",
+                "run-grant-cp-ap",
+                "run-grant-cp-ap",
+                Some("ap-other-cp"),
+                "9".repeat(64),
+            ),
+        ];
+        for (label, phase, receipt, approval_id, grant_run, delivery_run, delivery_ap, dig) in cases
+        {
+            let (got, rev) = store
+                .ensure_delivery_running("o", receipt, delivery_run, now())
+                .unwrap();
+            assert_eq!(got, DeliveryPhase::Running, "{label}");
+            match phase {
+                DeliveryPhase::Completed => {
+                    let (got, _) = store
+                        .set_delivery_phase(
+                            "o",
+                            receipt,
+                            delivery_run,
+                            rev,
+                            DeliveryEvent::Complete,
+                            delivery_ap,
+                            now(),
+                        )
+                        .unwrap();
+                    assert_eq!(got, DeliveryPhase::Completed, "{label}");
+                }
+                DeliveryPhase::Resuming => {
+                    let (got, rev) = store
+                        .set_delivery_phase(
+                            "o",
+                            receipt,
+                            delivery_run,
+                            rev,
+                            DeliveryEvent::AskRequired,
+                            delivery_ap,
+                            now(),
+                        )
+                        .unwrap();
+                    assert_eq!(got, DeliveryPhase::ApprovalRequired, "{label}");
+                    let (got, rev) = store
+                        .set_delivery_phase(
+                            "o",
+                            receipt,
+                            delivery_run,
+                            rev,
+                            DeliveryEvent::GrantAccepted,
+                            delivery_ap,
+                            now(),
+                        )
+                        .unwrap();
+                    assert_eq!(got, DeliveryPhase::Approved, "{label}");
+                    let (got, _) = store
+                        .set_delivery_phase(
+                            "o",
+                            receipt,
+                            delivery_run,
+                            rev,
+                            DeliveryEvent::ResumeStarted,
+                            None,
+                            now(),
+                        )
+                        .unwrap();
+                    assert_eq!(got, DeliveryPhase::Resuming, "{label}");
+                }
+                other => panic!("{label}: unsupported seed phase {other:?}"),
+            }
+            store
+                .record_approval_required("o", approval_id, receipt, grant_run, &dig, 1, now())
+                .unwrap();
+            let before = delivery_identity(&store, "o", receipt);
+            assert_eq!(before.0, phase, "{label}");
+            assert_eq!(before.2, delivery_run, "{label}");
+            assert_eq!(before.3.as_deref(), delivery_ap, "{label}");
+            let grant = ApprovalGrantBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                run_id: grant_run.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let err = store
+                .grant_approval_and_transition(&grant, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::Delivery(_)),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("ask retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Pending,
+                "{label} approval must stay pending"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
+    fn grant_and_transition_approved_fast_path_requires_same_run() {
+        // Already-applied GrantAccepted at Approved must compare run/approval
+        // identity. An Approved delivery owned by old-run must not count as
+        // success for a new-run grant; the new ask stays Pending and delivery
+        // identity is unchanged. Without this fence the Approved self-loop
+        // would commit the new approval while leaving delivery on old-run.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let receipt = "rcpt-g-fp-run";
+        let (_, rev) = store
+            .ensure_delivery_running("o", receipt, "old-run", now())
+            .unwrap();
+        let (phase, rev) = store
+            .set_delivery_phase(
+                "o",
+                receipt,
+                "old-run",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-old"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::ApprovalRequired);
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                receipt,
+                "old-run",
+                rev,
+                DeliveryEvent::GrantAccepted,
+                Some("ap-old"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::Approved);
+        let new_dig = "c".repeat(64);
+        store
+            .record_approval_required("o", "ap-new", receipt, "new-run", &new_dig, 1, now())
+            .unwrap();
+        let before = delivery_identity(&store, "o", receipt);
+        assert_eq!(before.0, DeliveryPhase::Approved);
+        assert_eq!(before.2, "old-run");
+        assert_eq!(before.3.as_deref(), Some("ap-old"));
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: receipt.into(),
+            run_id: "new-run".into(),
+            request_digest: new_dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .grant_approval_and_transition(&grant, now())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KernelStoreError::Delivery(_)
+                    | KernelStoreError::Conflict(_)
+                    | KernelStoreError::NotFound
+                    | KernelStoreError::StaleRevision { .. }
+                    | KernelStoreError::TerminalImmutable
+            ),
+            "{err:?}"
+        );
+        let row = store
+            .get_approval("o", receipt)
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        assert_eq!(row.run_id, "new-run");
+        assert_eq!(row.approval_id, "ap-new");
+        let after = delivery_identity(&store, "o", receipt);
+        assert_eq!(after, before, "delivery identity must not change");
+        assert_eq!(after.2, "old-run");
+        assert_eq!(after.3.as_deref(), Some("ap-old"));
+    }
+
+    #[test]
+    fn deny_and_transition_commits_decision_and_delivery_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "d".repeat(64);
+        store
+            .record_approval_required("o", "ap-dn", "rcpt-dn", "run-dn", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-dn", "run-dn", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-dn",
+                "run-dn",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-dn"),
+                now(),
+            )
+            .unwrap();
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-dn".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.deny_approval_and_transition(&deny, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Denied);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-dn")
+            .unwrap()
+            .expect("delivery denied");
+        assert_eq!(phase, DeliveryPhase::Denied);
+        let again = store.deny_approval_and_transition(&deny, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Denied);
+        let (phase, _) = store
+            .get_delivery_phase("o", "rcpt-dn")
+            .unwrap()
+            .expect("idempotent deny delivery");
+        assert_eq!(phase, DeliveryPhase::Denied);
+    }
+
+    #[test]
+    fn deny_and_transition_catch_up_after_standalone_deny() {
+        // Standalone deny_approval persists Denied while delivery stays at
+        // ApprovalRequired. deny_approval_and_transition must advance phase
+        // exactly once, then retry is idempotent.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "f".repeat(64);
+        store
+            .record_approval_required("o", "ap-cu-d", "rcpt-cu-d", "run-cu-d", &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", "rcpt-cu-d", "run-cu-d", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-cu-d",
+                "run-cu-d",
+                rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-cu-d"),
+                now(),
+            )
+            .unwrap();
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-cu-d".into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let row = store.deny_approval(&deny, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Denied);
+        let (phase, rev_before) = store
+            .get_delivery_phase("o", "rcpt-cu-d")
+            .unwrap()
+            .expect("delivery still waiting");
+        assert_eq!(phase, DeliveryPhase::ApprovalRequired);
+        let row = store.deny_approval_and_transition(&deny, now()).unwrap();
+        assert_eq!(row.decision, ApprovalDecisionKind::Denied);
+        let (phase, rev_after) = store
+            .get_delivery_phase("o", "rcpt-cu-d")
+            .unwrap()
+            .expect("delivery caught up");
+        assert_eq!(phase, DeliveryPhase::Denied);
+        assert_eq!(rev_after, rev_before + 1);
+        let again = store.deny_approval_and_transition(&deny, now()).unwrap();
+        assert_eq!(again.decision, ApprovalDecisionKind::Denied);
+        let (phase, rev_retry) = store
+            .get_delivery_phase("o", "rcpt-cu-d")
+            .unwrap()
+            .expect("idempotent catch-up");
+        assert_eq!(phase, DeliveryPhase::Denied);
+        assert_eq!(rev_retry, rev_after);
+    }
+
+    #[test]
+    fn deny_and_transition_mismatched_delivery_run_fails_closed() {
+        // DenyAccepted is legal from Running. Without a run_id predicate the
+        // UPDATE would rewrite another run's delivery to the current approval
+        // run and persist Denied. The combined transaction must fail closed:
+        // delivery stays on old-run / original phase, approval stays Pending.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "a".repeat(64);
+        let receipt = "rcpt-dn-mm-run";
+        store
+            .ensure_delivery_running("o", receipt, "old-run", now())
+            .unwrap();
+        store
+            .record_approval_required("o", "ap-dn-mm", receipt, "new-run", &dig, 1, now())
+            .unwrap();
+        let before = delivery_identity(&store, "o", receipt);
+        assert_eq!(before.0, DeliveryPhase::Running);
+        assert_eq!(before.2, "old-run");
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: receipt.into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .deny_approval_and_transition(&deny, now())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KernelStoreError::Delivery(_)
+                    | KernelStoreError::Conflict(_)
+                    | KernelStoreError::NotFound
+                    | KernelStoreError::StaleRevision { .. }
+            ),
+            "{err:?}"
+        );
+        let row = store
+            .get_approval("o", receipt)
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        let after = delivery_identity(&store, "o", receipt);
+        assert_eq!(after, before, "delivery identity must not change");
+        assert_eq!(after.2, "old-run");
+    }
+
+    #[test]
+    fn deny_and_transition_denied_fast_path_requires_same_run() {
+        // Already-applied DenyAccepted at Denied must compare run_id. A Denied
+        // delivery owned by old-run must not count as success for a new-run
+        // deny; the new ask stays Pending and delivery identity is unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let receipt = "rcpt-dn-fp-run";
+        let (_, rev) = store
+            .ensure_delivery_running("o", receipt, "old-run", now())
+            .unwrap();
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                receipt,
+                "old-run",
+                rev,
+                DeliveryEvent::DenyAccepted,
+                Some("ap-old"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::Denied);
+        let new_dig = "c".repeat(64);
+        store
+            .record_approval_required("o", "ap-new", receipt, "new-run", &new_dig, 1, now())
+            .unwrap();
+        let before = delivery_identity(&store, "o", receipt);
+        assert_eq!(before.0, DeliveryPhase::Denied);
+        assert_eq!(before.2, "old-run");
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: receipt.into(),
+            request_digest: new_dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .deny_approval_and_transition(&deny, now())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KernelStoreError::Delivery(_)
+                    | KernelStoreError::Conflict(_)
+                    | KernelStoreError::NotFound
+                    | KernelStoreError::StaleRevision { .. }
+                    | KernelStoreError::TerminalImmutable
+            ),
+            "{err:?}"
+        );
+        let row = store
+            .get_approval("o", receipt)
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        let after = delivery_identity(&store, "o", receipt);
+        assert_eq!(after, before, "delivery identity must not change");
+    }
+
+    #[test]
+    fn deny_and_transition_mismatched_redeny_binding_fails_closed() {
+        // Bound deny is idempotent only with the same revision / lease_owner /
+        // generation stored on the Denied row. Same-binding retry is pinned
+        // above; deny_other_gen only covers generation via deny_approval.
+        // This pins the atomic negative for all three fields. Denied fast-path
+        // now also requires the same delivery run_id.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "generation",
+                "rcpt-rd-gen",
+                "ap-rd-gen",
+                "run-rd-gen",
+                "6".repeat(64),
+            ),
+            (
+                "lease_owner",
+                "rcpt-rd-lo",
+                "ap-rd-lo",
+                "run-rd-lo",
+                "7".repeat(64),
+            ),
+            (
+                "revision",
+                "rcpt-rd-rev",
+                "ap-rd-rev",
+                "run-rd-rev",
+                "8".repeat(64),
+            ),
+        ];
+        for (label, receipt, approval_id, run_id, dig) in cases {
+            store
+                .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+                .unwrap();
+            let (_, rev) = store
+                .ensure_delivery_running("o", receipt, run_id, now())
+                .unwrap();
+            store
+                .set_delivery_phase(
+                    "o",
+                    receipt,
+                    run_id,
+                    rev,
+                    DeliveryEvent::AskRequired,
+                    Some(approval_id),
+                    now(),
+                )
+                .unwrap();
+            let ok = ApprovalDenyBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let row = store.deny_approval_and_transition(&ok, now()).unwrap();
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Denied,
+                "{label} first deny"
+            );
+            let before = delivery_identity(&store, "o", receipt);
+            assert_eq!(before.0, DeliveryPhase::Denied, "{label}");
+            assert_eq!(before.2, run_id, "{label}");
+            assert_eq!(before.3.as_deref(), Some(approval_id), "{label}");
+            let mut bad = ok.clone();
+            match label {
+                "generation" => bad.generation = 2,
+                "lease_owner" => bad.lease_owner = "other".into(),
+                "revision" => bad.expected_revision = 9,
+                other => panic!("unexpected case {other}"),
+            }
+            let err = store.deny_approval_and_transition(&bad, now()).unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::ApprovalBindingMismatch),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("denied retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Denied,
+                "{label} approval must stay denied"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
+    fn deny_and_transition_terminal_delivery_fails_closed() {
+        // DenyAccepted is legal from Running and ApprovalRequired, and
+        // already-applied at Denied. Completed / Failed / Cancelled are
+        // terminal: the combined deny+delivery transaction must fail closed
+        // so a pending ask is not persisted as Denied against a finished
+        // delivery. This is the deny counterpart of grant-while-running
+        // rollback. It is not the HIGH-003 claim that Running deny must
+        // fail — FSM (Running, DenyAccepted) → Denied is legal and not
+        // 753.2 current fail-closed.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "completed",
+                "rcpt-dn-term-cp",
+                "ap-dn-term-cp",
+                "run-dn-term-cp",
+                "a".repeat(64),
+                DeliveryEvent::Complete,
+                DeliveryPhase::Completed,
+            ),
+            (
+                "failed",
+                "rcpt-dn-term-fl",
+                "ap-dn-term-fl",
+                "run-dn-term-fl",
+                "b".repeat(64),
+                DeliveryEvent::Fail,
+                DeliveryPhase::Failed,
+            ),
+            (
+                "cancelled",
+                "rcpt-dn-term-cn",
+                "ap-dn-term-cn",
+                "run-dn-term-cn",
+                "c".repeat(64),
+                DeliveryEvent::Cancel,
+                DeliveryPhase::Cancelled,
+            ),
+        ];
+        for (label, receipt, approval_id, run_id, dig, event, phase) in cases {
+            store
+                .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+                .unwrap();
+            let (_, rev) = store
+                .ensure_delivery_running("o", receipt, run_id, now())
+                .unwrap();
+            let (got, _) = store
+                .set_delivery_phase("o", receipt, run_id, rev, event, Some(approval_id), now())
+                .unwrap();
+            assert_eq!(got, phase, "{label} seed");
+            let before = delivery_identity(&store, "o", receipt);
+            let deny = ApprovalDenyBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let err = store
+                .deny_approval_and_transition(&deny, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::TerminalImmutable),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("ask retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Pending,
+                "{label} approval must stay pending"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
+    fn grant_and_transition_failed_or_cancelled_delivery_fails_closed() {
+        // GrantAccepted is already applied at same-identity Approved and at
+        // same-identity Resuming / Verified / Completed. Failed / Cancelled
+        // are not in that set: a pending ask plus GrantAccepted must fail
+        // closed so the ask is not persisted as Approved against a finished
+        // delivery. This is the grant counterpart of deny-on-terminal rollback.
+        // It is not Failed same-identity retry after Approved, and not
+        // Completed (already_applied still holds).
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "failed",
+                "rcpt-g-term-fl",
+                "ap-g-term-fl",
+                "run-g-term-fl",
+                "d".repeat(64),
+                DeliveryEvent::Fail,
+                DeliveryPhase::Failed,
+            ),
+            (
+                "cancelled",
+                "rcpt-g-term-cn",
+                "ap-g-term-cn",
+                "run-g-term-cn",
+                "e".repeat(64),
+                DeliveryEvent::Cancel,
+                DeliveryPhase::Cancelled,
+            ),
+        ];
+        for (label, receipt, approval_id, run_id, dig, event, phase) in cases {
+            store
+                .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+                .unwrap();
+            let (_, rev) = store
+                .ensure_delivery_running("o", receipt, run_id, now())
+                .unwrap();
+            let (got, _) = store
+                .set_delivery_phase("o", receipt, run_id, rev, event, Some(approval_id), now())
+                .unwrap();
+            assert_eq!(got, phase, "{label} seed");
+            let before = delivery_identity(&store, "o", receipt);
+            let grant = ApprovalGrantBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                run_id: run_id.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let err = store
+                .grant_approval_and_transition(&grant, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::Delivery(_)),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("ask retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Pending,
+                "{label} approval must stay pending"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
+    fn grant_and_transition_denied_delivery_fails_closed() {
+        // Deny is never recoverable by grant. Failed/Cancelled grant rollback
+        // is GrantRequiresAsk; Denied is DenyIsFinal / ApprovalDeniedFinal.
+        // Approval-row grant-after-deny is already pinned on grant_approval.
+        // This pins the atomic path: a pending ask plus GrantAccepted against
+        // Denied delivery must roll back so the ask is not persisted as
+        // Approved. Seeding Running→DenyAccepted is legal FSM and is not
+        // 753.2 current fail-closed. Same-identity Failed retry after
+        // Approved is also not this slice.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let receipt = "rcpt-g-denied";
+        let approval_id = "ap-g-denied";
+        let run_id = "run-g-denied";
+        let dig = "0".repeat(64);
+        store
+            .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+            .unwrap();
+        let (_, rev) = store
+            .ensure_delivery_running("o", receipt, run_id, now())
+            .unwrap();
+        let (got, _) = store
+            .set_delivery_phase(
+                "o",
+                receipt,
+                run_id,
+                rev,
+                DeliveryEvent::DenyAccepted,
+                Some(approval_id),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(got, DeliveryPhase::Denied, "seed");
+        let before = delivery_identity(&store, "o", receipt);
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: receipt.into(),
+            run_id: run_id.into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .grant_approval_and_transition(&grant, now())
+            .unwrap_err();
+        assert!(
+            matches!(err, KernelStoreError::ApprovalDeniedFinal),
+            "{err:?}"
+        );
+        let row = store
+            .get_approval("o", receipt)
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(
+            row.decision,
+            ApprovalDecisionKind::Pending,
+            "approval must stay pending"
+        );
+        let after = delivery_identity(&store, "o", receipt);
+        assert_eq!(after, before, "delivery identity must not change");
+    }
+
+    #[test]
+    fn deny_and_transition_approved_downstream_delivery_fails_closed() {
+        // DenyAccepted is legal from Running and ApprovalRequired, and
+        // already-applied at Denied. Completed / Failed / Cancelled are
+        // terminal (deny_and_transition_terminal_delivery_fails_closed).
+        // Approved / Resuming / Verified are not terminal; DenyAccepted is
+        // IllegalTransition there. A pending ask plus deny against those
+        // phases must fail closed so the ask is not persisted as Denied
+        // against a delivery that already accepted a grant.
+        // deny_after_approve is different: the approval row is already
+        // Approved, so deny_approval_in_tx returns Conflict before delivery
+        // apply. Widening already_applied to DenyAccepted at
+        // Approved/Resuming/Verified would keep existing tests green.
+        // Running+DenyAccepted remains legal FSM and is not 753.2 current
+        // fail-closed.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let cases = [
+            (
+                "approved",
+                "rcpt-dn-ad-ap",
+                "ap-dn-ad-ap",
+                "run-dn-ad-ap",
+                "3".repeat(64),
+                None,
+                DeliveryPhase::Approved,
+            ),
+            (
+                "resuming",
+                "rcpt-dn-ad-rs",
+                "ap-dn-ad-rs",
+                "run-dn-ad-rs",
+                "4".repeat(64),
+                Some(DeliveryEvent::ResumeStarted),
+                DeliveryPhase::Resuming,
+            ),
+            (
+                "verified",
+                "rcpt-dn-ad-vf",
+                "ap-dn-ad-vf",
+                "run-dn-ad-vf",
+                "5".repeat(64),
+                Some(DeliveryEvent::Verified),
+                DeliveryPhase::Verified,
+            ),
+        ];
+        for (label, receipt, approval_id, run_id, dig, extra, phase) in cases {
+            store
+                .record_approval_required("o", approval_id, receipt, run_id, &dig, 1, now())
+                .unwrap();
+            let (_, rev) = store
+                .ensure_delivery_running("o", receipt, run_id, now())
+                .unwrap();
+            let (got, rev) = store
+                .set_delivery_phase(
+                    "o",
+                    receipt,
+                    run_id,
+                    rev,
+                    DeliveryEvent::AskRequired,
+                    Some(approval_id),
+                    now(),
+                )
+                .unwrap();
+            assert_eq!(got, DeliveryPhase::ApprovalRequired, "{label} ask");
+            let (got, rev) = store
+                .set_delivery_phase(
+                    "o",
+                    receipt,
+                    run_id,
+                    rev,
+                    DeliveryEvent::GrantAccepted,
+                    Some(approval_id),
+                    now(),
+                )
+                .unwrap();
+            assert_eq!(got, DeliveryPhase::Approved, "{label} grant seed");
+            if let Some(extra) = extra {
+                let (got, _) = store
+                    .set_delivery_phase("o", receipt, run_id, rev, extra, None, now())
+                    .unwrap();
+                assert_eq!(got, phase, "{label} seed");
+            }
+            let before = delivery_identity(&store, "o", receipt);
+            assert_eq!(before.0, phase, "{label}");
+            assert_eq!(before.2, run_id, "{label}");
+            assert_eq!(before.3.as_deref(), Some(approval_id), "{label}");
+            let deny = ApprovalDenyBinding {
+                owner: "o".into(),
+                receipt_id: receipt.into(),
+                request_digest: dig,
+                expected_revision: 1,
+                lease_owner: "lease".into(),
+                generation: 1,
+                decided_by: "principal".into(),
+            };
+            let err = store
+                .deny_approval_and_transition(&deny, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::Delivery(_)),
+                "{label}: {err:?}"
+            );
+            let row = store
+                .get_approval("o", receipt)
+                .unwrap()
+                .expect("ask retained");
+            assert_eq!(
+                row.decision,
+                ApprovalDecisionKind::Pending,
+                "{label} approval must stay pending"
+            );
+            let after = delivery_identity(&store, "o", receipt);
+            assert_eq!(after, before, "{label} delivery identity must not change");
+        }
+    }
+
+    #[test]
+    fn grant_and_deny_lease_owner_mismatch_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+
+        let grant_dig = "1".repeat(64);
+        store
+            .record_approval_required(
+                "o",
+                "ap-lo-g",
+                "rcpt-lo-g",
+                "run-lo-g",
+                &grant_dig,
+                1,
+                now(),
+            )
+            .unwrap();
+        store
+            .put_lease_fence(
+                &LeaseFence {
+                    owner: "o".into(),
+                    run_id: "run-lo-g".into(),
+                    lease_owner: "worker-a".into(),
+                    generation: 4,
+                    revision: 1,
+                    token: "tok-g".into(),
+                    policy_digest: "p".repeat(64),
+                    expires_at_ms: None,
+                },
+                now(),
+            )
+            .unwrap();
+        let (_, grant_rev) = store
+            .ensure_delivery_running("o", "rcpt-lo-g", "run-lo-g", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-lo-g",
+                "run-lo-g",
+                grant_rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-lo-g"),
+                now(),
+            )
+            .unwrap();
+        let grant = ApprovalGrantBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-lo-g".into(),
+            run_id: "run-lo-g".into(),
+            request_digest: grant_dig,
+            expected_revision: 1,
+            lease_owner: "worker-b".into(),
+            generation: 4,
+            decided_by: "principal".into(),
+        };
+        let grant_err = store
+            .grant_approval_and_transition(&grant, now())
+            .unwrap_err();
+        assert!(
+            matches!(grant_err, KernelStoreError::ApprovalBindingMismatch),
+            "{grant_err:?}"
+        );
+        let grant_row = store
+            .get_approval("o", "rcpt-lo-g")
+            .unwrap()
+            .expect("grant ask retained");
+        assert_eq!(grant_row.decision, ApprovalDecisionKind::Pending);
+        let (grant_phase, _) = store
+            .get_delivery_phase("o", "rcpt-lo-g")
+            .unwrap()
+            .expect("grant delivery retained");
+        assert_eq!(grant_phase, DeliveryPhase::ApprovalRequired);
+
+        let deny_dig = "2".repeat(64);
+        store
+            .record_approval_required("o", "ap-lo-d", "rcpt-lo-d", "run-lo-d", &deny_dig, 1, now())
+            .unwrap();
+        store
+            .put_lease_fence(
+                &LeaseFence {
+                    owner: "o".into(),
+                    run_id: "run-lo-d".into(),
+                    lease_owner: "worker-a".into(),
+                    generation: 4,
+                    revision: 1,
+                    token: "tok-d".into(),
+                    policy_digest: "q".repeat(64),
+                    expires_at_ms: None,
+                },
+                now(),
+            )
+            .unwrap();
+        let (_, deny_rev) = store
+            .ensure_delivery_running("o", "rcpt-lo-d", "run-lo-d", now())
+            .unwrap();
+        store
+            .set_delivery_phase(
+                "o",
+                "rcpt-lo-d",
+                "run-lo-d",
+                deny_rev,
+                DeliveryEvent::AskRequired,
+                Some("ap-lo-d"),
+                now(),
+            )
+            .unwrap();
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: "rcpt-lo-d".into(),
+            request_digest: deny_dig,
+            expected_revision: 1,
+            lease_owner: "worker-b".into(),
+            generation: 4,
+            decided_by: "principal".into(),
+        };
+        let deny_err = store
+            .deny_approval_and_transition(&deny, now())
+            .unwrap_err();
+        assert!(
+            matches!(deny_err, KernelStoreError::ApprovalBindingMismatch),
+            "{deny_err:?}"
+        );
+        let deny_row = store
+            .get_approval("o", "rcpt-lo-d")
+            .unwrap()
+            .expect("deny ask retained");
+        assert_eq!(deny_row.decision, ApprovalDecisionKind::Pending);
+        let (deny_phase, _) = store
+            .get_delivery_phase("o", "rcpt-lo-d")
+            .unwrap()
+            .expect("deny delivery retained");
+        assert_eq!(deny_phase, DeliveryPhase::ApprovalRequired);
     }
 
     #[test]

@@ -18,9 +18,14 @@ thin adapter (Tauri command)  — authz principal bind here
 KernelEvent / KernelProjection  — UI may show display_hint but MUST use projection
 ```
 
-**Honest residual:** `DecideApproval` / `DenyApproval` on the in-process adapter
-are versioned event stubs unless the shell drives the dogfood/KernelStore grant
-path. Do not treat adapter-only approve as multi-process durable authority.
+**Honest residual:** `DecideApproval` / `DenyApproval` persist through KernelStore
+only when the command carries a resolvable durable root and a matching pending
+ask plus caller binding. Missing store or binding fails closed.
+Do not treat an Approved/Denied event as authority without the store row.
+Denied is the approval decision; it does not fail the receipt. Delivery-phase
+advance uses the durable row's run id and reports a missing phase or lost CAS
+instead of emitting Approved/Denied against a wedged FSM. This is still not
+native resume.
 
 ## Command map (minimum)
 
@@ -43,6 +48,10 @@ path. Do not treat adapter-only approve as multi-process durable authority.
    **with `dogfood_root` (or a registered durable root after DriveDogfood)**.
    `LocalKernelAdapter` loads `kernel.sqlite` under that root — not memory alone.
 4. Duplicate command_id handling is idempotent or fail-closed Conflict — never a second effect.
+5. `DecideApproval` requires `approval_binding` (digest, revision, lease owner, generation).
+   `DenyApproval` requires the same binding fields; omitting the binding or digest fails closed.
+   Deny does not invent the digest from the pending row. Stale revision or a
+   mismatched lease fence fails closed (Conflict), same as grant.
 
 ## Not in kernel
 

@@ -130,13 +130,13 @@ pub use inprocess_agent::{
     InProcessPreparedCompletion,
 };
 pub use kernel_boundary::{
-    KERNEL_BOUNDARY_VERSION, KernelCapability, KernelCommand, KernelCommandKind, KernelErrorCode,
-    KernelEvent, KernelEventKind, KernelPrincipal, KernelProjection, LocalKernelAdapter,
-    ReplayCursor, SubscribeRequest,
+    KERNEL_BOUNDARY_VERSION, KernelApprovalBinding, KernelCapability, KernelCommand,
+    KernelCommandKind, KernelErrorCode, KernelEvent, KernelEventKind, KernelPrincipal,
+    KernelProjection, KernelStoreResolver, LocalKernelAdapter, ReplayCursor, SubscribeRequest,
 };
 pub use kernel_store::{
-    ApprovalDecision, ApprovalDecisionKind, ApprovalGrantBinding, ArtifactMeta, KernelStore,
-    KernelStoreError, LeaseFence,
+    ApprovalDecision, ApprovalDecisionKind, ApprovalDenyBinding, ApprovalGrantBinding,
+    ArtifactMeta, KernelStore, KernelStoreError, LeaseFence,
 };
 pub use message::{
     AgentMessageCompletionReadError, AgentMessageCompletionStageError, MessageComponents,
