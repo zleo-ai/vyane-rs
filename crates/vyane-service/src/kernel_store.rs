@@ -1374,6 +1374,9 @@ fn deny_approval_in_tx(
 /// `GrantAccepted` is already applied at `Approved` (FSM self-loop) and at
 /// same-identity `Resuming` / `Verified` / `Completed` (Approved downstream;
 /// FSM would otherwise return `GrantRequiresAsk`).
+/// `DenyAccepted` is already applied at `Denied` only when `stored_run_id`
+/// matches; the UPDATE is fenced on `run_id` so another run's delivery cannot
+/// be rewritten.
 fn apply_existing_delivery_event_in_tx(
     tx: &rusqlite::Transaction<'_>,
     owner: &str,
@@ -1398,7 +1401,8 @@ fn apply_existing_delivery_event_in_tx(
     let current = DeliveryPhase::parse(&phase_s).ok_or(KernelStoreError::InvalidInput(
         "unknown delivery phase in store",
     ))?;
-    let same_grant_identity = stored_run_id == run_id
+    let same_run_identity = stored_run_id == run_id;
+    let same_grant_identity = same_run_identity
         && stored_approval_id.is_some()
         && stored_approval_id.as_deref() == approval_id;
     let already_applied = match event {
@@ -1408,7 +1412,9 @@ fn apply_existing_delivery_event_in_tx(
         {
             true
         }
-        DeliveryEvent::DenyAccepted if current == DeliveryPhase::Denied => true,
+        DeliveryEvent::DenyAccepted if current == DeliveryPhase::Denied && same_run_identity => {
+            true
+        }
         _ => false,
     };
     if already_applied {
@@ -1425,7 +1431,7 @@ fn apply_existing_delivery_event_in_tx(
         "UPDATE kernel_delivery
          SET phase = ?1, revision = ?2, approval_id = COALESCE(?3, approval_id),
              run_id = ?4, updated_at_ms = ?5
-         WHERE owner = ?6 AND receipt_id = ?7 AND revision = ?8",
+         WHERE owner = ?6 AND receipt_id = ?7 AND revision = ?8 AND run_id = ?9",
         params![
             next.as_str(),
             next_rev as i64,
@@ -1434,10 +1440,16 @@ fn apply_existing_delivery_event_in_tx(
             now.timestamp_millis(),
             owner,
             receipt_id,
-            rev as i64
+            rev as i64,
+            run_id,
         ],
     )?;
     if n != 1 {
+        if !same_run_identity {
+            return Err(KernelStoreError::Delivery(
+                "delivery run_id does not match approval run".into(),
+            ));
+        }
         return Err(KernelStoreError::StaleRevision {
             expected: rev,
             actual: rev,
@@ -2645,12 +2657,125 @@ mod tests {
     }
 
     #[test]
+    fn deny_and_transition_mismatched_delivery_run_fails_closed() {
+        // DenyAccepted is legal from Running. Without a run_id predicate the
+        // UPDATE would rewrite another run's delivery to the current approval
+        // run and persist Denied. The combined transaction must fail closed:
+        // delivery stays on old-run / original phase, approval stays Pending.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let dig = "a".repeat(64);
+        let receipt = "rcpt-dn-mm-run";
+        store
+            .ensure_delivery_running("o", receipt, "old-run", now())
+            .unwrap();
+        store
+            .record_approval_required("o", "ap-dn-mm", receipt, "new-run", &dig, 1, now())
+            .unwrap();
+        let before = delivery_identity(&store, "o", receipt);
+        assert_eq!(before.0, DeliveryPhase::Running);
+        assert_eq!(before.2, "old-run");
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: receipt.into(),
+            request_digest: dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .deny_approval_and_transition(&deny, now())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KernelStoreError::Delivery(_)
+                    | KernelStoreError::Conflict(_)
+                    | KernelStoreError::NotFound
+                    | KernelStoreError::StaleRevision { .. }
+            ),
+            "{err:?}"
+        );
+        let row = store
+            .get_approval("o", receipt)
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        let after = delivery_identity(&store, "o", receipt);
+        assert_eq!(after, before, "delivery identity must not change");
+        assert_eq!(after.2, "old-run");
+    }
+
+    #[test]
+    fn deny_and_transition_denied_fast_path_requires_same_run() {
+        // Already-applied DenyAccepted at Denied must compare run_id. A Denied
+        // delivery owned by old-run must not count as success for a new-run
+        // deny; the new ask stays Pending and delivery identity is unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let receipt = "rcpt-dn-fp-run";
+        let (_, rev) = store
+            .ensure_delivery_running("o", receipt, "old-run", now())
+            .unwrap();
+        let (phase, _) = store
+            .set_delivery_phase(
+                "o",
+                receipt,
+                "old-run",
+                rev,
+                DeliveryEvent::DenyAccepted,
+                Some("ap-old"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(phase, DeliveryPhase::Denied);
+        let new_dig = "c".repeat(64);
+        store
+            .record_approval_required("o", "ap-new", receipt, "new-run", &new_dig, 1, now())
+            .unwrap();
+        let before = delivery_identity(&store, "o", receipt);
+        assert_eq!(before.0, DeliveryPhase::Denied);
+        assert_eq!(before.2, "old-run");
+        let deny = ApprovalDenyBinding {
+            owner: "o".into(),
+            receipt_id: receipt.into(),
+            request_digest: new_dig,
+            expected_revision: 1,
+            lease_owner: "lease".into(),
+            generation: 1,
+            decided_by: "principal".into(),
+        };
+        let err = store
+            .deny_approval_and_transition(&deny, now())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KernelStoreError::Delivery(_)
+                    | KernelStoreError::Conflict(_)
+                    | KernelStoreError::NotFound
+                    | KernelStoreError::StaleRevision { .. }
+                    | KernelStoreError::TerminalImmutable
+            ),
+            "{err:?}"
+        );
+        let row = store
+            .get_approval("o", receipt)
+            .unwrap()
+            .expect("ask retained");
+        assert_eq!(row.decision, ApprovalDecisionKind::Pending);
+        let after = delivery_identity(&store, "o", receipt);
+        assert_eq!(after, before, "delivery identity must not change");
+    }
+
+    #[test]
     fn deny_and_transition_mismatched_redeny_binding_fails_closed() {
         // Bound deny is idempotent only with the same revision / lease_owner /
         // generation stored on the Denied row. Same-binding retry is pinned
         // above; deny_other_gen only covers generation via deny_approval.
         // This pins the atomic negative for all three fields. Denied fast-path
-        // delivery identity stays remapped — not 753.2 current fail-closed.
+        // now also requires the same delivery run_id.
         let dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [

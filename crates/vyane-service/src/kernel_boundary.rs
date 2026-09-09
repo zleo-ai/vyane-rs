@@ -2109,6 +2109,71 @@ mod tests {
     }
 
     #[test]
+    fn deny_via_boundary_leaves_receipt_open() {
+        // Deny is an approval decision. The durable receipt stays Open; the
+        // Denied event must not invent Failed. Assert store + Status +
+        // ReadReceipt, not only the event's final_status field.
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let (store, digest) = seed_pending_ask(root.path(), "rcpt-open", "run-open", 1);
+        let before = store
+            .get_receipt(&principal().owner, "rcpt-open")
+            .unwrap()
+            .expect("seeded receipt");
+        assert_eq!(before.final_status, ReceiptFinalStatus::Open);
+        let adapter = LocalKernelAdapter::new(principal());
+        let denied = adapter.handle(
+            approval_cmd(
+                "dn-open",
+                KernelCommandKind::DenyApproval,
+                Some("rcpt-open"),
+                Some("run-open"),
+                None,
+                Some(&root_s),
+                Some(binding_for(&digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(denied.error, None, "expected durable deny, got {denied:?}");
+        assert_eq!(denied.kind, KernelEventKind::Denied);
+        let stored = store
+            .get_receipt(&principal().owner, "rcpt-open")
+            .unwrap()
+            .expect("receipt after deny");
+        assert_eq!(stored.final_status, ReceiptFinalStatus::Open);
+        let fresh = LocalKernelAdapter::new(principal());
+        for (command_id, kind) in [
+            ("st-open", KernelCommandKind::Status),
+            ("rr-open", KernelCommandKind::ReadReceipt),
+        ] {
+            let event = fresh.handle(
+                approval_cmd(
+                    command_id,
+                    kind,
+                    Some("rcpt-open"),
+                    None,
+                    None,
+                    Some(&root_s),
+                    None,
+                ),
+                now(),
+            );
+            assert_eq!(
+                event.error, None,
+                "{kind:?} must rebuild receipt after deny: {event:?}"
+            );
+            assert_eq!(event.kind, KernelEventKind::ReceiptUpdated);
+            match event.projection.unwrap() {
+                KernelProjection::Receipt { receipt } => {
+                    assert_eq!(receipt.receipt_id, "rcpt-open");
+                    assert_eq!(receipt.final_status, ReceiptFinalStatus::Open);
+                }
+                other => panic!("{kind:?}: expected receipt projection, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn deny_ownership_projection_reads_store_lease_fence() {
         let root = tempfile::tempdir().unwrap();
         let root_s = root.path().to_string_lossy().into_owned();
