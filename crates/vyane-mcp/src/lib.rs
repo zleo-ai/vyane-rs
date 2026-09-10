@@ -29,7 +29,7 @@
 //! an `invalid_argument` envelope. Validation happens before the service is
 //! called.
 
-use std::{collections::BTreeMap, future::Future, pin::Pin, str::FromStr, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, future::Future, pin::Pin, str::FromStr, sync::Arc};
 
 use anyhow::Result;
 use rmcp::{
@@ -985,14 +985,22 @@ impl VyaneMcpServer {
 #[tool_handler(router = self.tool_router)]
 impl rmcp::ServerHandler for VyaneMcpServer {
     fn get_info(&self) -> ServerInfo {
+        // `initialize` is the legacy lifecycle. rmcp 3.3 still treats
+        // `ProtocolVersion::LATEST` as 2025-11-25; name that revision
+        // explicitly so a later LATEST bump cannot make initialize
+        // advertise 2026-07-28.
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_protocol_version(ProtocolVersion::V_2025_11_25)
             .with_server_info(Implementation::new("vyane", env!("CARGO_PKG_VERSION")))
             .with_instructions(if self.workflow_control.is_some() {
                 WORKFLOW_SERVER_INSTRUCTIONS
             } else {
                 BASE_SERVER_INSTRUCTIONS
             })
+    }
+
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::V_2026_07_28))
     }
 }
 
