@@ -83,7 +83,7 @@ difference。运行 `python3 .github/scripts/parity-report.py --format markdown`
 | 共享服务层 | `vyane-service` | [x] `OwnerContextFactory` 完成 authentication/resolution 并拒绝 authenticated `local`；`OwnerScopedService` 冻结 dispatch/stream/query/session/reset；AgentRun components 已含 prepared authorized harness dispatch、配对的 Process/Native backend、exact message-completion handback，以及 daemon 使用的通用 resident host；ordinary dispatch 不启动它们 |
 | REST API | `vyane-cli` + `axum` | [x] per-start bearer、loopback Host/Origin 校验、拒绝 non-loopback bind、allowlisted view 与 assembly-frozen local service scope；bearer 尚不代表 distinct principal，也不是 hostile same-UID 或多用户隔离 |
 | 确定性路由 | `vyane-router` | [x] |
-| MCP server | `vyane-mcp` + `rmcp` 3.0 | [x] CLI 提供 9 个工具：原 6 个执行/查询/诊断工具，加经认证的持久 workflow submit/status/cancel；generic success output 上限为 1 MiB |
+| MCP server | `vyane-mcp` + `rmcp` 3.3 | [x] CLI 提供 9 个工具：原 6 个执行/查询/诊断工具，加经认证的持久 workflow submit/status/cancel；generic success output 上限为 1 MiB；stdio 双时代握手让 `initialize` 停在 2025-11-25，并可通过 `server/discover` 协商 MCP 2026-07-28 |
 | solution-review workflow（implement → fan-out review → synthesize） | `vyane-cli`（review module） | [x] 尚不是原仓结构化 git diff/PR review 产品 |
 
 Capability admission 刻意窄于 sandbox。`ReadOnly` 可用于 chat 或 harness target；`Write`/`Full`

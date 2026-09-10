@@ -71,6 +71,10 @@ roadmap state.
 [WP-99](plan/WP-99.md) refreshes the locked MCP SDK and macros from `rmcp`
 3.0.0 to the compatible 3.0.1 patch while retaining the Rust 1.88 floor and
 the existing stdio tool surface.
+[WP-467](plan/WP-467.md) refreshes that lock to `rmcp` 3.3.0 and pins the
+stdio server to MCP 2026 dual-era negotiation: `initialize` stays on
+2025-11-25, while `server/discover` can negotiate 2026-07-28. Streamable HTTP,
+OAuth, and Tasks remain unused.
 [WP-100](plan/WP-100.md) makes daemon terminal acceptance polling reuse one
 short-timeout client and retry transient loopback timeouts only inside the
 existing total terminal budget.
@@ -1217,7 +1221,7 @@ traits, the wave-1 packages are largely parallel — assembly happens at M6.
 
 | milestone | scope |
 |-----------|-------|
-| ~~**MCP server**~~ | ✅ the library keeps six base tools; the CLI injects an authenticated `WorkflowControl` adapter and exposes nine over stdio, adding durable workflow submit/status/idempotent-cancel (WP-62). [WP-89](plan/WP-89.md) moves the transport and real-protocol fixtures to stable `rmcp` 3.0 with a Rust 1.88 MSRV. Workflow input is strictly bounded and allowlisted; [WP-152](plan/WP-152.md) adds the bounded success-output projection on the same lifecycle view. The MCP crate owns no daemon discovery or credential. Task, board, collaboration, and multi-principal owner context remain open. |
+| ~~**MCP server**~~ | ✅ the library keeps six base tools; the CLI injects an authenticated `WorkflowControl` adapter and exposes nine over stdio, adding durable workflow submit/status/idempotent-cancel (WP-62). [WP-89](plan/WP-89.md) moves the transport and real-protocol fixtures to stable `rmcp` 3.0 with a Rust 1.88 MSRV. [WP-467](plan/WP-467.md) refreshes the lock to `rmcp` 3.3.0 and pins stdio dual-era negotiation: `initialize` stays on 2025-11-25, `server/discover` can negotiate MCP 2026-07-28. Workflow input is strictly bounded and allowlisted; [WP-152](plan/WP-152.md) adds the bounded success-output projection on the same lifecycle view. The MCP crate owns no daemon discovery or credential. Task, board, collaboration, and multi-principal owner context remain open. |
 | ~~**REST API**~~ | ✅ bearer-authenticated loopback-only HTTP JSON API (`vyane serve`, axum): `/v1/dispatch`, `/v1/broadcast`, `/v1/runs`, `/v1/sessions`, `/v1/health`; non-loopback bind/Host/Origin and cross-site requests are rejected, run/session results use allowlisted views, and the per-start token is mode `0600`. This is not hostile same-UID or multi-user isolation. |
 | ~~**shared service layer**~~ | ✅ `vyane-service` crate: one `VyaneService` facade shared by CLI, REST, and MCP front-ends, with allowlisted run/session views and owner-local session list/inspect/reset-native. Optional owner-bound message and AgentRun projection-only components require explicit construction and do not alter ordinary dispatch. There is no public fork or REST/MCP reset mutation. |
 | ~~**local A2A message CLI**~~ | ✅ `vyane a2a send/inbox/read` over the transactional message store, with explicit owner/mailbox scope, delayed visibility, bounded stable JSON pages and fenced read acknowledgement (WP-59). This is a same-machine queue, not authenticated multi-user authority or A2A HTTP compatibility. |
