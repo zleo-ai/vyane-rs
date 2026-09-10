@@ -1,0 +1,4 @@
+{
+  "name": "vyane-rs",
+  "install": "bash .cursor/install.sh"
+}
