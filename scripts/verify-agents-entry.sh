@@ -24,8 +24,22 @@ if ! grep -q 'AGENTS.md' README.md; then
 else
   echo "OK README.md points at AGENTS.md"
 fi
+# Local $GIT_DIR/info/exclude used to list /AGENTS.md, so an unforced
+# `git add` left the entry untracked. Existence on disk is not enough.
+if ! git ls-files --error-unmatch AGENTS.md >/dev/null 2>&1; then
+  echo "FAIL AGENTS.md is not tracked (git add -f; check info/exclude)"
+  fail=1
+else
+  echo "OK AGENTS.md is tracked"
+fi
+if ! git ls-files --error-unmatch CLAUDE.md >/dev/null 2>&1; then
+  echo "FAIL CLAUDE.md is not tracked"
+  fail=1
+else
+  echo "OK CLAUDE.md is tracked"
+fi
 # Public-repo hygiene: no private device/effort facts.
-if grep -E -n '/home/maple|\\\\wsl\$|默认 xhigh|事实源在 Meridian|beacon\.sqlite|hzlhu@qq\.com' AGENTS.md CLAUDE.md; then
+if grep -E -n '/home/maple|\\\\wsl\$|~/AIOS/|默认 xhigh|事实源在 Meridian|beacon\.sqlite|hzlhu@qq\.com' AGENTS.md CLAUDE.md; then
   echo "FAIL forbidden private/stale phrases"
   fail=1
 else
