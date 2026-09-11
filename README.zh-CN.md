@@ -578,6 +578,7 @@ vyane mcp                                # MCP server
 - [Roadmap](docs/ROADMAP.md) — v0.1 ~ v0.4 里程碑。
 - [原始 Vyane 对齐基线](docs/parity/ORIGINAL-VYANE-PARITY.md) — 固定双仓能力矩阵与验收门槛。
 - [Contributing](CONTRIBUTING.md) — toolchain、检查项、PR 约定、crate map。
+- [AGENTS.md](AGENTS.md) — 给 coding agent 的公开仓规则（不写私有路径或凭据）。
 
 ## 许可协议
 

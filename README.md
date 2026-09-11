@@ -937,6 +937,8 @@ profile environment:
 - [Original-Vyane parity baseline](docs/parity/ORIGINAL-VYANE-PARITY.md) —
   fixed cross-repository capability matrix and acceptance gates.
 - [Contributing](CONTRIBUTING.md) — toolchain, checks, and PR conventions.
+- [AGENTS.md](AGENTS.md) — public-repo rules for coding agents (no private
+  paths or credentials).
 
 ## License
 
