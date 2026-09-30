@@ -308,8 +308,12 @@ impl KernelErrorCode {
 
 /// Locates the durable [`KernelStore`] authoritative for a receipt.
 ///
-/// Approve/deny consume this seam instead of probing sqlite paths inside the
-/// transport adapter. `None` is unknown (mapped to [`KernelErrorCode::NotFound`]).
+/// Approve/deny and durable reads ([`KernelCommandKind::Status`],
+/// [`KernelCommandKind::ReadReceipt`], [`KernelCommandKind::GetProjection`],
+/// [`KernelCommandKind::ReadArtifact`]) consume this seam instead of probing
+/// sqlite paths in the adapter. `None` is unknown and maps to
+/// [`KernelErrorCode::NotFound`]. An explicit `dogfood_root` does not fall
+/// back to the memory ledger when resolution returns `None`.
 pub trait KernelStoreResolver: Send + Sync {
     fn resolve(
         &self,
@@ -321,7 +325,6 @@ pub trait KernelStoreResolver: Send + Sync {
 
 struct DurableStoreIndex {
     durable_roots: Mutex<Vec<PathBuf>>,
-    initialized_stores: Mutex<HashSet<PathBuf>>,
     receipt_store_index: Mutex<HashMap<String, PathBuf>>,
 }
 
@@ -329,7 +332,6 @@ impl DurableStoreIndex {
     fn new() -> Self {
         Self {
             durable_roots: Mutex::new(Vec::new()),
-            initialized_stores: Mutex::new(HashSet::new()),
             receipt_store_index: Mutex::new(HashMap::new()),
         }
     }
@@ -348,28 +350,10 @@ impl DurableStoreIndex {
         }
     }
 
-    fn mark_initialized(&self, path: &Path) {
-        if let Ok(mut guard) = self.initialized_stores.lock() {
-            guard.insert(path.to_path_buf());
-        }
-    }
-
     fn store_for_existing_path(&self, path: &Path) -> Option<KernelStore> {
-        if !path.is_file() {
-            return None;
-        }
-        if let Ok(guard) = self.initialized_stores.lock()
-            && guard.contains(path)
-        {
-            return Some(KernelStore::reuse(path));
-        }
-        match KernelStore::open_existing(path) {
-            Ok(store) => {
-                self.mark_initialized(store.path());
-                Some(store)
-            }
-            Err(_) => None,
-        }
+        // Discovery cannot create, migrate, or change journal mode. Revalidate
+        // even remembered paths so a replaced candidate is not trusted by cache.
+        KernelStore::probe_existing(path).ok()
     }
 
     fn indexed_store(&self, receipt_id: &str) -> Option<KernelStore> {
@@ -445,9 +429,11 @@ impl KernelStoreResolver for FilesystemKernelStoreResolver {
 /// In-process adapter exercising the transport-neutral contract.
 ///
 /// Process-local event queue is rebuildable. Durable receipt and approval
-/// authority is [`KernelStore`] under registered / command `dogfood_root`
-/// paths — Status/ReadReceipt discard memory and re-read facts. Approve/deny
-/// resolve the store through [`KernelStoreResolver`] and fail closed as
+/// authority is [`KernelStore`] located by [`KernelStoreResolver`]. An
+/// explicit `dogfood_root` is exclusive: it never falls back to the memory
+/// ledger or to registered siblings. Rootless submit and cancel keep their
+/// in-memory behavior; rootless reads try memory before the resolver.
+/// Approve/deny fail closed as
 /// [`KernelErrorCode::NotFound`], not [`KernelErrorCode::InvalidCommand`].
 pub struct LocalKernelAdapter {
     principal: KernelPrincipal,
@@ -469,8 +455,9 @@ impl LocalKernelAdapter {
         Self::with_index(principal, index, store_resolver)
     }
 
-    /// Construct with an injected store locator. Approve/deny use this
-    /// resolver exclusively and do not fall back to filesystem probing.
+    /// Construct with an injected store locator. Approve/deny and durable
+    /// reads use this resolver exclusively and do not fall back to filesystem
+    /// probing.
     #[must_use]
     pub fn with_store_resolver(
         principal: KernelPrincipal,
@@ -511,49 +498,27 @@ impl LocalKernelAdapter {
         }
     }
 
-    /// Load receipt: memory first, then durable KernelStore under dogfood roots.
+    /// Receipt for Status / ReadReceipt / GetProjection / ReadArtifact.
+    ///
+    /// An explicit `dogfood_root` resolves only through [`KernelStoreResolver`]
+    /// and [`KernelStore::get_receipt`]. Rootless commands still read the
+    /// in-memory ledger before that resolver.
     fn load_receipt(
         &self,
         receipt_id: &str,
         dogfood_root: Option<&str>,
     ) -> Option<CompletionReceipt> {
-        if let Ok(guard) = self.receipts.lock()
-            && let Some(r) = guard.get_for_owner(&self.principal.owner, receipt_id)
+        if dogfood_root.is_none()
+            && let Ok(guard) = self.receipts.lock()
+            && let Some(receipt) = guard.get_for_owner(&self.principal.owner, receipt_id)
         {
-            return Some(r.clone());
+            return Some(receipt.clone());
         }
-        self.load_receipt_from_durable(receipt_id, dogfood_root)
-    }
-
-    fn load_receipt_from_durable(
-        &self,
-        receipt_id: &str,
-        dogfood_root: Option<&str>,
-    ) -> Option<CompletionReceipt> {
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        if let Some(root) = dogfood_root.map(PathBuf::from) {
-            push_kernel_candidates(&root, receipt_id, &mut candidates);
-        }
-        if let Ok(roots) = self.index.durable_roots.lock() {
-            for root in roots.iter() {
-                push_kernel_candidates(root, receipt_id, &mut candidates);
-            }
-        }
-        // Dedup paths.
-        candidates.sort();
-        candidates.dedup();
-        for path in candidates {
-            if !path.exists() {
-                continue;
-            }
-            let Ok(store) = KernelStore::open(&path) else {
-                continue;
-            };
-            if let Ok(Some(receipt)) = store.get_receipt(&self.principal.owner, receipt_id) {
-                return Some(receipt);
-            }
-        }
-        None
+        let store = self.open_durable_store(receipt_id, dogfood_root)?;
+        store
+            .get_receipt(&self.principal.owner, receipt_id)
+            .ok()
+            .flatten()
     }
 
     fn open_durable_store(
@@ -3371,5 +3336,665 @@ mod tests {
             .unwrap()
             .expect("delivery retained");
         assert_eq!(phase, crate::approval_fsm::DeliveryPhase::Running);
+    }
+
+    fn read_cmd(
+        command_id: &str,
+        kind: KernelCommandKind,
+        receipt_id: &str,
+        root: Option<&str>,
+    ) -> KernelCommand {
+        KernelCommand {
+            boundary_version: KERNEL_BOUNDARY_VERSION,
+            command_id: command_id.into(),
+            kind,
+            principal: principal(),
+            task_case: None,
+            route: None,
+            receipt_id: Some(receipt_id.into()),
+            agent_run_id: None,
+            approval_granted: None,
+            subscribe: None,
+            replay_from: None,
+            dogfood_root: root.map(str::to_string),
+            approval_binding: None,
+        }
+    }
+
+    fn submit_cmd(command_id: &str, receipt_id: &str, root: Option<&str>) -> KernelCommand {
+        KernelCommand {
+            boundary_version: KERNEL_BOUNDARY_VERSION,
+            command_id: command_id.into(),
+            kind: KernelCommandKind::SubmitTask,
+            principal: principal(),
+            task_case: Some(task()),
+            route: Some(route()),
+            receipt_id: Some(receipt_id.into()),
+            agent_run_id: None,
+            approval_granted: None,
+            subscribe: None,
+            replay_from: None,
+            dogfood_root: root.map(str::to_string),
+            approval_binding: None,
+        }
+    }
+
+    fn explicit_read_kinds() -> [KernelCommandKind; 4] {
+        [
+            KernelCommandKind::Status,
+            KernelCommandKind::ReadReceipt,
+            KernelCommandKind::GetProjection,
+            KernelCommandKind::ReadArtifact,
+        ]
+    }
+
+    /// Distinguish two same-id rows by task id, revision, status, and digest.
+    fn stamp_receipt(
+        store: &KernelStore,
+        owner: &str,
+        receipt_id: &str,
+        task_case_id: &str,
+        status: ReceiptFinalStatus,
+        digest: &str,
+    ) -> CompletionReceipt {
+        store
+            .transition_receipt(owner, receipt_id, 1, now(), |receipt| {
+                receipt.task_case.task_case_id = task_case_id.to_string();
+                receipt.final_status = status;
+                receipt.validation_summary = Some(task_case_id.to_string());
+                receipt.output_artifact_digest = Some(digest.to_string());
+                Ok(())
+            })
+            .unwrap()
+    }
+
+    fn assert_selected_receipt(
+        event: &KernelEvent,
+        task_case_id: &str,
+        revision: u64,
+        status: ReceiptFinalStatus,
+        digest: &str,
+    ) {
+        assert_eq!(event.error, None, "{event:?}");
+        let Some(KernelProjection::Receipt { receipt }) = &event.projection else {
+            panic!("expected receipt projection, got {event:?}");
+        };
+        assert_eq!(receipt.task_case.task_case_id, task_case_id, "{receipt:?}");
+        assert_eq!(receipt.revision, revision, "{receipt:?}");
+        assert_eq!(receipt.final_status, status, "{receipt:?}");
+        assert_eq!(
+            receipt.output_artifact_digest.as_deref(),
+            Some(digest),
+            "{receipt:?}"
+        );
+    }
+
+    fn assert_read_not_found(event: &KernelEvent) {
+        assert_eq!(event.kind, KernelEventKind::Error, "{event:?}");
+        assert_eq!(event.error, Some(KernelErrorCode::NotFound), "{event:?}");
+        assert!(
+            !matches!(event.projection, Some(KernelProjection::Receipt { .. })),
+            "missing root must not project a receipt: {event:?}"
+        );
+    }
+
+    #[test]
+    fn root_resolution_explicit_root_reads_match_approval_store() {
+        let parent = tempfile::tempdir().unwrap();
+        let registered = parent.path().join("aaa-registered");
+        let named = parent.path().join("zzz-named");
+        fs::create_dir_all(&registered).unwrap();
+        fs::create_dir_all(&named).unwrap();
+        let receipt_id = "rcpt-same";
+        let (registered_store, _) = seed_pending_ask(&registered, receipt_id, "run-same", 1);
+        let (named_store, named_digest) = seed_pending_ask(&named, receipt_id, "run-same", 1);
+        let artifact = digest_hex("ef");
+        let named_receipt = stamp_receipt(
+            &named_store,
+            &principal().owner,
+            receipt_id,
+            "task-named",
+            ReceiptFinalStatus::Failed,
+            &artifact,
+        );
+        assert_eq!(named_receipt.task_case.task_case_id, "task-named");
+        assert_eq!(named_receipt.revision, 2);
+        assert_eq!(named_receipt.final_status, ReceiptFinalStatus::Failed);
+        assert_eq!(
+            named_receipt.output_artifact_digest.as_deref(),
+            Some(artifact.as_str())
+        );
+        let registered_receipt = registered_store
+            .get_receipt(&principal().owner, receipt_id)
+            .unwrap()
+            .expect("registered receipt");
+        assert_eq!(registered_receipt.task_case.task_case_id, "tc-1");
+        assert_eq!(registered_receipt.revision, 1);
+        assert_eq!(registered_receipt.final_status, ReceiptFinalStatus::Open);
+        assert!(registered_receipt.output_artifact_digest.is_none());
+
+        let adapter = LocalKernelAdapter::new(principal());
+        adapter.register_durable_root(&registered);
+        let named_s = named.to_string_lossy().into_owned();
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-root-resolution",
+                KernelCommandKind::DecideApproval,
+                Some(receipt_id),
+                Some("run-same"),
+                Some(true),
+                Some(&named_s),
+                Some(binding_for(&named_digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Approved, "{granted:?}");
+        assert_eq!(
+            named_store
+                .get_approval(&principal().owner, receipt_id)
+                .unwrap()
+                .expect("named approval")
+                .decision,
+            crate::kernel_store::ApprovalDecisionKind::Approved
+        );
+        assert_eq!(
+            registered_store
+                .get_approval(&principal().owner, receipt_id)
+                .unwrap()
+                .expect("registered approval")
+                .decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending
+        );
+
+        for kind in explicit_read_kinds() {
+            let event = adapter.handle(
+                read_cmd("rd-named", kind, receipt_id, Some(&named_s)),
+                now(),
+            );
+            assert_selected_receipt(
+                &event,
+                "task-named",
+                2,
+                ReceiptFinalStatus::Failed,
+                &artifact,
+            );
+        }
+    }
+
+    #[test]
+    fn root_resolution_missing_explicit_root_does_not_fall_back() {
+        let parent = tempfile::tempdir().unwrap();
+        let registered = parent.path().join("aaa-registered");
+        let explicit = parent.path().join("zzz-missing");
+        fs::create_dir_all(&registered).unwrap();
+        fs::create_dir_all(&explicit).unwrap();
+        let receipt_id = "rcpt-miss";
+        let (registered_store, _) = seed_pending_ask(&registered, receipt_id, "run-miss", 1);
+        let artifact = digest_hex("ab");
+        stamp_receipt(
+            &registered_store,
+            &principal().owner,
+            receipt_id,
+            "task-registered",
+            ReceiptFinalStatus::Failed,
+            &artifact,
+        );
+        let adapter = LocalKernelAdapter::new(principal());
+        adapter.register_durable_root(&registered);
+        let explicit_s = explicit.to_string_lossy().into_owned();
+        for kind in explicit_read_kinds() {
+            let event = adapter.handle(
+                read_cmd("rd-miss", kind, receipt_id, Some(&explicit_s)),
+                now(),
+            );
+            assert_read_not_found(&event);
+        }
+        assert!(
+            !explicit.join("kernel.sqlite").exists(),
+            "missing explicit root must not materialize kernel.sqlite"
+        );
+        assert!(
+            !explicit.join("durable-miss").join("kernel.sqlite").exists(),
+            "missing explicit root must not materialize a suffix candidate"
+        );
+    }
+
+    #[test]
+    fn root_resolution_memory_receipt_cannot_steal_explicit_durable_read() {
+        let named = tempfile::tempdir().unwrap();
+        let receipt_id = "rcpt-durable";
+        let (store, _) = seed_pending_ask(named.path(), receipt_id, "run-durable", 1);
+        let artifact = digest_hex("cd");
+        stamp_receipt(
+            &store,
+            &principal().owner,
+            receipt_id,
+            "task-durable",
+            ReceiptFinalStatus::Failed,
+            &artifact,
+        );
+        let named_s = named.path().to_string_lossy().into_owned();
+        let adapter = LocalKernelAdapter::new(principal());
+        let _submitted = adapter.handle(submit_cmd("sub-mem", receipt_id, None), now());
+        for kind in explicit_read_kinds() {
+            let event = adapter.handle(read_cmd("rd-mem", kind, receipt_id, Some(&named_s)), now());
+            assert_selected_receipt(
+                &event,
+                "task-durable",
+                2,
+                ReceiptFinalStatus::Failed,
+                &artifact,
+            );
+        }
+    }
+
+    #[test]
+    fn root_resolution_memory_only_submit_without_root_is_supported() {
+        let adapter = LocalKernelAdapter::new(principal());
+        let submitted = adapter.handle(submit_cmd("sub-noroot", "rcpt-memonly", None), now());
+        assert_eq!(
+            submitted.kind,
+            KernelEventKind::TaskAccepted,
+            "{submitted:?}"
+        );
+        let Some(KernelProjection::Receipt { receipt: accepted }) = submitted.projection.as_ref()
+        else {
+            panic!("accepted submit must project the memory receipt: {submitted:?}");
+        };
+        assert!(
+            accepted.output_artifact_digest.is_none(),
+            "memory submit has no artifact digest: {accepted:?}"
+        );
+        for kind in [
+            KernelCommandKind::Status,
+            KernelCommandKind::ReadReceipt,
+            KernelCommandKind::GetProjection,
+        ] {
+            let event = adapter.handle(read_cmd("rd-noroot", kind, "rcpt-memonly", None), now());
+            assert_eq!(event.kind, KernelEventKind::ReceiptUpdated, "{event:?}");
+            assert_eq!(event.error, None, "{event:?}");
+            let Some(KernelProjection::Receipt { receipt }) = event.projection.as_ref() else {
+                panic!("rootless read must project the memory receipt: {event:?}");
+            };
+            assert_eq!(
+                receipt, accepted,
+                "{kind:?} must return the accepted receipt"
+            );
+        }
+        let artifact = adapter.handle(
+            read_cmd(
+                "rd-noroot-artifact",
+                KernelCommandKind::ReadArtifact,
+                "rcpt-memonly",
+                None,
+            ),
+            now(),
+        );
+        assert_read_not_found(&artifact);
+    }
+
+    #[test]
+    fn root_resolution_injected_fixed_resolver_serves_durable_reads() {
+        let injected = tempfile::tempdir().unwrap();
+        let decoy = tempfile::tempdir().unwrap();
+        let receipt_id = "rcpt-inject-read";
+        let (injected_store, _) = seed_pending_ask(injected.path(), receipt_id, "run-inject", 1);
+        let (decoy_store, _) = seed_pending_ask(decoy.path(), receipt_id, "run-decoy", 1);
+        let injected_digest = digest_hex("11");
+        let decoy_digest = digest_hex("22");
+        stamp_receipt(
+            &injected_store,
+            &principal().owner,
+            receipt_id,
+            "task-injected",
+            ReceiptFinalStatus::Failed,
+            &injected_digest,
+        );
+        stamp_receipt(
+            &decoy_store,
+            &principal().owner,
+            receipt_id,
+            "task-decoy",
+            ReceiptFinalStatus::Cancelled,
+            &decoy_digest,
+        );
+        let adapter = LocalKernelAdapter::with_store_resolver(
+            principal(),
+            Arc::new(FixedStoreResolver {
+                store: injected_store.clone(),
+            }),
+        );
+        let decoy_s = decoy.path().to_string_lossy().into_owned();
+        for kind in explicit_read_kinds() {
+            let event = adapter.handle(
+                read_cmd("rd-fixed", kind, receipt_id, Some(&decoy_s)),
+                now(),
+            );
+            assert_selected_receipt(
+                &event,
+                "task-injected",
+                2,
+                ReceiptFinalStatus::Failed,
+                &injected_digest,
+            );
+        }
+    }
+
+    #[test]
+    fn root_resolution_empty_resolver_does_not_read_filesystem() {
+        let decoy = tempfile::tempdir().unwrap();
+        let receipt_id = "rcpt-empty-resolver";
+        let (decoy_store, _) = seed_pending_ask(decoy.path(), receipt_id, "run-empty", 1);
+        let decoy_digest = digest_hex("33");
+        stamp_receipt(
+            &decoy_store,
+            &principal().owner,
+            receipt_id,
+            "task-filesystem",
+            ReceiptFinalStatus::Failed,
+            &decoy_digest,
+        );
+        let adapter =
+            LocalKernelAdapter::with_store_resolver(principal(), Arc::new(EmptyStoreResolver));
+        adapter.register_durable_root(decoy.path());
+        let decoy_s = decoy.path().to_string_lossy().into_owned();
+        for kind in explicit_read_kinds() {
+            let event = adapter.handle(
+                read_cmd("rd-empty", kind, receipt_id, Some(&decoy_s)),
+                now(),
+            );
+            assert_read_not_found(&event);
+        }
+    }
+
+    #[test]
+    fn root_resolution_missing_storage_does_not_create_or_initialize_sqlite() {
+        let parent = tempfile::tempdir().unwrap();
+        let explicit = parent.path().join("explicit");
+        let registered = parent.path().join("registered");
+        fs::create_dir_all(&explicit).unwrap();
+        fs::create_dir_all(&registered).unwrap();
+        let missing_sqlite = explicit.join("kernel.sqlite");
+        let explicit_empty = explicit.join("durable-gap").join("kernel.sqlite");
+        fs::create_dir_all(explicit_empty.parent().unwrap()).unwrap();
+        fs::write(&explicit_empty, b"").unwrap();
+        let registered_empty = registered.join("kernel.sqlite");
+        fs::write(&registered_empty, b"").unwrap();
+        let adapter = LocalKernelAdapter::new(principal());
+        adapter.register_durable_root(&registered);
+        let explicit_s = explicit.to_string_lossy().into_owned();
+        let event = adapter.handle(
+            read_cmd(
+                "rd-gap",
+                KernelCommandKind::Status,
+                "rcpt-gap",
+                Some(&explicit_s),
+            ),
+            now(),
+        );
+        assert_read_not_found(&event);
+        assert!(
+            !missing_sqlite.exists(),
+            "status read must not create kernel.sqlite"
+        );
+        assert!(
+            !registered
+                .join("durable-gap")
+                .join("kernel.sqlite")
+                .exists(),
+            "status read must not create a registered suffix candidate"
+        );
+        let explicit_len = fs::metadata(&explicit_empty).unwrap().len();
+        let registered_len = fs::metadata(&registered_empty).unwrap().len();
+        assert_eq!(
+            (explicit_len, registered_len),
+            (0, 0),
+            "unrelated empty sqlite files were initialized"
+        );
+    }
+
+    #[test]
+    fn root_resolution_wrong_owner_unauthorized_and_foreign_not_leaked() {
+        let root = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(root.path().join("kernel.sqlite")).unwrap();
+        let receipt_id = "rcpt-owner";
+        let foreign_owner = "other-owner";
+        let mut foreign_task = task();
+        foreign_task.task_case_id = "task-foreign".into();
+        let foreign =
+            CompletionReceipt::open(receipt_id, foreign_owner, foreign_task, route(), now())
+                .unwrap();
+        store.insert_open_receipt(&foreign).unwrap();
+        let foreign_digest = digest_hex("ff");
+        let foreign_receipt = stamp_receipt(
+            &store,
+            foreign_owner,
+            receipt_id,
+            "task-foreign",
+            ReceiptFinalStatus::Failed,
+            &foreign_digest,
+        );
+        assert_eq!(foreign_receipt.revision, 2);
+        let local =
+            CompletionReceipt::open(receipt_id, principal().owner, task(), route(), now()).unwrap();
+        store.insert_open_receipt(&local).unwrap();
+
+        let adapter = LocalKernelAdapter::new(principal());
+        let root_s = root.path().to_string_lossy().into_owned();
+        let mut wrong_owner = read_cmd(
+            "rd-wrong-owner",
+            KernelCommandKind::ReadReceipt,
+            receipt_id,
+            Some(&root_s),
+        );
+        wrong_owner.principal = KernelPrincipal {
+            principal_id: principal().principal_id,
+            owner: foreign_owner.into(),
+        };
+        let denied = adapter.handle(wrong_owner, now());
+        assert_eq!(denied.kind, KernelEventKind::Error, "{denied:?}");
+        assert_eq!(
+            denied.error,
+            Some(KernelErrorCode::Unauthorized),
+            "{denied:?}"
+        );
+        assert!(
+            !matches!(denied.projection, Some(KernelProjection::Receipt { .. })),
+            "wrong owner must not receive a receipt: {denied:?}"
+        );
+        assert_ne!(denied.final_status, Some(ReceiptFinalStatus::Failed));
+
+        let local_read = adapter.handle(
+            read_cmd(
+                "rd-local",
+                KernelCommandKind::ReadReceipt,
+                receipt_id,
+                Some(&root_s),
+            ),
+            now(),
+        );
+        assert_eq!(local_read.error, None, "{local_read:?}");
+        let Some(KernelProjection::Receipt { receipt }) = &local_read.projection else {
+            panic!("expected local receipt, got {local_read:?}");
+        };
+        assert_eq!(receipt.owner, principal().owner);
+        assert_eq!(receipt.task_case.task_case_id, "tc-1");
+        assert_eq!(receipt.revision, 1);
+        assert_eq!(receipt.final_status, ReceiptFinalStatus::Open);
+        assert!(receipt.output_artifact_digest.is_none());
+        assert_ne!(receipt.task_case.task_case_id, "task-foreign");
+
+        let artifact = adapter.handle(
+            read_cmd(
+                "rd-artifact",
+                KernelCommandKind::ReadArtifact,
+                receipt_id,
+                Some(&root_s),
+            ),
+            now(),
+        );
+        assert_read_not_found(&artifact);
+        assert_ne!(artifact.final_status, Some(foreign_receipt.final_status));
+    }
+
+    #[test]
+    fn root_resolution_fresh_adapter_read_receipt_and_artifact_agree() {
+        let root = tempfile::tempdir().unwrap();
+        let receipt_id = "rcpt-fresh";
+        let store = KernelStore::open(root.path().join("kernel.sqlite")).unwrap();
+        let opened =
+            CompletionReceipt::open(receipt_id, principal().owner, task(), route(), now()).unwrap();
+        store.insert_open_receipt(&opened).unwrap();
+        let artifact = digest_hex("cd");
+        stamp_receipt(
+            &store,
+            &principal().owner,
+            receipt_id,
+            "task-fresh",
+            ReceiptFinalStatus::Failed,
+            &artifact,
+        );
+        let fresh = LocalKernelAdapter::new(principal());
+        let root_s = root.path().to_string_lossy().into_owned();
+        let read_receipt = fresh.handle(
+            read_cmd(
+                "rd-fresh-receipt",
+                KernelCommandKind::ReadReceipt,
+                receipt_id,
+                Some(&root_s),
+            ),
+            now(),
+        );
+        let read_artifact = fresh.handle(
+            read_cmd(
+                "rd-fresh-artifact",
+                KernelCommandKind::ReadArtifact,
+                receipt_id,
+                Some(&root_s),
+            ),
+            now(),
+        );
+        assert_eq!(
+            read_receipt.kind,
+            KernelEventKind::ReceiptUpdated,
+            "{read_receipt:?}"
+        );
+        assert_eq!(
+            read_artifact.kind,
+            KernelEventKind::ArtifactFinalized,
+            "{read_artifact:?}"
+        );
+        assert_selected_receipt(
+            &read_receipt,
+            "task-fresh",
+            2,
+            ReceiptFinalStatus::Failed,
+            &artifact,
+        );
+        assert_selected_receipt(
+            &read_artifact,
+            "task-fresh",
+            2,
+            ReceiptFinalStatus::Failed,
+            &artifact,
+        );
+        match (&read_receipt.projection, &read_artifact.projection) {
+            (
+                Some(KernelProjection::Receipt { receipt: left }),
+                Some(KernelProjection::Receipt { receipt: right }),
+            ) => {
+                assert_eq!(left.receipt_id, right.receipt_id);
+                assert_eq!(left.task_case.task_case_id, right.task_case.task_case_id);
+                assert_eq!(left.revision, right.revision);
+                assert_eq!(left.final_status, right.final_status);
+                assert_eq!(left.output_artifact_digest, right.output_artifact_digest);
+                assert_eq!(left, right);
+            }
+            _ => panic!("both reads must project the same receipt"),
+        }
+    }
+
+    fn seed_unrelated_sqlite(path: &Path, version: u32) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE unrelated(value TEXT); INSERT INTO unrelated VALUES ('keep');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", version).unwrap();
+    }
+
+    #[test]
+    fn root_resolution_unrelated_sqlite_is_not_initialized() {
+        for version in [0_u32, KernelStore::schema_version()] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("kernel.sqlite");
+            seed_unrelated_sqlite(&path, version);
+            let before = fs::read(&path).unwrap();
+            let adapter = LocalKernelAdapter::new(principal());
+            let root_s = root.path().to_string_lossy().into_owned();
+            for kind in explicit_read_kinds() {
+                assert_read_not_found(&adapter.handle(
+                    read_cmd("rd-foreign-db", kind, "rcpt-unknown", Some(&root_s)),
+                    now(),
+                ));
+                assert_eq!(
+                    fs::read(&path).unwrap(),
+                    before,
+                    "{kind:?} changed unrelated SQLite v{version}"
+                );
+                let conn = rusqlite::Connection::open_with_flags(
+                    &path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .unwrap();
+                let actual: u32 = conn
+                    .pragma_query_value(None, "user_version", |row| row.get(0))
+                    .unwrap();
+                let journal: String = conn
+                    .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                    .unwrap();
+                let tables: Vec<String> = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                    .unwrap()
+                    .query_map([], |row| row.get(0))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                let value: String = conn
+                    .query_row("SELECT value FROM unrelated", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(actual, version);
+                assert_eq!(journal, "delete");
+                assert_eq!(tables, vec!["unrelated".to_string()]);
+                assert_eq!(value, "keep");
+                assert!(!root.path().join("kernel.sqlite-wal").exists());
+                assert!(!root.path().join("kernel.sqlite-shm").exists());
+            }
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn root_resolution_replaced_cached_sqlite_is_revalidated() {
+        let root = tempfile::tempdir().unwrap();
+        let receipt_id = "rcpt-replaced-store";
+        let (_store, _) = seed_pending_ask(root.path(), receipt_id, "run-replaced", 1);
+        let adapter = LocalKernelAdapter::new(principal());
+        adapter.register_durable_root(root.path());
+        let first = adapter.handle(
+            read_cmd("rd-prime", KernelCommandKind::Status, receipt_id, None),
+            now(),
+        );
+        assert_eq!(first.error, None);
+        let path = root.path().join("kernel.sqlite");
+        fs::remove_file(&path).unwrap();
+        seed_unrelated_sqlite(&path, KernelStore::schema_version());
+        let before = fs::read(&path).unwrap();
+        for kind in explicit_read_kinds() {
+            assert_read_not_found(
+                &adapter.handle(read_cmd("rd-replaced", kind, receipt_id, None), now()),
+            );
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 }
