@@ -199,3 +199,63 @@ async fn openai_dispatch_oversized_subsets_are_clamped() {
         );
     }
 }
+
+// 经真实 HTTP 请求、CLI 子进程和账本落盘验证 Anthropic 的独立输入计数。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anthropic_dispatch_normalizes_cache_read_and_creation_before_billing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "billing-message",
+            "model": "billing-fixture",
+            "content": [{"type": "text", "text": "billing answer"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 9,
+                "cache_creation_input_tokens": 5,
+                "cache_read_input_tokens": 30,
+                "output_tokens": 4
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let record = dispatch_record(
+        &format!(
+            r#"
+            [providers.fixture]
+            base_url = "{}"
+            auth_style = "x_api_key"
+            protocol = "anthropic_messages"
+
+            [profiles.test]
+            provider = "fixture"
+            protocol = "anthropic_messages"
+            harness = "none"
+            model = "billing-fixture"
+            "#,
+            server.uri()
+        ),
+        None,
+    );
+    assert_eq!(
+        record.usage,
+        Some(Usage {
+            input_tokens: 44,
+            output_tokens: 4,
+            reasoning_tokens: None,
+            cached_input_tokens: Some(30),
+        })
+    );
+    // 普通输入和缓存创建按输入费率，只有缓存读取换费率：
+    // (9 + 5)*1 + 30*0.1 + 4*2 = 25，再除以一百万。
+    assert_estimate(
+        &record,
+        ModelPricing::per_1m(1.0, 2.0).with_cache(0.1),
+        0.000_025,
+    );
+    // 未配置缓存费率时，44 个输入都按普通输入费率计费。
+    assert_estimate(&record, ModelPricing::per_1m(1.0, 2.0), 0.000_052);
+}
