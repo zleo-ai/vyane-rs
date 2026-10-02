@@ -1370,6 +1370,10 @@ async fn dispatch_stream_on_harness_target_streams() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["status"], "success");
     assert_eq!(records[0]["transport"], "cli_wrap");
+    // 真实 CLI 和 harness 子进程跨异步 trait 调用后，终态结果及用量必须完整落账。
+    assert_eq!(records[0]["output_chars"], "harness final".chars().count());
+    assert_eq!(records[0]["usage"]["input_tokens"], 1);
+    assert_eq!(records[0]["usage"]["output_tokens"], 2);
 }
 
 // MockServer-backed CLI acceptance fixtures use two workers so wire
