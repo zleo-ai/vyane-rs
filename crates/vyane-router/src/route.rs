@@ -5,7 +5,7 @@
 
 use crate::decision::RouteDecision;
 use crate::intent::classify_intent;
-use crate::preference::{RoutePreferenceTable, parse_effort};
+use crate::preference::{RoutePreferenceTable, normalize_key, parse_effort};
 use crate::score::{ComplexitySignals, complexity_score, effort_for_tier, tier_for_score};
 use crate::tags::infer_route_tags_with_intent;
 
@@ -101,9 +101,12 @@ pub fn route_task(
 }
 
 /// Find the first tag that has a preference entry, for diagnostic tagging.
+///
+/// Uses the same key normalization as [`RoutePreferenceTable::resolve`] for
+/// tag lookup, while preserving the original matching tag in the diagnostic.
 fn first_matching_tag(tags: &[String], table: &RoutePreferenceTable) -> String {
     for tag in tags {
-        let key = tag.trim().to_ascii_lowercase();
+        let key = normalize_key(tag);
         if table.tag_preferences.contains_key(&key) {
             return tag.clone();
         }
@@ -159,6 +162,73 @@ mod tests {
         assert_eq!(decision.effort, RouteEffort::High);
         assert_eq!(decision.tag, "frontend");
         assert_eq!(decision.selection_key, "profile:frontend");
+    }
+
+    #[test]
+    fn diagnostic_tag_agrees_with_normalized_preference_match() {
+        // The table is keyed by the normalized form ("front-end") while the
+        // task carries the raw tag "front end" (with a space). resolve()
+        // matches via normalize_key(), so the diagnostic RouteDecision.tag
+        // must report the matching tag instead of coming back empty.
+        let mut tag_prefs = BTreeMap::new();
+        tag_prefs.insert(
+            "front-end".into(),
+            RouteTargetPreference {
+                selection_key: "profile:front-end".into(),
+                provider: "anthropic".into(),
+                ..Default::default()
+            },
+        );
+        let table = RoutePreferenceTable {
+            tag_preferences: tag_prefs,
+            ..Default::default()
+        };
+        let signals = ComplexitySignals {
+            task_tags: vec!["front end".into()],
+            ..ComplexitySignals::new()
+        };
+        let decision = route_task(
+            "build a component",
+            &["anthropic".into()],
+            Some(&signals),
+            Some(&table),
+            "openai",
+        );
+        // Routing itself resolves the preference through the normalized key...
+        assert_eq!(decision.provider, "anthropic");
+        // ...so the diagnostic tag must be reported, not silently emptied.
+        assert_eq!(decision.tag, "front end");
+    }
+
+    #[test]
+    fn diagnostic_tag_normalization_covers_non_space_punctuation() {
+        // Same agreement requirement for a separator other than a space: the
+        // raw tag "web/frontend" normalizes to the configured "web-frontend".
+        let mut tag_prefs = BTreeMap::new();
+        tag_prefs.insert(
+            "web-frontend".into(),
+            RouteTargetPreference {
+                provider: "anthropic".into(),
+                ..Default::default()
+            },
+        );
+        let table = RoutePreferenceTable {
+            tag_preferences: tag_prefs,
+            ..Default::default()
+        };
+        let signals = ComplexitySignals {
+            task_tags: vec!["web/frontend".into()],
+            ..ComplexitySignals::new()
+        };
+        let decision = route_task(
+            "build a page",
+            &["anthropic".into()],
+            Some(&signals),
+            Some(&table),
+            "openai",
+        );
+        assert_eq!(decision.provider, "anthropic");
+        assert_eq!(decision.tag, "web/frontend");
     }
 
     #[test]

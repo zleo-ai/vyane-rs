@@ -14,3 +14,4 @@
 ## Unreleased
 
 - 补齐安全路由对 `authenticate` / `authorize` 及其过去式、第三人称单数、进行时的识别；保留完整词边界，避免 `author`、`authority`、`authoritative` 和嵌词误报。
+- 修复路由诊断标签与偏好匹配的归一化不一致：`front end` / `front-end` 等分隔符写法使用同一规则查找，诊断保留实际命中的原始标签。
