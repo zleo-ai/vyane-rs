@@ -2615,6 +2615,8 @@ mod tests {
                 .request_cancel(owner, id, expected_revision, expected_executor_epoch, at)
         }
 
+        // fetch_update 在新 stable 上改名 try_update；MSRV 1.88 还没有 try_update，先保留旧名。
+        #[allow(deprecated)]
         fn settle(
             &self,
             owner: &str,
