@@ -573,7 +573,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
         let events = decoder.push(
             br#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}
 
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":4,"output_tokens":2}}
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":4,"output_tokens":2,"cache_read_input_tokens":30,"cache_creation_input_tokens":5}}
 
 "#,
             StreamProtocol::Anthropic,
@@ -583,9 +583,10 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
         assert!(matches!(
             &events[1],
             StreamEvent::Usage(Usage {
-                input_tokens: 4,
+                input_tokens: 39,
                 output_tokens: 2,
-                ..
+                reasoning_tokens: None,
+                cached_input_tokens: Some(30),
             })
         ));
         assert!(matches!(

@@ -835,7 +835,8 @@ async fn anthropic_complete_success_parses_outcome_and_request() {
             "usage": {
                 "input_tokens": 9,
                 "output_tokens": 4,
-                "cache_read_input_tokens": 3
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 5
             }
         })))
         .mount(&server)
@@ -854,10 +855,10 @@ async fn anthropic_complete_success_parses_outcome_and_request() {
     assert_eq!(
         outcome.usage,
         Some(Usage {
-            input_tokens: 9,
+            input_tokens: 44,
             output_tokens: 4,
             reasoning_tokens: None,
-            cached_input_tokens: Some(3),
+            cached_input_tokens: Some(30),
         })
     );
 
