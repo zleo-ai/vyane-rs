@@ -18,32 +18,27 @@ use vyane_core::{ModelId, Usage};
 ///
 /// # The reasoning / cache convention
 ///
-/// Whether reasoning and cached tokens are *separate* from the main input /
-/// output counts or *already included* in them depends on the provider's usage
-/// reporting, which this crate does not control. The table encodes that as an
-/// explicit convention rather than a guess:
+/// 传入估算器的 `Usage` 必须将推理和缓存 token 分别计入输出和输入
+/// 总量；这两个可选字段是总量的子计数，不是额外的 token 池。
+/// 若上游分别报告这些计数，调用方须先归一化，再进行估算。
 ///
-/// - [`ModelPricing::reasoning_per_1m`] is `None` ⇒ reasoning tokens are assumed
-///   to be **already counted** in `Usage::output_tokens` (the default — e.g.
-///   OpenAI `o`-series folds reasoning into completion tokens). When `Some`,
-///   reasoning tokens are billed **in addition** at the given rate.
-/// - [`ModelPricing::cache_read_per_1m`] is `None` ⇒ cached tokens are assumed
-///   to be **already counted** in `Usage::input_tokens`. When `Some`, cached
-///   tokens are billed **in addition** at the given rate.
+/// - [`ModelPricing::reasoning_per_1m`] 为 `None` 时，推理子计数按普通
+///   输出费率计费；为 `Some` 时，子计数改按指定费率计费，替换普通输出费率。
+/// - [`ModelPricing::cache_read_per_1m`] 为 `None` 时，缓存子计数按普通
+///   输入费率计费；为 `Some` 时，子计数改按指定费率计费，替换普通输入费率。
 ///
-/// A caller that sets a separate rate is asserting their `Usage` reports those
-/// tokens as distinct. This keeps the estimate explicit and reproducible.
+/// 超出父计数的子计数会被钳制到父计数，避免异常报告导致扣除时下溢。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelPricing {
     /// USD per 1,000,000 prompt / input tokens.
     pub input_per_1m: f64,
     /// USD per 1,000,000 completion / output tokens.
     pub output_per_1m: f64,
-    /// Separate rate for reasoning / thinking tokens. `None` ⇒ folded into
-    /// output (see type docs).
+    /// `Usage::output_tokens` 中推理子计数的替换费率。
+    /// `None` 表示使用普通输出费率，见类型文档。
     pub reasoning_per_1m: Option<f64>,
-    /// Separate rate for cached input tokens. `None` ⇒ folded into input
-    /// (see type docs).
+    /// `Usage::input_tokens` 中缓存子计数的替换费率。
+    /// `None` 表示使用普通输入费率，见类型文档。
     pub cache_read_per_1m: Option<f64>,
 }
 
@@ -60,14 +55,14 @@ impl ModelPricing {
         }
     }
 
-    /// Mark reasoning tokens as billed separately at `rate` (USD / 1M).
+    /// 将推理子计数改按 `rate` 计费，单位为美元／百万 token。
     #[must_use]
     pub const fn with_reasoning(mut self, rate: f64) -> Self {
         self.reasoning_per_1m = Some(rate);
         self
     }
 
-    /// Mark cached input tokens as billed separately at `rate` (USD / 1M).
+    /// 将缓存子计数改按 `rate` 计费，单位为美元／百万 token。
     #[must_use]
     pub const fn with_cache(mut self, rate: f64) -> Self {
         self.cache_read_per_1m = Some(rate);
@@ -190,18 +185,33 @@ impl PriceTable {
         let pricing = self.entries.get(model.as_str()).copied()?;
 
         let per_million = 1_000_000_f64;
-        let mut cost = (usage.input_tokens as f64 / per_million) * pricing.input_per_1m
-            + (usage.output_tokens as f64 / per_million) * pricing.output_per_1m;
 
-        // Reasoning is billed separately only when a distinct rate is declared;
-        // otherwise it is assumed already counted in output (see ModelPricing).
-        if let (Some(tokens), Some(rate)) = (usage.reasoning_tokens, pricing.reasoning_per_1m) {
-            cost += (tokens as f64 / per_million) * rate;
-        }
-        // Likewise, cached input is billed separately only with a distinct rate.
-        if let (Some(tokens), Some(rate)) = (usage.cached_input_tokens, pricing.cache_read_per_1m) {
-            cost += (tokens as f64 / per_million) * rate;
-        }
+        // 有推理费率时，推理子计数使用该费率，其余输出仍使用普通费率。
+        let (reasoning_tokens, reasoning_cost) =
+            match (usage.reasoning_tokens, pricing.reasoning_per_1m) {
+                (Some(tokens), Some(rate)) => {
+                    let tokens = tokens.min(usage.output_tokens);
+                    (tokens, (tokens as f64 / per_million) * rate)
+                }
+                _ => (0, 0.0),
+            };
+        let plain_output = usage.output_tokens - reasoning_tokens;
+
+        // 有缓存费率时，缓存子计数使用该费率，其余输入仍使用普通费率。
+        let (cached_tokens, cached_cost) =
+            match (usage.cached_input_tokens, pricing.cache_read_per_1m) {
+                (Some(tokens), Some(rate)) => {
+                    let tokens = tokens.min(usage.input_tokens);
+                    (tokens, (tokens as f64 / per_million) * rate)
+                }
+                _ => (0, 0.0),
+            };
+        let plain_input = usage.input_tokens - cached_tokens;
+
+        let cost = (plain_input as f64 / per_million) * pricing.input_per_1m
+            + (plain_output as f64 / per_million) * pricing.output_per_1m
+            + reasoning_cost
+            + cached_cost;
 
         Some(cost)
     }
@@ -232,9 +242,7 @@ mod tests {
         }
     }
 
-    /// Compare an estimate to an expected value within one tenth of a cent —
-    /// USD prices are decimal but float arithmetic is not, so exact `==` would
-    /// be flaky. `None` stays exactly `None`.
+    /// 使用 1e-9 美元的误差容限，覆盖小额费用的浮点运算误差。
     fn assert_cost(actual: Option<f64>, expected: f64) {
         let actual = actual.expect("expected a priced estimate, got None");
         assert!(
@@ -296,8 +304,8 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_billed_separately_when_rate_set() {
-        // Declaring a reasoning rate asserts reasoning tokens are NOT in output.
+    fn reasoning_rate_replaces_output_rate_when_set() {
+        // 推理费率替换子计数对应的普通输出费率。
         let pricing = ModelPricing::per_1m(1.0, 2.0).with_reasoning(3.0);
         let table = PriceTable::new().with_overrides([("r".to_string(), pricing)]);
         let usage = Usage {
@@ -306,8 +314,8 @@ mod tests {
             reasoning_tokens: Some(1_000_000),
             cached_input_tokens: None,
         };
-        // 1*1 + 1*2 + 1*3 = 6
-        assert_cost(table.estimate(&model("r"), &usage), 6.0);
+        // 1*1 + 1*3 = 4，全部输出均为推理 token。
+        assert_cost(table.estimate(&model("r"), &usage), 4.0);
     }
 
     #[test]
@@ -326,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_billed_separately_when_rate_set() {
+    fn cache_rate_replaces_input_rate_when_set() {
         let pricing = ModelPricing::per_1m(1.0, 2.0).with_cache(0.1);
         let table = PriceTable::new().with_overrides([("c".to_string(), pricing)]);
         let usage = Usage {
@@ -335,8 +343,130 @@ mod tests {
             reasoning_tokens: None,
             cached_input_tokens: Some(1_000_000),
         };
-        // 1*1 + 1*0.1 = 1.1
-        assert_cost(table.estimate(&model("c"), &usage), 1.1);
+        // 全部输入均为缓存 token，费用为 1*0.1 = 0.1。
+        assert_cost(table.estimate(&model("c"), &usage), 0.1);
+    }
+
+    #[test]
+    fn cached_input_is_subset_of_input_not_additional() {
+        // 输入总量已经包含缓存部分：100 个普通输入与 900 个缓存输入，
+        // 费用为 0.0001 + 0.00009 = 0.00019，重复收费则为 0.00109。
+        let pricing = ModelPricing::per_1m(1.0, 0.0).with_cache(0.1);
+        let table = PriceTable::new().with_overrides([("c".to_string(), pricing)]);
+        let usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cached_input_tokens: Some(900),
+        };
+        assert_cost(table.estimate(&model("c"), &usage), 0.00019);
+    }
+
+    #[test]
+    fn cached_share_larger_than_input_is_clamped_to_input() {
+        // 缓存子计数大于输入总量时，钳制到输入总量。
+        let pricing = ModelPricing::per_1m(1.0, 0.0).with_cache(0.1);
+        let table = PriceTable::new().with_overrides([("c".to_string(), pricing)]);
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cached_input_tokens: Some(500),
+        };
+        // 全部 100 个输入 token 按缓存费率计费。
+        assert_cost(table.estimate(&model("c"), &usage), 0.000_01);
+    }
+
+    #[test]
+    fn reasoning_tokens_are_subset_of_output_not_additional() {
+        // 600 个普通输出与 400 个推理输出分别计费，
+        // 费用为 0.0012 + 0.0032 = 0.0044。
+        let pricing = ModelPricing::per_1m(0.0, 2.0).with_reasoning(8.0);
+        let table = PriceTable::new().with_overrides([("r".to_string(), pricing)]);
+        let usage = Usage {
+            input_tokens: 0,
+            output_tokens: 1_000,
+            reasoning_tokens: Some(400),
+            cached_input_tokens: None,
+        };
+        assert_cost(table.estimate(&model("r"), &usage), 0.0044);
+    }
+
+    #[test]
+    fn reasoning_share_larger_than_output_is_clamped_to_output() {
+        let pricing = ModelPricing::per_1m(0.0, 2.0).with_reasoning(8.0);
+        let table = PriceTable::new().with_overrides([("r".to_string(), pricing)]);
+        let usage = Usage {
+            output_tokens: 100,
+            reasoning_tokens: Some(u64::MAX),
+            ..Default::default()
+        };
+        assert_cost(table.estimate(&model("r"), &usage), 0.0008);
+    }
+
+    #[test]
+    fn zero_parent_counts_clamp_nonzero_subsets_to_zero() {
+        let pricing = ModelPricing::per_1m(1.0, 2.0)
+            .with_cache(0.1)
+            .with_reasoning(8.0);
+        let table = PriceTable::new().with_overrides([("m".to_string(), pricing)]);
+        let usage = Usage {
+            cached_input_tokens: Some(u64::MAX),
+            reasoning_tokens: Some(u64::MAX),
+            ..Default::default()
+        };
+        assert_cost(table.estimate(&model("m"), &usage), 0.0);
+    }
+
+    #[test]
+    fn subset_rates_require_both_a_count_and_a_rate() {
+        let plain = ModelPricing::per_1m(1.0, 2.0);
+        let subsets = plain.with_cache(0.1).with_reasoning(8.0);
+        let counts = Usage {
+            input_tokens: 1_000,
+            output_tokens: 1_000,
+            cached_input_tokens: Some(900),
+            reasoning_tokens: Some(400),
+        };
+        // 不给费率、不报告子计数、报告零子计数，都应保持普通计费。
+        for (pricing, usage) in [
+            (plain, counts),
+            (subsets, usage(1_000, 1_000)),
+            (
+                subsets,
+                Usage {
+                    cached_input_tokens: Some(0),
+                    reasoning_tokens: Some(0),
+                    ..counts
+                },
+            ),
+            (
+                plain,
+                Usage {
+                    cached_input_tokens: Some(u64::MAX),
+                    reasoning_tokens: Some(u64::MAX),
+                    ..counts
+                },
+            ),
+        ] {
+            let table = PriceTable::new().with_overrides([("m".to_string(), pricing)]);
+            assert_cost(table.estimate(&model("m"), &usage), 0.003);
+        }
+    }
+
+    #[test]
+    fn zero_subset_rates_do_not_charge_those_tokens() {
+        let pricing = ModelPricing::per_1m(1.0, 2.0)
+            .with_cache(0.0)
+            .with_reasoning(0.0);
+        let table = PriceTable::new().with_overrides([("m".to_string(), pricing)]);
+        let usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 1_000,
+            cached_input_tokens: Some(900),
+            reasoning_tokens: Some(400),
+        };
+        assert_cost(table.estimate(&model("m"), &usage), 0.0013);
     }
 
     #[test]
