@@ -22,13 +22,18 @@ jobs:
     steps:
       # actions/checkout v6.0.2 (resolved from the official repository).
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          # Full history so the PR's own commits (base..head) can be scanned.
+          fetch-depth: 0
 
       - name: Test the public boundary gate
         run: bash .github/scripts/test-public-boundary.sh
 
-      - name: Check tracked files and pull request text
+      - name: Check tracked files, pull request text and commits
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 .github/scripts/public-boundary.py

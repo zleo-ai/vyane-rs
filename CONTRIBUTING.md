@@ -123,8 +123,9 @@ Test placement:
   commit messages and files must not carry private tracker IDs, host paths,
   device or account names, or agent hand-off notes. The `Public boundary`
   workflow runs `.github/scripts/public-boundary.py` on every push and on
-  every PR title or body edit, docs-only changes included; a branch name
-  that trips it is only a warning.
+  every PR title or body edit, docs-only changes included. It checks tracked
+  files, the PR title and body, and the message and emails of every commit
+  in the PR; a branch name that trips it is only a warning.
 
 ## Independent review (three tiers)
 
