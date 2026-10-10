@@ -26,3 +26,5 @@ stay unconfused. See `README.md` and `docs/ARCHITECTURE.md`.
   reviewer.
 - Do not describe private, unpublished source as a "verifiable" step for
   public readers.
+- Do not copy private device facts or model-effort defaults into this file
+  or `CLAUDE.md`; `CLAUDE.md` only imports this file.
