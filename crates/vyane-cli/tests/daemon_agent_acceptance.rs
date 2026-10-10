@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,20 @@ const CLEANUP_RUN: &str = "0197f524-7a00-7000-8000-000000000109";
 
 fn vyane() -> Command {
     Command::new(VYANE_BIN)
+}
+
+/// See `require_live_command_admission` in the harness command tests. A busy
+/// host fails this check instead of recording a pass for a sandbox that never
+/// started. CI hosts under the ceiling run the resident sandbox for real.
+fn require_live_command_admission() {
+    if let Err(
+        error @ vyane_harness::native::NativeCommandHostError::ProcessCeilingExceeded { .. },
+    ) = vyane_harness::native::command_process_ceiling()
+    {
+        panic!(
+            "host thread count exceeds the command admission limit; this sandbox admission test is unavailable and was not treated as passing: {error}"
+        );
+    }
 }
 
 fn http_client() -> reqwest::Client {
@@ -634,7 +649,7 @@ async fn terminal_polling_never_crosses_total_budget() {
         )
         .mount(&server)
         .await;
-    let data_dir = TempDir::new().unwrap();
+    let data_dir = common::private_tempdir();
     fs::write(
         data_dir.path().join("daemon.json"),
         serde_json::to_vec(&json!({"addr": server.address().to_string()})).unwrap(),
@@ -719,9 +734,9 @@ fn regular_files_below(root: &Path) -> Vec<PathBuf> {
 
 #[tokio::test]
 async fn process_agent_success_is_idempotent_and_publishes_exact_output() {
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let invocation = bin_dir.path().join("invocations");
     write_claude(
         &bin_dir,
@@ -784,9 +799,9 @@ async fn native_agent_submit_uses_the_shared_resident_lane() {
         .expect(1)
         .mount(&server)
         .await;
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_config(&config_dir, &server.uri());
     let workdir = data_dir.path().join("native-workdir");
     fs::create_dir(&workdir).unwrap();
@@ -888,9 +903,9 @@ async fn native_agent_submit_fails_over_and_exact_retry_rejects_chain_drift() {
         .mount(&secondary)
         .await;
 
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_failover_config(&config_dir, &primary.uri(), &secondary.uri());
     let workdir = data_dir.path().join("native-failover-workdir");
     fs::create_dir(&workdir).unwrap();
@@ -924,9 +939,9 @@ async fn native_agent_submit_fails_over_and_exact_retry_rejects_chain_drift() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_native_ceiling_rejects_an_optional_axis_before_the_model() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_config_with_read_only_ceiling(&config_dir, &server.uri());
     let workdir = data_dir.path().join("native-ceiling-workdir");
     fs::create_dir(&workdir).unwrap();
@@ -985,9 +1000,9 @@ async fn native_write_permission_reaches_the_real_resident_tool_lane() {
         .expect(2)
         .mount(&server)
         .await;
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_config(&config_dir, &server.uri());
     let workdir = data_dir.path().join("native-write-workdir");
     fs::create_dir(&workdir).unwrap();
@@ -1066,9 +1081,9 @@ async fn configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay(
         .expect(1)
         .mount(&server)
         .await;
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_config_with_write_approval(&config_dir, &server.uri());
     let workdir = data_dir.path().join("native-approval-workdir");
     fs::create_dir(&workdir).unwrap();
@@ -1089,6 +1104,7 @@ async fn configured_tool_ask_stops_the_resident_lane_before_the_write_or_replay(
 // earlier acceptance runtimes in the same process have torn down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_command_permission_reaches_the_real_resident_sandbox() {
+    require_live_command_admission();
     let server = MockServer::start().await;
     let response_index = Arc::new(AtomicUsize::new(0));
     let response_index_for_mock = Arc::clone(&response_index);
@@ -1130,9 +1146,9 @@ async fn native_command_permission_reaches_the_real_resident_sandbox() {
         .expect(2)
         .mount(&server)
         .await;
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_config(&config_dir, &server.uri());
     let workdir = data_dir.path().join("native-command-workdir");
     fs::create_dir(&workdir).unwrap();
@@ -1180,6 +1196,7 @@ async fn native_command_permission_reaches_the_real_resident_sandbox() {
 // earlier acceptance runtimes in the same process have torn down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_writable_command_root_reaches_the_real_resident_sandbox() {
+    require_live_command_admission();
     let server = MockServer::start().await;
     let response_index = Arc::new(AtomicUsize::new(0));
     let response_index_for_mock = Arc::clone(&response_index);
@@ -1224,9 +1241,9 @@ async fn native_writable_command_root_reaches_the_real_resident_sandbox() {
         .expect(2)
         .mount(&server)
         .await;
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_config(&config_dir, &server.uri());
     let workdir = data_dir.path().join("native-writable-command-workdir");
     fs::create_dir_all(workdir.join("src")).unwrap();
@@ -1345,9 +1362,9 @@ async fn native_web_search_uses_the_separate_frozen_responses_target() {
         .mount(&search_server)
         .await;
 
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_search_config(&config_dir, &main_server.uri(), &search_server.uri());
     let workdir = data_dir.path().join("native-search-workdir");
     fs::create_dir(&workdir).unwrap();
@@ -1415,9 +1432,9 @@ async fn mixed_process_and_native_lanes_run_concurrently_in_one_daemon() {
         .expect(1)
         .mount(&server)
         .await;
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     write_claude(
         &bin_dir,
         "printf '%s\\n' '{\"result\":\"process mixed answer\"}'",
@@ -1464,9 +1481,9 @@ async fn native_agent_cancel_uses_the_exact_in_process_controller() {
         )
         .mount(&server)
         .await;
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_config(&config_dir, &server.uri());
     let workdir = data_dir.path().join("native-cancel-workdir");
     fs::create_dir(&workdir).unwrap();
@@ -1490,10 +1507,10 @@ async fn native_agent_cancel_uses_the_exact_in_process_controller() {
 
 #[tokio::test]
 async fn read_only_explicit_workdir_is_the_fake_harness_cwd() {
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let observed_cwd = bin_dir.path().join("observed-cwd");
     write_claude(
         &bin_dir,
@@ -1531,9 +1548,9 @@ async fn read_only_explicit_workdir_is_the_fake_harness_cwd() {
 
 #[tokio::test]
 async fn exit_zero_without_terminal_result_fails_without_completion() {
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     write_claude(
         &bin_dir,
         "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[]}}'",
@@ -1561,9 +1578,9 @@ async fn exit_zero_without_terminal_result_fails_without_completion() {
 
 #[tokio::test]
 async fn cancel_stops_the_exact_process_group_and_settles_cancelled() {
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let pid_file = bin_dir.path().join("pids");
     write_claude(
         &bin_dir,
@@ -1618,9 +1635,9 @@ async fn cancel_stops_the_exact_process_group_and_settles_cancelled() {
 
 #[tokio::test]
 async fn daemon_stop_leaves_no_orphan_from_a_term_ignoring_process_group() {
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let pid_file = bin_dir.path().join("stop-pids");
     write_claude(
         &bin_dir,
@@ -1657,9 +1674,9 @@ async fn daemon_stop_leaves_no_orphan_from_a_term_ignoring_process_group() {
 
 #[tokio::test]
 async fn restart_recovers_exact_controller_without_replay() {
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let invocation = bin_dir.path().join("invocations");
     write_claude(
         &bin_dir,
@@ -1712,9 +1729,9 @@ async fn restart_settles_expired_native_controller_without_replaying_private_inp
         .expect(1)
         .mount(&server)
         .await;
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_config(&config_dir, &server.uri());
     let workdir = data_dir.path().join("native-restart-workdir");
     fs::create_dir(&workdir).unwrap();
@@ -1765,9 +1782,9 @@ async fn graceful_stop_cancels_active_native_wire_and_restart_settles_without_re
         .expect(1)
         .mount(&server)
         .await;
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_native_config(&config_dir, &server.uri());
     let workdir = data_dir.path().join("native-graceful-stop-workdir");
     fs::create_dir(&workdir).unwrap();
@@ -1818,9 +1835,9 @@ async fn graceful_stop_cancels_active_native_wire_and_restart_settles_without_re
 
 #[tokio::test]
 async fn restart_cleans_terminal_controller_left_after_database_commit() {
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let started = bin_dir.path().join("cleanup-started");
     write_claude(
         &bin_dir,
@@ -1879,9 +1896,9 @@ while :; do /bin/sleep 1; done",
 
 #[tokio::test]
 async fn missing_target_binary_settles_dispatch_failed() {
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let binary = write_claude(&bin_dir, "exit 0");
     let config = write_config(&config_dir);
     let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());
@@ -1903,9 +1920,9 @@ async fn missing_target_binary_settles_dispatch_failed() {
 
 #[tokio::test]
 async fn submit_rejects_caller_owned_identity_fields() {
-    let config_dir = TempDir::new().unwrap();
-    let data_dir = TempDir::new().unwrap();
-    let bin_dir = TempDir::new().unwrap();
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     write_claude(&bin_dir, "printf '%s\\n' '{\"result\":\"unused\"}'");
     let config = write_config(&config_dir);
     let mut daemon = DaemonGuard::start(data_dir.path(), &config, bin_dir.path());

@@ -539,8 +539,10 @@ where F: FnMut(StreamDispatchEvent) + Send;
   own the child process group and must honour the forwarded token plus
   `HarnessJob.timeout`; the kernel awaits their cleanup instead of dropping the
   process-owning future.
-- Record assembly (digest, attempt shape, status mapping, best-effort ledger
-  append) is kernel-owned and front-ends must not duplicate it.
+- Record assembly (digest, attempt shape, status mapping, ledger append) is
+  kernel-owned and front-ends must not duplicate it. A ledger failure after
+  the stream finishes is reported on `DispatchOutcome.persistence` and does
+  not change the run status.
 
 The additive `prepare` → `dispatch_stream_prepared` seam is for callers that
 own both probe and fallback. An unsupported prepared probe moves its one-shot
@@ -757,9 +759,11 @@ actual execution.
 This is a strong single-host `FsSessionStore` fence, not a distributed lease:
 there is no durable generation/token, TTL renewal, heartbeat or stale-holder
 recovery protocol for remote/custom stores. Session persistence after an
-already-completed model call also remains best-effort, so a commit failure is
-warned and returned as a successful run rather than pretending the external
-side effect did not happen. Regular dispatch may start fresh from `Absent`, but
+already-completed model call does not rewrite that call into a failure: the
+run status stays the model outcome, and `DispatchOutcome.persistence` reports
+whether the ledger append and session update landed. A failed step means
+history or the next transcript may be missing, and callers must not repeat
+the call solely because of it. Regular dispatch may start fresh from `Absent`, but
 still rejects `LegacyUnbound` or `Bound` native state before `make` whenever the
 admitted chain contains a harness. Streaming dispatch does not acquire a lease
 or load a snapshot; it rejects any session before session-store load,

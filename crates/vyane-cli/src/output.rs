@@ -1,6 +1,7 @@
 use serde::Serialize;
 use vyane_core::{ErrorKind, RunRecord, RunStatus, Sandbox, SessionRecord};
 use vyane_harness::native::{NativeTurnStop, ToolInvocationStatus};
+use vyane_kernel::{DispatchPersistence, PersistenceStep};
 use vyane_router::RouteDecision;
 use vyane_service::{NativePermissionAxisStatus, PermissionCheck, SessionView};
 use vyane_task::TaskRecord;
@@ -13,6 +14,7 @@ use crate::task::store::{StatusFile, TaskListRow, TaskState};
 pub struct RunJson {
     pub record: RunRecord,
     pub output: Option<String>,
+    pub persistence: DispatchPersistence,
 }
 
 #[derive(Debug, Serialize)]
@@ -21,6 +23,30 @@ pub struct BroadcastJson {
     pub record: Option<RunRecord>,
     pub output: Option<String>,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistence: Option<DispatchPersistence>,
+}
+
+/// Human warning when a finished run did not fully persist.
+///
+/// The model call already completed. Repeating it would run that side effect
+/// again; the missing piece is history or the next transcript.
+pub fn format_dispatch_persistence_warning_line(persistence: &DispatchPersistence) -> String {
+    let mut failed = Vec::new();
+    if let PersistenceStep::Failed { kind } = persistence.ledger {
+        failed.push(format!("ledger ({})", kind.as_str()));
+    }
+    if let PersistenceStep::Failed { kind } = persistence.session {
+        failed.push(format!("session ({})", kind.as_str()));
+    }
+    let steps = if failed.is_empty() {
+        "post-run".to_string()
+    } else {
+        failed.join(" and ")
+    };
+    format!(
+        "warning: {steps} persistence failed after the run finished; the model call already completed and must not be repeated"
+    )
 }
 
 #[derive(Debug)]

@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::fs;
 use std::sync::{Arc, Barrier};
 
@@ -65,7 +66,7 @@ fn lease(owner: &str, expires_offset: i64) -> Lease {
 }
 
 fn test_store() -> (TempDir, SqliteTaskStore) {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
     (directory, store)
 }
@@ -1120,7 +1121,7 @@ fn task_database_and_wal_never_receive_prompt_or_secret_canaries() {
 
 #[test]
 fn newer_user_version_is_rejected_without_downgrade() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("future.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection.pragma_update(None, "user_version", 3).unwrap();
@@ -1144,7 +1145,7 @@ fn newer_user_version_is_rejected_without_downgrade() {
 
 #[test]
 fn v1_migration_preserves_rich_rows_events_and_autoincrement_high_water() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("v1-rich.sqlite3");
     create_v1_database(&path);
     let connection = Connection::open(&path).unwrap();
@@ -1253,7 +1254,7 @@ fn v1_migration_preserves_rich_rows_events_and_autoincrement_high_water() {
 
 #[test]
 fn failed_v1_migration_rolls_back_version_objects_and_rows() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("v1-rollback.sqlite3");
     create_v1_database(&path);
     let connection = Connection::open(&path).unwrap();
@@ -1336,7 +1337,7 @@ fn failed_v1_migration_rolls_back_version_objects_and_rows() {
 
 #[test]
 fn concurrent_v1_open_migrates_once_and_both_openers_observe_v2() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("v1-concurrent.sqlite3");
     create_v1_database(&path);
     let barrier = Arc::new(Barrier::new(3));
@@ -1364,7 +1365,7 @@ fn concurrent_v1_open_migrates_once_and_both_openers_observe_v2() {
 
 #[test]
 fn unversioned_database_with_user_objects_fails_closed() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("unversioned-objects.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection
@@ -1724,7 +1725,7 @@ fn non_unique_insert_constraints_are_not_misreported_as_duplicates() {
 
 #[test]
 fn matching_user_version_with_missing_schema_is_rejected_at_open() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("missing-schema.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection.pragma_update(None, "user_version", 1).unwrap();
@@ -1739,7 +1740,7 @@ fn matching_user_version_with_missing_schema_is_rejected_at_open() {
 
 #[test]
 fn matching_user_version_rejects_views_and_damaged_integrity_contracts() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let views_path = directory.path().join("views.sqlite3");
     let connection = Connection::open(&views_path).unwrap();
     connection
@@ -1828,7 +1829,7 @@ fn matching_user_version_rejects_views_and_damaged_integrity_contracts() {
 
 #[test]
 fn current_v2_reopen_rejects_a_replaced_owner_event_index() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("damaged-v2.sqlite3");
     let store = SqliteTaskStore::open(&path).unwrap();
     drop(store);
@@ -1863,7 +1864,7 @@ fn corrupt_storage_types_and_lifecycle_invariants_surface_as_corrupt_data() {
             "UPDATE tasks SET state = 'succeeded' WHERE id = 'corrupt'",
         ),
     ] {
-        let directory = TempDir::new().unwrap();
+        let directory = common::private_tempdir();
         let path = directory.path().join(format!("{name}.sqlite3"));
         let store = SqliteTaskStore::open(&path).unwrap();
         store.create(OWNER, new_task("corrupt", 0)).unwrap();
@@ -2061,4 +2062,30 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = common::private_tempdir();
+    let group_writable = directory.path().join("group-writable");
+    fs::create_dir(&group_writable).unwrap();
+    // 0775 is the mode a 0777 directory creation receives under umask 002.
+    fs::set_permissions(&group_writable, fs::Permissions::from_mode(0o775)).unwrap();
+    match SqliteTaskStore::open(group_writable.join("tasks.sqlite3")) {
+        Err(TaskStoreError::InvalidInput(message)) => {
+            assert!(message.contains("group- or world-writable"), "{message}");
+        }
+        other => panic!("group-writable parent must still be rejected, got {other:?}"),
+    }
+
+    let fixture = common::private_tempdir();
+    assert_eq!(
+        fs::metadata(fixture.path()).unwrap().permissions().mode() & 0o022,
+        0,
+        "fixture parent must not be group- or world-writable"
+    );
+    SqliteTaskStore::open(fixture.path().join("tasks.sqlite3")).unwrap();
 }

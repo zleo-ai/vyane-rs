@@ -143,7 +143,6 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use chrono::Utc;
-    use tempfile::TempDir;
     use vyane_agent::{ExecutionBackend, NewAgentRun, NewWorker, RunMode, SqliteAgentStore};
 
     use super::*;
@@ -181,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_after_append_retries_the_same_stable_identity() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let concrete =
             Arc::new(SqliteAgentStore::open(directory.path().join("agent.sqlite3")).unwrap());
         add_root(concrete.as_ref(), "owner");

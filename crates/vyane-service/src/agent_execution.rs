@@ -1247,7 +1247,7 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = crate::test_support::private_tempdir();
             let clock = Arc::new(FixedClock(Mutex::new(Utc::now())));
             let store = Arc::new(
                 SqliteAgentStore::open_with_clock(temp.path().join("agent.db"), clock.clone())

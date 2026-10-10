@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,7 +41,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = common::private_tempdir();
         let message_concrete =
             Arc::new(SqliteMessageStore::open(directory.path().join("messages.sqlite3")).unwrap());
         let message_store: Arc<dyn MessageStore> = message_concrete.clone();
@@ -586,7 +587,7 @@ async fn lane_and_projector_failures_do_not_stop_unrelated_loops() {
 
 #[tokio::test(start_paused = true)]
 async fn maintenance_runs_without_delivery_lanes() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = common::private_tempdir();
     let clock = Arc::new(TestMessageClock::new());
     let message_concrete = Arc::new(
         SqliteMessageStore::open_with_clock(

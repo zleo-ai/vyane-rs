@@ -398,23 +398,19 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
         }
         None => runtime.dispatcher.dispatch(&task, chain, cancel).await?,
     };
-    let record = outcome.record;
+    let status = outcome.record.status;
+    let persistence = outcome.persistence;
     let output = outcome.output;
-    let success = record.status == RunStatus::Success;
 
     if json {
-        print_run_json(record, output)?;
+        print_run_json(outcome.record, output, persistence)?;
     } else if let Some(text) = output.as_deref() {
         println!("{text}");
-    } else if let Some(error) = &record.error {
+    } else if let Some(error) = &outcome.record.error {
         eprintln!("{}", crate::output::format_run_failure_line(error));
     }
 
-    Ok(if success {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    })
+    Ok(exit_for_completed_dispatch(status, &persistence))
 }
 
 /// The chain qualifies for `--stream` when it is one direct-HTTP or CLI-harness
@@ -499,21 +495,19 @@ async fn run_dispatch_streaming(
                     println!();
                 }
             }
-            let record = outcome.record;
+            let status = outcome.record.status;
+            let persistence = outcome.persistence;
             let output = outcome.output;
-            let success = record.status == RunStatus::Success;
 
             if json {
-                print_run_json(record, output)?;
-            } else if !success && let Some(error) = &record.error {
+                print_run_json(outcome.record, output, persistence)?;
+            } else if status != RunStatus::Success
+                && let Some(error) = &outcome.record.error
+            {
                 eprintln!("{}", crate::output::format_run_failure_line(error));
             }
 
-            Ok(Some(if success {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }))
+            Ok(Some(exit_for_completed_dispatch(status, &persistence)))
         }
     }
 }
@@ -883,6 +877,7 @@ async fn worker_body(
         .await?;
     let record = outcome.record;
     let output = outcome.output;
+    let persistence = outcome.persistence;
 
     // Persist the answer (if any) beside the status, then finalize status.
     if let Some(text) = output.as_deref()
@@ -916,11 +911,10 @@ async fn worker_body(
         paths.write_status(&final_status)?;
     }
 
-    Ok(if record.status == RunStatus::Success {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    })
+    // Durable settlement already followed `record.status`. Exit 3 tells a
+    // waiter that persistence is incomplete without classifying the model
+    // call as failed (exit 1), which is what a retry of this worker would do.
+    Ok(exit_for_completed_dispatch(record.status, &persistence))
 }
 
 fn detached_harness_reporter(paths: TaskPaths) -> HarnessLifecycleReporter {
@@ -2428,19 +2422,32 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
 
     let mut rows = Vec::with_capacity(results.len());
     let mut json_rows = Vec::with_capacity(results.len());
-    let mut all_success = true;
+    let mut run_failed = false;
+    let mut persistence_incomplete = false;
 
     for (target, result) in targets.into_iter().zip(results) {
         match result {
             Ok(outcome) => {
+                if outcome.record.status != RunStatus::Success {
+                    run_failed = true;
+                }
+                if !outcome.persistence.is_complete() {
+                    persistence_incomplete = true;
+                    eprintln!(
+                        "{}",
+                        crate::output::format_dispatch_persistence_warning_line(
+                            &outcome.persistence
+                        )
+                    );
+                }
                 let record = outcome.record;
                 let output = outcome.output;
-                all_success &= record.status == RunStatus::Success;
                 json_rows.push(BroadcastJson {
                     target: target.clone(),
                     record: Some(record.clone()),
                     output: output.clone(),
                     error: None,
+                    persistence: Some(outcome.persistence),
                 });
                 rows.push(BroadcastRow {
                     target,
@@ -2450,13 +2457,14 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
                 });
             }
             Err(error) => {
-                all_success = false;
+                run_failed = true;
                 let message = error.to_string();
                 json_rows.push(BroadcastJson {
                     target: target.clone(),
                     record: None,
                     output: None,
                     error: Some(message.clone()),
+                    persistence: None,
                 });
                 rows.push(BroadcastRow {
                     target,
@@ -2474,10 +2482,15 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
         crate::output::print_broadcast_table(&rows);
     }
 
-    Ok(if all_success {
-        ExitCode::SUCCESS
-    } else {
+    // Exit 1 means at least one model call failed. Exit 3 means every call
+    // finished and at least one post-run write did not. Callers must not
+    // treat 3 as "run the task again".
+    Ok(if run_failed {
         ExitCode::from(1)
+    } else if persistence_incomplete {
+        ExitCode::from(3)
+    } else {
+        ExitCode::SUCCESS
     })
 }
 
@@ -3213,12 +3226,51 @@ fn cancellation_token() -> CancellationToken {
     token
 }
 
-fn print_run_json(record: vyane_core::RunRecord, output: Option<String>) -> Result<()> {
+fn print_run_json(
+    record: vyane_core::RunRecord,
+    output: Option<String>,
+    persistence: vyane_kernel::DispatchPersistence,
+) -> Result<()> {
     println!(
         "{}",
-        serde_json::to_string_pretty(&RunJson { record, output })?
+        serde_json::to_string_pretty(&RunJson {
+            record,
+            output,
+            persistence
+        })?
     );
     Ok(())
+}
+
+/// Process status for a finished dispatch.
+///
+/// Exit 1 is a failed model call. Exit 3 is a finished call whose ledger or
+/// session write failed. Those are different: retrying exit 3 would repeat a
+/// side effect that already happened. The stderr warning says so as well.
+fn exit_for_completed_dispatch(
+    status: RunStatus,
+    persistence: &vyane_kernel::DispatchPersistence,
+) -> ExitCode {
+    if !persistence.is_complete() {
+        eprintln!(
+            "{}",
+            crate::output::format_dispatch_persistence_warning_line(persistence)
+        );
+    }
+    ExitCode::from(completed_dispatch_status_code(status, persistence))
+}
+
+fn completed_dispatch_status_code(
+    status: RunStatus,
+    persistence: &vyane_kernel::DispatchPersistence,
+) -> u8 {
+    if status != RunStatus::Success {
+        1
+    } else if !persistence.is_complete() {
+        3
+    } else {
+        0
+    }
 }
 
 fn print_workflow_error(error: &WorkflowError) {
@@ -3433,9 +3485,41 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn completed_dispatch_exit_distinguishes_persistence_from_run_failure() {
+        use vyane_core::ErrorKind;
+        use vyane_kernel::{DispatchPersistence, PersistenceStep};
+
+        let failed_ledger = DispatchPersistence {
+            ledger: PersistenceStep::Failed {
+                kind: ErrorKind::Io,
+            },
+            session: PersistenceStep::NotRequested,
+        };
+        assert_eq!(
+            completed_dispatch_status_code(RunStatus::Success, &failed_ledger),
+            3
+        );
+        assert_eq!(
+            completed_dispatch_status_code(RunStatus::Error, &failed_ledger),
+            1
+        );
+        let saved = DispatchPersistence {
+            ledger: PersistenceStep::Saved,
+            session: PersistenceStep::Saved,
+        };
+        assert_eq!(
+            completed_dispatch_status_code(RunStatus::Success, &saved),
+            0
+        );
+        let warning = crate::output::format_dispatch_persistence_warning_line(&failed_ledger);
+        assert!(warning.contains("ledger (io)"), "{warning}");
+        assert!(warning.contains("must not be repeated"), "{warning}");
+    }
+
     #[tokio::test]
     async fn session_reset_cli_is_exact_revision_only_and_never_retries_conflict() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = session_test_service(&directory);
         let now = chrono::Utc::now();
         service
@@ -3512,7 +3596,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_control_initialization_failure_uses_bounded_exit_contract() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let blocked_root = directory.path().join("not-a-directory");
         std::fs::write(&blocked_root, "block directory creation").unwrap();
         let code = run_session_with_paths(
@@ -3545,7 +3629,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_rejects_non_loopback_before_loading_config() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let missing_config = directory.path().join("missing-config.toml");
         let code = run_serve(
             Some(missing_config),
@@ -3623,7 +3707,7 @@ mod tests {
 
     #[tokio::test]
     async fn detached_scope_rejects_same_origin_workflows_and_foreign_owners() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
         let created_at = chrono::Utc::now();
 
@@ -3693,7 +3777,7 @@ mod tests {
 
     #[test]
     fn old_queued_task_is_not_interrupted_by_a_read() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
         let created = create_detached(
             &store,
@@ -3717,7 +3801,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn temporarily_unverifiable_controller_is_not_interrupted_by_a_read() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
         let created = create_detached(&store, "unverifiable-worker", chrono::Utc::now());
         let pid = std::process::id() as i32;
@@ -3768,7 +3852,7 @@ mod tests {
 
     #[test]
     fn stopped_matching_harness_is_unlinked_but_a_replacement_stays_pending() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(&directory.path().join("tasks"), "nested-observation");
         paths.ensure_dir().unwrap();
         let old = HarnessControllerFile {
@@ -3810,7 +3894,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn dead_sentinel_never_authorizes_a_live_numeric_pgid() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(&directory.path().join("tasks"), "reused-group");
         paths.ensure_dir().unwrap();
         let grandchild_pid = directory.path().join("released-grandchild.pid");
@@ -3865,7 +3949,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn terminal_race_after_running_snapshot_cleans_stopped_outer_and_nested() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let tasks_root = directory.path().join("tasks");
         let paths = TaskPaths::new(&tasks_root, "terminal-request-race");
         paths.ensure_dir().unwrap();
@@ -3963,7 +4047,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn unverifiable_reread_of_terminal_still_cleans_exact_outer() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(&directory.path().join("tasks"), "terminal-refusal-race");
         paths.ensure_dir().unwrap();
         let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
@@ -4023,7 +4107,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn spawn_failure_settles_only_the_exact_attached_controller() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
         let pid = std::process::id() as i32;
         let pgid = pgid_of(pid).unwrap();
@@ -4086,5 +4170,35 @@ mod tests {
                 .state,
             DurableTaskState::Running
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = crate::test_support::private_tempdir();
+        let group_writable = directory.path().join("group-writable");
+        std::fs::create_dir(&group_writable).unwrap();
+        // 0775 is the mode a 0777 directory creation receives under umask 002.
+        std::fs::set_permissions(&group_writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+        match SqliteTaskStore::open(group_writable.join("tasks.sqlite3")) {
+            Err(TaskStoreError::InvalidInput(message)) => {
+                assert!(message.contains("group- or world-writable"), "{message}");
+            }
+            other => panic!("group-writable parent must still be rejected, got {other:?}"),
+        }
+
+        let fixture = crate::test_support::private_tempdir();
+        assert_eq!(
+            std::fs::metadata(fixture.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o022,
+            0,
+            "fixture parent must not be group- or world-writable"
+        );
+        SqliteTaskStore::open(fixture.path().join("tasks.sqlite3")).unwrap();
     }
 }

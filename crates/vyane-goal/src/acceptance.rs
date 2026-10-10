@@ -709,7 +709,7 @@ mod tests {
     fn successful_command_does_not_leave_background_descendants() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().expect("command tempdir");
+        let directory = crate::test_support::private_tempdir();
         let script = directory.path().join("spawn-background");
         let escaped_marker = directory.path().join("escaped");
         std::fs::write(
@@ -747,7 +747,7 @@ mod tests {
     fn cancellation_stops_command_and_background_descendants() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().expect("command tempdir");
+        let directory = crate::test_support::private_tempdir();
         let script = directory.path().join("cancel-background");
         let started = directory.path().join("started");
         let escaped = directory.path().join("escaped");
@@ -792,7 +792,7 @@ mod tests {
     fn command_spawn_retries_transient_executable_busy() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().expect("command tempdir");
+        let directory = crate::test_support::private_tempdir();
         let script = directory.path().join("busy-script");
         std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write command");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))

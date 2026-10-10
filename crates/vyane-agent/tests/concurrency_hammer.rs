@@ -288,8 +288,19 @@ fn check_stall(shared: &Shared, probes: &[Arc<Probe>]) -> bool {
     false
 }
 
+fn private_tempdir() -> TempDir {
+    let directory = TempDir::new().expect("tempdir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict tempdir permissions");
+    }
+    directory
+}
+
 fn hammer(threads: usize, duration: Duration, stall: Duration) {
-    let directory = TempDir::new().unwrap();
+    let directory = private_tempdir();
     let store = SqliteAgentStore::open(directory.path().join("agent.sqlite3")).unwrap();
     store
         .create_root(

@@ -693,7 +693,7 @@ mod tests {
     }
 
     fn fixture() -> (tempfile::TempDir, AgentInputSpool) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let spool = AgentInputSpool::open(directory.path().join("spool"), "owner-marker").unwrap();
         (directory, spool)
     }
@@ -828,7 +828,7 @@ mod tests {
     fn unsafe_directory_is_never_repaired_or_followed() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let root = directory.path().join("spool");
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).unwrap();

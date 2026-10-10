@@ -764,8 +764,6 @@ pub fn interpret_state(status: &StatusFile, identity: &IdentityProbe<'_>) -> Tas
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-
     fn sample_status(state: TaskState, pid: i32) -> StatusFile {
         let mut s = StatusFile::running("run-1", pid, pid, "test/model (openai_chat)", None);
         s.state = state;
@@ -880,7 +878,7 @@ mod tests {
 
     #[test]
     fn atomic_write_leaves_no_temp_and_is_readable() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(dir.path(), "abc");
         paths.ensure_dir().unwrap();
         let status = sample_status(TaskState::Running, 123);
@@ -901,7 +899,7 @@ mod tests {
 
     #[test]
     fn harness_controller_roundtrips_privately_and_exact_stop_removes_only_itself() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(dir.path(), "nested");
         paths.ensure_dir().unwrap();
         let controller = HarnessControllerFile {
@@ -944,7 +942,7 @@ mod tests {
 
     #[test]
     fn pending_controller_blocks_new_started_and_old_stop_cannot_remove_new() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(dir.path(), "nested-race");
         paths.ensure_dir().unwrap();
         let old = HarnessControllerFile {
@@ -995,7 +993,7 @@ mod tests {
 
     #[test]
     fn harness_controller_lock_contention_is_bounded_and_diagnostic() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(dir.path(), "nested-lock-timeout");
         paths.ensure_dir().unwrap();
 
@@ -1038,7 +1036,7 @@ mod tests {
 
     #[test]
     fn legacy_job_spec_roundtrips() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(dir.path(), "j1");
         paths.ensure_dir().unwrap();
         let job = sample_job("j1");
@@ -1114,7 +1112,7 @@ mod tests {
 
     #[test]
     fn tail_log_returns_last_n_lines() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(dir.path(), "log1");
         paths.ensure_dir().unwrap();
         fs::write(paths.log(), "l1\nl2\nl3\nl4\nl5\n").unwrap();
@@ -1128,7 +1126,7 @@ mod tests {
 
     #[test]
     fn list_tasks_orders_recent_first_and_surfaces_unwritten_scaffold() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let root = dir.path();
 
         // Two runs with distinct start times.
@@ -1160,7 +1158,7 @@ mod tests {
 
     #[test]
     fn list_tasks_applies_orphan_detection() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let root = dir.path();
         let paths = TaskPaths::new(root, "orphan");
         paths.ensure_dir().unwrap();
@@ -1177,7 +1175,7 @@ mod tests {
 
     #[test]
     fn list_tasks_surfaces_job_without_status_as_stale() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let root = dir.path();
 
         // A legacy task dir with job.json but no status.json: an older parent
@@ -1217,7 +1215,7 @@ mod tests {
 
     #[test]
     fn list_tasks_surfaces_new_log_scaffold_without_job_as_stale() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(dir.path(), "stdin-spawn-failed");
         paths.ensure_dir().unwrap();
         fs::write(paths.log(), "handoff never completed\n").unwrap();

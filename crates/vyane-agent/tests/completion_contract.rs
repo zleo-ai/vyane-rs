@@ -114,6 +114,16 @@ fn digest(byte: char) -> String {
     std::iter::repeat_n(byte, 64).collect()
 }
 
+fn private_tempdir() -> TempDir {
+    let directory = tempfile::tempdir().expect("tempdir");
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restrict tempdir permissions");
+    }
+    directory
+}
+
 struct Fixture {
     _directory: TempDir,
     clock: Arc<TestClock>,
@@ -122,7 +132,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let clock = Arc::new(TestClock::new());
         let store =
             SqliteAgentStore::open_with_clock(directory.path().join("agent.sqlite"), clock.clone())
@@ -755,7 +765,7 @@ fn tampered_completion_backend_fails_permit_and_integrity_audit() {
 
 #[test]
 fn recovery_descriptor_read_linearizes_before_ticket_settlement() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_tempdir();
     let clock = Arc::new(ReaderBlockingClock::new());
     let store = Arc::new(
         SqliteAgentStore::open_with_clock(directory.path().join("agent.sqlite"), clock.clone())
@@ -921,7 +931,7 @@ fn concurrent_commit_and_cancel_have_one_terminal_truth() {
 
 #[test]
 fn version_one_database_migrates_atomically_with_existing_truth() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_tempdir();
     let path = directory.path().join("agent.sqlite");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
@@ -977,7 +987,7 @@ fn version_one_database_migrates_atomically_with_existing_truth() {
 
 #[test]
 fn drifted_version_one_schema_is_rejected_without_partial_migration() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_tempdir();
     let path = directory.path().join("agent.sqlite");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection

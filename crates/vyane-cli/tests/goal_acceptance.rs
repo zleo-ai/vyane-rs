@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::path::Path;
 #[cfg(unix)]
 use std::process::Stdio;
@@ -63,7 +64,7 @@ fn create(db: &str, owner: &str, id: &str, title: &str, priority: &str) -> Value
 
 #[test]
 fn continuity_next_is_stable_json_and_read_only() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db_path = directory.path().join("goals.sqlite3");
     let db = db_text(&db_path);
     let store = SqliteGoalStore::open(&db_path).unwrap();
@@ -173,7 +174,7 @@ fn pursuit_fixture(directory: &TempDir) -> (std::path::PathBuf, TempDir) {
         "#,
     )
     .expect("write pursuit config");
-    let bin = TempDir::new().expect("bin tempdir");
+    let bin = common::private_tempdir();
     let claude = bin.path().join("claude");
     #[cfg(target_os = "linux")]
     let script = r#"#!/bin/sh
@@ -229,7 +230,7 @@ exit 1
 
 #[test]
 fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let workdir = directory.path().to_str().unwrap();
     let created = json_output(
@@ -390,7 +391,7 @@ fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
 
 #[test]
 fn create_persists_typed_continuity_policy_without_starting_handoff() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let policy = r#"{"mode":"quota_handoff","primary":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"primary"},"takeover":[{"provider":"backup","protocol":"anthropic_messages","harness":"claude-code","model":"fallback","role":"takeover"}],"reviewer":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"reviewer"},"resume_primary_after_reset":true,"require_review_before_resume":true}"#;
 
@@ -433,7 +434,7 @@ fn create_persists_typed_continuity_policy_without_starting_handoff() {
 
 #[test]
 fn malformed_continuity_policy_fails_before_goal_creation() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let output = vyane()
         .args([
@@ -459,7 +460,7 @@ fn malformed_continuity_policy_fails_before_goal_creation() {
 
 #[test]
 fn continuity_signal_is_typed_json_and_never_dispatches() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db_path = directory.path().join("goals.sqlite3");
     let db = db_text(&db_path);
     let policy = r#"{"mode":"quota_handoff","primary":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"primary"},"takeover":[{"provider":"backup","protocol":"anthropic_messages","harness":"claude-code","model":"fallback","role":"takeover"}],"reviewer":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"reviewer"},"resume_primary_after_reset":true,"require_review_before_resume":true}"#;
@@ -609,7 +610,7 @@ fn continuity_signal_is_typed_json_and_never_dispatches() {
 
 #[test]
 fn continuity_queue_and_decide_are_explicit_json_roundtrip() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db_path = directory.path().join("goals.sqlite3");
     let db = db_text(&db_path);
     let policy = r#"{"mode":"quota_handoff","primary":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"primary"},"takeover":[{"provider":"backup","protocol":"anthropic_messages","harness":"claude-code","model":"fallback","role":"takeover"}],"reviewer":{"provider":"primary","protocol":"openai_responses","harness":"codex-cli","model":"main","role":"reviewer"},"resume_primary_after_reset":true,"require_review_before_resume":true}"#;
@@ -735,7 +736,7 @@ fn continuity_queue_and_decide_are_explicit_json_roundtrip() {
 
 #[test]
 fn continuity_review_queue_requires_persisted_successful_takeover_evidence() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db_path = directory.path().join("goals.sqlite3");
     let db = db_text(&db_path);
     let target = |role: &str| GoalExecutionTarget {
@@ -863,8 +864,8 @@ fn continuity_review_queue_requires_persisted_successful_takeover_evidence() {
 #[cfg(unix)]
 #[test]
 fn continuity_execute_dispatches_once_and_settles_done() {
-    let directory = TempDir::new().expect("temporary directory");
-    let data_dir = TempDir::new().expect("data directory");
+    let directory = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let db_path = directory.path().join("goals.sqlite3");
     let db = db_text(&db_path);
     let (config, bin) = pursuit_fixture(&directory);
@@ -1354,7 +1355,7 @@ fn continuity_execute_dispatches_once_and_settles_done() {
 
 #[test]
 fn done_requires_satisfied_criteria_or_an_explicit_waiver() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let created = json_output(
         &[
@@ -1417,7 +1418,7 @@ fn done_requires_satisfied_criteria_or_an_explicit_waiver() {
 
 #[test]
 fn claim_holds_a_lease_that_blocks_other_workers() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     create(&db, "owner-a", "leased", "Leased", "1");
 
@@ -1488,7 +1489,7 @@ fn claim_holds_a_lease_that_blocks_other_workers() {
 
 #[test]
 fn next_and_list_use_priority_order_and_optional_auto_start() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     create(&db, "owner-a", "normal", "Normal", "2");
     create(&db, "owner-a", "urgent", "Urgent", "0");
@@ -1538,7 +1539,7 @@ fn next_and_list_use_priority_order_and_optional_auto_start() {
 
 #[test]
 fn owner_scope_hides_foreign_goals_and_allows_same_id() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     create(&db, "owner-a", "shared", "Owner A", "2");
     create(&db, "owner-b", "shared", "Owner B", "2");
@@ -1563,7 +1564,7 @@ fn owner_scope_hides_foreign_goals_and_allows_same_id() {
 
 #[test]
 fn malformed_input_and_illegal_transition_have_json_error_and_exit_two() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let malformed = json_output(
         &[
@@ -1599,7 +1600,7 @@ fn malformed_input_and_illegal_transition_have_json_error_and_exit_two() {
 
 #[test]
 fn verify_runs_bounded_commands_and_persists_only_satisfied_criteria() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let created = json_output(
         &[
@@ -1726,7 +1727,7 @@ fn verify_runs_bounded_commands_and_persists_only_satisfied_criteria() {
 
 #[test]
 fn verify_all_satisfied_returns_success_exit_code() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let output = vyane()
         .args([
@@ -1781,7 +1782,7 @@ fn verify_all_satisfied_returns_success_exit_code() {
 
 #[test]
 fn verify_requires_an_in_progress_goal_before_recording_evidence() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     json_output(
         &[
@@ -1825,7 +1826,7 @@ fn verify_requires_an_in_progress_goal_before_recording_evidence() {
 
 #[test]
 fn verify_requires_the_matching_cli_worker_for_an_active_lease() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     json_output(
         &[
@@ -1904,8 +1905,8 @@ fn verify_requires_the_matching_cli_worker_for_an_active_lease() {
 #[cfg(unix)]
 #[test]
 fn pursue_auto_dispatches_fresh_segment_reverifies_and_completes() {
-    let directory = TempDir::new().expect("tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let directory = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let (config, bin) = pursuit_fixture(&directory);
     let acceptance = pursuit_acceptance(&directory);
@@ -2019,8 +2020,8 @@ fn pursue_auto_dispatches_fresh_segment_reverifies_and_completes() {
 #[cfg(unix)]
 #[test]
 fn pursue_reports_runtime_error_as_paused_exit_three() {
-    let directory = TempDir::new().expect("tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let directory = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let (config, bin) = pursuit_fixture(&directory);
     let claude = bin.path().join("claude");
@@ -2136,8 +2137,8 @@ fn pursue_reports_runtime_error_as_paused_exit_three() {
 #[cfg(unix)]
 #[test]
 fn pursue_missing_acceptance_returns_paused_exit_three() {
-    let directory = TempDir::new().expect("tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let directory = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let (config, bin) = pursuit_fixture(&directory);
     create(
@@ -2199,8 +2200,8 @@ fn pursue_missing_acceptance_returns_paused_exit_three() {
 #[cfg(unix)]
 #[test]
 fn pursue_external_pause_returns_stopped_exit_four() {
-    let directory = TempDir::new().expect("tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let directory = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let (config, bin) = pursuit_fixture(&directory);
     let claude = bin.path().join("claude");
@@ -2319,7 +2320,7 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
 
 #[test]
 fn pursue_rejects_non_local_owner_before_goal_or_runtime_access() {
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let value = json_output(
         &[
@@ -2349,8 +2350,8 @@ fn pursue_rejects_non_local_owner_before_goal_or_runtime_access() {
 #[cfg(unix)]
 #[test]
 fn pursue_sigint_cancels_the_active_segment_and_pauses_immediately() {
-    let directory = TempDir::new().expect("tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let directory = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let (config, bin) = pursuit_fixture(&directory);
     let claude = bin.path().join("claude");
@@ -2473,8 +2474,8 @@ printf '%s\n' '{"result":"segment complete","session_id":"fresh-segment"}'
 #[cfg(unix)]
 #[test]
 fn pursue_sigint_during_verification_kills_process_group_and_pauses() {
-    let directory = TempDir::new().expect("tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let directory = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let (config, bin) = pursuit_fixture(&directory);
     let verifier = directory.path().join("interruptible-verifier");
@@ -2621,7 +2622,7 @@ fn pursue_sigint_during_verification_kills_process_group_and_pauses() {
 
 #[test]
 fn default_database_uses_vyane_data_dir_and_help_marks_scope_as_unauthenticated() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let created = vyane()
         .env("VYANE_DATA_DIR", directory.path())
         .args(["goal", "create", "--json", "--title", "Default storage"])

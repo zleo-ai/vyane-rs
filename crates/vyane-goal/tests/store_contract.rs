@@ -1,3 +1,4 @@
+mod common;
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::Connection;
 use sha2::{Digest as _, Sha256};
@@ -18,7 +19,7 @@ fn timestamp(seconds: i64) -> DateTime<Utc> {
 }
 
 fn fixture() -> (TempDir, SqliteGoalStore) {
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     let store =
         SqliteGoalStore::open(directory.path().join("goals.sqlite3")).expect("open goal store");
     (directory, store)
@@ -69,7 +70,7 @@ fn wal_sidecars_are_private_with_umask_022_in_a_public_directory() {
         return;
     }
 
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755))
         .expect("make database directory publicly readable");
     let path = directory.path().join("goals.sqlite3");
@@ -1539,4 +1540,35 @@ fn invalid_metadata_is_rejected_before_persistence() {
             )
             .is_err()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = common::private_tempdir();
+    let group_writable = directory.path().join("group-writable");
+    std::fs::create_dir(&group_writable).expect("create group-writable parent");
+    // 0775 is the mode a 0777 directory creation receives under umask 002.
+    std::fs::set_permissions(&group_writable, std::fs::Permissions::from_mode(0o775))
+        .expect("make parent group-writable");
+    match SqliteGoalStore::open(group_writable.join("goals.sqlite3")) {
+        Err(GoalStoreError::InvalidInput(message)) => {
+            assert!(message.contains("group- or world-writable"), "{message}");
+        }
+        other => panic!("group-writable parent must still be rejected, got {other:?}"),
+    }
+
+    let fixture = common::private_tempdir();
+    assert_eq!(
+        std::fs::metadata(fixture.path())
+            .expect("read fixture parent mode")
+            .permissions()
+            .mode()
+            & 0o022,
+        0,
+        "fixture parent must not be group- or world-writable"
+    );
+    SqliteGoalStore::open(fixture.path().join("goals.sqlite3")).expect("open private fixture");
 }

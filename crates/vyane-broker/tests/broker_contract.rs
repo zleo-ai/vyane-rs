@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,8 +14,8 @@ use vyane_broker::{
 };
 use vyane_message::{
     ClaimQuery, DeliveryMailbox, DeliveryStatus, EndpointKind, EndpointRef, IdempotencyKey,
-    LeaseRequest, MessageDirection, MessagePublicationStatus, MessageStore, NackDisposition,
-    NewDelivery, NewMessage, NewTransportReceipt, SqliteMessageStore,
+    LeaseRequest, MessageDirection, MessagePublicationStatus, MessageStore, MessageStoreError,
+    NackDisposition, NewDelivery, NewMessage, NewTransportReceipt, SqliteMessageStore,
 };
 
 #[derive(Clone)]
@@ -119,7 +120,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = common::private_tempdir();
         let concrete =
             Arc::new(SqliteMessageStore::open(directory.path().join("messages.sqlite3")).unwrap());
         let store: Arc<dyn MessageStore> = concrete.clone();
@@ -666,4 +667,34 @@ fn nack_disposition_stays_part_of_the_public_message_contract() {
         NackDisposition::RetryAfter { delay_seconds: 3 },
         NackDisposition::RetryAfter { delay_seconds: 3 }
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = common::private_tempdir();
+    let group_writable = directory.path().join("group-writable");
+    std::fs::create_dir(&group_writable).unwrap();
+    // 0775 is the mode a 0777 directory creation receives under umask 002.
+    std::fs::set_permissions(&group_writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+    match SqliteMessageStore::open(group_writable.join("messages.sqlite3")) {
+        Err(MessageStoreError::InvalidInput(message)) => {
+            assert!(message.contains("group- or world-writable"), "{message}");
+        }
+        other => panic!("group-writable parent must still be rejected, got {other:?}"),
+    }
+
+    let fixture = common::private_tempdir();
+    assert_eq!(
+        std::fs::metadata(fixture.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o022,
+        0,
+        "fixture parent must not be group- or world-writable"
+    );
+    SqliteMessageStore::open(fixture.path().join("messages.sqlite3")).unwrap();
 }

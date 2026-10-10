@@ -2002,7 +2002,7 @@ mod tests {
     fn first_creation_closes_candidates_before_atomic_publication() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::TempDir::new().expect("create temporary database directory");
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("first-create.sqlite3");
         let candidates = (0..8)
             .map(|_| {
@@ -2075,7 +2075,7 @@ mod tests {
 
     #[test]
     fn write_transaction_rechecks_schema_after_acquiring_the_writer_lock() {
-        let directory = tempfile::TempDir::new().expect("create temporary database directory");
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("schema-race.sqlite3");
         let store = SqliteTaskStore::open(&path).expect("initialize task store");
 
@@ -2104,7 +2104,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn preparing_an_existing_database_does_not_release_its_posix_writer_lock() {
-        let directory = tempfile::TempDir::new().expect("create temporary database directory");
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("lock-probe.sqlite3");
         prepare_database_path(&path).expect("prepare database path");
 
@@ -2142,7 +2142,7 @@ mod tests {
     fn unsafe_existing_database_modes_fail_closed_without_repair() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::TempDir::new().expect("create temporary database directory");
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("unsafe-mode.sqlite3");
         prepare_database_path(&path).expect("create database file");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
@@ -2184,7 +2184,7 @@ mod tests {
     fn database_paths_and_sidecars_reject_symlinks() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-        let directory = tempfile::TempDir::new().expect("create temporary database directory");
+        let directory = crate::test_support::private_tempdir();
         let real_parent = directory.path().join("real");
         std::fs::create_dir(&real_parent).expect("create real parent");
         std::fs::set_permissions(&real_parent, std::fs::Permissions::from_mode(0o700))

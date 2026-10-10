@@ -9,14 +9,29 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use vyane_core::{NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir};
 use vyane_harness::native::{
-    NativeCommandNetworkPolicy, NativeCommandNetworkRoute, NativeCommandNetworkRule,
-    NativeCommandPolicy, NativeCommandRule, PermissionPolicy, ToolCall, ToolContext,
-    ToolInvocationStatus, command_permission_policy, command_tool_registry, prepare_command_mounts,
-    register_command_tool_with_network, validate_command_host, validate_command_host_with_mounts,
-    validate_command_network_host, workspace_tool_registry_with_policy,
+    NativeCommandHostError, NativeCommandNetworkPolicy, NativeCommandNetworkRoute,
+    NativeCommandNetworkRule, NativeCommandPolicy, NativeCommandRule, PermissionPolicy, ToolCall,
+    ToolContext, ToolInvocationStatus, command_permission_policy, command_process_ceiling,
+    command_tool_registry, prepare_command_mounts, register_command_tool_with_network,
+    validate_command_host, validate_command_host_with_mounts, validate_command_network_host,
+    workspace_tool_registry_with_policy,
 };
 
 static COMMAND_TEST_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Real sandbox admission is unavailable when this host is already over the
+/// process ceiling. Failing here is deliberate: returning would record a pass
+/// for a check that never ran. Hosts under the ceiling, including CI, continue
+/// into the real sandbox.
+fn require_live_command_admission() {
+    if let Err(error @ NativeCommandHostError::ProcessCeilingExceeded { .. }) =
+        command_process_ceiling()
+    {
+        panic!(
+            "host thread count exceeds the command admission limit; this sandbox admission test is unavailable and was not treated as passing: {error}"
+        );
+    }
+}
 
 #[derive(Default)]
 struct RecordingAuthority {
@@ -71,6 +86,7 @@ fn call(program: &str, args: &[&str]) -> ToolCall {
 }
 
 async fn execute(root: &std::path::Path, policy: NativeCommandPolicy, call: ToolCall) -> String {
+    require_live_command_admission();
     let _permit = COMMAND_TEST_GATE
         .acquire()
         .await
@@ -128,6 +144,7 @@ async fn execute_network_with_route(
     call: ToolCall,
     route: NativeCommandNetworkRoute,
 ) -> vyane_core::Result<String> {
+    require_live_command_admission();
     let _permit = COMMAND_TEST_GATE
         .acquire()
         .await
@@ -179,6 +196,7 @@ async fn revocation_at_the_tool_owned_spawn_check_prevents_execution() {
 
 #[tokio::test]
 async fn revocation_at_the_physical_spawn_check_prevents_execution() {
+    require_live_command_admission();
     let root = tempdir().expect("workspace");
     let registry = command_tool_registry(policy(&[("printf", &[])])).expect("command registry");
     let permissions =
@@ -206,6 +224,7 @@ async fn revocation_at_the_physical_spawn_check_prevents_execution() {
 
 #[tokio::test]
 async fn host_probe_and_descriptor_bound_read_succeed() {
+    require_live_command_admission();
     let root = tempdir().expect("workspace");
     std::fs::write(root.path().join("visible.txt"), "workspace-data").expect("fixture");
     let policy = policy(&[("cat", &["visible.txt"])]);
@@ -220,6 +239,7 @@ async fn host_probe_and_descriptor_bound_read_succeed() {
 
 #[tokio::test]
 async fn host_probe_rejects_allowlisted_program_missing_from_sandbox() {
+    require_live_command_admission();
     let root = tempdir().expect("workspace");
     let missing = policy(&[("vyane-program-that-does-not-exist", &[])]);
     assert!(
@@ -231,6 +251,7 @@ async fn host_probe_rejects_allowlisted_program_missing_from_sandbox() {
 
 #[tokio::test]
 async fn network_host_probe_runs_the_proxy_launcher_before_admission() {
+    require_live_command_admission();
     let root = tempdir().expect("workspace");
     let pinned = PinnedWorkdir::open(root.path()).expect("pin");
     validate_command_network_host(&pinned, &policy(&[("python3", &["-c"])]), &network_policy())
@@ -269,6 +290,7 @@ async fn workspace_is_read_only_and_host_etc_is_not_mounted() {
 
 #[tokio::test]
 async fn only_explicit_descriptor_bound_roots_are_writable() {
+    require_live_command_admission();
     let root = tempdir().expect("workspace");
     std::fs::create_dir(root.path().join("src")).expect("writable root");
     std::fs::create_dir(root.path().join(".git")).expect("protected sibling");
@@ -321,6 +343,7 @@ async fn regular_file_writable_roots_are_rejected() {
 
 #[tokio::test]
 async fn writable_mounts_are_bound_to_their_admitted_workspace() {
+    require_live_command_admission();
     let workspace_a = tempdir().expect("workspace a");
     let workspace_b = tempdir().expect("workspace b");
     std::fs::create_dir(workspace_a.path().join("src")).expect("root a");
@@ -341,6 +364,8 @@ async fn writable_mounts_are_bound_to_their_admitted_workspace() {
 #[tokio::test]
 async fn host_admission_requires_each_root_to_be_mutable() {
     use std::os::unix::fs::PermissionsExt as _;
+
+    require_live_command_admission();
 
     let root = tempdir().expect("workspace");
     let locked = root.path().join("locked");
@@ -408,6 +433,7 @@ async fn hard_links_cannot_escape_a_writable_root() {
 
 #[tokio::test]
 async fn admitted_writable_root_handle_survives_path_replacement() {
+    require_live_command_admission();
     let _permit = COMMAND_TEST_GATE
         .acquire()
         .await

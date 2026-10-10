@@ -4,8 +4,10 @@
 //! It walks a resolved chain of targets with correct failover gating and a
 //! complete attempt trail ([`Dispatcher::dispatch`]), and fans one task across
 //! many chains concurrently in input order ([`Dispatcher::broadcast`]). Every
-//! run produces exactly one [`vyane_core::RunRecord`], appended to the ledger
-//! and reflected in the session store — on success **and** on failure.
+//! run produces exactly one [`vyane_core::RunRecord`]. Ledger append and
+//! session update are attempted on success **and** on failure; whether those
+//! writes landed is reported on [`DispatchPersistence`] and does not rewrite
+//! the run's own status.
 //!
 //! The kernel composes [`vyane_core`]'s capability traits (`ChatClient`,
 //! `Harness`, `Ledger`, `SessionStore`) at runtime and depends on **no** other
@@ -30,7 +32,10 @@ pub use capability::{
     IsolationStrength,
 };
 pub use digest::task_digest;
-pub use dispatch::{DispatchOutcome, Dispatcher, PreparedDispatch, StreamDispatchEvent};
+pub use dispatch::{
+    DispatchOutcome, DispatchPersistence, Dispatcher, PersistenceStep, PreparedDispatch,
+    StreamDispatchEvent,
+};
 pub use executor::{Executor, ExecutorFactory};
 
 // Re-export the cancellation primitive so callers driving the kernel use the

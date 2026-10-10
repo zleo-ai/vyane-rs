@@ -1021,7 +1021,7 @@ mod tests {
     }
 
     fn fixture() -> (tempfile::TempDir, NativeAgentInputSpool) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let spool =
             NativeAgentInputSpool::open(directory.path().join("spool"), "owner-marker").unwrap();
         (directory, spool)
@@ -1659,7 +1659,7 @@ mod tests {
     #[test]
     fn unsafe_roots_and_ancestors_are_not_repaired_or_followed() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let root = directory.path().join("spool");
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).unwrap();

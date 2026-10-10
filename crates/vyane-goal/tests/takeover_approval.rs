@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::time::Duration;
 
 use chrono::{TimeZone as _, Utc};
@@ -57,7 +58,7 @@ fn setup() -> (TempDir, SqliteGoalStore) {
 }
 
 fn setup_with_policy(policy: GoalContinuityPolicy) -> (TempDir, SqliteGoalStore) {
-    let dir = TempDir::new().unwrap();
+    let dir = common::private_tempdir();
     let store = SqliteGoalStore::open(dir.path().join("goals.sqlite3")).unwrap();
     let mut goal = NewGoal::new("controlled takeover", at(1_000));
     goal.id = Some("goal-a".into());
@@ -686,7 +687,7 @@ fn tampered_approval_boundary_fails_integrity_read() {
 #[test]
 fn removed_workdir_does_not_make_approval_unreadable() {
     let (dir, store) = setup();
-    let workdir = TempDir::new().unwrap();
+    let workdir = common::private_tempdir();
     let mut request = request(&store, &dir);
     request.workdir = std::fs::canonicalize(workdir.path()).unwrap();
     let approval = store
@@ -948,7 +949,7 @@ fn primary_resume_queue_rejects_missing_or_drifted_review_chain() {
 
 #[test]
 fn primary_resume_without_review_requires_no_predecessor_review() {
-    let dir = TempDir::new().unwrap();
+    let dir = common::private_tempdir();
     let store = SqliteGoalStore::open(dir.path().join("goals.sqlite3")).unwrap();
     let mut no_review = policy();
     no_review.reviewer = None;

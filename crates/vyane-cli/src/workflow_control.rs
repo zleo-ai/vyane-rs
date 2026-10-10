@@ -829,7 +829,7 @@ mod tests {
     use crate::task::proc::{install_process_group, pid_alive};
 
     fn test_control() -> (tempfile::TempDir, WorkflowHarnessControl) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let run_id = WorkflowRunId::generate();
         let control = WorkflowHarnessControl::new(&run_id, directory.path()).unwrap();
         (directory, control)

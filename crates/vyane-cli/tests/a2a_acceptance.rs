@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::collections::BTreeSet;
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
@@ -13,7 +14,6 @@ use assert_cmd::Command;
 #[cfg(target_os = "linux")]
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::Value;
-use tempfile::TempDir;
 #[cfg(target_os = "linux")]
 use vyane_message::{DeliveryStatus, MessageClock, MessageStore as _, SqliteMessageStore};
 
@@ -59,7 +59,7 @@ fn send(db: &Path, owner: &str, recipient: &str, body: &str) -> Value {
 
 #[test]
 fn send_inbox_read_round_trip_has_stable_json_and_strict_scope() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = directory.path().join("messages.sqlite3");
     let db_text = db_text(&db);
     let sent = json_output(
@@ -266,7 +266,7 @@ fn send_inbox_read_round_trip_has_stable_json_and_strict_scope() {
 #[cfg(target_os = "linux")]
 #[test]
 fn read_does_not_acknowledge_when_stdout_rejects_the_response() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = directory.path().join("messages.sqlite3");
     let db_text = db_text(&db);
     let sent = send(&db, "local", "recipient", "must remain recoverable");
@@ -306,7 +306,7 @@ fn read_does_not_acknowledge_when_stdout_rejects_the_response() {
 
 #[test]
 fn human_read_prints_the_body_and_help_states_the_local_authority_boundary() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = directory.path().join("messages.sqlite3");
     let db_text = db_text(&db);
     let sent = send(&db, "local", "recipient", "visible review body");
@@ -333,7 +333,7 @@ fn human_read_prints_the_body_and_help_states_the_local_authority_boundary() {
 
 #[test]
 fn delayed_messages_and_bounded_pages_are_explicit() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = directory.path().join("messages.sqlite3");
     let db_text = db_text(&db);
     let delayed = json_output(
@@ -392,7 +392,7 @@ fn delayed_messages_and_bounded_pages_are_explicit() {
 
 #[test]
 fn invalid_inputs_return_stable_json_errors() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let db = directory.path().join("messages.sqlite3");
     let db_text = db_text(&db);
     let payload = json_output(

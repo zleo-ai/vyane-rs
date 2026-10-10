@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn managed_permission_ceilings_are_loaded_and_validated_without_environment_mutation() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let base = dir.path().join("base.toml");
         let managed = dir.path().join("managed.toml");
         std::fs::write(&base, "").unwrap();
@@ -332,7 +332,7 @@ mod tests {
                 max_sandbox: Sandbox::ReadOnly,
             },
         ];
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let runtime =
             Runtime::new(layers.into(), StoragePaths::from_data_dir(directory.path())).unwrap();
         let task = vyane_core::TaskSpec::new("edit").with_sandbox(Sandbox::Write);
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn invalid_managed_native_ceiling_fails_config_loading() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let base = dir.path().join("base.toml");
         let managed = dir.path().join("managed.toml");
         std::fs::write(&base, "").unwrap();
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn command_ceiling_with_read_exclusions_fails_config_loading() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let base = dir.path().join("base.toml");
         let managed = dir.path().join("managed.toml");
         std::fs::write(&base, "").unwrap();

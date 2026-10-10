@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::process::Command;
 use std::sync::{Arc, Barrier, Mutex};
 
@@ -93,7 +94,7 @@ fn transport_receipt(external_id: &str) -> NewTransportReceipt {
 }
 
 fn test_store() -> (TempDir, TestClock, SqliteMessageStore) {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let clock = TestClock::new(timestamp(0));
     let store = SqliteMessageStore::open_with_clock(
         directory.path().join("messages.sqlite3"),
@@ -1418,7 +1419,7 @@ fn newer_schema_and_corrupt_rows_fail_closed() {
 
 #[test]
 fn altered_or_extended_schema_fails_closed() {
-    let trigger_directory = TempDir::new().unwrap();
+    let trigger_directory = common::private_tempdir();
     let trigger_path = trigger_directory.path().join("messages.sqlite3");
     drop(SqliteMessageStore::open(&trigger_path).unwrap());
     let connection = Connection::open(&trigger_path).unwrap();
@@ -1435,7 +1436,7 @@ fn altered_or_extended_schema_fails_closed() {
         Err(MessageStoreError::CorruptData(_))
     ));
 
-    let extra_directory = TempDir::new().unwrap();
+    let extra_directory = common::private_tempdir();
     let extra_path = extra_directory.path().join("messages.sqlite3");
     drop(SqliteMessageStore::open(&extra_path).unwrap());
     let connection = Connection::open(&extra_path).unwrap();
@@ -1451,7 +1452,7 @@ fn altered_or_extended_schema_fails_closed() {
 
 #[test]
 fn relational_corruption_fails_the_explicit_and_open_audits() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
     store
@@ -1479,7 +1480,7 @@ fn relational_corruption_fails_the_explicit_and_open_audits() {
 
 #[test]
 fn publication_audit_binds_release_time_to_each_initial_enqueue_event() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
     let request = message("publication-time-corruption", "body", "worker-a");
@@ -1523,7 +1524,7 @@ fn publication_audit_binds_release_time_to_each_initial_enqueue_event() {
 
 #[test]
 fn publication_audit_rejects_initial_enqueue_time_drift() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
     store
@@ -1556,7 +1557,7 @@ fn publication_audit_rejects_initial_enqueue_time_drift() {
 fn database_files_are_private_without_mutating_existing_parent() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
     let path = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
@@ -1595,7 +1596,7 @@ fn database_files_are_private_without_mutating_existing_parent() {
 fn database_and_live_wal_files_with_broad_permissions_fail_closed() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
     let message_id = store
@@ -1645,7 +1646,7 @@ fn database_and_live_wal_files_with_broad_permissions_fail_closed() {
 fn database_and_sidecar_symlinks_fail_closed() {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let victim = directory.path().join("victim");
     std::fs::write(&victim, b"unchanged").unwrap();
     let database_link = directory.path().join("linked.sqlite3");
@@ -2228,7 +2229,7 @@ fn create_v1_database(path: &std::path::Path, with_message: bool) -> Option<(New
 #[cfg(unix)]
 #[test]
 fn schema_v1_migrates_existing_messages_to_ordinary_published_truth() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     let (request, message_id) = create_v1_database(&path, true).unwrap();
     let digest = request.request_digest().unwrap();
@@ -2273,7 +2274,7 @@ fn schema_v1_migrates_existing_messages_to_ordinary_published_truth() {
 #[cfg(unix)]
 #[test]
 fn schema_v1_upgrade_rolls_back_atomically_when_final_manifest_is_invalid() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     create_v1_database(&path, false);
     let connection = Connection::open(&path).unwrap();
@@ -2300,4 +2301,34 @@ fn schema_v1_upgrade_rolls_back_atomically_when_final_manifest_is_invalid() {
         )
         .unwrap();
     assert_eq!(migrated_table_count, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = common::private_tempdir();
+    let group_writable = directory.path().join("group-writable");
+    std::fs::create_dir(&group_writable).unwrap();
+    // 0775 is the mode a 0777 directory creation receives under umask 002.
+    std::fs::set_permissions(&group_writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+    match SqliteMessageStore::open(group_writable.join("messages.sqlite3")) {
+        Err(MessageStoreError::InvalidInput(message)) => {
+            assert!(message.contains("group- or world-writable"), "{message}");
+        }
+        other => panic!("group-writable parent must still be rejected, got {other:?}"),
+    }
+
+    let fixture = common::private_tempdir();
+    assert_eq!(
+        std::fs::metadata(fixture.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o022,
+        0,
+        "fixture parent must not be group- or world-writable"
+    );
+    SqliteMessageStore::open(fixture.path().join("messages.sqlite3")).unwrap();
 }

@@ -51,6 +51,8 @@ mod routing;
 mod selector;
 mod service;
 mod task;
+#[cfg(test)]
+mod test_support;
 
 pub use agent::AgentProjectionComponents;
 pub use agent_completion::{
