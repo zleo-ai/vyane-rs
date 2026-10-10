@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, dead_code)]
 
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use tempfile::TempDir;
 
@@ -20,7 +20,9 @@ pub fn private_tempdir() -> TempDir {
 /// directory from `path` up through `boundary`.
 ///
 /// `boundary` is the temp root. Directories outside it are left untouched.
-/// A path that leaves the boundary, or any symlink on the way, is an error.
+/// Every component of `boundary`, and every component from `boundary` down to
+/// `path`, must be a real directory. A symbolic link on either walk is an
+/// error, as is a path that leaves `boundary`.
 pub fn create_private_dir_all(boundary: &Path, path: &Path) -> Result<(), String> {
     ensure_boundary(boundary)?;
     let relative = path
@@ -49,12 +51,19 @@ pub fn create_private_dir(path: &Path) {
 }
 
 fn ensure_boundary(boundary: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(boundary).map_err(|error| error.to_string())?;
-    if metadata.file_type().is_symlink() {
-        return Err("private directory boundary passes through a symbolic link".into());
-    }
-    if !metadata.is_dir() {
+    if boundary.as_os_str().is_empty() {
         return Err("private directory boundary is not a directory".into());
+    }
+    let mut current = PathBuf::new();
+    for component in boundary.components() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err("private directory boundary passes through a symbolic link".into());
+        }
+        if !metadata.is_dir() {
+            return Err("private directory boundary is not a directory".into());
+        }
     }
     Ok(())
 }
@@ -140,5 +149,21 @@ mod tests {
             assert!(error.contains("symbolic link"), "{error}");
             assert!(!link_target.join("child").exists());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_dir_all_rejects_a_symbolic_link_ancestor_of_the_boundary() {
+        let root = private_tempdir();
+        let real_parent = root.path().join("real-parent");
+        fs::create_dir(&real_parent).unwrap();
+        let linked_parent = root.path().join("linked-parent");
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+        let boundary = linked_parent.join("boundary");
+        fs::create_dir(&boundary).unwrap();
+
+        let error = create_private_dir_all(&boundary, &boundary.join("child")).unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert!(!real_parent.join("boundary").join("child").exists());
     }
 }

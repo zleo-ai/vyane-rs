@@ -230,14 +230,15 @@ impl TaskStore for SqliteTaskStore {
 
     fn get(&self, owner: &str, id: &str) -> Result<Option<TaskRecord>> {
         validate_text("owner", owner, 256)?;
-        let connection = self.connection()?;
-        get_in_connection(&connection, owner, id)
+        let mut connection = self.connection()?;
+        get_in_connection(&mut connection, owner, id)
     }
 
     fn list(&self, owner: &str, query: &TaskQuery) -> Result<TaskPage> {
         validate_text("owner", owner, 256)?;
         query.validate()?;
-        let connection = self.connection()?;
+        let mut connection = self.connection()?;
+        let transaction = read_transaction(&mut connection)?;
         let mut clauses = Vec::new();
         let mut values = Vec::<Value>::new();
 
@@ -298,10 +299,18 @@ impl TaskStore for SqliteTaskStore {
             "SELECT {TASK_COLUMNS} FROM tasks{where_clause} \
              ORDER BY created_at_ms DESC, id DESC LIMIT ?"
         );
-        let mut statement = connection.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(values), row_to_task)?;
-        let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        attach_persistence(&connection, &mut items)?;
+        let mut items = {
+            let mut statement = transaction.prepare(&sql)?;
+            let rows = statement.query_map(params_from_iter(values), row_to_task)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        // The task rows are already loaded. A settlement that commits before
+        // the persistence read must not be paired with those rows.
+        #[cfg(test)]
+        if !items.is_empty() {
+            pause_between_task_and_persistence_reads();
+        }
+        attach_persistence(&transaction, &mut items)?;
 
         let has_more = items.len() > query.limit;
         if has_more {
@@ -316,13 +325,14 @@ impl TaskStore for SqliteTaskStore {
             None
         };
 
+        transaction.commit()?;
         Ok(TaskPage { items, next_cursor })
     }
 
     fn events(&self, owner: &str, id: &str) -> Result<Vec<TaskEvent>> {
         validate_text("owner", owner, 256)?;
-        let connection = self.connection()?;
-        if get_in_connection(&connection, owner, id)?.is_none() {
+        let mut connection = self.connection()?;
+        if get_in_connection(&mut connection, owner, id)?.is_none() {
             return Err(TaskStoreError::NotFound { id: id.to_string() });
         }
         let mut statement = connection.prepare(
@@ -660,6 +670,14 @@ fn enable_wal(connection: &Connection) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
+}
+
+fn read_transaction(connection: &mut Connection) -> Result<Transaction<'_>> {
+    // Deferred so a writer can commit while this snapshot is open. The task
+    // row and its persistence row still share the snapshot from the first read.
+    connection
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(Into::into)
 }
 
 fn write_transaction(connection: &mut Connection) -> Result<Transaction<'_>> {
@@ -1393,14 +1411,31 @@ fn user_version(connection: &Connection) -> Result<u32> {
     })
 }
 
-fn get_in_connection(connection: &Connection, owner: &str, id: &str) -> Result<Option<TaskRecord>> {
+fn task_row(connection: &Connection, owner: &str, id: &str) -> Result<Option<TaskRecord>> {
     let sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE owner = ?1 AND id = ?2");
-    let record = connection
+    Ok(connection
         .query_row(&sql, params![owner, id], row_to_task)
-        .optional()?;
-    record
-        .map(|record| finish_task(connection, record))
-        .transpose()
+        .optional()?)
+}
+
+fn get_in_connection(
+    connection: &mut Connection,
+    owner: &str,
+    id: &str,
+) -> Result<Option<TaskRecord>> {
+    let transaction = read_transaction(connection)?;
+    let record = task_row(&transaction, owner, id)?;
+    // The task row is already loaded. A settlement that commits before the
+    // persistence read must not be paired with that row.
+    #[cfg(test)]
+    if record.is_some() {
+        pause_between_task_and_persistence_reads();
+    }
+    let record = record
+        .map(|record| finish_task(&transaction, record))
+        .transpose()?;
+    transaction.commit()?;
+    Ok(record)
 }
 
 fn get_in_transaction(
@@ -1408,13 +1443,42 @@ fn get_in_transaction(
     owner: &str,
     id: &str,
 ) -> Result<Option<TaskRecord>> {
-    let sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE owner = ?1 AND id = ?2");
-    let record = transaction
-        .query_row(&sql, params![owner, id], row_to_task)
-        .optional()?;
+    let record = task_row(transaction, owner, id)?;
     record
         .map(|record| finish_task(transaction, record))
         .transpose()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TASK_PERSISTENCE_READ_GAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only gap between the task-row read and the persistence read.
+///
+/// The hook runs on the reader thread, after the task row is in memory and
+/// before persistence is loaded. Production builds do not call it.
+#[cfg(test)]
+fn pause_between_task_and_persistence_reads() {
+    let hook = TASK_PERSISTENCE_READ_GAP.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn set_task_persistence_read_gap_hook(hook: impl FnOnce() + 'static) {
+    TASK_PERSISTENCE_READ_GAP.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn clear_task_persistence_read_gap_hook() {
+    TASK_PERSISTENCE_READ_GAP.with(|slot| {
+        slot.borrow_mut().take();
+    });
 }
 
 fn finish_task(connection: &Connection, mut record: TaskRecord) -> Result<TaskRecord> {
@@ -1542,20 +1606,33 @@ fn insert_persistence(
 ) -> Result<()> {
     let (ledger_state, ledger_kind) = persistence.ledger.stored_parts()?;
     let (session_state, session_kind) = persistence.session.stored_parts()?;
-    transaction.execute(
-        "INSERT INTO task_dispatch_persistence (\
+    transaction
+        .execute(
+            "INSERT INTO task_dispatch_persistence (\
             owner, task_id, ledger_state, ledger_kind, session_state, session_kind\
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            owner,
-            id,
-            ledger_state,
-            ledger_kind,
-            session_state,
-            session_kind
-        ],
-    )?;
+            params![
+                owner,
+                id,
+                ledger_state,
+                ledger_kind,
+                session_state,
+                session_kind
+            ],
+        )
+        .map_err(persistence_write_error)?;
     Ok(())
+}
+
+fn persistence_write_error(error: rusqlite::Error) -> TaskStoreError {
+    match error {
+        // The engine message can carry free-form failure text. Keep the
+        // SQLite error code and drop that text.
+        rusqlite::Error::SqliteFailure(failure, _) => {
+            TaskStoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, None))
+        }
+        other => other.into(),
+    }
 }
 
 fn insert_snapshot(transaction: &Transaction<'_>, record: &TaskRecord) -> Result<()> {
@@ -2213,6 +2290,9 @@ mod tests {
     #[cfg(unix)]
     use rusqlite::ErrorCode;
 
+    use crate::{TaskKind, TaskOrigin};
+    use vyane_core::ErrorKind;
+
     use super::*;
 
     #[cfg(unix)]
@@ -2461,5 +2541,141 @@ mod tests {
             error.sqlite_error_code(),
             Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
         ));
+    }
+
+    #[test]
+    fn settlement_between_task_and_persistence_reads_stays_one_snapshot() {
+        let directory = crate::test_support::private_tempdir();
+        let store =
+            SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).expect("open task store");
+        let get_running = running_task(&store, "get-gap");
+        let list_running = running_task(&store, "list-gap");
+        let persistence = failed_ledger_persistence();
+
+        let _guard = ReadGapHookGuard;
+        set_task_persistence_read_gap_hook({
+            let store = store.clone();
+            move || {
+                settle_succeeded(&store, &get_running, persistence);
+            }
+        });
+        let during_get = store
+            .get("local", "get-gap")
+            .expect("get must not treat a concurrent settlement as corrupt")
+            .expect("get task");
+        assert_presettlement_snapshot(&during_get);
+        let after_get = store
+            .get("local", "get-gap")
+            .expect("reread get")
+            .expect("get task after settlement");
+        assert_settled_snapshot(&after_get, persistence);
+
+        set_task_persistence_read_gap_hook({
+            let store = store.clone();
+            move || {
+                settle_succeeded(&store, &list_running, persistence);
+            }
+        });
+        let during_list = store
+            .list("local", &TaskQuery::default())
+            .expect("list must not treat a concurrent settlement as corrupt");
+        let listed = during_list
+            .items
+            .iter()
+            .find(|record| record.id == "list-gap")
+            .expect("listed task");
+        assert_presettlement_snapshot(listed);
+        let after_list = store
+            .list("local", &TaskQuery::default())
+            .expect("reread list");
+        let listed = after_list
+            .items
+            .iter()
+            .find(|record| record.id == "list-gap")
+            .expect("listed task after settlement");
+        assert_settled_snapshot(listed, persistence);
+    }
+
+    struct ReadGapHookGuard;
+
+    impl Drop for ReadGapHookGuard {
+        fn drop(&mut self) {
+            clear_task_persistence_read_gap_hook();
+        }
+    }
+
+    fn running_task(store: &SqliteTaskStore, id: &str) -> TaskRecord {
+        let created = DateTime::<Utc>::from_timestamp_millis(1_781_640_000_000).expect("timestamp");
+        let queued = store
+            .create(
+                "local",
+                NewTask {
+                    id: id.to_string(),
+                    kind: TaskKind::Dispatch,
+                    origin: TaskOrigin::RestAsync,
+                    task_digest: "0123456789abcdef".to_string(),
+                    target_key: "test/model".to_string(),
+                    created_at: created,
+                },
+            )
+            .expect("create task");
+        store
+            .attach_controller(
+                "local",
+                id,
+                queued.revision,
+                queued.executor_epoch,
+                ControllerRef::InProcess {
+                    instance_id: "server-a".into(),
+                },
+                None,
+                created + chrono::TimeDelta::seconds(1),
+            )
+            .expect("attach controller")
+    }
+
+    fn failed_ledger_persistence() -> TaskDispatchPersistence {
+        TaskDispatchPersistence {
+            ledger: TaskPersistenceStep::Failed {
+                kind: ErrorKind::Io,
+            },
+            session: TaskPersistenceStep::NotRequested,
+        }
+    }
+
+    fn settle_succeeded(
+        store: &SqliteTaskStore,
+        running: &TaskRecord,
+        persistence: TaskDispatchPersistence,
+    ) {
+        store
+            .settle(
+                "local",
+                &running.id,
+                running.revision,
+                running.executor_epoch,
+                TaskSettlement::Succeeded {
+                    ledger_run_id: Some("run-gap".into()),
+                    persistence: Some(persistence),
+                },
+                running.updated_at + chrono::TimeDelta::seconds(1),
+            )
+            .expect("settle during read gap");
+    }
+
+    fn assert_presettlement_snapshot(record: &TaskRecord) {
+        assert_eq!(record.state, TaskState::Running);
+        assert!(record.persistence.is_none());
+        assert!(record.finished_at.is_none());
+        assert!(record.ledger_run_id.is_none());
+        assert!(record.failure_code.is_none());
+    }
+
+    fn assert_settled_snapshot(record: &TaskRecord, persistence: TaskDispatchPersistence) {
+        assert_eq!(record.state, TaskState::Succeeded);
+        assert_eq!(record.persistence, Some(persistence));
+        assert!(record.finished_at.is_some());
+        assert_eq!(record.ledger_run_id.as_deref(), Some("run-gap"));
+        assert!(record.failure_code.is_none());
     }
 }

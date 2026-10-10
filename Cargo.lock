@@ -2707,8 +2707,10 @@ dependencies = [
  "chrono",
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
+ "vyane-core",
 ]
 
 [[package]]

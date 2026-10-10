@@ -1284,11 +1284,95 @@ fn recorded_dispatch_persistence_round_trips_and_rejects_a_different_replay() {
         Some(persistence)
     );
 
-    let bytes = fs::read(directory.path().join("tasks.sqlite3")).unwrap();
-    assert!(!contains_bytes(
-        &bytes,
-        b"ledger append failed because the disk is full"
-    ));
+    const MARKER: &str = "ledger-failure-marker-9f3c2a";
+    let path = directory.path().join("tasks.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER reject_marked_persistence_insert \
+             BEFORE INSERT ON task_dispatch_persistence \
+             BEGIN SELECT RAISE(ABORT, '{MARKER}'); END;"
+        ))
+        .unwrap();
+    drop(connection);
+
+    let marked = store.create(OWNER, new_task("marked-failure", 4)).unwrap();
+    let marked_running = store
+        .attach_controller(
+            OWNER,
+            "marked-failure",
+            marked.revision,
+            marked.executor_epoch,
+            in_process("server-a"),
+            None,
+            timestamp(5),
+        )
+        .unwrap();
+    let marked_error = store
+        .settle(
+            OWNER,
+            "marked-failure",
+            marked_running.revision,
+            marked_running.executor_epoch,
+            TaskSettlement::Succeeded {
+                ledger_run_id: Some("run-marked".into()),
+                persistence: Some(persistence),
+            },
+            timestamp(6),
+        )
+        .unwrap_err();
+    assert!(matches!(marked_error, TaskStoreError::Sqlite(_)));
+    let public_error = marked_error.to_string();
+    assert!(
+        !public_error.contains(MARKER),
+        "public error contains the storage failure marker: {public_error}"
+    );
+    assert!(!marked_error.as_str().contains(MARKER));
+    let marked_record = store.get(OWNER, "marked-failure").unwrap().unwrap();
+    assert_eq!(marked_record.state, TaskState::Running);
+    assert!(marked_record.persistence.is_none());
+    let rendered = serde_json::to_string(&marked_record).unwrap();
+    assert!(!rendered.contains(MARKER), "{rendered}");
+
+    let connection = Connection::open(&path).unwrap();
+    let stored_marker: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatch_persistence \
+             WHERE ledger_state LIKE ?1 OR IFNULL(ledger_kind, '') LIKE ?1 \
+                OR session_state LIKE ?1 OR IFNULL(session_kind, '') LIKE ?1 \
+                OR task_id LIKE ?1",
+            [format!("%{MARKER}%")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_marker, 0);
+    connection
+        .execute_batch(
+            "PRAGMA secure_delete = ON;
+             DROP TRIGGER reject_marked_persistence_insert;
+             VACUUM;",
+        )
+        .unwrap();
+    drop(connection);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = append_suffix(&path, suffix);
+            if candidate.exists() {
+                fs::set_permissions(&candidate, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let candidate = append_suffix(&path, suffix);
+        if let Ok(bytes) = fs::read(&candidate) {
+            assert!(
+                !contains_bytes(&bytes, MARKER.as_bytes()),
+                "database file contains the storage failure marker"
+            );
+        }
+    }
 
     let connection = Connection::open(store.path()).unwrap();
     connection
