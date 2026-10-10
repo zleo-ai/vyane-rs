@@ -24,7 +24,7 @@ and **not** to resume the WP-179–465 pure-formatter residual train.
 - **Plan of record:** [`docs/plan/DECISION-GRADE-KERNEL.md`](plan/DECISION-GRADE-KERNEL.md)
   (parity classification a–e, assumptions, stop conditions, semantic
   milestones M0–M5).
-- **2026-08-20 alignment audit:** [`docs/evidence/EOS-753-KERNEL-ALIGNMENT-AUDIT.md`](evidence/EOS-753-KERNEL-ALIGNMENT-AUDIT.md)
+- **2026-08-20 alignment audit:** [`docs/evidence/KERNEL-ALIGNMENT-AUDIT-2026-08-20.md`](evidence/KERNEL-ALIGNMENT-AUDIT-2026-08-20.md)
   (current public impl vs Python / Horus / Tauri plans; names the next kernel
   work package without implementing it).
 - **Capability counts remain honest:** after LED-05 moved to `partial` on

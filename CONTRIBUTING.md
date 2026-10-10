@@ -119,6 +119,12 @@ Test placement:
   process group on cancel`, `docs(architecture): clarify failover gate`.
 - **Keep the docs in sync.** If you change a public type or config shape, update
   the affected docs and `profiles.example.toml` in the same PR.
+- **Public text only.** This repository is public. Titles, descriptions,
+  commit messages and files must not carry private tracker IDs, host paths,
+  device or account names, or agent hand-off notes. The `Public boundary`
+  workflow runs `.github/scripts/public-boundary.py` on every push and on
+  every PR title or body edit, docs-only changes included; a branch name
+  that trips it is only a warning.
 
 ## Independent review (three tiers)
 
@@ -139,7 +145,7 @@ touches.
   adversarial multi-round review; do not merge until review is clean — CI
   green alone is not sufficient. Implementer, reviewer, and merger must be
   three separate agent runs. Strict-tier review depends on the
-  maintainer-side vyane pipeline (`VYANE_PROJECT`, overridable); external
+  maintainer-side vyane pipeline (set `VYANE_PROJECT`); external
   contributors cannot run it themselves — a maintainer runs that round on
   their behalf.
 

@@ -1,0 +1,34 @@
+name: Public boundary
+
+# Runs on every change, including docs-only ones that the main CI skips, and
+# re-runs when a pull request title or body is edited.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  public-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # actions/checkout v6.0.2 (resolved from the official repository).
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Test the public boundary gate
+        run: bash .github/scripts/test-public-boundary.sh
+
+      - name: Check tracked files and pull request text
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: python3 .github/scripts/public-boundary.py

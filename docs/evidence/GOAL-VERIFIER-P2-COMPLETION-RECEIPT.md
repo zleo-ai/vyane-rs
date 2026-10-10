@@ -1,22 +1,20 @@
-# CompletionReceipt — EOS-652 residual P2
+# CompletionReceipt — goal verifier residual P2
 
 ## Identity
 
 | Field | Value |
 |-------|--------|
-| Card | EOS-652 residual P2 (independent-verifier completion, progress lease fence, future-ts lease safety) |
+| Scope | Goal verifier residual P2 (independent-verifier completion, progress lease fence, future-ts lease safety) |
 | runtime / harness | grok-build |
 | model | grok-4.5 |
-| Branch | `grok/EOS-652-verifier-goal` |
-| Worktree | `/home/maple/AIOS/worktrees/vyane-rs/eos652-verifier-goal` |
 | Base (origin/main) | `915905a14f4f7cb810fad90fd87aec49f91f6b36` |
 | Head (implementation) | `6c217a2b985b7a27c3a42201e9a0d6ef03a0c573` |
-| Branch tip | see `git rev-parse HEAD` on `grok/EOS-652-verifier-goal` (stack: 6c217a2 fix + CLI lifecycle + receipt docs) |
+| Branch tip | implementation stack: 6c217a2 fix + CLI lifecycle + receipt docs |
 | Push / PR | **none** (bounded local commit only) |
 
 ## Audit (main baseline)
 
-Full matrix: session scratch `eos652-audit.md` (also under implementer scratch).
+The full audit matrix was kept with the maintainer and is not part of this repository.
 
 | Residual P2 item | Baseline status | Disposition |
 |------------------|-----------------|-------------|
@@ -34,16 +32,16 @@ Already-present P1 left intact: claim/generation fencing, owner isolation, pause
 - `crates/vyane-goal/src/lib.rs` — module docs
 - `crates/vyane-cli/src/cli.rs`, `crates/vyane-cli/src/goal.rs` — optional `--worker` on `goal progress`
 - `crates/vyane-cli/tests/goal_acceptance.rs` — lifecycle public path uses verify→done (durable artifacts)
-- `crates/vyane-goal/tests/eos652_p2.rs` — residual P2 regressions (new)
+- `crates/vyane-goal/tests/goal_verifier_p2.rs` — residual P2 regressions (new)
 - `crates/vyane-goal/tests/claim_lease.rs`, `store_contract.rs`, `continuity_projection.rs`, `takeover_approval.rs` — call-site + completion-path updates
-- `docs/evidence/EOS-652-P2-COMPLETION-RECEIPT.md` — this receipt
+- `docs/evidence/GOAL-VERIFIER-P2-COMPLETION-RECEIPT.md` — this receipt
 
 ## Baseline red evidence
 
 Command (signature stub only; fence/completion/future-ts behavior still baseline-missing):
 
 ```text
-cargo test -p vyane-goal --test eos652_p2
+cargo test -p vyane-goal --test goal_verifier_p2
 ```
 
 Observed failures (4 red / 2 green on positive waiver+verifier paths that already worked under partial semantics):
@@ -61,7 +59,7 @@ Environment note: local umask `002` makes default tempdirs group-writable; GoalS
 
 | Gate | Result |
 |------|--------|
-| `cargo test -p vyane-goal --test eos652_p2` | **6 passed** |
+| `cargo test -p vyane-goal --test goal_verifier_p2` | **6 passed** |
 | `cargo test -p vyane-goal --test claim_lease --test store_contract --test pursuit` | **15 + 26 + 25 passed** |
 | `cargo test -p vyane-goal` | **all green** (lib + integration) |
 | `cargo test -p vyane-cli --test goal_acceptance` | **25 passed** (lifecycle uses verify→done durable artifacts) |
