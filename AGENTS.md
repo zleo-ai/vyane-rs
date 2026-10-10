@@ -26,8 +26,3 @@ stay unconfused. See `README.md` and `docs/ARCHITECTURE.md`.
   reviewer.
 - Do not describe private, unpublished source as a "verifiable" step for
   public readers.
-
-Claude Code loads [`CLAUDE.md`](CLAUDE.md), which only imports this file.
-
-(EOS-690: `origin/main` had no agent entry; this file closes that gap
-without copying private device or model-effort facts.)
