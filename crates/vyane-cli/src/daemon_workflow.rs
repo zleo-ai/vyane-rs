@@ -469,6 +469,7 @@ impl DaemonWorkflowSupervisor {
                         TaskSettlement::Failed {
                             code: FailureCode::Internal,
                             ledger_run_id: None,
+                            persistence: None,
                         },
                     )
                     .await;
@@ -519,6 +520,7 @@ impl DaemonWorkflowSupervisor {
                                     TaskSettlement::Failed {
                                         code: FailureCode::Internal,
                                         ledger_run_id: None,
+                                        persistence: None,
                                     },
                                 )
                                 .await
@@ -553,6 +555,7 @@ impl DaemonWorkflowSupervisor {
                     TaskSettlement::Failed {
                         code: FailureCode::Internal,
                         ledger_run_id: None,
+                        persistence: None,
                     },
                 )
                 .await;
@@ -788,6 +791,7 @@ impl DaemonWorkflowSupervisor {
             let settlement = TaskSettlement::Failed {
                 code,
                 ledger_run_id: None,
+                persistence: None,
             };
             tracing::error!(
                 task_id = %id,
@@ -859,19 +863,23 @@ impl DaemonWorkflowSupervisor {
                 let settlement = match outcome.status {
                     WorkflowRunStatus::Completed => TaskSettlement::Succeeded {
                         ledger_run_id: None,
+                        persistence: None,
                     },
                     WorkflowRunStatus::Cancelled => TaskSettlement::Cancelled {
                         ledger_run_id: None,
+                        persistence: None,
                     },
                     WorkflowRunStatus::CompletedWithFailures | WorkflowRunStatus::Failed => {
                         TaskSettlement::Failed {
                             code: FailureCode::DispatchFailed,
                             ledger_run_id: None,
+                            persistence: None,
                         }
                     }
                     WorkflowRunStatus::Running => TaskSettlement::Failed {
                         code: FailureCode::Internal,
                         ledger_run_id: None,
+                        persistence: None,
                     },
                 };
                 // Kind-only pure lines; ledger/journal paths stay out (WP-383/389).
@@ -919,6 +927,7 @@ impl DaemonWorkflowSupervisor {
                 let settlement = TaskSettlement::Failed {
                     code,
                     ledger_run_id: None,
+                    persistence: None,
                 };
                 tracing::error!(
                     task_id = %id,
@@ -947,6 +956,7 @@ impl DaemonWorkflowSupervisor {
                     let settlement = TaskSettlement::Failed {
                         code,
                         ledger_run_id: None,
+                        persistence: None,
                     };
                     tracing::error!(
                         task_id = %id,

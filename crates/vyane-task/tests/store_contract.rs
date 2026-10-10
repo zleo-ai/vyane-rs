@@ -7,9 +7,11 @@ use std::sync::{Arc, Barrier};
 use chrono::{DateTime, TimeDelta, TimeZone as _, Utc};
 use rusqlite::Connection;
 use tempfile::TempDir;
+use vyane_core::ErrorKind;
 use vyane_task::{
-    ControllerRef, FailureCode, Lease, NewTask, SqliteTaskStore, TaskEventKind, TaskKind,
-    TaskOrigin, TaskQuery, TaskSettlement, TaskState, TaskStore, TaskStoreError,
+    ControllerRef, FailureCode, Lease, NewTask, SqliteTaskStore, TaskDispatchPersistence,
+    TaskEventKind, TaskKind, TaskOrigin, TaskPersistenceStep, TaskQuery, TaskSettlement, TaskState,
+    TaskStore, TaskStoreError,
 };
 
 const OWNER: &str = "local";
@@ -117,6 +119,7 @@ fn create_attach_and_reopen_preserve_snapshot_and_events() {
             running.executor_epoch,
             TaskSettlement::Succeeded {
                 ledger_run_id: Some("run-reopen".into()),
+                persistence: None,
             },
             timestamp(2),
         )
@@ -149,6 +152,7 @@ fn illegal_transitions_are_atomic_and_terminal_settlement_is_exactly_idempotent(
         queued.executor_epoch,
         TaskSettlement::Succeeded {
             ledger_run_id: Some("too-early".into()),
+            persistence: None,
         },
         timestamp(1),
     );
@@ -169,6 +173,7 @@ fn illegal_transitions_are_atomic_and_terminal_settlement_is_exactly_idempotent(
         .unwrap();
     let settlement = TaskSettlement::Succeeded {
         ledger_run_id: Some("run-states".into()),
+        persistence: None,
     };
     let terminal = store
         .settle(
@@ -204,6 +209,7 @@ fn illegal_transitions_are_atomic_and_terminal_settlement_is_exactly_idempotent(
         TaskSettlement::Failed {
             code: FailureCode::DispatchFailed,
             ledger_run_id: Some("run-states".into()),
+            persistence: None,
         },
         timestamp(4),
     );
@@ -245,6 +251,7 @@ fn concurrent_identical_settlements_are_exactly_idempotent_inside_writer_lock() 
                     running.executor_epoch,
                     TaskSettlement::Succeeded {
                         ledger_run_id: Some("run-settle-race".into()),
+                        persistence: None,
                     },
                     timestamp(2),
                 )
@@ -330,6 +337,7 @@ fn cancel_and_settle_race_has_one_cas_winner_then_authoritative_settlement() {
             race_epoch,
             TaskSettlement::Succeeded {
                 ledger_run_id: Some("run-race".into()),
+                persistence: None,
             },
             timestamp(2),
         )
@@ -352,6 +360,7 @@ fn cancel_and_settle_race_has_one_cas_winner_then_authoritative_settlement() {
                 current.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-race".into()),
+                    persistence: None,
                 },
                 timestamp(3),
             )
@@ -477,6 +486,7 @@ fn lease_claim_requires_expiry_and_invalidates_the_old_executor_epoch() {
         running.executor_epoch,
         TaskSettlement::Succeeded {
             ledger_run_id: Some("stale".into()),
+            persistence: None,
         },
         timestamp(17),
     );
@@ -874,6 +884,7 @@ fn foreign_owner_mutations_are_not_found_and_never_change_snapshot_or_events() {
             running.executor_epoch,
             TaskSettlement::Succeeded {
                 ledger_run_id: None,
+                persistence: None,
             },
             timestamp(10),
         ),
@@ -1124,7 +1135,7 @@ fn newer_user_version_is_rejected_without_downgrade() {
     let directory = common::private_tempdir();
     let path = directory.path().join("future.sqlite3");
     let connection = Connection::open(&path).unwrap();
-    connection.pragma_update(None, "user_version", 3).unwrap();
+    connection.pragma_update(None, "user_version", 4).unwrap();
     drop(connection);
     make_database_owner_only(&path);
 
@@ -1132,15 +1143,183 @@ fn newer_user_version_is_rejected_without_downgrade() {
     assert!(matches!(
         error,
         TaskStoreError::UnsupportedSchema {
-            found: 3,
-            supported: 2
+            found: 4,
+            supported: 3
         }
     ));
     let connection = Connection::open(&path).unwrap();
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
+}
+
+#[test]
+fn v2_task_without_persistence_opens_as_unrecorded() {
+    let directory = common::private_tempdir();
+    let path = directory.path().join("v2-unrecorded.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    connection
+        .pragma_update(None, "journal_mode", "DELETE")
+        .unwrap();
+    connection
+        .execute_batch(include_str!("../migrations/0001_tasks.sql"))
+        .unwrap();
+    connection
+        .execute_batch(include_str!("../migrations/0002_owner_scope.sql"))
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO tasks (
+                owner, id, record_schema, kind, origin, state, task_digest, target_key,
+                created_at_ms, started_at_ms, updated_at_ms, finished_at_ms, revision,
+                executor_epoch, controller_kind, controller_instance_id, ledger_run_id
+             ) VALUES (
+                'local', 'old-task', 1, 'dispatch', 'cli_detached', 'succeeded',
+                '0123456789abcdef', 'test/model',
+                0, 1000, 2000, 2000, 2, 1,
+                'in_process', 'server-a', 'run-old'
+             )",
+            [],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 2).unwrap();
+    drop(connection);
+    make_database_owner_only(&path);
+
+    let store = SqliteTaskStore::open(&path).unwrap();
+    let record = store.get("local", "old-task").unwrap().unwrap();
+    assert_eq!(record.state, TaskState::Succeeded);
+    assert_eq!(record.ledger_run_id.as_deref(), Some("run-old"));
+    assert!(record.persistence.is_none());
+    let json = serde_json::to_value(&record).unwrap();
+    assert!(json.get("persistence").is_none());
+    assert_eq!(json["state"], "succeeded");
+    let persisted: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatch_persistence WHERE task_id = 'old-task'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted, 0);
+}
+
+#[test]
+fn recorded_dispatch_persistence_round_trips_and_rejects_a_different_replay() {
+    let (directory, store) = test_store();
+    let queued = store.create(OWNER, new_task("persist", 0)).unwrap();
+    let running = store
+        .attach_controller(
+            OWNER,
+            &queued.id,
+            queued.revision,
+            queued.executor_epoch,
+            in_process("server-a"),
+            None,
+            timestamp(1),
+        )
+        .unwrap();
+    let persistence = TaskDispatchPersistence {
+        ledger: TaskPersistenceStep::Failed {
+            kind: ErrorKind::Io,
+        },
+        session: TaskPersistenceStep::NotRequested,
+    };
+    let settlement = TaskSettlement::Succeeded {
+        ledger_run_id: Some("run-persist".into()),
+        persistence: Some(persistence),
+    };
+    let settled = store
+        .settle(
+            OWNER,
+            "persist",
+            running.revision,
+            running.executor_epoch,
+            settlement.clone(),
+            timestamp(2),
+        )
+        .unwrap();
+    assert_eq!(settled.state, TaskState::Succeeded);
+    assert_eq!(settled.ledger_run_id.as_deref(), Some("run-persist"));
+    assert_eq!(settled.persistence, Some(persistence));
+    assert!(!settled.persistence.unwrap().is_complete());
+
+    let replay = store
+        .settle(
+            OWNER,
+            "persist",
+            running.revision,
+            settled.executor_epoch,
+            settlement,
+            timestamp(3),
+        )
+        .unwrap();
+    assert_eq!(replay, settled);
+
+    let conflicting = store.settle(
+        OWNER,
+        "persist",
+        settled.revision,
+        settled.executor_epoch,
+        TaskSettlement::Succeeded {
+            ledger_run_id: Some("run-persist".into()),
+            persistence: Some(TaskDispatchPersistence {
+                ledger: TaskPersistenceStep::Saved,
+                session: TaskPersistenceStep::NotRequested,
+            }),
+        },
+        timestamp(3),
+    );
+    assert!(matches!(
+        conflicting,
+        Err(TaskStoreError::InvalidState { .. })
+    ));
+    assert_eq!(
+        store.get(OWNER, "persist").unwrap().unwrap().persistence,
+        Some(persistence)
+    );
+
+    let bytes = fs::read(directory.path().join("tasks.sqlite3")).unwrap();
+    assert!(!contains_bytes(
+        &bytes,
+        b"ledger append failed because the disk is full"
+    ));
+
+    let connection = Connection::open(store.path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO tasks (
+                owner, id, record_schema, kind, origin, state, task_digest, target_key,
+                created_at_ms, started_at_ms, updated_at_ms, finished_at_ms, revision,
+                executor_epoch, controller_kind, controller_instance_id
+             ) VALUES (
+                'local', 'free-text', 1, 'dispatch', 'rest_async', 'succeeded',
+                '0123456789abcdef', 'test/model',
+                0, 1000, 2000, 2000, 2, 1, 'in_process', 'server-a'
+             )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO task_dispatch_persistence (
+                owner, task_id, ledger_state, ledger_kind, session_state, session_kind
+             ) VALUES (
+                'local', 'free-text', 'failed', 'the disk is full', 'not_requested', NULL
+             )",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let error = store.get(OWNER, "free-text").unwrap_err();
+    let message = error.to_string();
+    assert!(matches!(error, TaskStoreError::CorruptData(_)));
+    assert!(!message.contains("disk is full"));
 }
 
 #[test]
@@ -1336,7 +1515,7 @@ fn failed_v1_migration_rolls_back_version_objects_and_rows() {
 }
 
 #[test]
-fn concurrent_v1_open_migrates_once_and_both_openers_observe_v2() {
+fn concurrent_v1_open_migrates_once_and_both_openers_observe_current_schema() {
     let directory = common::private_tempdir();
     let path = directory.path().join("v1-concurrent.sqlite3");
     create_v1_database(&path);
@@ -1360,7 +1539,7 @@ fn concurrent_v1_open_migrates_once_and_both_openers_observe_v2() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 }
 
 #[test]
@@ -1460,6 +1639,7 @@ fn backward_wall_clock_is_clamped_and_lease_checks_use_effective_time() {
             running.executor_epoch,
             TaskSettlement::Succeeded {
                 ledger_run_id: Some("run-clock".into()),
+                persistence: None,
             },
             timestamp(1),
         )
@@ -1585,6 +1765,7 @@ fn state_specific_failure_codes_reject_semantic_mismatches() {
             TaskSettlement::Failed {
                 code,
                 ledger_run_id: None,
+                persistence: None,
             },
             timestamp(1),
         );

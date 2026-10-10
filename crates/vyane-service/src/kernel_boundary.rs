@@ -1358,7 +1358,8 @@ mod tests {
     #[test]
     fn drive_dogfood_yields_truth_verified_receipt_projection() {
         let root = crate::test_support::private_tempdir();
-        crate::test_support::create_private_dir_all(&root.path().join("durable-df01"));
+        crate::test_support::create_private_dir_all(root.path(), &root.path().join("durable-df01"))
+            .expect("create private directory");
         let adapter = LocalKernelAdapter::new(principal());
         let event = adapter.handle(
             KernelCommand {
@@ -1396,7 +1397,8 @@ mod tests {
     #[test]
     fn status_rebuilds_projection_from_kernel_store_after_discard() {
         let root = crate::test_support::private_tempdir();
-        crate::test_support::create_private_dir_all(&root.path().join("durable-rb01"));
+        crate::test_support::create_private_dir_all(root.path(), &root.path().join("durable-rb01"))
+            .expect("create private directory");
         let root_s = root.path().to_string_lossy().into_owned();
         let adapter = LocalKernelAdapter::new(principal());
         let driven = adapter.handle(

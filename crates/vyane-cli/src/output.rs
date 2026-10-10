@@ -31,6 +31,40 @@ pub struct BroadcastJson {
 ///
 /// The model call already completed. Repeating it would run that side effect
 /// again; the missing piece is history or the next transcript.
+pub fn task_persistence_from_dispatch(
+    persistence: &DispatchPersistence,
+) -> vyane_task::TaskDispatchPersistence {
+    vyane_task::TaskDispatchPersistence {
+        ledger: task_step_from_dispatch(persistence.ledger),
+        session: task_step_from_dispatch(persistence.session),
+    }
+}
+
+pub fn dispatch_persistence_from_task(
+    persistence: &vyane_task::TaskDispatchPersistence,
+) -> DispatchPersistence {
+    DispatchPersistence {
+        ledger: dispatch_step_from_task(persistence.ledger),
+        session: dispatch_step_from_task(persistence.session),
+    }
+}
+
+fn task_step_from_dispatch(step: PersistenceStep) -> vyane_task::TaskPersistenceStep {
+    match step {
+        PersistenceStep::Saved => vyane_task::TaskPersistenceStep::Saved,
+        PersistenceStep::NotRequested => vyane_task::TaskPersistenceStep::NotRequested,
+        PersistenceStep::Failed { kind } => vyane_task::TaskPersistenceStep::Failed { kind },
+    }
+}
+
+fn dispatch_step_from_task(step: vyane_task::TaskPersistenceStep) -> PersistenceStep {
+    match step {
+        vyane_task::TaskPersistenceStep::Saved => PersistenceStep::Saved,
+        vyane_task::TaskPersistenceStep::NotRequested => PersistenceStep::NotRequested,
+        vyane_task::TaskPersistenceStep::Failed { kind } => PersistenceStep::Failed { kind },
+    }
+}
+
 pub fn format_dispatch_persistence_warning_line(persistence: &DispatchPersistence) -> String {
     let mut failed = Vec::new();
     if let PersistenceStep::Failed { kind } = persistence.ledger {
@@ -2614,6 +2648,7 @@ mod tests {
             lease: None,
             ledger_run_id: None,
             failure_code,
+            persistence: None,
         }
     }
 
@@ -3330,6 +3365,7 @@ mod tests {
             lease: None,
             ledger_run_id: None,
             failure_code: None,
+            persistence: None,
         }
     }
 
@@ -4390,6 +4426,7 @@ mod tests {
         assert_eq!(
             format_task_settlement_line(&vyane_task::TaskSettlement::Succeeded {
                 ledger_run_id: Some("secret-run".into()),
+                persistence: None,
             }),
             "task settlement: succeeded"
         );

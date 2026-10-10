@@ -6,78 +6,139 @@
 #![allow(clippy::unwrap_used, dead_code)]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use tempfile::TempDir;
 
 pub fn private_tempdir() -> TempDir {
     let directory = tempfile::tempdir().expect("tempdir");
-    restrict_private(directory.path());
+    restrict_private(directory.path()).expect("restrict tempdir");
     directory
 }
 
-/// Create `path` and every missing ancestor, then remove group and world
-/// write from `path` and from ancestors that are still group- or world-writable.
+/// Create `path` inside `boundary` and remove group and world write from every
+/// directory from `path` up through `boundary`.
 ///
-/// Walking stops at a directory that is already private, or at a sticky
-/// directory such as the system temp root. Callers that intentionally widen
-/// a mode do so after this returns.
-pub fn create_private_dir_all(path: &Path) {
-    fs::create_dir_all(path).expect("create directory");
-    restrict_private_upwards(path);
+/// `boundary` is the temp root. Directories outside it are left untouched.
+/// A path that leaves the boundary, or any symlink on the way, is an error.
+pub fn create_private_dir_all(boundary: &Path, path: &Path) -> Result<(), String> {
+    ensure_boundary(boundary)?;
+    let relative = path
+        .strip_prefix(boundary)
+        .map_err(|_| "path is outside the private directory boundary".to_string())?;
+    if relative.as_os_str().is_empty() {
+        return restrict_private(boundary);
+    }
+    for component in relative.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err("path escapes the private directory boundary".into());
+        }
+    }
+    restrict_private(boundary)?;
+    let mut current = boundary.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        ensure_real_directory(&current)?;
+    }
+    Ok(())
 }
 
 pub fn create_private_dir(path: &Path) {
     fs::create_dir(path).expect("create directory");
-    restrict_private(path);
+    restrict_private(path).expect("restrict directory");
 }
 
-fn restrict_private(path: &Path) {
+fn ensure_boundary(boundary: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(boundary).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() {
+        return Err("private directory boundary passes through a symbolic link".into());
+    }
+    if !metadata.is_dir() {
+        return Err("private directory boundary is not a directory".into());
+    }
+    Ok(())
+}
+
+fn ensure_real_directory(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err("path passes through a symbolic link".into())
+        }
+        Ok(metadata) if metadata.is_dir() => restrict_private(path),
+        Ok(_) => Err("path is not a directory".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(|error| error.to_string())?;
+            let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("path passes through a symbolic link".into());
+            }
+            restrict_private(path)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn restrict_private(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .expect("restrict directory permissions");
+            .map_err(|error| format!("restrict directory permissions: {error}"))?;
     }
     #[cfg(not(unix))]
     {
         let _ = path;
     }
+    Ok(())
 }
 
-fn restrict_private_upwards(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut current = path.to_path_buf();
-        loop {
-            let metadata = fs::metadata(&current).expect("read directory mode");
-            let mode = metadata.permissions().mode();
-            if mode & 0o1000 != 0 {
-                break;
-            }
-            if mode & 0o022 != 0 {
-                fs::set_permissions(&current, fs::Permissions::from_mode(0o700))
-                    .expect("restrict directory permissions");
-            }
-            let Some(parent) = current.parent() else {
-                break;
-            };
-            if parent.as_os_str().is_empty() {
-                break;
-            }
-            let parent_mode = fs::metadata(parent)
-                .expect("read parent directory mode")
-                .permissions()
-                .mode();
-            if parent_mode & 0o1000 != 0 || parent_mode & 0o022 == 0 {
-                break;
-            }
-            current = parent.to_path_buf();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_dir_all_rejects_paths_outside_the_boundary_and_symbolic_links() {
+        let root = private_tempdir();
+        let boundary = root.path().join("boundary");
+        fs::create_dir(&boundary).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o775)).unwrap();
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
+
+        let outside = root.path().join("outside");
+        let error = create_private_dir_all(&boundary, &outside.join("child")).unwrap_err();
+        assert!(error.contains("boundary"), "{error}");
+        assert!(!outside.exists());
+
+        let escaped = boundary.join("..").join("escaped");
+        let error = create_private_dir_all(&boundary, &escaped).unwrap_err();
+        assert!(error.contains("boundary"), "{error}");
+        assert!(!root.path().join("escaped").exists());
+
+        let created = boundary.join("wide").join("child");
+        create_private_dir_all(&boundary, &created).unwrap();
+        assert!(created.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&created), 0o700);
+            assert_eq!(mode(&boundary.join("wide")), 0o700);
+            assert_eq!(mode(&boundary), 0o700);
+            assert_eq!(mode(root.path()), 0o775);
+        }
+
+        #[cfg(unix)]
+        {
+            let link_target = root.path().join("link-target");
+            fs::create_dir(&link_target).unwrap();
+            std::os::unix::fs::symlink(&link_target, boundary.join("link")).unwrap();
+            let error = create_private_dir_all(&boundary, &boundary.join("link").join("child"))
+                .unwrap_err();
+            assert!(error.contains("symbolic link"), "{error}");
+            assert!(!link_target.join("child").exists());
+        }
     }
 }

@@ -12,12 +12,13 @@ use rusqlite::{
 };
 
 use crate::{
-    ControllerRef, FailureCode, Lease, NewTask, Result, TaskCursor, TaskEvent, TaskEventKind,
-    TaskPage, TaskQuery, TaskRecord, TaskSettlement, TaskState, TaskStore, TaskStoreError,
+    ControllerRef, FailureCode, Lease, NewTask, Result, TaskCursor, TaskDispatchPersistence,
+    TaskEvent, TaskEventKind, TaskPage, TaskPersistenceStep, TaskQuery, TaskRecord, TaskSettlement,
+    TaskState, TaskStore, TaskStoreError,
     model::{validate_task_digest, validate_text},
 };
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 const RECORD_SCHEMA: u32 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
@@ -28,6 +29,7 @@ const DATABASE_CREATE_PREFIX: &str = ".vyane-task-db-create";
 static DATABASE_CREATE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MIGRATION_0001: &str = include_str!("../migrations/0001_tasks.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_owner_scope.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_dispatch_persistence.sql");
 
 const SCHEMA_OBJECTS_V1: &[(&str, &str, &str)] = &[
     ("table", "tasks", "tasks"),
@@ -44,6 +46,19 @@ const SCHEMA_OBJECTS_V2: &[(&str, &str, &str)] = &[
     ("index", "tasks_owner_ledger_run_idx", "tasks"),
     ("table", "task_events", "task_events"),
     ("index", "task_events_owner_task_idx", "task_events"),
+];
+const SCHEMA_OBJECTS_V3: &[(&str, &str, &str)] = &[
+    ("table", "tasks", "tasks"),
+    ("index", "tasks_owner_created_idx", "tasks"),
+    ("index", "tasks_owner_state_lease_idx", "tasks"),
+    ("index", "tasks_owner_ledger_run_idx", "tasks"),
+    ("table", "task_events", "task_events"),
+    ("index", "task_events_owner_task_idx", "task_events"),
+    (
+        "table",
+        "task_dispatch_persistence",
+        "task_dispatch_persistence",
+    ),
 ];
 
 const TASK_COLUMNS: &str = "\
@@ -113,6 +128,11 @@ impl SqliteTaskStore {
         if found == 1 {
             validate_schema_version(&transaction, 1)?;
             migrate_v1_to_v2(&transaction)?;
+        }
+        let found = user_version(&transaction)?;
+        if found == 2 {
+            validate_schema_version(&transaction, 2)?;
+            migrate_v2_to_v3(&transaction)?;
         }
         validate_schema_version(&transaction, SCHEMA_VERSION)?;
         validate_database_files(&self.path)?;
@@ -281,6 +301,7 @@ impl TaskStore for SqliteTaskStore {
         let mut statement = connection.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(values), row_to_task)?;
         let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        attach_persistence(&connection, &mut items)?;
 
         let has_more = items.len() > query.limit;
         if has_more {
@@ -406,7 +427,8 @@ impl TaskStore for SqliteTaskStore {
             let (state, failure_code, ledger_run_id) = settlement.parts();
             let exact_result = before.state == state
                 && before.failure_code == failure_code
-                && before.ledger_run_id.as_deref() == ledger_run_id;
+                && before.ledger_run_id.as_deref() == ledger_run_id
+                && before.persistence == settlement.persistence();
             let current_or_commit_retry = expected_revision == before.revision
                 || expected_revision.checked_add(1) == Some(before.revision);
             if exact_result
@@ -447,9 +469,13 @@ impl TaskStore for SqliteTaskStore {
         after.failure_code = failure_code;
         after.ledger_run_id = ledger_run_id.map(str::to_string);
         after.lease = None;
+        after.persistence = settlement.persistence();
         after.revision = next_counter(before.revision, "revision")?;
         after.updated_at = effective_at;
         update_snapshot(&transaction, &before, &after)?;
+        if let Some(persistence) = after.persistence {
+            insert_persistence(&transaction, &after.owner, &after.id, persistence)?;
+        }
         let actor = before.controller.as_ref().map(ControllerRef::actor);
         insert_event(
             &transaction,
@@ -665,6 +691,7 @@ fn validate_schema_version(connection: &Connection, version: u32) -> Result<()> 
     let objects = match version {
         1 => SCHEMA_OBJECTS_V1,
         2 => SCHEMA_OBJECTS_V2,
+        3 => SCHEMA_OBJECTS_V3,
         _ => {
             return Err(TaskStoreError::CorruptData(format!(
                 "no schema manifest exists for task schema version {version}"
@@ -766,10 +793,22 @@ fn validate_schema_columns(connection: &Connection, version: u32) -> Result<()> 
     ];
     let (tasks, events) = match version {
         1 => (TASK_V1, EVENT_V1),
-        2 => (TASK_V2, EVENT_V2),
+        2 | 3 => (TASK_V2, EVENT_V2),
         _ => unreachable!("version manifest selected above"),
     };
-    for (table, expected) in [("tasks", tasks), ("task_events", events)] {
+    let mut tables = vec![("tasks", tasks), ("task_events", events)];
+    if version == 3 {
+        const PERSISTENCE_V3: &[&str] = &[
+            "owner",
+            "task_id",
+            "ledger_state",
+            "ledger_kind",
+            "session_state",
+            "session_kind",
+        ];
+        tables.push(("task_dispatch_persistence", PERSISTENCE_V3));
+    }
+    for (table, expected) in tables {
         let sql = format!("SELECT name FROM pragma_table_info('{table}') ORDER BY cid");
         let mut statement = connection.prepare(&sql)?;
         let actual = statement
@@ -842,6 +881,8 @@ fn migration_schema_statement(version: u32, object_type: &str, name: &str) -> Re
     let (migration, source_name) = match (version, name) {
         (1, _) => (MIGRATION_0001, name),
         (2, _) => (MIGRATION_0002, name),
+        (3, "task_dispatch_persistence") => (MIGRATION_0003, name),
+        (3, _) => (MIGRATION_0002, name),
         _ => {
             return Err(TaskStoreError::CorruptData(format!(
                 "no bundled task schema exists for version {version}"
@@ -1023,6 +1064,38 @@ fn migrate_v1_to_v2(transaction: &Transaction<'_>) -> Result<()> {
     }
     validate_schema_version(transaction, 2)?;
     transaction.pragma_update(None, "user_version", 2_u32)?;
+    Ok(())
+}
+
+fn migrate_v2_to_v3(transaction: &Transaction<'_>) -> Result<()> {
+    let source_tasks: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
+    transaction
+        .execute_batch(MIGRATION_0003)
+        .map_err(|error| match error {
+            rusqlite::Error::SqliteFailure(failure, _)
+                if failure.code == ErrorCode::ConstraintViolation =>
+            {
+                TaskStoreError::CorruptData(
+                    "task persistence migration could not preserve stored data".into(),
+                )
+            }
+            other => TaskStoreError::Sqlite(other),
+        })?;
+    let target_tasks: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
+    let persistence_rows: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM task_dispatch_persistence",
+        [],
+        |row| row.get(0),
+    )?;
+    if source_tasks != target_tasks || persistence_rows != 0 {
+        return Err(TaskStoreError::CorruptData(
+            "task persistence migration invented or dropped task rows".into(),
+        ));
+    }
+    validate_schema_version(transaction, 3)?;
+    transaction.pragma_update(None, "user_version", 3_u32)?;
     Ok(())
 }
 
@@ -1322,9 +1395,12 @@ fn user_version(connection: &Connection) -> Result<u32> {
 
 fn get_in_connection(connection: &Connection, owner: &str, id: &str) -> Result<Option<TaskRecord>> {
     let sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE owner = ?1 AND id = ?2");
-    Ok(connection
+    let record = connection
         .query_row(&sql, params![owner, id], row_to_task)
-        .optional()?)
+        .optional()?;
+    record
+        .map(|record| finish_task(connection, record))
+        .transpose()
 }
 
 fn get_in_transaction(
@@ -1333,9 +1409,153 @@ fn get_in_transaction(
     id: &str,
 ) -> Result<Option<TaskRecord>> {
     let sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE owner = ?1 AND id = ?2");
-    Ok(transaction
+    let record = transaction
         .query_row(&sql, params![owner, id], row_to_task)
-        .optional()?)
+        .optional()?;
+    record
+        .map(|record| finish_task(transaction, record))
+        .transpose()
+}
+
+fn finish_task(connection: &Connection, mut record: TaskRecord) -> Result<TaskRecord> {
+    record.persistence = load_persistence(connection, &record.owner, &record.id)?;
+    validate_recorded_persistence(&record)?;
+    Ok(record)
+}
+
+fn attach_persistence(connection: &Connection, records: &mut [TaskRecord]) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let owner = records[0].owner.clone();
+    let mut sql = String::from(
+        "SELECT task_id, ledger_state, ledger_kind, session_state, session_kind \
+         FROM task_dispatch_persistence WHERE owner = ? AND task_id IN (",
+    );
+    for index in 0..records.len() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('?');
+    }
+    sql.push(')');
+    let mut values = Vec::with_capacity(records.len() + 1);
+    values.push(Value::Text(owner));
+    values.extend(records.iter().map(|record| Value::Text(record.id.clone())));
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(values), persistence_row)?;
+    let mut by_id = std::collections::HashMap::new();
+    for row in rows {
+        let (id, persistence) = row?;
+        if by_id.insert(id, persistence).is_some() {
+            return Err(TaskStoreError::CorruptData(
+                "task persistence row is duplicated".into(),
+            ));
+        }
+    }
+    for record in records.iter_mut() {
+        record.persistence = by_id.remove(&record.id);
+        validate_recorded_persistence(record)?;
+    }
+    Ok(())
+}
+
+fn load_persistence(
+    connection: &Connection,
+    owner: &str,
+    id: &str,
+) -> Result<Option<TaskDispatchPersistence>> {
+    connection
+        .query_row(
+            "SELECT ledger_state, ledger_kind, session_state, session_kind \
+             FROM task_dispatch_persistence WHERE owner = ?1 AND task_id = ?2",
+            params![owner, id],
+            |row| {
+                let ledger_state: String = row.get(0)?;
+                let ledger_kind: Option<String> = row.get(1)?;
+                let session_state: String = row.get(2)?;
+                let session_kind: Option<String> = row.get(3)?;
+                Ok((ledger_state, ledger_kind, session_state, session_kind))
+            },
+        )
+        .optional()?
+        .map(|(ledger_state, ledger_kind, session_state, session_kind)| {
+            persistence_from_parts(
+                &ledger_state,
+                ledger_kind.as_deref(),
+                &session_state,
+                session_kind.as_deref(),
+            )
+        })
+        .transpose()
+}
+
+fn persistence_row(row: &Row<'_>) -> rusqlite::Result<(String, TaskDispatchPersistence)> {
+    let id: String = row.get(0)?;
+    let ledger_state: String = row.get(1)?;
+    let ledger_kind: Option<String> = row.get(2)?;
+    let session_state: String = row.get(3)?;
+    let session_kind: Option<String> = row.get(4)?;
+    let persistence = persistence_from_parts(
+        &ledger_state,
+        ledger_kind.as_deref(),
+        &session_state,
+        session_kind.as_deref(),
+    )
+    .map_err(|error| data_error(1, Type::Text, error.to_string()))?;
+    Ok((id, persistence))
+}
+
+fn persistence_from_parts(
+    ledger_state: &str,
+    ledger_kind: Option<&str>,
+    session_state: &str,
+    session_kind: Option<&str>,
+) -> Result<TaskDispatchPersistence> {
+    Ok(TaskDispatchPersistence {
+        ledger: TaskPersistenceStep::from_stored(ledger_state, ledger_kind)?,
+        session: TaskPersistenceStep::from_stored(session_state, session_kind)?,
+    })
+}
+
+fn validate_recorded_persistence(record: &TaskRecord) -> Result<()> {
+    if record.persistence.is_none() {
+        return Ok(());
+    }
+    if matches!(
+        record.state,
+        TaskState::Succeeded | TaskState::Failed | TaskState::TimedOut | TaskState::Cancelled
+    ) {
+        Ok(())
+    } else {
+        Err(TaskStoreError::CorruptData(
+            "task persistence is recorded on a non-settled task".into(),
+        ))
+    }
+}
+
+fn insert_persistence(
+    transaction: &Transaction<'_>,
+    owner: &str,
+    id: &str,
+    persistence: TaskDispatchPersistence,
+) -> Result<()> {
+    let (ledger_state, ledger_kind) = persistence.ledger.stored_parts()?;
+    let (session_state, session_kind) = persistence.session.stored_parts()?;
+    transaction.execute(
+        "INSERT INTO task_dispatch_persistence (\
+            owner, task_id, ledger_state, ledger_kind, session_state, session_kind\
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            owner,
+            id,
+            ledger_state,
+            ledger_kind,
+            session_state,
+            session_kind
+        ],
+    )?;
+    Ok(())
 }
 
 fn insert_snapshot(transaction: &Transaction<'_>, record: &TaskRecord) -> Result<()> {
@@ -1544,6 +1764,7 @@ fn row_to_task(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
             .as_deref()
             .map(|value| parse_column(value, 23))
             .transpose()?,
+        persistence: None,
     };
     validate_stored_task(&record).map_err(|message| data_error(0, Type::Text, message))?;
     Ok(record)
@@ -2084,7 +2305,7 @@ mod tests {
         let mut stale_connection = store.connection().expect("open prechecked connection");
         let upgraded = Connection::open(&path).expect("open migration connection");
         upgraded
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", 4)
             .expect("advance database schema version");
         drop(upgraded);
 
@@ -2095,8 +2316,8 @@ mod tests {
         assert!(matches!(
             error,
             TaskStoreError::UnsupportedSchema {
-                found: 3,
-                supported: 2
+                found: 4,
+                supported: 3
             }
         ));
     }

@@ -1823,7 +1823,8 @@ mod tests {
         // `run_successful_dogfood` creates `durable-{suffix}` before the store
         // checks its parent. Pre-create that directory as mode 0700 so an
         // umask of 002 cannot leave it group-writable.
-        crate::test_support::create_private_dir_all(&root.join(format!("durable-{suffix}")));
+        crate::test_support::create_private_dir_all(root, &root.join(format!("durable-{suffix}")))
+            .expect("create private directory");
         run_successful_dogfood(root, owner, suffix, now())
     }
 
@@ -1889,7 +1890,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         let mut config = sample_config(root.path(), "ask", workdir);
         config.require_approval = true;
         config.permission = PermissionDecision::Ask;
@@ -1907,7 +1909,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         let mut config = sample_config(root.path(), "deny", workdir);
         config.require_approval = true;
         config.permission = PermissionDecision::Ask;
@@ -1936,7 +1939,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         let mut config = sample_config(root.path(), id, workdir);
         config.require_approval = true;
         config.permission = PermissionDecision::Ask;
@@ -2065,7 +2069,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let mut config = sample_config(root.path(), "gcrash", workdir);
         config.require_approval = true;
@@ -2142,7 +2147,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let mut config = sample_config(root.path(), "grant", workdir);
         config.require_approval = true;
@@ -2180,7 +2186,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         let mut config = sample_config(root.path(), "cancel", workdir);
         config.risk_class = RiskClass::ReadOnly;
         let mut path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
@@ -2198,7 +2205,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let config = sample_config(root.path(), "crash", workdir.clone());
         let config_reopen = config.clone();
@@ -2241,7 +2249,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let config = sample_config(root.path(), "succr", workdir);
         let mut path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
@@ -2285,7 +2294,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let config = sample_config(root.path(), "sucop", workdir);
         let config_reopen = config.clone();
@@ -2395,7 +2405,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let config = sample_config(root.path(), "art", workdir);
         let config2 = config.clone();
@@ -2425,7 +2436,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         let mut config = sample_config(root.path(), "race", workdir);
         config.risk_class = RiskClass::ReadOnly;
         let mut path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
@@ -2473,7 +2485,8 @@ mod tests {
         let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        crate::test_support::create_private_dir_all(&workdir);
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let mut config = sample_config(root.path(), "tree", workdir);
         config.risk_class = RiskClass::ReadOnly;

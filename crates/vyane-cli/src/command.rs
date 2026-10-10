@@ -630,6 +630,7 @@ fn settle_spawn_failure(
             TaskSettlement::Failed {
                 code: FailureCode::SpawnFailed,
                 ledger_run_id: None,
+                persistence: None,
             },
             chrono::Utc::now(),
         ) {
@@ -733,6 +734,7 @@ async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<Ex
                             TaskSettlement::Failed {
                                 code: FailureCode::Configuration,
                                 ledger_run_id: None,
+                                persistence: None,
                             },
                         )
                     });
@@ -901,7 +903,7 @@ async fn worker_body(
             store,
             &args.id,
             worker_epoch,
-            settlement_from_run(record.status, record.run_id.clone()),
+            settlement_from_run(record.status, record.run_id.clone(), &persistence),
         )?;
     } else if let Some(mut final_status) = running {
         final_status.state = run_status_to_task_state(record.status);
@@ -911,9 +913,11 @@ async fn worker_body(
         paths.write_status(&final_status)?;
     }
 
-    // Durable settlement already followed `record.status`. Exit 3 tells a
-    // waiter that persistence is incomplete without classifying the model
-    // call as failed (exit 1), which is what a retry of this worker would do.
+    // Settlement follows the model outcome and stores the persistence result in
+    // the same transaction. The parent does not wait on this process, so this
+    // exit code is not what `task status` observes. `task status` reads the
+    // stored result and returns 3 when the run succeeded and persistence is
+    // incomplete, without classifying the model call as failed.
     Ok(exit_for_completed_dispatch(record.status, &persistence))
 }
 
@@ -1085,16 +1089,31 @@ fn attach_detached_controller(
     }
 }
 
-fn settlement_from_run(status: RunStatus, ledger_run_id: String) -> TaskSettlement {
+fn settlement_from_run(
+    status: RunStatus,
+    ledger_run_id: String,
+    persistence: &vyane_kernel::DispatchPersistence,
+) -> TaskSettlement {
     let ledger_run_id = Some(ledger_run_id);
+    let persistence = Some(crate::output::task_persistence_from_dispatch(persistence));
     match status {
-        RunStatus::Success => TaskSettlement::Succeeded { ledger_run_id },
+        RunStatus::Success => TaskSettlement::Succeeded {
+            ledger_run_id,
+            persistence,
+        },
         RunStatus::Error => TaskSettlement::Failed {
             code: FailureCode::DispatchFailed,
             ledger_run_id,
+            persistence,
         },
-        RunStatus::Timeout => TaskSettlement::TimedOut { ledger_run_id },
-        RunStatus::Cancelled => TaskSettlement::Cancelled { ledger_run_id },
+        RunStatus::Timeout => TaskSettlement::TimedOut {
+            ledger_run_id,
+            persistence,
+        },
+        RunStatus::Cancelled => TaskSettlement::Cancelled {
+            ledger_run_id,
+            persistence,
+        },
     }
 }
 
@@ -1352,18 +1371,7 @@ async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
         } else {
             crate::output::print_durable_task_status(&record, &log_tail);
         }
-        let ok = matches!(
-            record.state,
-            DurableTaskState::Queued
-                | DurableTaskState::Running
-                | DurableTaskState::Cancelling
-                | DurableTaskState::Succeeded
-        );
-        return Ok(if ok {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(1)
-        });
+        return Ok(exit_for_observed_task(&record));
     }
 
     let status = match paths.read_status() {
@@ -3258,6 +3266,43 @@ fn exit_for_completed_dispatch(
         );
     }
     ExitCode::from(completed_dispatch_status_code(status, persistence))
+}
+
+/// Exit status for a durable task a caller is observing.
+///
+/// A succeeded task with incomplete persistence exits 3, matching a foreground
+/// dispatch. A missing persistence record is unknown, so it does not exit 3 and
+/// does not claim the writes landed. Any other unhappy terminal state exits 1,
+/// including when persistence is also incomplete.
+fn exit_for_observed_task(record: &TaskRecord) -> ExitCode {
+    let persistence = record
+        .persistence
+        .as_ref()
+        .map(crate::output::dispatch_persistence_from_task);
+    if let Some(persistence) = persistence.as_ref().filter(|value| !value.is_complete()) {
+        eprintln!(
+            "{}",
+            crate::output::format_dispatch_persistence_warning_line(persistence)
+        );
+    }
+    let running_or_succeeded = matches!(
+        record.state,
+        DurableTaskState::Queued
+            | DurableTaskState::Running
+            | DurableTaskState::Cancelling
+            | DurableTaskState::Succeeded
+    );
+    if !running_or_succeeded {
+        return ExitCode::from(1);
+    }
+    if record.state == DurableTaskState::Succeeded
+        && persistence
+            .as_ref()
+            .is_some_and(|value| !value.is_complete())
+    {
+        return ExitCode::from(3);
+    }
+    ExitCode::SUCCESS
 }
 
 fn completed_dispatch_status_code(

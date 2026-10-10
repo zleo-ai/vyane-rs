@@ -1079,7 +1079,8 @@ mod tests {
             },
         );
         let data_dir = root.path().join("data");
-        crate::test_support::create_private_dir_all(&data_dir);
+        crate::test_support::create_private_dir_all(root.path(), &data_dir)
+            .expect("create private directory");
         let paths = StoragePaths::from_data_dir(data_dir);
         let service = VyaneService::from_loaded_with_paths(
             LoadedConfig {
@@ -1144,7 +1145,8 @@ mod tests {
             },
         );
         let data_dir = root.path().join("data");
-        crate::test_support::create_private_dir_all(&data_dir);
+        crate::test_support::create_private_dir_all(root.path(), &data_dir)
+            .expect("create private directory");
         let paths = StoragePaths::from_data_dir(data_dir);
         let service = VyaneService::from_loaded_with_paths(
             LoadedConfig {

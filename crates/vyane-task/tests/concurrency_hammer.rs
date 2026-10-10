@@ -216,6 +216,7 @@ fn worker_loop(store: SqliteTaskStore, shared: Arc<Shared>, probe: Arc<Probe>, w
                                         running.executor_epoch,
                                         TaskSettlement::Succeeded {
                                             ledger_run_id: Some(format!("run-{seq}")),
+                                            persistence: None,
                                         },
                                         timestamp(2),
                                     )

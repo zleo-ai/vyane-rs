@@ -1812,3 +1812,156 @@ fn unix_signal_pid(pid: i32, signal: i32) {
 fn unix_pid_alive(_pid: i32) -> bool {
     true
 }
+
+#[cfg(unix)]
+#[test]
+fn legacy_detached_task_without_persistence_exits_zero_and_omits_the_field() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let data = common::private_tempdir();
+    let path = data.path().join("tasks.sqlite3");
+    let connection = rusqlite::Connection::open(&path).expect("open legacy task database");
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .expect("enable foreign keys");
+    connection
+        .pragma_update(None, "journal_mode", "DELETE")
+        .expect("delete journal");
+    connection
+        .execute_batch(include_str!("../../vyane-task/migrations/0001_tasks.sql"))
+        .expect("apply v1 schema");
+    connection
+        .execute_batch(include_str!(
+            "../../vyane-task/migrations/0002_owner_scope.sql"
+        ))
+        .expect("apply v2 schema");
+    connection
+        .execute(
+            "INSERT INTO tasks (
+                owner, id, record_schema, kind, origin, state, task_digest, target_key,
+                created_at_ms, started_at_ms, updated_at_ms, finished_at_ms, revision,
+                executor_epoch, controller_kind, controller_instance_id, ledger_run_id
+             ) VALUES (
+                'local', 'old-task', 1, 'dispatch', 'cli_detached', 'succeeded',
+                '0123456789abcdef', 'review',
+                0, 1000, 2000, 2000, 2, 1,
+                'in_process', 'server-a', 'run-old'
+             )",
+            [],
+        )
+        .expect("insert legacy task");
+    connection
+        .pragma_update(None, "user_version", 2)
+        .expect("mark schema v2");
+    drop(connection);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("restrict database");
+
+    let output = vyane()
+        .env("VYANE_DATA_DIR", data.path())
+        .args(["task", "status", "old-task", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("persistence failed").not())
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&output).expect("status json");
+    assert_eq!(status["state"], "succeeded");
+    assert_eq!(status["ledger_run_id"], "run-old");
+    assert!(status.get("persistence").is_none());
+}
+
+#[cfg(target_os = "linux")]
+fn write_counting_fake_claude(dir: &TempDir, calls: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let bin = dir.path().join("claude");
+    let script = format!(
+        "#!/bin/sh\nset -eu\nprintf x >> '{}'\nprintf '%s\\n' '{{\"result\":\"once\",\"session_id\":\"native-new\"}}'\n",
+        calls.display()
+    );
+    fs::write(&bin, script).expect("write counting fake claude");
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))
+        .expect("make counting fake claude executable");
+    bin
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_counting_detached(
+    data_dir: &Path,
+    block_ledger: bool,
+) -> (String, std::path::PathBuf, TempDir, TempDir) {
+    let config_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
+    let calls = bin_dir.path().join("calls");
+    write_counting_fake_claude(&bin_dir, &calls);
+    let config = write_config(&config_dir, &harness_config());
+    if block_ledger {
+        fs::create_dir(data_dir.join("ledger.jsonl")).expect("block ledger path");
+    }
+    let path = format!(
+        "{}:{}",
+        bin_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = vyane()
+        .env("PATH", &path)
+        .env("VYANE_DATA_DIR", data_dir)
+        .arg("--config")
+        .arg(&config)
+        .args(["dispatch", "count me", "--target", "builder", "--detach"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id = String::from_utf8(out).expect("utf8 id").trim().to_string();
+    (id, calls, config_dir, bin_dir)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn detached_task_status_exits_three_when_ledger_persistence_fails() {
+    let data_dir = common::private_tempdir();
+    let (id, calls, _config_dir, _bin_dir) = spawn_counting_detached(data_dir.path(), true);
+    let status = poll_until_terminal(data_dir.path(), &id, Duration::from_secs(15));
+    assert_eq!(status["state"], "succeeded");
+    assert!(
+        status["ledger_run_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_eq!(status["persistence"]["ledger"]["state"], "failed");
+    assert_eq!(status["persistence"]["ledger"]["kind"], "io");
+    assert_eq!(status["persistence"]["session"]["state"], "not_requested");
+    assert_eq!(fs::read(&calls).expect("call count"), b"x");
+
+    vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["task", "status", &id, "--json"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains(
+            "ledger (io) persistence failed after the run finished",
+        ))
+        .stderr(predicate::str::contains("must not be repeated"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn detached_task_status_exits_zero_when_persistence_succeeds() {
+    let data_dir = common::private_tempdir();
+    let (id, calls, _config_dir, _bin_dir) = spawn_counting_detached(data_dir.path(), false);
+    let status = poll_until_terminal(data_dir.path(), &id, Duration::from_secs(15));
+    assert_eq!(status["state"], "succeeded");
+    assert_eq!(status["persistence"]["ledger"]["state"], "saved");
+    assert_eq!(status["persistence"]["session"]["state"], "not_requested");
+    assert_eq!(fs::read(&calls).expect("call count"), b"x");
+
+    vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["task", "status", &id])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("persistence failed").not());
+}

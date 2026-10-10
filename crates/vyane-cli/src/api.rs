@@ -119,6 +119,11 @@ pub struct TaskEntry {
     pub ledger_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<FailureCode>,
+    /// Post-run ledger and session result. Absent when the completion did not
+    /// record one. A failed ledger step means `ledger_run_id` may not name a
+    /// stored ledger row; the id is still returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistence: Option<vyane_kernel::DispatchPersistence>,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +145,10 @@ impl From<TaskRecord> for TaskEntry {
             revision: record.revision,
             ledger_run_id: record.ledger_run_id,
             failure_code: record.failure_code,
+            persistence: record
+                .persistence
+                .as_ref()
+                .map(crate::output::dispatch_persistence_from_task),
         }
     }
 }
@@ -713,6 +722,7 @@ impl TaskSupervisor {
                         TaskSettlement::Failed {
                             code: FailureCode::Internal,
                             ledger_run_id: None,
+                            persistence: None,
                         },
                         None,
                     )
@@ -1298,20 +1308,34 @@ fn settlement_from_dispatch_result(result: anyhow::Result<DispatchOutcome>) -> T
         return TaskSettlement::Failed {
             code: FailureCode::DispatchFailed,
             ledger_run_id: None,
+            persistence: None,
         };
     };
     let ledger_run_id = (!outcome.record.run_id.is_empty()).then_some(outcome.record.run_id);
-    // Follow the model call's status. A persistence failure is reported on
-    // the dispatch outcome and must not settle the task as failed, which
-    // would invite a retry of work that already ran.
+    // Follow the model call's status. The persistence result is stored with
+    // that settlement. A persistence failure must not settle the task as
+    // failed, which would invite a retry of work that already ran.
+    let persistence = Some(crate::output::task_persistence_from_dispatch(
+        &outcome.persistence,
+    ));
     match outcome.record.status {
-        RunStatus::Success => TaskSettlement::Succeeded { ledger_run_id },
+        RunStatus::Success => TaskSettlement::Succeeded {
+            ledger_run_id,
+            persistence,
+        },
         RunStatus::Error => TaskSettlement::Failed {
             code: FailureCode::DispatchFailed,
             ledger_run_id,
+            persistence,
         },
-        RunStatus::Timeout => TaskSettlement::TimedOut { ledger_run_id },
-        RunStatus::Cancelled => TaskSettlement::Cancelled { ledger_run_id },
+        RunStatus::Timeout => TaskSettlement::TimedOut {
+            ledger_run_id,
+            persistence,
+        },
+        RunStatus::Cancelled => TaskSettlement::Cancelled {
+            ledger_run_id,
+            persistence,
+        },
     }
 }
 
@@ -3839,23 +3863,24 @@ mod tests {
         ] {
             let settlement = settlement_from_dispatch_result(Ok(outcome_with_status(run_status)));
             let actual = match settlement {
-                TaskSettlement::Succeeded { ledger_run_id } => {
+                TaskSettlement::Succeeded { ledger_run_id, .. } => {
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::Succeeded
                 }
                 TaskSettlement::Failed {
                     code,
                     ledger_run_id,
+                    ..
                 } => {
                     assert_eq!(code, FailureCode::DispatchFailed);
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::Failed
                 }
-                TaskSettlement::TimedOut { ledger_run_id } => {
+                TaskSettlement::TimedOut { ledger_run_id, .. } => {
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::TimedOut
                 }
-                TaskSettlement::Cancelled { ledger_run_id } => {
+                TaskSettlement::Cancelled { ledger_run_id, .. } => {
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::Cancelled
                 }
@@ -3901,6 +3926,7 @@ mod tests {
                 attached.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-done".into()),
+                    persistence: None,
                 },
             )
             .await
@@ -4290,6 +4316,7 @@ mod tests {
                 terminal.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-shutdown-terminal".into()),
+                    persistence: None,
                 },
             )
             .await
@@ -4424,6 +4451,7 @@ mod tests {
                 attached.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-output-route".into()),
+                    persistence: None,
                 },
             )
             .await
@@ -5175,6 +5203,120 @@ mod tests {
             assert!(json.get(forbidden).is_none(), "leaked field {forbidden}");
         }
         assert!(!json.to_string().contains("secret prompt"));
+    }
+
+    #[tokio::test]
+    async fn async_task_reports_ledger_persistence_failure_without_repeating_the_model() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-persist",
+                "model": "test-model",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "persisted-answer" },
+                    "finish_reason": "stop"
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let data = crate::test_support::private_tempdir();
+        let service = direct_http_test_service(data.path(), server.uri());
+        std::fs::create_dir(data.path().join("ledger.jsonl")).unwrap();
+        let (_task_directory, supervisor) = temp_supervisor().await;
+        let app = router_from_parts(service, supervisor, API_TOKEN).unwrap();
+        let created = app
+            .clone()
+            .oneshot(
+                axum::http::Request::post("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:9721")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::from(
+                        r#"{"task":"say hi once","target":"test"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::ACCEPTED);
+        let created = response_json(created).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert!(created.get("persistence").is_none());
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let body = loop {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(format!("/v1/tasks/{id}"))
+                        .header("host", "127.0.0.1:9721")
+                        .header("authorization", format!("Bearer {API_TOKEN}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            let state = body["state"].as_str().unwrap_or("");
+            if !matches!(state, "queued" | "running" | "cancelling") {
+                break body;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "task {id} did not finish: {body}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        assert_eq!(body["state"], "succeeded");
+        assert!(
+            body["ledger_run_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(body["persistence"]["ledger"]["state"], "failed");
+        assert_eq!(body["persistence"]["ledger"]["kind"], "io");
+        assert_eq!(body["persistence"]["session"]["state"], "not_requested");
+        assert!(body["persistence"]["ledger"].get("message").is_none());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert!(data.path().join("ledger.jsonl").is_dir());
+    }
+
+    #[tokio::test]
+    async fn task_without_recorded_persistence_does_not_report_success_or_failure() {
+        let (_directory, supervisor) = temp_supervisor().await;
+        let attached = create_attached(&supervisor, "unrecorded-persistence").await;
+        supervisor
+            .settle_current(
+                &attached.id,
+                attached.executor_epoch,
+                TaskSettlement::Succeeded {
+                    ledger_run_id: Some("run-unrecorded".into()),
+                    persistence: None,
+                },
+            )
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/v1/tasks/{id}", get(get_task))
+            .with_state(supervisor);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/v1/tasks/unrecorded-persistence")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["state"], "succeeded");
+        assert_eq!(body["ledger_run_id"], "run-unrecorded");
+        assert!(body.get("persistence").is_none());
     }
 
     // --- SSE payload serialization ----------------------------------------
