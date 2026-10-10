@@ -400,11 +400,11 @@ require_cmd() {
 
 run_standard() {
   local contributing="${REPO_ROOT}/CONTRIBUTING.md"
-  local claude_md="${REPO_ROOT}/CLAUDE.md"
+  local agents_md="${REPO_ROOT}/AGENTS.md"
   {
     cat <<EOF
 你是 zleo-ai/vyane-rs 的独立代码审查者。只审查下面内嵌的 PR diff。
-不要修改任何文件。不要调用工具；diff 与 CONTRIBUTING 已全部内嵌，直接写审查结果。
+不要修改任何文件。不要调用工具；diff、CONTRIBUTING.md 与 AGENTS.md 已全部内嵌，直接写审查结果。
 
 输出格式（必须遵守）：
 - 第 1 行：结论：APPROVE  或  结论：REQUEST_CHANGES  或  结论：COMMENT
@@ -416,7 +416,7 @@ run_standard() {
 - 不要伪造未观察到的问题。
 
 三维度：
-A. 规范合规 — 对照仓内 CONTRIBUTING.md（如下内嵌）。本仓若无 CLAUDE.md 则只对照 CONTRIBUTING 与 diff 内可见约定。
+A. 规范合规 — 对照仓内 CONTRIBUTING.md 与 AGENTS.md（如下内嵌）。本仓若无 AGENTS.md 则只对照 CONTRIBUTING 与 diff 内可见约定。
 B. Bug 扫描 — 只看 diff 内变更，不把预存问题当成本 PR 引入。
 C. 架构影响 — 是否破坏 crate 边界、kernel 对具体 client/harness 的隔离、向后兼容。
 
@@ -441,13 +441,13 @@ EOF
     fi
     echo "----- end CONTRIBUTING.md -----"
     echo
-    if [[ -f "$claude_md" ]]; then
-      echo "----- CLAUDE.md -----"
-      cat "$claude_md"
-      echo "----- end CLAUDE.md -----"
+    if [[ -f "$agents_md" ]]; then
+      echo "----- AGENTS.md -----"
+      cat "$agents_md"
+      echo "----- end AGENTS.md -----"
       echo
     else
-      echo "CLAUDE.md: not present in this repository."
+      echo "AGENTS.md: not present in this repository."
       echo
     fi
     if ((TRUNCATED)); then
