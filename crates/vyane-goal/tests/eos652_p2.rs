@@ -7,6 +7,7 @@
 //! Signature note: while `progress` gains an optional `worker_id` fence argument
 //! during implementation, these probes drive the real GoalStore entry points.
 
+mod common;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 
@@ -25,7 +26,7 @@ fn timestamp(seconds: i64) -> DateTime<Utc> {
 }
 
 fn fixture() -> (TempDir, SqliteGoalStore) {
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     // GoalStore refuses group/world-writable parents; neutralize umask 002 temps.
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
         .expect("restrict tempdir permissions");

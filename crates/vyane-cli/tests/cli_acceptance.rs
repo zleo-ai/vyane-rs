@@ -1,3 +1,4 @@
+mod common;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -277,7 +278,7 @@ fn write_workflow(dir: &TempDir, text: &str) -> std::path::PathBuf {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_unknown_target_exits_with_config_code() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
+    let config_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
 
     vyane()
@@ -298,7 +299,7 @@ async fn dispatch_unknown_target_exits_with_config_code() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn check_with_temp_config_lists_profile() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
+    let config_dir = common::private_tempdir();
     let config = write_config(
         &config_dir,
         &format!(
@@ -335,7 +336,7 @@ allow = [{{ program = "CANARY_PERMISSION_COMMAND" }}]
 
 #[test]
 fn check_permission_summary_preserves_large_loadable_config_exit_behavior() {
-    let config_dir = TempDir::new().expect("config tempdir");
+    let config_dir = common::private_tempdir();
     let mut source = String::new();
     for index in 0..=vyane_service::DIAGNOSTIC_MAX_CONFIG_ITEMS {
         source.push_str(&format!(
@@ -367,8 +368,8 @@ default_model = "model"
 async fn dispatch_openai_chat_writes_success_ledger_and_json_parses() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "wiremock answer").await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
 
     vyane()
@@ -407,8 +408,8 @@ async fn dispatch_openai_chat_writes_success_ledger_and_json_parses() {
 async fn dispatch_auto_routes_executes_effort_and_records_decision() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "auto answer").await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &auto_route_config_for(&server));
 
     for args in [
@@ -474,8 +475,8 @@ async fn dispatch_auto_routes_executes_effort_and_records_decision() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_cannot_forge_routing_decision_labels() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
 
     vyane()
@@ -532,8 +533,8 @@ async fn user_cannot_forge_routing_decision_labels() {
 async fn generic_effort_label_does_not_forge_the_reserved_route_effort() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "auto answer").await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &auto_route_config_for(&server));
 
     vyane()
@@ -567,8 +568,8 @@ async fn generic_effort_label_does_not_forge_the_reserved_route_effort() {
 async fn profile_prefix_disambiguates_a_profile_named_auto() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "literal auto profile").await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let mut text = config_for(&server);
     text.push_str(
         r#"
@@ -609,8 +610,8 @@ async fn dispatch_failover_and_history_work_end_to_end() {
     let backup = MockServer::start().await;
     mock_openai(&primary, 500, "").await;
     mock_openai(&backup, 200, "backup answer").await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &failover_config(&primary, &backup));
 
     vyane()
@@ -657,8 +658,8 @@ async fn dispatch_failover_and_history_work_end_to_end() {
 async fn workflow_run_and_list_work_end_to_end() {
     let server = MockServer::start().await;
     mock_openai_workflow(&server).await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
     let workflow = write_workflow(
         &config_dir,
@@ -726,8 +727,8 @@ async fn workflow_run_and_list_work_end_to_end() {
 async fn workflow_replay_creates_a_new_run_without_reexecuting_recorded_successes() {
     let server = MockServer::start().await;
     mock_openai_workflow(&server).await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
     let workflow = write_workflow(
         &config_dir,
@@ -814,7 +815,7 @@ async fn workflow_replay_creates_a_new_run_without_reexecuting_recorded_successe
 
 #[test]
 fn workflow_replay_rejects_var_before_config_or_journal_access() {
-    let data_dir = TempDir::new().expect("data tempdir");
+    let data_dir = common::private_tempdir();
     let missing_config = data_dir.path().join("missing-config.toml");
     let missing_workflow = data_dir.path().join("missing-workflow.toml");
 
@@ -843,8 +844,8 @@ fn workflow_replay_rejects_var_before_config_or_journal_access() {
 async fn workflow_auto_target_resolves_after_render_and_records_route() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "workflow auto").await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &auto_route_config_for(&server));
     let workflow = write_workflow(
         &config_dir,
@@ -914,8 +915,8 @@ async fn workflow_explicit_effort_overrides_profile_and_tier_across_failover() {
     let backup = MockServer::start().await;
     mock_openai(&primary, 500, "").await;
     mock_openai(&backup, 200, "backup answer").await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(
         &config_dir,
         &workflow_effort_failover_config(&primary, &backup),
@@ -972,8 +973,8 @@ async fn workflow_explicit_effort_overrides_profile_and_tier_across_failover() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_workflow_effort_fails_before_journal_or_network_without_echo() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &auto_route_config_for(&server));
     let canary = "EFFORT_VALUE_MUST_NOT_BE_ECHOED";
     let workflow = write_workflow(
@@ -1021,8 +1022,8 @@ async fn invalid_workflow_effort_fails_before_journal_or_network_without_echo() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_effort_cannot_bypass_frontier_guard() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &auto_route_config_for(&server));
     let workflow = write_workflow(
         &config_dir,
@@ -1068,8 +1069,8 @@ async fn workflow_effort_cannot_bypass_frontier_guard() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_route_hints_on_explicit_target_fail_before_journal_or_network() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
     let workflow = write_workflow(
         &config_dir,
@@ -1115,8 +1116,8 @@ async fn workflow_route_hints_on_explicit_target_fail_before_journal_or_network(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_auto_route_hints_are_validated_before_journal_or_dispatch() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &auto_route_config_for(&server));
     let workflow = write_workflow(
         &config_dir,
@@ -1169,8 +1170,8 @@ async fn workflow_auto_route_hints_are_validated_before_journal_or_dispatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_auto_preflight_validates_every_eligible_profile() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let mut config_text = auto_route_config_for(&server);
     config_text.push_str(
         r#"
@@ -1237,8 +1238,8 @@ async fn dispatch_stream_prints_deltas_and_writes_ledger() {
         ))
         .mount(&server)
         .await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &responses_config_for(&server));
 
     vyane()
@@ -1307,8 +1308,8 @@ async fn dispatch_stream_on_failover_chain_falls_back_and_records_both_attempts(
     let backup = MockServer::start().await;
     mock_openai(&primary, 500, "").await;
     mock_openai(&backup, 200, "backup answer").await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &failover_config(&primary, &backup));
 
     // `resilient` resolves to a two-element chain (primary + backup) —
@@ -1344,9 +1345,9 @@ async fn dispatch_stream_on_failover_chain_falls_back_and_records_both_attempts(
 #[tokio::test]
 #[cfg(unix)]
 async fn dispatch_stream_on_harness_target_streams() {
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
-    let bin_dir = TempDir::new().expect("bin tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let config = write_config(&config_dir, &harness_config());
     let _fake_claude = write_fake_streaming_claude(&bin_dir);
 
@@ -1382,8 +1383,8 @@ async fn dispatch_stream_on_harness_target_streams() {
 async fn dispatch_stream_with_session_falls_back() {
     let server = MockServer::start().await;
     mock_openai(&server, 200, "session answer").await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
 
     // `--session` names a single direct-HTTP target — otherwise streamable —
@@ -1423,7 +1424,7 @@ async fn dispatch_stream_with_session_falls_back() {
 /// not a crash.
 #[tokio::test]
 async fn route_with_empty_config_errors_cleanly() {
-    let config_dir = TempDir::new().expect("config tempdir");
+    let config_dir = common::private_tempdir();
     let config = config_dir.path().join("config.toml");
     fs::write(&config, "# empty config\n").expect("write config");
 
@@ -1439,7 +1440,7 @@ async fn route_with_empty_config_errors_cleanly() {
 /// `vyane route` with tier-configured profiles routes a simple task to economy.
 #[tokio::test]
 async fn route_simple_task_to_economy() {
-    let config_dir = TempDir::new().expect("config tempdir");
+    let config_dir = common::private_tempdir();
     let config = config_dir.path().join("config.toml");
     fs::write(
         &config,
@@ -1480,7 +1481,7 @@ async fn route_simple_task_to_economy() {
 /// `vyane route --tier frontier` overrides to the frontier profile.
 #[tokio::test]
 async fn route_explicit_tier_override() {
-    let config_dir = TempDir::new().expect("config tempdir");
+    let config_dir = common::private_tempdir();
     let config = config_dir.path().join("config.toml");
     fs::write(
         &config,
@@ -1524,7 +1525,7 @@ async fn route_explicit_tier_override() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_with_one_reviewer_exits_two() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
+    let config_dir = common::private_tempdir();
     let config = config_dir.path().join("config.toml");
     fs::write(&config, config_for(&server)).expect("write config");
 
@@ -1634,8 +1635,8 @@ async fn mock_review_pipeline(server: &MockServer) {
 async fn review_pipeline_runs_three_steps_end_to_end() {
     let server = MockServer::start().await;
     mock_review_pipeline(&server).await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
 
     let output = vyane()

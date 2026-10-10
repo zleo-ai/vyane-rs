@@ -146,7 +146,8 @@ In the clean public integration baseline:
   before session-store load, capability probe or `make`. Pure direct-HTTP
   transcript continuation remains available through regular dispatch. The
   current fence is local and descriptor-owned, not a distributed TTL/generation
-  protocol, and post-model session persistence remains best-effort. The owner-
+  protocol, and post-model session persistence is reported on the dispatch
+  outcome without turning a finished model call into a failed run. The owner-
   local service/CLI exposes list, inspect and revision-checked reset-native
   only; there is no public fork, REST mutation or production resume.
 - Decision 7 remains in force: there is no registered `NativeHarness`, and the

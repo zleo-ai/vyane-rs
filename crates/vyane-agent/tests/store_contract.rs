@@ -107,8 +107,21 @@ fn complete(store: &dyn AgentStore, owner: &str, claimed: &vyane_agent::ClaimedR
     store.commit_completion(owner, &prepared.permit).unwrap();
 }
 
+fn private_tempdir() -> TempDir {
+    let directory = TempDir::new().expect("tempdir");
+    // Callers may use umask 002, which makes a new temp directory group-writable.
+    // The store rejects that parent. The fixture tightens it itself.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restrict tempdir permissions");
+    }
+    directory
+}
+
 fn store() -> (TempDir, Arc<TestClock>, SqliteAgentStore) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_tempdir();
     let clock = Arc::new(TestClock::new());
     let store =
         SqliteAgentStore::open_with_clock(directory.path().join("agent.sqlite"), clock.clone())
@@ -1946,10 +1959,40 @@ fn clock_rollback_never_regresses_records_events_or_projection_time() {
 
 #[cfg(unix)]
 #[test]
-fn database_files_are_private_without_mutating_existing_parent() {
+fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let directory = TempDir::new().unwrap();
+    let group_writable = directory.path().join("group-writable");
+    std::fs::create_dir(&group_writable).unwrap();
+    // 0775 is the mode a 0777 directory creation receives under umask 002.
+    std::fs::set_permissions(&group_writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+    match SqliteAgentStore::open(group_writable.join("agent.sqlite")) {
+        Err(AgentStoreError::InvalidInput(message)) => {
+            assert!(message.contains("group- or world-writable"), "{message}");
+        }
+        other => panic!("group-writable parent must still be rejected, got {other:?}"),
+    }
+
+    let fixture = private_tempdir();
+    assert_eq!(
+        std::fs::metadata(fixture.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o022,
+        0,
+        "fixture parent must not be group- or world-writable"
+    );
+    SqliteAgentStore::open(fixture.path().join("agent.sqlite")).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn database_files_are_private_without_mutating_existing_parent() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = private_tempdir();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
     let path = directory.path().join("agent.sqlite");
     let store = SqliteAgentStore::open(&path).unwrap();
@@ -1993,7 +2036,7 @@ fn database_files_are_private_without_mutating_existing_parent() {
 fn database_and_sidecar_symlinks_fail_closed() {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-    let directory = TempDir::new().unwrap();
+    let directory = private_tempdir();
     let victim = directory.path().join("victim");
     std::fs::write(&victim, b"unchanged").unwrap();
     let database_link = directory.path().join("linked.sqlite");
@@ -2036,7 +2079,7 @@ fn database_and_sidecar_symlinks_fail_closed() {
 fn existing_database_files_with_permissive_modes_fail_closed() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let directory = TempDir::new().unwrap();
+    let directory = private_tempdir();
     let database = directory.path().join("agent.sqlite");
     drop(SqliteAgentStore::open(&database).unwrap());
 

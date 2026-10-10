@@ -1397,7 +1397,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_lists_inspects_and_resets_only_the_local_owner() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         service
             .runtime()
@@ -1483,7 +1483,7 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_dispatch_and_broadcast_persist_only_the_frozen_owner() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = executable_service(&directory);
         let owner_a = service.scope(owner_context("a"));
         let owner_b = service.scope(owner_context("b"));
@@ -1566,7 +1566,7 @@ mod tests {
 
     #[tokio::test]
     async fn authorized_service_dispatch_rejects_http_and_sessions_without_a_run() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = executable_service(&directory);
         let scoped = service.scope(owner_context("authorized"));
         let authority = || HarnessSpawnAuthority::new(|| true);
@@ -1604,7 +1604,7 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_sessions_isolate_same_id_and_reset_cannot_cross_owner() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let owner_a = service.scope(owner_context("a"));
         let owner_b = service.scope(owner_context("b"));

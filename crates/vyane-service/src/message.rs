@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn construction_is_explicit_owner_bound_and_validates_before_writing() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = StoragePaths::from_data_dir(directory.path().join("data"));
 
         assert!(MessageComponents::open(&paths, "   ").is_err());
@@ -464,7 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_style_completion_prepares_and_stages_exact_message() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = StoragePaths::from_data_dir(directory.path().join("data"));
         let messages = MessageComponents::open(&paths, "owner-a").unwrap();
         let agent_store = Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());
@@ -551,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn completion_body_is_absent_until_exact_commit_and_publication() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = StoragePaths::from_data_dir(directory.path().join("data"));
         let messages = MessageComponents::open(&paths, "owner-a").unwrap();
         let agent_store = Arc::new(SqliteAgentStore::open(paths.agent_metadata_db_path()).unwrap());
@@ -641,7 +641,7 @@ mod tests {
 
     #[tokio::test]
     async fn resident_broker_assembly_owns_scope_and_drains_without_delivery_lanes() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = StoragePaths::from_data_dir(directory.path().join("data"));
         let messages = MessageComponents::open(&paths, "alice").unwrap();
         let agents = AgentProjectionComponents::open(&paths, "alice").unwrap();
@@ -681,5 +681,48 @@ mod tests {
             error.to_string(),
             "invalid broker configuration: broker and projector owner scopes must match"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = crate::test_support::private_tempdir();
+        let group_writable = directory.path().join("group-writable");
+        std::fs::create_dir(&group_writable).unwrap();
+        // 0775 is the mode a 0777 directory creation receives under umask 002.
+        std::fs::set_permissions(&group_writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let error = match MessageComponents::open(
+            &crate::StoragePaths::from_data_dir(&group_writable),
+            "alice",
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("group-writable parent must still be rejected"),
+        };
+        let mut message = error.to_string();
+        let mut source = error.source();
+        while let Some(inner) = source {
+            message.push('\n');
+            message.push_str(&inner.to_string());
+            source = inner.source();
+        }
+        assert!(message.contains("group- or world-writable"), "{message}");
+
+        let fixture = crate::test_support::private_tempdir();
+        assert_eq!(
+            std::fs::metadata(fixture.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o022,
+            0,
+            "fixture parent must not be group- or world-writable"
+        );
+        match MessageComponents::open(&crate::StoragePaths::from_data_dir(fixture.path()), "alice")
+        {
+            Ok(_) => {}
+            Err(error) => panic!("private fixture parent must be accepted: {error}"),
+        }
     }
 }

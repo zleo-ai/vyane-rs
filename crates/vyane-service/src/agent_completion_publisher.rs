@@ -697,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn sink_success_before_ack_replays_on_the_same_projector() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store =
             Arc::new(SqliteAgentStore::open(directory.path().join("agent.sqlite3")).unwrap());
         let (prepared_publish, _) = prepare(&store, "publish", "recording-v1");
@@ -766,7 +766,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_and_conflicting_sinks_are_durable_and_do_not_block_later_success() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store =
             Arc::new(SqliteAgentStore::open(directory.path().join("agent.sqlite3")).unwrap());
         let (missing, _) = prepare(&store, "missing", "missing-v1");
@@ -818,7 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn defer_delay_is_derived_from_the_store_authoritative_clock() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).single().unwrap(),
         ));

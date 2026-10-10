@@ -12,6 +12,8 @@ mod broker;
 mod error;
 mod projector;
 mod supervisor;
+#[cfg(test)]
+mod test_support;
 
 pub use adapter::{
     AdapterContext, AdapterFailure, AdapterOutcome, DeliveryAdapter, DeliveryEnvelope, ReplaySafety,

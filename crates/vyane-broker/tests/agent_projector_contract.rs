@@ -1,10 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::Utc;
-use tempfile::TempDir;
 use vyane_agent::{
     AgentStore, ExecutionBackend, NewAgentRun, NewWorker, RunMode, SqliteAgentStore,
 };
@@ -52,7 +52,7 @@ fn add_root(store: &dyn AgentStore, owner: &str, suffix: &str, include_canaries:
 
 #[tokio::test]
 async fn projection_is_bounded_body_free_and_owner_projector_scoped() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let concrete =
         Arc::new(SqliteAgentStore::open(directory.path().join("agent.sqlite3")).unwrap());
     add_root(concrete.as_ref(), "owner-a", "a", true);
@@ -169,7 +169,7 @@ async fn projection_is_bounded_body_free_and_owner_projector_scoped() {
 
 #[tokio::test]
 async fn failed_append_does_not_acknowledge_the_source_event() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let concrete =
         Arc::new(SqliteAgentStore::open(directory.path().join("agent.sqlite3")).unwrap());
     add_root(concrete.as_ref(), "owner", "retry", false);

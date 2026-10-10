@@ -1,19 +1,19 @@
 //! 从真实 dispatch 子进程和落盘用量进入公共估算接口。
 //! dispatch 目前不会自动填充 cost_usd；此处验证它实际产出的 Usage。
 
+mod common;
 use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
-use tempfile::TempDir;
 use vyane_core::{RunRecord, Usage};
 use vyane_ledger::{ModelPricing, PriceTable};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn dispatch_record(config: &str, binary_dir: Option<&Path>) -> RunRecord {
-    let dir = TempDir::new().expect("创建临时目录");
+    let dir = common::private_tempdir();
     let config_path = dir.path().join("config.toml");
     fs::write(&config_path, config).expect("写入测试配置");
     let mut command = Command::cargo_bin("vyane").expect("找到 vyane 程序");
@@ -61,7 +61,7 @@ fn assert_estimate(record: &RunRecord, pricing: ModelPricing, expected: f64) {
 fn claude_dispatch_cache_subset_is_not_double_billed() {
     use std::os::unix::fs::PermissionsExt;
 
-    let bin_dir = TempDir::new().expect("创建子进程目录");
+    let bin_dir = common::private_tempdir();
     let binary = bin_dir.path().join("claude");
     fs::write(
         &binary,

@@ -701,7 +701,7 @@ mod tests {
     }
 
     fn fixture() -> (tempfile::TempDir, ProcessControllerStore) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let root = directory.path().join("controllers");
         let store = ProcessControllerStore::open(&root, "owner-a").unwrap();
         (directory, store)
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn unsafe_existing_directory_is_not_repaired() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let root = directory.path().join("controllers");
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).unwrap();

@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -164,7 +165,7 @@ impl GoalSegmentRuntime for LeaseProbingHangingRuntime<'_> {
 }
 
 fn fixture() -> (TempDir, SqliteGoalStore) {
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).expect("store");
     (directory, store)
 }
@@ -257,7 +258,7 @@ async fn segment_then_reverify_completes_without_runtime_owned_done() {
 
 #[tokio::test]
 async fn paused_checkpoint_survives_reopen_and_new_lease_continues_lifetime_budget() {
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     let database = directory.path().join("goals.sqlite3");
     let started_at;
     let first_revision;
@@ -998,7 +999,7 @@ async fn runtime_timeout_and_external_pause_stop_without_extra_segments() {
 
 #[tokio::test]
 async fn runtime_crash_keeps_the_pre_dispatch_failure_reservation() {
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     let database = directory.path().join("goals.sqlite3");
     let store = SqliteGoalStore::open(&database).expect("store");
     running_goal(

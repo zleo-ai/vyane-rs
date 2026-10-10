@@ -271,6 +271,7 @@ prompt = "hello"
             lease: None,
             ledger_run_id: None,
             failure_code: None,
+            persistence: None,
         };
         assert_eq!(
             map_task_record(&caller_id, &task, None, false),

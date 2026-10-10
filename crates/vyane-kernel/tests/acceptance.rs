@@ -753,8 +753,8 @@ impl SessionStore for BoundSnapshotSessions {
     }
 }
 
-/// A ledger whose `append` always fails, to prove persistence is best-effort:
-/// a completed run must still come back `Ok` even when the ledger errors.
+/// A ledger whose `append` always fails. A completed run still comes back
+/// `Ok`; the failure is reported on the outcome instead of replacing the run.
 #[derive(Clone, Default)]
 struct ErroringLedger {
     append_calls: Arc<AtomicUsize>,
@@ -780,8 +780,8 @@ impl Ledger for ErroringLedger {
     }
 }
 
-/// A session store whose `save` always fails (loads succeed as empty), to prove
-/// a session-persistence error also never demotes a completed run.
+/// A session store whose `save` always fails (loads succeed as empty). A
+/// completed run stays `Ok`, and the session step reports the failure.
 #[derive(Clone, Default)]
 struct ErroringSessions {
     save_calls: Arc<AtomicUsize>,
@@ -3459,14 +3459,15 @@ async fn cancellation_between_attempts_stops_before_next_factory_make() {
 }
 
 // ===========================================================================
-// Architect decision: persistence after a completed run is best-effort — a
-// ledger or session-store error must not demote a successful run to Err.
+// A completed model call stays Ok even when post-run persistence fails.
+// The failure is reported on DispatchOutcome.persistence so callers can see
+// it without mistaking the run itself for a failure they should repeat.
 // ===========================================================================
 
 #[tokio::test]
-async fn ledger_append_failure_does_not_fail_a_completed_run() {
-    // The model call succeeds; the ledger append errors. The run must still
-    // come back Ok with status Success — the append failure is only logged.
+async fn ledger_append_failure_is_visible_without_failing_a_completed_run() {
+    // The model call succeeds; the ledger append errors. The run comes back
+    // Ok with status Success, and the ledger step is Failed.
     let factory = MockFactory::new()
         .on("m", Behaviour::succeed("all good"))
         .into_arc();
@@ -3478,13 +3479,24 @@ async fn ledger_append_failure_does_not_fail_a_completed_run() {
     let rec = d
         .dispatch(&task, vec![http_target("p", "m")], CancellationToken::new())
         .await
-        .expect("a completed run must survive a ledger append failure");
+        .expect("a completed run must stay Ok when ledger append fails");
 
     assert_eq!(rec.record.status, RunStatus::Success);
     assert_eq!(
         rec.record.output_chars,
         Some("all good".chars().count() as u64)
     );
+    assert!(matches!(
+        rec.persistence.ledger,
+        vyane_kernel::PersistenceStep::Failed {
+            kind: ErrorKind::Io
+        }
+    ));
+    assert!(matches!(
+        rec.persistence.session,
+        vyane_kernel::PersistenceStep::NotRequested
+    ));
+    assert!(!rec.persistence.is_complete());
     assert_eq!(
         ledger.append_calls(),
         1,
@@ -3493,9 +3505,9 @@ async fn ledger_append_failure_does_not_fail_a_completed_run() {
 }
 
 #[tokio::test]
-async fn session_save_failure_does_not_fail_a_completed_run() {
-    // The model call succeeds; the session store's save errors. The run must
-    // still return Ok/Success — session persistence is best-effort.
+async fn session_save_failure_is_visible_without_failing_a_completed_run() {
+    // The model call succeeds; the session store's save errors. The run stays
+    // Ok/Success, and the session step reports the failure.
     let factory = MockFactory::new()
         .on("agent-model", Behaviour::succeed_harness("ok", "native-x"))
         .into_arc();
@@ -3513,22 +3525,33 @@ async fn session_save_failure_does_not_fail_a_completed_run() {
     let rec = d
         .dispatch(&task, chain, CancellationToken::new())
         .await
-        .expect("a completed run must survive a session save failure");
+        .expect("a completed run must stay Ok when session save fails");
 
     assert_eq!(rec.record.status, RunStatus::Success);
     assert_eq!(rec.record.session_id.as_deref(), Some("sess-save-fail"));
+    assert!(matches!(
+        rec.persistence.ledger,
+        vyane_kernel::PersistenceStep::Saved
+    ));
+    assert!(matches!(
+        rec.persistence.session,
+        vyane_kernel::PersistenceStep::Failed {
+            kind: ErrorKind::Io
+        }
+    ));
+    assert!(!rec.persistence.is_complete());
     assert_eq!(ledger.append_count(), 1, "the run was still recorded");
     assert!(
         sessions.save_calls() >= 1,
-        "a session save was attempted (and failed, but did not propagate)"
+        "a session save was attempted and its failure is on the outcome"
     );
 }
 
 #[tokio::test]
-async fn ledger_failure_on_a_failed_run_still_returns_the_error_record() {
-    // Even when the run itself failed *and* the ledger append fails, dispatch
-    // still returns Ok with the Error record — the append error never masks the
-    // run's own terminal status.
+async fn ledger_failure_on_a_failed_run_stays_visible_without_masking_status() {
+    // When the run itself failed *and* the ledger append fails, dispatch
+    // still returns Ok with the Error record. The append failure is on
+    // persistence and does not replace the run's terminal status.
     let factory = MockFactory::new()
         .on("m", Behaviour::fail(ErrorKind::Config))
         .into_arc();
@@ -3544,6 +3567,12 @@ async fn ledger_failure_on_a_failed_run_still_returns_the_error_record() {
 
     assert_eq!(rec.record.status, RunStatus::Error);
     assert!(rec.record.error.is_some());
+    assert!(matches!(
+        rec.persistence.ledger,
+        vyane_kernel::PersistenceStep::Failed {
+            kind: ErrorKind::Io
+        }
+    ));
     assert_eq!(ledger.append_calls(), 1);
 }
 

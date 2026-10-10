@@ -1,6 +1,7 @@
 //! Behavior contract for queue claim/lease (P1-A) and real
 //! acceptance-criteria verification before completion (P1-B).
 
+mod common;
 use std::sync::Barrier;
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -19,7 +20,7 @@ fn timestamp(seconds: i64) -> DateTime<Utc> {
 }
 
 fn fixture() -> (TempDir, SqliteGoalStore) {
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     let store =
         SqliteGoalStore::open(directory.path().join("goals.sqlite3")).expect("open goal store");
     (directory, store)
@@ -563,7 +564,7 @@ const MIGRATION_0001: &str = include_str!("../migrations/0001_goals.sql");
 
 #[test]
 fn v1_database_upgrades_in_place_and_supports_claims() {
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     let path = directory.path().join("goals.sqlite3");
     {
         let connection = Connection::open(&path).expect("create v1 database");

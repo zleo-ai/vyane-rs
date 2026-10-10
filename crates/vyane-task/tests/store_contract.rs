@@ -1,14 +1,17 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::fs;
 use std::sync::{Arc, Barrier};
 
 use chrono::{DateTime, TimeDelta, TimeZone as _, Utc};
 use rusqlite::Connection;
 use tempfile::TempDir;
+use vyane_core::ErrorKind;
 use vyane_task::{
-    ControllerRef, FailureCode, Lease, NewTask, SqliteTaskStore, TaskEventKind, TaskKind,
-    TaskOrigin, TaskQuery, TaskSettlement, TaskState, TaskStore, TaskStoreError,
+    ControllerRef, FailureCode, Lease, NewTask, SqliteTaskStore, TaskDispatchPersistence,
+    TaskEventKind, TaskKind, TaskOrigin, TaskPersistenceStep, TaskQuery, TaskSettlement, TaskState,
+    TaskStore, TaskStoreError,
 };
 
 const OWNER: &str = "local";
@@ -65,7 +68,7 @@ fn lease(owner: &str, expires_offset: i64) -> Lease {
 }
 
 fn test_store() -> (TempDir, SqliteTaskStore) {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
     (directory, store)
 }
@@ -116,6 +119,7 @@ fn create_attach_and_reopen_preserve_snapshot_and_events() {
             running.executor_epoch,
             TaskSettlement::Succeeded {
                 ledger_run_id: Some("run-reopen".into()),
+                persistence: None,
             },
             timestamp(2),
         )
@@ -148,6 +152,7 @@ fn illegal_transitions_are_atomic_and_terminal_settlement_is_exactly_idempotent(
         queued.executor_epoch,
         TaskSettlement::Succeeded {
             ledger_run_id: Some("too-early".into()),
+            persistence: None,
         },
         timestamp(1),
     );
@@ -168,6 +173,7 @@ fn illegal_transitions_are_atomic_and_terminal_settlement_is_exactly_idempotent(
         .unwrap();
     let settlement = TaskSettlement::Succeeded {
         ledger_run_id: Some("run-states".into()),
+        persistence: None,
     };
     let terminal = store
         .settle(
@@ -203,6 +209,7 @@ fn illegal_transitions_are_atomic_and_terminal_settlement_is_exactly_idempotent(
         TaskSettlement::Failed {
             code: FailureCode::DispatchFailed,
             ledger_run_id: Some("run-states".into()),
+            persistence: None,
         },
         timestamp(4),
     );
@@ -244,6 +251,7 @@ fn concurrent_identical_settlements_are_exactly_idempotent_inside_writer_lock() 
                     running.executor_epoch,
                     TaskSettlement::Succeeded {
                         ledger_run_id: Some("run-settle-race".into()),
+                        persistence: None,
                     },
                     timestamp(2),
                 )
@@ -329,6 +337,7 @@ fn cancel_and_settle_race_has_one_cas_winner_then_authoritative_settlement() {
             race_epoch,
             TaskSettlement::Succeeded {
                 ledger_run_id: Some("run-race".into()),
+                persistence: None,
             },
             timestamp(2),
         )
@@ -351,6 +360,7 @@ fn cancel_and_settle_race_has_one_cas_winner_then_authoritative_settlement() {
                 current.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-race".into()),
+                    persistence: None,
                 },
                 timestamp(3),
             )
@@ -476,6 +486,7 @@ fn lease_claim_requires_expiry_and_invalidates_the_old_executor_epoch() {
         running.executor_epoch,
         TaskSettlement::Succeeded {
             ledger_run_id: Some("stale".into()),
+            persistence: None,
         },
         timestamp(17),
     );
@@ -873,6 +884,7 @@ fn foreign_owner_mutations_are_not_found_and_never_change_snapshot_or_events() {
             running.executor_epoch,
             TaskSettlement::Succeeded {
                 ledger_run_id: None,
+                persistence: None,
             },
             timestamp(10),
         ),
@@ -1120,10 +1132,10 @@ fn task_database_and_wal_never_receive_prompt_or_secret_canaries() {
 
 #[test]
 fn newer_user_version_is_rejected_without_downgrade() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("future.sqlite3");
     let connection = Connection::open(&path).unwrap();
-    connection.pragma_update(None, "user_version", 3).unwrap();
+    connection.pragma_update(None, "user_version", 4).unwrap();
     drop(connection);
     make_database_owner_only(&path);
 
@@ -1131,20 +1143,272 @@ fn newer_user_version_is_rejected_without_downgrade() {
     assert!(matches!(
         error,
         TaskStoreError::UnsupportedSchema {
-            found: 3,
-            supported: 2
+            found: 4,
+            supported: 3
         }
     ));
     let connection = Connection::open(&path).unwrap();
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
+}
+
+#[test]
+fn v2_task_without_persistence_opens_as_unrecorded() {
+    let directory = common::private_tempdir();
+    let path = directory.path().join("v2-unrecorded.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    connection
+        .pragma_update(None, "journal_mode", "DELETE")
+        .unwrap();
+    connection
+        .execute_batch(include_str!("../migrations/0001_tasks.sql"))
+        .unwrap();
+    connection
+        .execute_batch(include_str!("../migrations/0002_owner_scope.sql"))
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO tasks (
+                owner, id, record_schema, kind, origin, state, task_digest, target_key,
+                created_at_ms, started_at_ms, updated_at_ms, finished_at_ms, revision,
+                executor_epoch, controller_kind, controller_instance_id, ledger_run_id
+             ) VALUES (
+                'local', 'old-task', 1, 'dispatch', 'cli_detached', 'succeeded',
+                '0123456789abcdef', 'test/model',
+                0, 1000, 2000, 2000, 2, 1,
+                'in_process', 'server-a', 'run-old'
+             )",
+            [],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 2).unwrap();
+    drop(connection);
+    make_database_owner_only(&path);
+
+    let store = SqliteTaskStore::open(&path).unwrap();
+    let record = store.get("local", "old-task").unwrap().unwrap();
+    assert_eq!(record.state, TaskState::Succeeded);
+    assert_eq!(record.ledger_run_id.as_deref(), Some("run-old"));
+    assert!(record.persistence.is_none());
+    let json = serde_json::to_value(&record).unwrap();
+    assert!(json.get("persistence").is_none());
+    assert_eq!(json["state"], "succeeded");
+    let persisted: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatch_persistence WHERE task_id = 'old-task'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted, 0);
+}
+
+#[test]
+fn recorded_dispatch_persistence_round_trips_and_rejects_a_different_replay() {
+    let (directory, store) = test_store();
+    let queued = store.create(OWNER, new_task("persist", 0)).unwrap();
+    let running = store
+        .attach_controller(
+            OWNER,
+            &queued.id,
+            queued.revision,
+            queued.executor_epoch,
+            in_process("server-a"),
+            None,
+            timestamp(1),
+        )
+        .unwrap();
+    let persistence = TaskDispatchPersistence {
+        ledger: TaskPersistenceStep::Failed {
+            kind: ErrorKind::Io,
+        },
+        session: TaskPersistenceStep::NotRequested,
+    };
+    let settlement = TaskSettlement::Succeeded {
+        ledger_run_id: Some("run-persist".into()),
+        persistence: Some(persistence),
+    };
+    let settled = store
+        .settle(
+            OWNER,
+            "persist",
+            running.revision,
+            running.executor_epoch,
+            settlement.clone(),
+            timestamp(2),
+        )
+        .unwrap();
+    assert_eq!(settled.state, TaskState::Succeeded);
+    assert_eq!(settled.ledger_run_id.as_deref(), Some("run-persist"));
+    assert_eq!(settled.persistence, Some(persistence));
+    assert!(!settled.persistence.unwrap().is_complete());
+
+    let replay = store
+        .settle(
+            OWNER,
+            "persist",
+            running.revision,
+            settled.executor_epoch,
+            settlement,
+            timestamp(3),
+        )
+        .unwrap();
+    assert_eq!(replay, settled);
+
+    let conflicting = store.settle(
+        OWNER,
+        "persist",
+        settled.revision,
+        settled.executor_epoch,
+        TaskSettlement::Succeeded {
+            ledger_run_id: Some("run-persist".into()),
+            persistence: Some(TaskDispatchPersistence {
+                ledger: TaskPersistenceStep::Saved,
+                session: TaskPersistenceStep::NotRequested,
+            }),
+        },
+        timestamp(3),
+    );
+    assert!(matches!(
+        conflicting,
+        Err(TaskStoreError::InvalidState { .. })
+    ));
+    assert_eq!(
+        store.get(OWNER, "persist").unwrap().unwrap().persistence,
+        Some(persistence)
+    );
+
+    const MARKER: &str = "ledger-failure-marker-9f3c2a";
+    let path = directory.path().join("tasks.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER reject_marked_persistence_insert \
+             BEFORE INSERT ON task_dispatch_persistence \
+             BEGIN SELECT RAISE(ABORT, '{MARKER}'); END;"
+        ))
+        .unwrap();
+    drop(connection);
+
+    let marked = store.create(OWNER, new_task("marked-failure", 4)).unwrap();
+    let marked_running = store
+        .attach_controller(
+            OWNER,
+            "marked-failure",
+            marked.revision,
+            marked.executor_epoch,
+            in_process("server-a"),
+            None,
+            timestamp(5),
+        )
+        .unwrap();
+    let marked_error = store
+        .settle(
+            OWNER,
+            "marked-failure",
+            marked_running.revision,
+            marked_running.executor_epoch,
+            TaskSettlement::Succeeded {
+                ledger_run_id: Some("run-marked".into()),
+                persistence: Some(persistence),
+            },
+            timestamp(6),
+        )
+        .unwrap_err();
+    assert!(matches!(marked_error, TaskStoreError::Sqlite(_)));
+    let public_error = marked_error.to_string();
+    assert!(
+        !public_error.contains(MARKER),
+        "public error contains the storage failure marker: {public_error}"
+    );
+    assert!(!marked_error.as_str().contains(MARKER));
+    let marked_record = store.get(OWNER, "marked-failure").unwrap().unwrap();
+    assert_eq!(marked_record.state, TaskState::Running);
+    assert!(marked_record.persistence.is_none());
+    let rendered = serde_json::to_string(&marked_record).unwrap();
+    assert!(!rendered.contains(MARKER), "{rendered}");
+
+    let connection = Connection::open(&path).unwrap();
+    let stored_marker: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatch_persistence \
+             WHERE ledger_state LIKE ?1 OR IFNULL(ledger_kind, '') LIKE ?1 \
+                OR session_state LIKE ?1 OR IFNULL(session_kind, '') LIKE ?1 \
+                OR task_id LIKE ?1",
+            [format!("%{MARKER}%")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_marker, 0);
+    connection
+        .execute_batch(
+            "PRAGMA secure_delete = ON;
+             DROP TRIGGER reject_marked_persistence_insert;
+             VACUUM;",
+        )
+        .unwrap();
+    drop(connection);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = append_suffix(&path, suffix);
+            if candidate.exists() {
+                fs::set_permissions(&candidate, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let candidate = append_suffix(&path, suffix);
+        if let Ok(bytes) = fs::read(&candidate) {
+            assert!(
+                !contains_bytes(&bytes, MARKER.as_bytes()),
+                "database file contains the storage failure marker"
+            );
+        }
+    }
+
+    let connection = Connection::open(store.path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO tasks (
+                owner, id, record_schema, kind, origin, state, task_digest, target_key,
+                created_at_ms, started_at_ms, updated_at_ms, finished_at_ms, revision,
+                executor_epoch, controller_kind, controller_instance_id
+             ) VALUES (
+                'local', 'free-text', 1, 'dispatch', 'rest_async', 'succeeded',
+                '0123456789abcdef', 'test/model',
+                0, 1000, 2000, 2000, 2, 1, 'in_process', 'server-a'
+             )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO task_dispatch_persistence (
+                owner, task_id, ledger_state, ledger_kind, session_state, session_kind
+             ) VALUES (
+                'local', 'free-text', 'failed', 'the disk is full', 'not_requested', NULL
+             )",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let error = store.get(OWNER, "free-text").unwrap_err();
+    let message = error.to_string();
+    assert!(matches!(error, TaskStoreError::CorruptData(_)));
+    assert!(!message.contains("disk is full"));
 }
 
 #[test]
 fn v1_migration_preserves_rich_rows_events_and_autoincrement_high_water() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("v1-rich.sqlite3");
     create_v1_database(&path);
     let connection = Connection::open(&path).unwrap();
@@ -1253,7 +1517,7 @@ fn v1_migration_preserves_rich_rows_events_and_autoincrement_high_water() {
 
 #[test]
 fn failed_v1_migration_rolls_back_version_objects_and_rows() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("v1-rollback.sqlite3");
     create_v1_database(&path);
     let connection = Connection::open(&path).unwrap();
@@ -1335,8 +1599,8 @@ fn failed_v1_migration_rolls_back_version_objects_and_rows() {
 }
 
 #[test]
-fn concurrent_v1_open_migrates_once_and_both_openers_observe_v2() {
-    let directory = TempDir::new().unwrap();
+fn concurrent_v1_open_migrates_once_and_both_openers_observe_current_schema() {
+    let directory = common::private_tempdir();
     let path = directory.path().join("v1-concurrent.sqlite3");
     create_v1_database(&path);
     let barrier = Arc::new(Barrier::new(3));
@@ -1359,12 +1623,12 @@ fn concurrent_v1_open_migrates_once_and_both_openers_observe_v2() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 }
 
 #[test]
 fn unversioned_database_with_user_objects_fails_closed() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("unversioned-objects.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection
@@ -1459,6 +1723,7 @@ fn backward_wall_clock_is_clamped_and_lease_checks_use_effective_time() {
             running.executor_epoch,
             TaskSettlement::Succeeded {
                 ledger_run_id: Some("run-clock".into()),
+                persistence: None,
             },
             timestamp(1),
         )
@@ -1584,6 +1849,7 @@ fn state_specific_failure_codes_reject_semantic_mismatches() {
             TaskSettlement::Failed {
                 code,
                 ledger_run_id: None,
+                persistence: None,
             },
             timestamp(1),
         );
@@ -1724,7 +1990,7 @@ fn non_unique_insert_constraints_are_not_misreported_as_duplicates() {
 
 #[test]
 fn matching_user_version_with_missing_schema_is_rejected_at_open() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("missing-schema.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection.pragma_update(None, "user_version", 1).unwrap();
@@ -1739,7 +2005,7 @@ fn matching_user_version_with_missing_schema_is_rejected_at_open() {
 
 #[test]
 fn matching_user_version_rejects_views_and_damaged_integrity_contracts() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let views_path = directory.path().join("views.sqlite3");
     let connection = Connection::open(&views_path).unwrap();
     connection
@@ -1828,7 +2094,7 @@ fn matching_user_version_rejects_views_and_damaged_integrity_contracts() {
 
 #[test]
 fn current_v2_reopen_rejects_a_replaced_owner_event_index() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("damaged-v2.sqlite3");
     let store = SqliteTaskStore::open(&path).unwrap();
     drop(store);
@@ -1863,7 +2129,7 @@ fn corrupt_storage_types_and_lifecycle_invariants_surface_as_corrupt_data() {
             "UPDATE tasks SET state = 'succeeded' WHERE id = 'corrupt'",
         ),
     ] {
-        let directory = TempDir::new().unwrap();
+        let directory = common::private_tempdir();
         let path = directory.path().join(format!("{name}.sqlite3"));
         let store = SqliteTaskStore::open(&path).unwrap();
         store.create(OWNER, new_task("corrupt", 0)).unwrap();
@@ -2061,4 +2327,30 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = common::private_tempdir();
+    let group_writable = directory.path().join("group-writable");
+    fs::create_dir(&group_writable).unwrap();
+    // 0775 is the mode a 0777 directory creation receives under umask 002.
+    fs::set_permissions(&group_writable, fs::Permissions::from_mode(0o775)).unwrap();
+    match SqliteTaskStore::open(group_writable.join("tasks.sqlite3")) {
+        Err(TaskStoreError::InvalidInput(message)) => {
+            assert!(message.contains("group- or world-writable"), "{message}");
+        }
+        other => panic!("group-writable parent must still be rejected, got {other:?}"),
+    }
+
+    let fixture = common::private_tempdir();
+    assert_eq!(
+        fs::metadata(fixture.path()).unwrap().permissions().mode() & 0o022,
+        0,
+        "fixture parent must not be group- or world-writable"
+    );
+    SqliteTaskStore::open(fixture.path().join("tasks.sqlite3")).unwrap();
 }

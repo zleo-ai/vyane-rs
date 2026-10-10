@@ -119,6 +119,11 @@ pub struct TaskEntry {
     pub ledger_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<FailureCode>,
+    /// Post-run ledger and session result. Absent when the completion did not
+    /// record one. A failed ledger step means `ledger_run_id` may not name a
+    /// stored ledger row; the id is still returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistence: Option<vyane_kernel::DispatchPersistence>,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +145,10 @@ impl From<TaskRecord> for TaskEntry {
             revision: record.revision,
             ledger_run_id: record.ledger_run_id,
             failure_code: record.failure_code,
+            persistence: record
+                .persistence
+                .as_ref()
+                .map(crate::output::dispatch_persistence_from_task),
         }
     }
 }
@@ -713,6 +722,7 @@ impl TaskSupervisor {
                         TaskSettlement::Failed {
                             code: FailureCode::Internal,
                             ledger_run_id: None,
+                            persistence: None,
                         },
                         None,
                     )
@@ -1298,17 +1308,34 @@ fn settlement_from_dispatch_result(result: anyhow::Result<DispatchOutcome>) -> T
         return TaskSettlement::Failed {
             code: FailureCode::DispatchFailed,
             ledger_run_id: None,
+            persistence: None,
         };
     };
     let ledger_run_id = (!outcome.record.run_id.is_empty()).then_some(outcome.record.run_id);
+    // Follow the model call's status. The persistence result is stored with
+    // that settlement. A persistence failure must not settle the task as
+    // failed, which would invite a retry of work that already ran.
+    let persistence = Some(crate::output::task_persistence_from_dispatch(
+        &outcome.persistence,
+    ));
     match outcome.record.status {
-        RunStatus::Success => TaskSettlement::Succeeded { ledger_run_id },
+        RunStatus::Success => TaskSettlement::Succeeded {
+            ledger_run_id,
+            persistence,
+        },
         RunStatus::Error => TaskSettlement::Failed {
             code: FailureCode::DispatchFailed,
             ledger_run_id,
+            persistence,
         },
-        RunStatus::Timeout => TaskSettlement::TimedOut { ledger_run_id },
-        RunStatus::Cancelled => TaskSettlement::Cancelled { ledger_run_id },
+        RunStatus::Timeout => TaskSettlement::TimedOut {
+            ledger_run_id,
+            persistence,
+        },
+        RunStatus::Cancelled => TaskSettlement::Cancelled {
+            ledger_run_id,
+            persistence,
+        },
     }
 }
 
@@ -1448,12 +1475,20 @@ pub struct BroadcastItem {
     pub output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Present when this target produced a finished run. A failed step does
+    /// not change the HTTP status: the model call already happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistence: Option<vyane_kernel::DispatchPersistence>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DispatchResponse {
     pub record: RunView,
     pub output: Option<String>,
+    /// Post-run ledger and session result. HTTP stays successful when the
+    /// model call finished; this field is how a persistence failure is visible
+    /// without a status that clients retry as a failed run.
+    pub persistence: vyane_kernel::DispatchPersistence,
 }
 
 impl From<DispatchOutcome> for DispatchResponse {
@@ -1461,6 +1496,7 @@ impl From<DispatchOutcome> for DispatchResponse {
         Self {
             record: RunView::from(outcome.record),
             output: outcome.output,
+            persistence: outcome.persistence,
         }
     }
 }
@@ -2012,6 +2048,7 @@ enum SsePayload {
     Finished {
         record: Box<RunView>,
         output: Option<String>,
+        persistence: vyane_kernel::DispatchPersistence,
     },
     Unsupported,
 }
@@ -2122,6 +2159,7 @@ async fn dispatch_stream(
             Ok(Some(outcome)) => SsePayload::Finished {
                 record: Box::new(RunView::from(outcome.record)),
                 output: outcome.output,
+                persistence: outcome.persistence,
             },
             Err(e) => {
                 eprintln!(
@@ -2129,6 +2167,10 @@ async fn dispatch_stream(
                     crate::output::format_dispatch_stream_error_line(&format!("{e:#}"))
                 );
                 SsePayload::Finished {
+                    persistence: vyane_kernel::DispatchPersistence {
+                        ledger: vyane_kernel::PersistenceStep::NotRequested,
+                        session: vyane_kernel::PersistenceStep::NotRequested,
+                    },
                     record: Box::new(RunView::from(vyane_core::RunRecord {
                         run_id: String::new(),
                         owner: "local".into(),
@@ -2253,6 +2295,7 @@ async fn broadcast(
                 record: Some(RunView::from(outcome.record)),
                 output: outcome.output,
                 error: None,
+                persistence: Some(outcome.persistence),
             },
             Err(e) => {
                 // Per-target error: log the full chain server-side, surface a
@@ -2266,6 +2309,7 @@ async fn broadcast(
                     record: None,
                     output: None,
                     error: Some("target execution failed".into()),
+                    persistence: None,
                 }
             }
         })
@@ -2733,7 +2777,7 @@ mod tests {
     }
 
     async fn temp_supervisor() -> (tempfile::TempDir, TaskSupervisor) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("rest-task-metadata.sqlite3");
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
         (directory, supervisor)
@@ -2981,6 +3025,10 @@ mod tests {
                 labels: Default::default(),
             },
             output: (status == RunStatus::Success).then(|| "done".into()),
+            persistence: vyane_kernel::DispatchPersistence {
+                ledger: vyane_kernel::PersistenceStep::Saved,
+                session: vyane_kernel::PersistenceStep::NotRequested,
+            },
         }
     }
 
@@ -3087,7 +3135,7 @@ mod tests {
     #[tokio::test]
     async fn full_rest_router_requires_bearer_and_loopback_browser_authority() {
         let (_directory, supervisor) = temp_supervisor().await;
-        let service_directory = tempfile::tempdir().unwrap();
+        let service_directory = crate::test_support::private_tempdir();
         let app = router_from_parts(
             test_service(service_directory.path()),
             supervisor,
@@ -3145,7 +3193,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_continuity_next_requires_exact_bearer_and_rejects_query_or_write_routes() {
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let (_task_directory, tasks) = temp_supervisor().await;
         let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
         let route = "/v1/goals/missing/continuity-next";
@@ -3393,7 +3441,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_continuity_next_is_stable_no_store_and_has_no_side_effects() {
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let store = create_continuity_goal(data.path(), LOCAL_TASK_OWNER, "rest-projection");
         let before = store
             .get(LOCAL_TASK_OWNER, "rest-projection")
@@ -3458,7 +3506,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_continuity_next_maps_absent_and_unavailable_without_internal_details() {
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let store = SqliteGoalStore::open(data.path().join("goals.sqlite3")).unwrap();
         let mut goal = NewGoal::new("No continuity", chrono::Utc::now());
         goal.id = Some("plain".into());
@@ -3535,7 +3583,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let service_directory = tempfile::tempdir().unwrap();
+        let service_directory = crate::test_support::private_tempdir();
         let service = direct_http_test_service(service_directory.path(), server.uri());
         let (_task_directory, tasks) = temp_supervisor().await;
         let state = test_state(service.clone(), tasks);
@@ -3609,7 +3657,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let service_directory = tempfile::tempdir().unwrap();
+        let service_directory = crate::test_support::private_tempdir();
         let service = direct_http_test_service(service_directory.path(), server.uri());
         let (_task_directory, tasks) = temp_supervisor().await;
         let state = test_state(service.clone(), tasks);
@@ -3815,23 +3863,24 @@ mod tests {
         ] {
             let settlement = settlement_from_dispatch_result(Ok(outcome_with_status(run_status)));
             let actual = match settlement {
-                TaskSettlement::Succeeded { ledger_run_id } => {
+                TaskSettlement::Succeeded { ledger_run_id, .. } => {
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::Succeeded
                 }
                 TaskSettlement::Failed {
                     code,
                     ledger_run_id,
+                    ..
                 } => {
                     assert_eq!(code, FailureCode::DispatchFailed);
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::Failed
                 }
-                TaskSettlement::TimedOut { ledger_run_id } => {
+                TaskSettlement::TimedOut { ledger_run_id, .. } => {
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::TimedOut
                 }
-                TaskSettlement::Cancelled { ledger_run_id } => {
+                TaskSettlement::Cancelled { ledger_run_id, .. } => {
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::Cancelled
                 }
@@ -3877,6 +3926,7 @@ mod tests {
                 attached.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-done".into()),
+                    persistence: None,
                 },
             )
             .await
@@ -3940,7 +3990,7 @@ mod tests {
 
     #[tokio::test]
     async fn another_supervisor_cannot_cancel_a_running_task_it_does_not_own() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("shared-rest-tasks.sqlite3");
         let owner = TaskSupervisor::open(&database).await.unwrap();
         let foreign = TaskSupervisor::open(&database).await.unwrap();
@@ -4016,7 +4066,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_initialization_cleanup_never_interrupts_a_foreign_controller() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("initialization-cleanup.sqlite3");
         let initializer = TaskSupervisor::open(&database).await.unwrap();
         let foreign = TaskSupervisor::open(&database).await.unwrap();
@@ -4148,7 +4198,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_store_error_still_aborts_and_drops_pending_dispatch_before_return() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("shutdown-corrupt.sqlite3");
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
         let lock_path = directory.path().join("task-supervisor.lock");
@@ -4254,7 +4304,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_is_terminal_noop_and_does_not_touch_foreign_or_cli_tasks() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("shutdown-scope.sqlite3");
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
         let foreign = TaskSupervisor::open(&database).await.unwrap();
@@ -4266,6 +4316,7 @@ mod tests {
                 terminal.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-shutdown-terminal".into()),
+                    persistence: None,
                 },
             )
             .await
@@ -4320,7 +4371,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_target_is_rejected_before_task_metadata_is_created() {
         let (_directory, supervisor) = temp_supervisor().await;
-        let service_directory = tempfile::tempdir().unwrap();
+        let service_directory = crate::test_support::private_tempdir();
         let app = router_from_parts(
             test_service(service_directory.path()),
             supervisor.clone(),
@@ -4348,7 +4399,7 @@ mod tests {
     #[tokio::test]
     async fn harness_ceiling_is_a_400_and_async_submission_leaves_no_metadata() {
         let (_directory, supervisor) = temp_supervisor().await;
-        let service_directory = tempfile::tempdir().unwrap();
+        let service_directory = crate::test_support::private_tempdir();
         let app = router_from_parts(
             cli_harness_ceiling_test_service(service_directory.path()),
             supervisor.clone(),
@@ -4400,6 +4451,7 @@ mod tests {
                 attached.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-output-route".into()),
+                    persistence: None,
                 },
             )
             .await
@@ -4488,7 +4540,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let inner = SqliteTaskStore::open(directory.path().join("flaky-settle.sqlite3")).unwrap();
         let store = Arc::new(FlakySettleStore::new(inner, 2));
         let supervisor = TaskSupervisor::from_store(store.clone());
@@ -4540,7 +4592,7 @@ mod tests {
     #[tokio::test]
     async fn supervised_dispatch_persists_output_only_as_separate_artifact() {
         const OUTPUT: &str = "REST-OUTPUT-CANARY-outside-task-database";
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("tasks.sqlite3");
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
         let attached = create_attached(&supervisor, "output-artifact").await;
@@ -4700,7 +4752,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_construction_does_not_recover_existing_tasks() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("explicit-rest.sqlite3");
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
         let queued = new_task("embedded-queued", TaskOrigin::RestAsync);
@@ -4728,7 +4780,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_failure_happens_before_task_database_recovery() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = test_service(directory.path());
         let database = service.storage_paths().task_metadata_db_path();
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
@@ -4749,7 +4801,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_loopback_listen_is_rejected_before_task_database_recovery() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = test_service(directory.path());
         let database = service.storage_paths().task_metadata_db_path();
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
@@ -4775,7 +4827,7 @@ mod tests {
 
     #[test]
     fn api_token_publication_removes_only_its_exact_generation() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("serve.token");
         crate::daemon::write_private_atomic(&path, API_TOKEN.as_bytes()).unwrap();
         drop(ApiTokenPublication {
@@ -4797,7 +4849,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_and_session_routes_return_only_allowlisted_views() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = test_service(directory.path());
         let mut run = outcome_with_status(RunStatus::Error).record;
         run.owner = "local".into();
@@ -4883,7 +4935,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_output_artifact_roundtrips_with_private_permissions() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("tasks/task-1/output.txt");
         write_private_task_output(path.clone(), "private result".into())
             .await
@@ -4913,7 +4965,7 @@ mod tests {
 
     #[test]
     fn task_output_artifacts_are_owner_and_task_qualified() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store: Arc<dyn TaskStore> =
             Arc::new(SqliteTaskStore::open(directory.path().join("tasks.sqlite")).unwrap());
         let root = directory.path().join("artifacts");
@@ -5151,6 +5203,120 @@ mod tests {
             assert!(json.get(forbidden).is_none(), "leaked field {forbidden}");
         }
         assert!(!json.to_string().contains("secret prompt"));
+    }
+
+    #[tokio::test]
+    async fn async_task_reports_ledger_persistence_failure_without_repeating_the_model() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-persist",
+                "model": "test-model",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "persisted-answer" },
+                    "finish_reason": "stop"
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let data = crate::test_support::private_tempdir();
+        let service = direct_http_test_service(data.path(), server.uri());
+        std::fs::create_dir(data.path().join("ledger.jsonl")).unwrap();
+        let (_task_directory, supervisor) = temp_supervisor().await;
+        let app = router_from_parts(service, supervisor, API_TOKEN).unwrap();
+        let created = app
+            .clone()
+            .oneshot(
+                axum::http::Request::post("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:9721")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::from(
+                        r#"{"task":"say hi once","target":"test"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::ACCEPTED);
+        let created = response_json(created).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert!(created.get("persistence").is_none());
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let body = loop {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(format!("/v1/tasks/{id}"))
+                        .header("host", "127.0.0.1:9721")
+                        .header("authorization", format!("Bearer {API_TOKEN}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            let state = body["state"].as_str().unwrap_or("");
+            if !matches!(state, "queued" | "running" | "cancelling") {
+                break body;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "task {id} did not finish: {body}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        assert_eq!(body["state"], "succeeded");
+        assert!(
+            body["ledger_run_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(body["persistence"]["ledger"]["state"], "failed");
+        assert_eq!(body["persistence"]["ledger"]["kind"], "io");
+        assert_eq!(body["persistence"]["session"]["state"], "not_requested");
+        assert!(body["persistence"]["ledger"].get("message").is_none());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert!(data.path().join("ledger.jsonl").is_dir());
+    }
+
+    #[tokio::test]
+    async fn task_without_recorded_persistence_does_not_report_success_or_failure() {
+        let (_directory, supervisor) = temp_supervisor().await;
+        let attached = create_attached(&supervisor, "unrecorded-persistence").await;
+        supervisor
+            .settle_current(
+                &attached.id,
+                attached.executor_epoch,
+                TaskSettlement::Succeeded {
+                    ledger_run_id: Some("run-unrecorded".into()),
+                    persistence: None,
+                },
+            )
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/v1/tasks/{id}", get(get_task))
+            .with_state(supervisor);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/v1/tasks/unrecorded-persistence")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["state"], "succeeded");
+        assert_eq!(body["ledger_run_id"], "run-unrecorded");
+        assert!(body.get("persistence").is_none());
     }
 
     // --- SSE payload serialization ----------------------------------------

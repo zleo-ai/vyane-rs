@@ -1357,7 +1357,9 @@ mod tests {
 
     #[test]
     fn drive_dogfood_yields_truth_verified_receipt_projection() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
+        crate::test_support::create_private_dir_all(root.path(), &root.path().join("durable-df01"))
+            .expect("create private directory");
         let adapter = LocalKernelAdapter::new(principal());
         let event = adapter.handle(
             KernelCommand {
@@ -1394,7 +1396,9 @@ mod tests {
 
     #[test]
     fn status_rebuilds_projection_from_kernel_store_after_discard() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
+        crate::test_support::create_private_dir_all(root.path(), &root.path().join("durable-rb01"))
+            .expect("create private directory");
         let root_s = root.path().to_string_lossy().into_owned();
         let adapter = LocalKernelAdapter::new(principal());
         let driven = adapter.handle(
@@ -1673,7 +1677,7 @@ mod tests {
 
     #[test]
     fn unresolvable_named_root_is_not_found_not_invalid_command() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let adapter = LocalKernelAdapter::new(principal());
         let grant = adapter.handle(
@@ -1726,7 +1730,7 @@ mod tests {
 
     #[test]
     fn malformed_approve_deny_is_invalid_even_without_store() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let adapter = LocalKernelAdapter::new(principal());
 
@@ -1809,7 +1813,7 @@ mod tests {
 
     #[test]
     fn injected_store_resolver_grants_without_filesystem_probe() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-inject", "run-inject", 1);
         let adapter = LocalKernelAdapter::with_store_resolver(
             principal(),
@@ -1842,7 +1846,7 @@ mod tests {
 
     #[test]
     fn injected_store_resolver_is_exclusive_of_filesystem_probe() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-reject", "run-reject", 1);
         let adapter =
@@ -1948,7 +1952,7 @@ mod tests {
 
     #[test]
     fn decide_approval_persists_grant_visible_to_fresh_adapter() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-grant", "run-grant", 1);
         let adapter = LocalKernelAdapter::new(principal());
@@ -2037,7 +2041,7 @@ mod tests {
 
     #[test]
     fn deny_then_grant_via_boundary_fails_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-deny", "run-deny", 1);
         let adapter = LocalKernelAdapter::new(principal());
@@ -2117,7 +2121,7 @@ mod tests {
         // Deny is an approval decision. The durable receipt stays Open; the
         // Denied event must not invent Failed. Assert store + Status +
         // ReadReceipt, not only the event's final_status field.
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-open", "run-open", 1);
         let before = store
@@ -2179,7 +2183,7 @@ mod tests {
 
     #[test]
     fn deny_ownership_projection_reads_store_lease_fence() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (_store, digest) =
             seed_pending_ask_with_lease(root.path(), "rcpt-own", "run-own", 1, "worker-a", 4);
@@ -2251,7 +2255,7 @@ mod tests {
 
     #[test]
     fn deny_ownership_projection_omits_lease_when_fence_missing() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) =
             seed_pending_ask_without_lease(root.path(), "rcpt-dnofence", "run-dnofence", 1);
@@ -2299,7 +2303,7 @@ mod tests {
 
     #[test]
     fn deny_ignores_conflicting_caller_run_id() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask_with_lease(
             root.path(),
@@ -2372,7 +2376,7 @@ mod tests {
 
     #[test]
     fn deny_revision_and_lease_fence_mismatch_fail_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) =
             seed_pending_ask_with_lease(root.path(), "rcpt-dfence", "run-dfence", 1, "worker-a", 4);
@@ -2428,7 +2432,7 @@ mod tests {
 
     #[test]
     fn lease_owner_mismatch_fails_closed_for_grant_and_deny() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let adapter = LocalKernelAdapter::new(principal());
 
@@ -2509,7 +2513,7 @@ mod tests {
 
     #[test]
     fn wrong_approval_binding_fails_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-bind", "run-bind", 3);
         let adapter = LocalKernelAdapter::new(principal());
@@ -2540,7 +2544,7 @@ mod tests {
 
     #[test]
     fn decide_approval_prefers_store_with_approval_row() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let decoy = root.path().join("durable-decoy");
         std::fs::create_dir_all(&decoy).unwrap();
         let _decoy_store = KernelStore::open(decoy.join("kernel.sqlite")).unwrap();
@@ -2584,7 +2588,7 @@ mod tests {
 
     #[test]
     fn decide_approval_missing_fields_fail_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-miss", "run-miss", 1);
         let adapter = LocalKernelAdapter::new(principal());
@@ -2646,7 +2650,7 @@ mod tests {
 
     #[test]
     fn decide_approval_mismatch_and_missing_ask_fail_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-mis", "run-mis", 1);
         let adapter = LocalKernelAdapter::new(principal());
@@ -2729,7 +2733,7 @@ mod tests {
 
     #[test]
     fn decide_approval_regrant_is_idempotent() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-idemp", "run-idemp", 1);
         let adapter = LocalKernelAdapter::new(principal());
@@ -2783,7 +2787,7 @@ mod tests {
             ("rcpt-hold-none", "run-hold-none", "ap-hold-none", None),
         ];
         for (receipt, run_id, command_id, granted) in cases {
-            let root = tempfile::tempdir().unwrap();
+            let root = crate::test_support::private_tempdir();
             let root_s = root.path().to_string_lossy().into_owned();
             let (store, digest) = seed_pending_ask(root.path(), receipt, run_id, 1);
             let adapter = LocalKernelAdapter::new(principal());
@@ -2823,7 +2827,7 @@ mod tests {
 
     #[test]
     fn decide_approval_not_granted_after_approve_is_conflict() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-hold-ap", "run-hold-ap", 1);
         let adapter = LocalKernelAdapter::new(principal());
@@ -2872,7 +2876,7 @@ mod tests {
 
     #[test]
     fn decide_approval_not_granted_after_deny_is_conflict() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-hold-dn", "run-hold-dn", 1);
         let adapter = LocalKernelAdapter::new(principal());
@@ -2922,7 +2926,7 @@ mod tests {
 
     #[test]
     fn deny_without_binding_fails_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, _digest) = seed_pending_ask(root.path(), "rcpt-nobind", "run-nobind", 1);
         let adapter = LocalKernelAdapter::new(principal());
@@ -2953,7 +2957,7 @@ mod tests {
 
     #[test]
     fn deny_digest_mismatch_fails_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, _digest) = seed_pending_ask(root.path(), "rcpt-baddig", "run-baddig", 1);
         let adapter = LocalKernelAdapter::new(principal());
@@ -2984,7 +2988,7 @@ mod tests {
 
     #[test]
     fn grant_ownership_projection_reads_store_lease_fence() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (_store, digest) =
             seed_pending_ask_with_lease(root.path(), "rcpt-gown", "run-gown", 1, "worker-a", 4);
@@ -3021,7 +3025,7 @@ mod tests {
 
     #[test]
     fn grant_ownership_projection_omits_lease_when_fence_missing() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (_store, digest) =
             seed_pending_ask_without_lease(root.path(), "rcpt-nofence", "run-nofence", 1);
@@ -3054,7 +3058,7 @@ mod tests {
 
     #[test]
     fn decide_approval_named_dogfood_root_is_not_stolen_by_sorted_sibling() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_support::private_tempdir();
         let early = parent.path().join("aaa");
         let named = parent.path().join("zzz");
         std::fs::create_dir_all(&early).unwrap();
@@ -3099,7 +3103,7 @@ mod tests {
 
     #[test]
     fn deny_after_approve_fails_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) = seed_pending_ask(root.path(), "rcpt-post", "run-post", 1);
         let adapter = LocalKernelAdapter::new(principal());
@@ -3143,7 +3147,7 @@ mod tests {
 
     #[test]
     fn decide_approval_does_not_create_missing_candidate_sqlite() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let ghost = root.path().join("durable-ghost");
         std::fs::create_dir_all(&ghost).unwrap();
         let root_s = root.path().to_string_lossy().into_owned();
@@ -3170,7 +3174,7 @@ mod tests {
 
     #[test]
     fn decide_approval_indexed_store_skips_later_unbounded_scan() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_support::private_tempdir();
         let decoy = parent.path().join("decoy");
         let named = parent.path().join("named");
         std::fs::create_dir_all(&decoy).unwrap();
@@ -3252,7 +3256,7 @@ mod tests {
 
     #[test]
     fn deny_without_delivery_phase_fails_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) =
             seed_pending_ask_without_delivery(root.path(), "rcpt-nophase", "run-nophase", 1);
@@ -3289,7 +3293,7 @@ mod tests {
 
     #[test]
     fn grant_without_delivery_phase_fails_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) =
             seed_pending_ask_without_delivery(root.path(), "rcpt-nogrant", "run-nogrant", 1);
@@ -3339,7 +3343,7 @@ mod tests {
 
     #[test]
     fn grant_while_delivery_still_running_fails_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_s = root.path().to_string_lossy().into_owned();
         let (store, digest) =
             seed_pending_ask_with_running_delivery(root.path(), "rcpt-running", "run-running", 1);

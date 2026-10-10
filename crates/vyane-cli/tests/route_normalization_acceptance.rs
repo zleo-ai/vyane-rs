@@ -1,13 +1,12 @@
+mod common;
 use std::fs;
 
 use assert_cmd::Command;
 use serde_json::Value;
-use tempfile::TempDir;
-
 // 运行真实 CLI 子进程：经过参数解析、配置插入、服务适配器和路由器，
 // 同时断言所选目标与诊断标签，避免把回退目标误当成标签匹配成功。
 fn route(config_tag: &str, input_tags: &str) -> Value {
-    let dir = TempDir::new().expect("创建临时目录");
+    let dir = common::private_tempdir();
     let config = dir.path().join("config.toml");
     fs::write(
         &config,

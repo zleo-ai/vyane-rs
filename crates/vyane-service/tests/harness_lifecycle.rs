@@ -2,6 +2,7 @@
 //!
 //! This is a public-safe CLI lifecycle stand-in — not formal vendor integration.
 
+mod common;
 use std::fs;
 use std::process::Command;
 use std::thread;
@@ -14,7 +15,7 @@ use vyane_service::run_dogfood_with_hermetic_harness;
 #[test]
 fn hermetic_harness_lifecycle_spawn_ask_resume_artifact_dual_run() {
     let bin = env!("CARGO_BIN_EXE_vyane_harness_lifecycle");
-    let root = tempfile::tempdir().unwrap();
+    let root = common::private_tempdir();
     let workdir = root.path().join("wd");
     fs::create_dir_all(&workdir).unwrap();
 
@@ -75,7 +76,7 @@ fn hermetic_harness_lifecycle_spawn_ask_resume_artifact_dual_run() {
 #[test]
 fn hermetic_harness_cancel_via_kill() {
     let bin = env!("CARGO_BIN_EXE_vyane_harness_lifecycle");
-    let root = tempfile::tempdir().unwrap();
+    let root = common::private_tempdir();
     let workdir = root.path().join("wd");
     fs::create_dir_all(&workdir).unwrap();
     let mut child = Command::new(bin)
@@ -102,8 +103,10 @@ fn hermetic_harness_cancel_via_kill() {
 #[test]
 fn hermetic_harness_drives_dogfood_to_completion_receipt() {
     let bin = env!("CARGO_BIN_EXE_vyane_harness_lifecycle");
-    let root = tempfile::tempdir().unwrap();
+    let root = common::private_tempdir();
     let now = Utc.with_ymd_and_hms(2026, 8, 4, 16, 0, 0).single().unwrap();
+    common::create_private_dir_all(root.path(), &root.path().join("durable-hl01"))
+        .expect("create private directory");
     let (receipt, effects) =
         run_dogfood_with_hermetic_harness(root.path(), "local", "hl01", bin.as_ref(), now)
             .expect("hermetic harness dogfood path");
@@ -115,6 +118,8 @@ fn hermetic_harness_drives_dogfood_to_completion_receipt() {
     );
     assert_eq!(effects.len(), 1);
     // Dual consistent run.
+    common::create_private_dir_all(root.path(), &root.path().join("durable-hl02"))
+        .expect("create private directory");
     let (r2, e2) =
         run_dogfood_with_hermetic_harness(root.path(), "local", "hl02", bin.as_ref(), now).unwrap();
     assert_eq!(r2.final_status, ReceiptFinalStatus::Completed);
@@ -124,7 +129,7 @@ fn hermetic_harness_drives_dogfood_to_completion_receipt() {
 #[test]
 fn hermetic_harness_normal_mode_and_crash_window() {
     let bin = env!("CARGO_BIN_EXE_vyane_harness_lifecycle");
-    let root = tempfile::tempdir().unwrap();
+    let root = common::private_tempdir();
     let workdir = root.path().join("wd");
     fs::create_dir_all(&workdir).unwrap();
     let output = Command::new(bin)

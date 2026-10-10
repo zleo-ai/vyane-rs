@@ -1078,7 +1078,10 @@ mod tests {
                 ..ProfilePatch::default()
             },
         );
-        let paths = StoragePaths::from_data_dir(root.path().join("data"));
+        let data_dir = root.path().join("data");
+        crate::test_support::create_private_dir_all(root.path(), &data_dir)
+            .expect("create private directory");
+        let paths = StoragePaths::from_data_dir(data_dir);
         let service = VyaneService::from_loaded_with_paths(
             LoadedConfig {
                 config: ResolvedConfig {
@@ -1141,7 +1144,10 @@ mod tests {
                 ..ProfilePatch::default()
             },
         );
-        let paths = StoragePaths::from_data_dir(root.path().join("data"));
+        let data_dir = root.path().join("data");
+        crate::test_support::create_private_dir_all(root.path(), &data_dir)
+            .expect("create private directory");
+        let paths = StoragePaths::from_data_dir(data_dir);
         let service = VyaneService::from_loaded_with_paths(
             LoadedConfig {
                 config: ResolvedConfig {
@@ -1337,7 +1343,7 @@ mod tests {
         let _assembly = assembly_test_lock().lock().await;
         let primary = MockServer::start().await;
         let secondary = MockServer::start().await;
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
         let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
@@ -1386,7 +1392,7 @@ mod tests {
 
     async fn assert_pre_wire_rejection(case: PreWireCase) {
         let server = MockServer::start().await;
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
         let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
@@ -1488,7 +1494,7 @@ mod tests {
             .mount(&secondary)
             .await;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
         let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
@@ -1518,7 +1524,7 @@ mod tests {
         let _assembly = assembly_test_lock().lock().await;
         let primary = MockServer::start().await;
         let secondary = MockServer::start().await;
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
         let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
@@ -1594,7 +1600,7 @@ mod tests {
             .mount(&secondary)
             .await;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
         std::fs::write(workdir_path.join("note.txt"), "tool evidence\n").unwrap();
@@ -1665,7 +1671,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
         std::fs::write(workdir_path.join("note.txt"), "workspace evidence\n").unwrap();
@@ -1805,7 +1811,7 @@ mod tests {
     async fn malformed_private_input_is_body_free_and_zero_wire() {
         let _assembly = assembly_test_lock().lock().await;
         let server = MockServer::start().await;
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
         let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
@@ -1868,7 +1874,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
         let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
@@ -1930,7 +1936,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
         let workdir = PinnedWorkdir::open(&workdir_path).unwrap();
@@ -1991,7 +1997,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let workdir_path = root.path().join("workspace");
         std::fs::create_dir(&workdir_path).unwrap();
         let workdir = PinnedWorkdir::open(&workdir_path).unwrap();

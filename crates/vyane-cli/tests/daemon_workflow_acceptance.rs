@@ -5,6 +5,7 @@
 //! graceful shutdown. The target is a local Wiremock server, so no external
 //! network or installed harness is required.
 
+mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -296,8 +297,8 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
         .mount(&server)
         .await;
 
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &server);
     let workflow = write_workflow(&config_dir);
 
@@ -393,8 +394,8 @@ async fn submitted_workflow_outlives_cli_and_explicit_id_retry_is_idempotent() {
 #[tokio::test]
 async fn resident_daemon_projectors_start_and_gracefully_stop() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &server);
     let mut daemon = DaemonGuard::start(data_dir.path(), &config);
     assert!(daemon.stop().status.success());
@@ -421,8 +422,8 @@ async fn mcp_workflow_tools_use_the_authenticated_resident_daemon() -> anyhow::R
         .mount(&server)
         .await;
 
-    let config_dir = TempDir::new()?;
-    let data_dir = TempDir::new()?;
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &server);
     let workflow = write_workflow(&config_dir);
     let mut daemon = DaemonGuard::start(data_dir.path(), &config);

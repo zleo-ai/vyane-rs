@@ -1,5 +1,6 @@
 //! 经真实 CLI 子进程验证安全动词的标签推断和配置选择，无需联网。
 
+mod common;
 use std::fs;
 
 use assert_cmd::Command;
@@ -7,7 +8,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 fn route_fixture() -> TempDir {
-    let directory = TempDir::new().expect("创建测试目录");
+    let directory = common::private_tempdir();
     fs::write(
         directory.path().join("config.toml"),
         r#"

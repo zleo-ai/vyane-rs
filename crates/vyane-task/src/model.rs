@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use vyane_core::ErrorKind;
 
 use crate::{Result, TaskStoreError};
 
@@ -240,6 +241,15 @@ pub struct TaskRecord {
     pub lease: Option<Lease>,
     pub ledger_run_id: Option<String>,
     pub failure_code: Option<FailureCode>,
+    /// Post-run ledger and session result recorded with settlement.
+    ///
+    /// `None` means this completion was stored before the field existed, or the
+    /// settler did not record one. That is unknown: it is not a successful
+    /// write and it is not a failed write. `ledger_run_id` stays independently
+    /// present when the settler had a run id; a failed ledger step means that
+    /// id may not name a stored ledger row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistence: Option<TaskDispatchPersistence>,
 }
 
 impl TaskRecord {
@@ -262,6 +272,7 @@ impl TaskRecord {
             lease: None,
             ledger_run_id: None,
             failure_code: None,
+            persistence: None,
         }
     }
 }
@@ -345,21 +356,118 @@ pub struct TaskPage {
     pub next_cursor: Option<TaskCursor>,
 }
 
+/// Ledger and session result stored with a task settlement.
+///
+/// Each step is a state plus, only when that step failed, the stable
+/// [`ErrorKind`] token. Free-form store messages are not part of this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskDispatchPersistence {
+    pub ledger: TaskPersistenceStep,
+    pub session: TaskPersistenceStep,
+}
+
+impl TaskDispatchPersistence {
+    /// Whether every recorded step landed.
+    ///
+    /// [`TaskPersistenceStep::NotRequested`] counts as complete.
+    #[must_use]
+    pub fn is_complete(self) -> bool {
+        !matches!(self.ledger, TaskPersistenceStep::Failed { .. })
+            && !matches!(self.session, TaskPersistenceStep::Failed { .. })
+    }
+}
+
+/// One post-run persistence step recorded on a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TaskPersistenceStep {
+    /// The write completed.
+    Saved,
+    /// The step does not apply to this run.
+    NotRequested,
+    /// The write failed after the run finished. `kind` is an [`ErrorKind`] token.
+    Failed { kind: ErrorKind },
+}
+
+impl TaskPersistenceStep {
+    pub(crate) fn stored_parts(self) -> Result<(&'static str, Option<&'static str>)> {
+        match self {
+            Self::Saved => Ok(("saved", None)),
+            Self::NotRequested => Ok(("not_requested", None)),
+            Self::Failed { kind } => {
+                let token = kind.as_str();
+                match parse_persistence_kind(token) {
+                    Some(parsed) if parsed == kind => Ok(("failed", Some(token))),
+                    _ => Err(TaskStoreError::InvalidInput(
+                        "persistence failure kind is not a stable error kind".into(),
+                    )),
+                }
+            }
+        }
+    }
+
+    pub(crate) fn from_stored(state: &str, kind: Option<&str>) -> Result<Self> {
+        match (state, kind) {
+            ("saved", None) => Ok(Self::Saved),
+            ("not_requested", None) => Ok(Self::NotRequested),
+            ("failed", Some(token)) => {
+                let kind = parse_persistence_kind(token).ok_or_else(|| {
+                    TaskStoreError::CorruptData(
+                        "task persistence failure kind is not a stable error kind".into(),
+                    )
+                })?;
+                Ok(Self::Failed { kind })
+            }
+            _ => Err(TaskStoreError::CorruptData(
+                "task persistence step is incomplete or unknown".into(),
+            )),
+        }
+    }
+}
+
+fn parse_persistence_kind(token: &str) -> Option<ErrorKind> {
+    Some(match token {
+        "config" => ErrorKind::Config,
+        "auth" => ErrorKind::Auth,
+        "rate_limited" => ErrorKind::RateLimited,
+        "timeout" => ErrorKind::Timeout,
+        "transport" => ErrorKind::Transport,
+        "protocol" => ErrorKind::Protocol,
+        "spawn_failed" => ErrorKind::SpawnFailed,
+        "harness_failed" => ErrorKind::HarnessFailed,
+        "cancelled" => ErrorKind::Cancelled,
+        "unsupported" => ErrorKind::Unsupported,
+        "not_found" => ErrorKind::NotFound,
+        "conflict" => ErrorKind::Conflict,
+        "io" => ErrorKind::Io,
+        "indeterminate" => ErrorKind::Indeterminate,
+        "other" => ErrorKind::Other,
+        _ => return None,
+    })
+}
+
 /// Terminal result metadata. Output content is intentionally not part of it.
+///
+/// `persistence` is recorded only by settlers that observed a finished dispatch.
+/// `None` leaves the completion unrecorded rather than claiming the writes landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskSettlement {
     Succeeded {
         ledger_run_id: Option<String>,
+        persistence: Option<TaskDispatchPersistence>,
     },
     Failed {
         code: FailureCode,
         ledger_run_id: Option<String>,
+        persistence: Option<TaskDispatchPersistence>,
     },
     TimedOut {
         ledger_run_id: Option<String>,
+        persistence: Option<TaskDispatchPersistence>,
     },
     Cancelled {
         ledger_run_id: Option<String>,
+        persistence: Option<TaskDispatchPersistence>,
     },
 }
 
@@ -392,23 +500,34 @@ impl TaskSettlement {
 
     pub(crate) fn parts(&self) -> (TaskState, Option<FailureCode>, Option<&str>) {
         match self {
-            Self::Succeeded { ledger_run_id } => {
+            Self::Succeeded { ledger_run_id, .. } => {
                 (TaskState::Succeeded, None, ledger_run_id.as_deref())
             }
             Self::Failed {
                 code,
                 ledger_run_id,
+                ..
             } => (TaskState::Failed, Some(*code), ledger_run_id.as_deref()),
-            Self::TimedOut { ledger_run_id } => (
+            Self::TimedOut { ledger_run_id, .. } => (
                 TaskState::TimedOut,
                 Some(FailureCode::TimedOut),
                 ledger_run_id.as_deref(),
             ),
-            Self::Cancelled { ledger_run_id } => (
+            Self::Cancelled { ledger_run_id, .. } => (
                 TaskState::Cancelled,
                 Some(FailureCode::Cancelled),
                 ledger_run_id.as_deref(),
             ),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn persistence(&self) -> Option<TaskDispatchPersistence> {
+        match self {
+            Self::Succeeded { persistence, .. }
+            | Self::Failed { persistence, .. }
+            | Self::TimedOut { persistence, .. }
+            | Self::Cancelled { persistence, .. } => *persistence,
         }
     }
 }
@@ -491,6 +610,7 @@ mod tests {
         assert_eq!(
             TaskSettlement::Succeeded {
                 ledger_run_id: Some("secret-run".into()),
+                persistence: None,
             }
             .as_str(),
             "succeeded"
@@ -499,6 +619,7 @@ mod tests {
             TaskSettlement::Failed {
                 code: FailureCode::Internal,
                 ledger_run_id: Some("secret-run".into()),
+                persistence: None,
             }
             .as_str(),
             "failed"
@@ -506,6 +627,7 @@ mod tests {
         assert_eq!(
             TaskSettlement::TimedOut {
                 ledger_run_id: None,
+                persistence: None,
             }
             .as_str(),
             "timed_out"
@@ -513,6 +635,7 @@ mod tests {
         assert_eq!(
             TaskSettlement::Cancelled {
                 ledger_run_id: Some("secret-run".into()),
+                persistence: None,
             }
             .as_str(),
             "cancelled"
@@ -520,6 +643,7 @@ mod tests {
         assert!(
             !TaskSettlement::Succeeded {
                 ledger_run_id: Some("secret-run".into()),
+                persistence: None,
             }
             .as_str()
             .contains("secret")

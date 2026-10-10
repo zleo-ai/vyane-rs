@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -734,7 +735,7 @@ fn routing_cases_recompute_current_rust_output() {
 fn automatic_routing_config(
     candidates: &[AutomaticRoutingCandidate],
 ) -> (tempfile::TempDir, LoadedConfig) {
-    let directory = tempfile::tempdir().expect("automatic routing tempdir");
+    let directory = common::private_tempdir();
     let path = directory.path().join("config.toml");
     let mut config = String::new();
     let providers = candidates

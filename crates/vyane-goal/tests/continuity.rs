@@ -1,3 +1,4 @@
+mod common;
 use chrono::{TimeZone as _, Utc};
 use tempfile::TempDir;
 use vyane_goal::{
@@ -72,7 +73,7 @@ fn quota(goal_id: Option<&str>, event_id: &str) -> GoalQuotaEvent {
 
 #[test]
 fn quota_event_persists_visible_handoff_plan_once() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = common::private_tempdir();
     let store = store(&directory);
     create_started(&store, "goal-a", policy(true));
 
@@ -128,7 +129,7 @@ fn quota_event_persists_visible_handoff_plan_once() {
 
 #[test]
 fn unmatched_and_unstarted_goals_are_not_mutated() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = common::private_tempdir();
     let store = store(&directory);
     create_started(&store, "running", policy(true));
     let mut queued = NewGoal::new("queued", at(1_000));
@@ -157,7 +158,7 @@ fn unmatched_and_unstarted_goals_are_not_mutated() {
 
 #[test]
 fn quota_target_aliases_provider_or_harness_and_broadcasts_to_all_matches() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = common::private_tempdir();
     let store = store(&directory);
     create_started(&store, "provider-match", policy(true));
     let mut harness_policy = policy(true);
@@ -193,7 +194,7 @@ fn quota_target_aliases_provider_or_harness_and_broadcasts_to_all_matches() {
 
 #[test]
 fn policy_validation_rejects_wrong_primary_role() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = common::private_tempdir();
     let store = store(&directory);
     let mut wrong_role = policy(true);
     wrong_role.primary.role = "takeover".into();
@@ -206,7 +207,7 @@ fn policy_validation_rejects_wrong_primary_role() {
 
 #[test]
 fn policy_validation_rejects_missing_reviewer() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = common::private_tempdir();
     let store = store(&directory);
     let mut missing_reviewer = policy(true);
     missing_reviewer.reviewer = None;
@@ -221,7 +222,7 @@ fn policy_validation_rejects_missing_reviewer() {
 
 #[test]
 fn review_check_gate_requires_review_and_builds_failure_repair_plan() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = common::private_tempdir();
     let store = store(&directory);
     let mut invalid = policy(true);
     invalid.require_review_before_resume = false;
@@ -279,7 +280,7 @@ fn review_check_gate_requires_review_and_builds_failure_repair_plan() {
 
 #[test]
 fn policy_validation_rejects_too_many_takeover_targets() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = common::private_tempdir();
     let store = store(&directory);
     let mut too_many = policy(true);
     too_many.takeover = vec![target("takeover", "backup", "claude-code", "fallback"); 9];
@@ -292,7 +293,7 @@ fn policy_validation_rejects_too_many_takeover_targets() {
 
 #[test]
 fn missing_takeover_records_a_manual_blocker_without_execution() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = common::private_tempdir();
     let store = store(&directory);
     create_started(&store, "manual", policy(false));
 
@@ -317,7 +318,7 @@ fn missing_takeover_records_a_manual_blocker_without_execution() {
 
 #[test]
 fn optional_review_and_primary_resume_steps_follow_policy_flags() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = common::private_tempdir();
     let store = store(&directory);
     let mut no_review = policy(true);
     no_review.require_review_before_resume = false;
@@ -360,7 +361,7 @@ fn optional_review_and_primary_resume_steps_follow_policy_flags() {
 
 #[test]
 fn both_optional_continuity_steps_can_be_disabled() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = common::private_tempdir();
     let store = store(&directory);
     let mut no_follow_up = policy(true);
     no_follow_up.require_review_before_resume = false;

@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn lock_is_private_exclusive_and_released_with_owner() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let data_dir = directory.path().join("data");
         let path = data_dir.join("task-supervisor.lock");
         let first = acquire_task_supervisor_lock(&path).unwrap();

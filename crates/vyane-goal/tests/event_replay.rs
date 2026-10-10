@@ -1,3 +1,4 @@
+mod common;
 use chrono::{DateTime, TimeDelta, Utc};
 use tempfile::TempDir;
 use vyane_goal::{
@@ -48,7 +49,7 @@ fn timestamp(seconds: i64) -> DateTime<Utc> {
 }
 
 fn fixture() -> (TempDir, SqliteGoalStore) {
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     #[cfg(unix)]
     {
         use std::fs;

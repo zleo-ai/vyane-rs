@@ -15,6 +15,7 @@
 //! both workers in `futex_do_wait` past the 5s busy timeout. Default runtime
 //! is a few seconds for CI; raise `VYANE_STORE_HAMMER_MS` for longer probes.
 
+mod common;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs;
@@ -25,7 +26,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::{TimeDelta, Utc};
-use tempfile::TempDir;
 use vyane_message::{
     ClaimQuery, DeliveryMailbox, EndpointKind, EndpointRef, IdempotencyKey, LeaseRequest,
     MessageDirection, MessageStore, NewDelivery, NewMessage, SqliteMessageStore,
@@ -398,7 +398,7 @@ fn check_stall(shared: &Shared, probes: &[Arc<Probe>]) -> bool {
 }
 
 fn hammer(threads: usize, duration: Duration, stall: Duration) {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path: PathBuf = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
     maybe_set_journal_mode(&path);
@@ -493,7 +493,7 @@ fn clock_advance_keeps_expire_due_writing_against_readers() {
     // A second, shorter shape: expire_due actually mutates rows while readers
     // hammer unprojected_events/get, matching maintenance_once vs project_once
     // and the wait_until(get) caller in the no-lane supervisor fixture.
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let clock_now = Arc::new(Mutex::new(Utc::now() - TimeDelta::seconds(60)));
     struct Clock(Arc<Mutex<chrono::DateTime<Utc>>>);
     impl vyane_message::MessageClock for Clock {
