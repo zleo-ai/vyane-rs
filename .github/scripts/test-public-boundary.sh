@@ -10,6 +10,7 @@ trap 'rm -rf "$TEMP_ROOT"' EXIT
 readonly BOARD_ID="EOS""-1234"
 readonly HOME_PATH="/home/someone/""AIOS/vyane"
 readonly MAIL="someone@""qq.com"
+readonly SAMPLE_HOME_PATH="/home/""ubuntu/project"
 readonly NO_PR=(env -u PR_TITLE -u PR_BODY -u PR_HEAD_REF -u PR_BASE_SHA -u PR_HEAD_SHA)
 
 fresh_repo() {
@@ -76,9 +77,23 @@ content_case private-system-name "db=beacon"".sqlite"
 content_case private-system-name "moved from Meri""dian"
 content_case personal-email "author $MAIL" AUTHORS
 
+# Placeholder prefixes do not exempt a different account name.
+content_case private-home-path "/home/""runner-other/work"
+content_case private-home-path "/Users/""runner.private/work"
+content_case private-home-path "/home/""ubuntu-private/work"
+content_case private-home-path "/home/""ubuntu.private/work"
+content_case private-home-path "/home/""ubuntu_private/work"
+content_case private-home-path "/home/""ubuntu/""AIOS/vyane"
+
 # Placeholder accounts and ordinary words stay clean.
 repo="$(fresh_repo placeholders)"
-printf '%s\n' 'HOME=/home/u' '/Users/runner/work' 'eos_token_id = 2' 'EOS2 marker' >"$repo/notes.md"
+printf '%s\n' 'HOME=/home/u' '/Users/runner/work' 'eos_token_id = 2' 'EOS2 marker' '/home/''ubuntu' "$SAMPLE_HOME_PATH" >"$repo/notes.md"
+stage_all "$repo"
+expect_clean python3 "$SCRIPT" --root "$repo"
+
+# An ordinary example home path also stays clean as a symlink target.
+repo="$(fresh_repo samplehome-symlink)"
+ln -s "$SAMPLE_HOME_PATH" "$repo/link"
 stage_all "$repo"
 expect_clean python3 "$SCRIPT" --root "$repo"
 
@@ -137,6 +152,10 @@ expect_label() {
     exit 1
   }
 }
+expect_clean env PR_TITLE="docs: $SAMPLE_HOME_PATH" PR_BODY="Example: $SAMPLE_HOME_PATH" \
+  python3 "$SCRIPT" --root "$repo"
+expect_rule private-home-path env PR_BODY="/home/""ubuntu-private/work" python3 "$SCRIPT" --root "$repo"
+expect_label "pull request body:"
 expect_rule internal-board-id env PR_TITLE="feat($BOARD_ID): x" python3 "$SCRIPT" --root "$repo"
 expect_label "pull request title:"
 expect_rule private-home-path env PR_BODY="see $HOME_PATH" python3 "$SCRIPT" --root "$repo"
@@ -150,6 +169,15 @@ expect_label "::warning::.*pull request branch"
 
 # Commit messages and emails in base..head are checked.
 git -C "$repo" -c user.name=t -c user.email=t@example.invalid commit -q -m "base"
+base="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "docs: $SAMPLE_HOME_PATH"
+expect_clean env PR_BASE_SHA="$base" PR_HEAD_SHA="$(git -C "$repo" rev-parse HEAD)" \
+  python3 "$SCRIPT" --root "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "path=/home/""ubuntu-private/work"
+expect_rule private-home-path env PR_BASE_SHA="$base" PR_HEAD_SHA="$(git -C "$repo" rev-parse HEAD)" \
+  python3 "$SCRIPT" --root "$repo"
+expect_label "message:"
 base="$(git -C "$repo" rev-parse HEAD)"
 git -C "$repo" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "fix($BOARD_ID): x"
 expect_rule internal-board-id env PR_BASE_SHA="$base" PR_HEAD_SHA="$(git -C "$repo" rev-parse HEAD)" \

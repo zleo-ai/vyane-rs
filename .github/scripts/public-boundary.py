@@ -36,7 +36,7 @@ class Rule:
 # Placeholder account names that tests and docs may use in example paths.
 SAMPLE_HOME_NAMES = (
     "u|user|username|runner|someone|example|me|you|alice|bob|name|test|tester|"
-    "vyane|dev|ci|root|nobody"
+    "vyane|dev|ci|root|nobody|ubuntu"
 )
 
 CONTENT_RULES = (
@@ -48,7 +48,7 @@ CONTENT_RULES = (
     Rule(
         "private-home-path",
         re.compile(
-            r"(?:/home|/Users)/(?!(?:" + SAMPLE_HOME_NAMES + r")(?:/|\b))[A-Za-z0-9._-]+(?:/|\b)"
+            r"(?:/home|/Users)/(?!(?:" + SAMPLE_HOME_NAMES + r")(?![A-Za-z0-9._-]))[A-Za-z0-9._-]+(?:/|\b)"
             r"|(?:/home|/Users)/[^/\s]+[/]AIOS\b"
             r"|(?:~|\$HOME|\$\{HOME\})[/]AIOS\b"
             r"|\\\\wsl[$]"
