@@ -287,6 +287,89 @@ fn session_view_serializes_into_items_array_shape_without_continuity_authority()
 }
 
 #[tokio::test]
+async fn history_since_mcp_filters_before_limit_and_rejects_invalid_dates() -> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("fixtures/history_since.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let server_handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, expected) in [
+        (
+            serde_json::json!({}),
+            vec![
+                "late-old",
+                "error",
+                "other-provider",
+                "after",
+                "boundary",
+                "before",
+            ],
+        ),
+        (
+            serde_json::json!({"since": "2026-01-01T12:00:00Z"}),
+            vec!["error", "other-provider", "after", "boundary"],
+        ),
+        (
+            serde_json::json!({"since": "2026-01-01T14:00:00+02:00", "provider": "p", "status": "success"}),
+            vec!["after", "boundary"],
+        ),
+        (
+            serde_json::json!({"since": "2026-01-01T12:00:00Z", "provider": "p", "status": "success", "limit": 1}),
+            vec!["after"],
+        ),
+        (serde_json::json!({"since": "2026-01-02T00:00:00Z"}), vec![]),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        let body = result_payload(result);
+        let ids: Vec<_> = body["items"]
+            .as_array()
+            .expect("history items")
+            .iter()
+            .map(|record| record["run_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, expected, "arguments: {arguments}");
+    }
+    for since in [
+        "yesterday",
+        "2026-01-01",
+        "2026-01-01T12:00:00",
+        "2026-02-30T12:00:00Z",
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history").with_arguments(
+                    serde_json::json!({"since": since})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await?;
+        let body = result_payload(result);
+        assert_eq!(body["error"]["code"], "invalid_argument");
+        assert!(!body.to_string().contains(since));
+    }
+    client.cancel().await?;
+    server_handle.await??;
+    assert_eq!(std::fs::read_to_string(ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
 async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> anyhow::Result<()> {
     const PATH_CANARY: &str = "CANARY_WIRE_CONFIG.toml";
     const URL_CANARY: &str = "https://CANARY_WIRE_URL.invalid/v1";

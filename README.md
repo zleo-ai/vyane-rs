@@ -541,8 +541,17 @@ support:
 | `GET` | `/v1/tasks/:id` | get one task's durable status and ledger link |
 | `GET` | `/v1/tasks/:id/output` | read a successful task's separate mode-0600 output artifact |
 | `POST` | `/v1/tasks/:id/cancel` | cancel a running task |
-| `GET` | `/v1/runs` | query the run ledger (filter by status/provider) |
+| `GET` | `/v1/runs` | query the run ledger (filter by status/provider/start time) |
 | `GET` | `/v1/sessions` | list saved sessions |
+
+History accepts an inclusive start-time cutoff through
+`vyane history --since 2026-01-01T12:00:00Z`, the REST query parameter
+`since`, and the MCP `vyane_history` argument `since`. Supply an RFC 3339
+timestamp with a timezone (`Z` or an explicit offset); percent-encode `+` as
+`%2B` in a REST query. The cutoff compares `started_at` and combines with
+provider/status filters before the record limit, retaining reverse append
+order. Omit it to query all time. This reuses the run ledger; source/session/
+label filtering and cost aggregation remain open parity work.
 
 SSE streaming events (`POST /v1/dispatch/stream`):
 

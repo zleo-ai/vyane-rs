@@ -259,6 +259,13 @@ token，并 await 该 future。取消只在 cycle 之间观察；已经开始的
 
 ### 协议入口
 
+历史查询现支持包含边界的开始时间下限：CLI 使用
+`vyane history --since 2026-01-01T12:00:00Z`，REST `GET /v1/runs`
+与 MCP `vyane_history` 使用 `since` 参数。时间须带 `Z` 或显式时区偏移；
+REST 查询中的 `+` 须编码为 `%2B`。筛选依据 `started_at`，与 provider/status
+组合后再取 limit，保持 ledger 的倒序追加顺序；省略参数仍查询全部时间。
+这复用现有 ledger，source/session/label 筛选与成本聚合仍待实现。
+
 Vyane 支持三种可互换的前端，全部共享同一个 `vyane-service` 层：
 
 | 协议 | 命令 | 用途 |

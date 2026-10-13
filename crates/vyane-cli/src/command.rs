@@ -2518,7 +2518,7 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
             owner: Some("local".to_string()),
             provider: args.provider.map(ProviderId::new),
             status: args.status.map(Into::into),
-            since: None,
+            since: args.since,
             limit: Some(args.limit),
         })
         .await?;

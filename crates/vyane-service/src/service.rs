@@ -102,6 +102,8 @@ pub struct HistoryFilter {
     pub limit: Option<usize>,
     pub status: Option<RunStatus>,
     pub provider: Option<String>,
+    /// Inclusive lower bound on run start time; applied before the limit.
+    pub since: Option<DateTime<Utc>>,
 }
 
 /// One resolved target + its raw selector, returned by [`VyaneService::resolve`].
@@ -801,7 +803,7 @@ impl VyaneService {
                 owner: Some(owner.to_string()),
                 provider: filter.provider.map(ProviderId::new),
                 status: filter.status,
-                since: None,
+                since: filter.since,
                 limit: filter.limit,
             })
             .await

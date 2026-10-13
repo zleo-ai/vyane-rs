@@ -819,6 +819,9 @@ pub struct HistoryArgs {
     /// Filter by provider id.
     #[arg(long, value_name = "PROVIDER")]
     pub provider: Option<String>,
+    /// Include runs started at or after this RFC 3339 timestamp (with timezone).
+    #[arg(long, value_name = "TIMESTAMP")]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,

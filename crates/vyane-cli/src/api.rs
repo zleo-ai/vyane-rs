@@ -1457,6 +1457,9 @@ pub struct RunsQuery {
     pub status: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Include runs started at or after this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Default and max record limits for `GET /v1/runs`.
@@ -2346,6 +2349,7 @@ async fn runs(
         limit,
         status,
         provider: query.provider,
+        since: query.since,
     };
 
     let records = state.service.history_views(filter).await.map_err(|error| {
@@ -3565,6 +3569,74 @@ mod tests {
             response_json(unavailable).await,
             serde_json::json!({ "error": "goal continuity is unavailable" })
         );
+    }
+
+    #[tokio::test]
+    async fn history_since_rest_filters_before_limit_and_rejects_invalid_dates() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_since.jsonl");
+        let data = crate::test_support::private_tempdir();
+        let ledger = data.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "",
+                vec![
+                    "late-old",
+                    "error",
+                    "other-provider",
+                    "after",
+                    "boundary",
+                    "before",
+                ],
+            ),
+            (
+                "?since=2026-01-01T12:00:00Z",
+                vec!["error", "other-provider", "after", "boundary"],
+            ),
+            (
+                "?since=2026-01-01T14:00:00%2B02:00&provider=p&status=success",
+                vec!["after", "boundary"],
+            ),
+            (
+                "?since=2026-01-01T12:00:00Z&provider=p&status=success&limit=1",
+                vec!["after"],
+            ),
+            ("?since=2026-01-02T00:00:00Z", vec![]),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            let ids: Vec<_> = body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|record| record["run_id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, expected, "query: {query}");
+        }
+        for since in [
+            "yesterday",
+            "2026-01-01",
+            "2026-01-01T12:00:00",
+            "2026-02-30T12:00:00Z",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(
+                    &format!("/v1/runs?since={since}"),
+                    Some(API_TOKEN),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "since: {since}");
+        }
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
     }
 
     #[tokio::test]
