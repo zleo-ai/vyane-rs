@@ -331,6 +331,10 @@ pub struct HistoryArgs {
     /// Filter by provider id.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Include runs started at or after this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One bounded route tag or candidate profile name.
@@ -434,6 +438,7 @@ impl Default for HistoryArgs {
             limit: default_history_limit(),
             status: None,
             provider: None,
+            since: None,
         }
     }
 }
@@ -1179,6 +1184,7 @@ fn history_filter(args: HistoryArgs) -> std::result::Result<HistoryFilter, SafeT
         limit: Some(args.limit),
         status,
         provider: args.provider,
+        since: args.since,
     })
 }
 
@@ -1736,6 +1742,7 @@ mod tests {
             limit: 1_000,
             status: Some("success".into()),
             provider: Some("openai".into()),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(filter.limit, Some(1_000));
