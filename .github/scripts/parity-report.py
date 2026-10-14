@@ -27,6 +27,22 @@ CAPABILITY_STATUS_BASELINE = {
     "different": 9,
     "planned": 2,
 }
+# Keep identity coverage independent of status counts: renaming one row must
+# not silently replace a capability while retaining the same totals.
+CAPABILITY_ID_BASELINE = frozenset(
+    f"{domain}-{index:02d}"
+    for domain, count in {
+        "EXE": 9,
+        "CON": 7,
+        "COL": 6,
+        "LED": 6,
+        "GOV": 7,
+        "QUA": 4,
+        "OBS": 6,
+        "INT": 8,
+    }.items()
+    for index in range(1, count + 1)
+)
 CAPABILITY_STATUS_CLAIMS = {
     CAPABILITY_MATRIX_PATH: re.compile(
         r"当前 (?P<total>\d+) 项计数为：\s*"
@@ -103,6 +119,13 @@ def validate_capability_status_counts() -> None:
             fail(f"capability {capability_id} has unknown status {status}")
         seen_ids.add(capability_id)
         counts[status] += 1
+
+    if seen_ids != CAPABILITY_ID_BASELINE:
+        fail(
+            "capability matrix id set drifted: "
+            f"missing={sorted(CAPABILITY_ID_BASELINE - seen_ids)}, "
+            f"unknown={sorted(seen_ids - CAPABILITY_ID_BASELINE)}"
+        )
 
     actual = {"total": len(seen_ids)}
     actual.update(

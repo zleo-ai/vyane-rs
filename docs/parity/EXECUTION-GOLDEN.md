@@ -15,6 +15,18 @@ By default this runs the Rust `parity_manifest` integration tests before
 validating fixture digests and reporting matches and open differences.
 `--skip-rust-test` checks stored data only; it does not recompute behavior.
 
+The offline report also pins the 53 canonical capability identifiers, separately
+from their status counts. Replacing a row with an unknown identifier or a
+noncanonical number is an error even when all counts stay the same. Intentional
+coverage changes require an explicit baseline update; this check does not change
+implementation status or establish additional parity.
+
+Exercise this report boundary without compiling Rust:
+
+```sh
+python3 .github/scripts/test-parity-report.py
+```
+
 ## What runs
 
 Eight target cases exercise `ResolvedConfig::resolve_failover_with`: direct
