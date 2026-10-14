@@ -3610,6 +3610,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_duration_rest_projects_owned_filtered_record_timings() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_duration.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, total, expected) in [
+            (
+                "?stats=true",
+                35,
+                serde_json::json!({"samples":34,"invalid":1,"total_ms":7000,"mean_ms":205.9}),
+            ),
+            (
+                "?stats=true&provider=q",
+                2,
+                serde_json::json!({"samples":1,"invalid":1,"total_ms":2750,"mean_ms":2750.0}),
+            ),
+            (
+                "?stats=true&status=cancelled",
+                1,
+                serde_json::json!({"samples":0,"invalid":1,"total_ms":null,"mean_ms":null}),
+            ),
+            (
+                "?stats=true&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T14:00:00Z&provider=p",
+                2,
+                serde_json::json!({"samples":2,"invalid":0,"total_ms":0,"mean_ms":0.0}),
+            ),
+            (
+                "?stats=true&provider=absent",
+                0,
+                serde_json::json!({"samples":0,"invalid":0,"total_ms":null,"mean_ms":null}),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["total"], total, "{query}");
+            assert_eq!(body["duration"], expected, "{query}");
+            assert!(!body.to_string().contains("DURATION_PRIVATE_CANARY"));
+            assert!(body.get("session_id").is_none() && body.get("labels").is_none());
+        }
+        let response = app
+            .clone()
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(goal_request("/v1/runs", Some(API_TOKEN)))
+            .await
+            .unwrap();
+        let body = response_json(response).await;
+        assert_eq!(body["items"].as_array().unwrap().len(), 35);
+        assert!(
+            body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r.get("duration").is_none()
+                    && r.get("labels").is_none()
+                    && r.get("session_id").is_none())
+        );
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
     async fn history_stats_rest_success_rates_use_filtered_counts_and_unknown_empty_samples() {
         const HISTORY: &str = include_str!("../tests/fixtures/history_stats.jsonl");
         let root = crate::test_support::private_tempdir();
