@@ -3610,6 +3610,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_stats_rest_success_rates_use_filtered_counts_and_unknown_empty_samples() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_stats.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            ("?stats=true", serde_json::json!(25.0)),
+            (
+                "?stats=true&until=2026-01-01T11:00:00Z",
+                serde_json::json!(25.0),
+            ),
+            (
+                "?stats=true&provider=q&status=success",
+                serde_json::json!(100.0),
+            ),
+            ("?stats=true&status=error", serde_json::json!(0.0)),
+            (
+                "?stats=true&since=2026-01-02T00:00:00Z",
+                serde_json::Value::Null,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body.get("success_rate"), Some(&expected), "query: {query}");
+            if query == "?stats=true" {
+                assert_eq!(body["by_provider"]["p"]["success_rate"], 0.0);
+                assert_eq!(body["by_provider"]["q"]["success_rate"], 100.0);
+            }
+        }
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
     async fn history_stats_rest_counts_all_filtered_runs_without_a_list_limit() {
         const HISTORY: &str = include_str!("../tests/fixtures/history_stats.jsonl");
         let root = crate::test_support::private_tempdir();
@@ -3639,7 +3679,7 @@ mod tests {
             if total == 120 {
                 assert_eq!(
                     body["by_provider"]["p"],
-                    serde_json::json!({"total":90,"success":0,"error":30,"timeout":30,"cancelled":30})
+                    serde_json::json!({"total":90,"success":0,"error":30,"timeout":30,"cancelled":30,"success_rate":0.0})
                 );
             }
         }

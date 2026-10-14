@@ -572,6 +572,12 @@ zero counts and an empty provider map. Statistics contain no run ids, prompts,
 paths, labels, raw errors or cost estimates; duration and cost aggregation are
 separate remaining work.
 
+Each count object also includes `success_rate`: successful runs as a percentage
+of all matching runs, rounded to one decimal. Error, timeout and cancelled runs
+remain in the denominator. Provider groups use their own counts, and all filters
+apply before computing rates. With no matching runs the overall rate is `null`
+(CLI text: `n/a`); a nonempty group with no successes has a measured rate of `0.0`.
+
 SSE streaming events (`POST /v1/dispatch/stream`):
 
 ```
