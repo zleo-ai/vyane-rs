@@ -3610,6 +3610,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_duration_rest_projects_complete_owned_final_provider_groups() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_duration.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "?stats=true",
+                serde_json::json!({"p":{"samples":33,"invalid":0,"total_ms":4250,"mean_ms":128.8},"q":{"samples":1,"invalid":1,"total_ms":2750,"mean_ms":2750.0}}),
+            ),
+            (
+                "?stats=true&provider=p",
+                serde_json::json!({"p":{"samples":33,"invalid":0,"total_ms":4250,"mean_ms":128.8}}),
+            ),
+            (
+                "?stats=true&status=cancelled",
+                serde_json::json!({"q":{"samples":0,"invalid":1,"total_ms":null,"mean_ms":null}}),
+            ),
+            (
+                "?stats=true&provider=p&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T14:00:00Z",
+                serde_json::json!({"p":{"samples":2,"invalid":0,"total_ms":0,"mean_ms":0.0}}),
+            ),
+            ("?stats=true&provider=absent", serde_json::json!({})),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["by_provider_duration"], expected, "{query}");
+            assert!(!body.to_string().contains("DURATION_PRIVATE_CANARY"));
+            assert_eq!(
+                body["by_provider"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .collect::<Vec<_>>(),
+                body["by_provider_duration"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .collect::<Vec<_>>()
+            );
+        }
+        let response = app
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
     async fn history_duration_rest_projects_owned_filtered_record_timings() {
         const HISTORY: &str = include_str!("../tests/fixtures/history_duration.jsonl");
         let root = crate::test_support::private_tempdir();

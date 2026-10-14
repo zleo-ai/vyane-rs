@@ -124,6 +124,8 @@ pub struct HistoryStats {
     pub counts: RunCounts,
     pub duration: HistoryDurations,
     pub by_provider: BTreeMap<String, RunCounts>,
+    /// Whole recorded run spans grouped by their final provider.
+    pub by_provider_duration: BTreeMap<String, HistoryDurations>,
 }
 
 impl HistoryStats {
@@ -133,11 +135,17 @@ impl HistoryStats {
         for record in records {
             stats.counts.record(record.status);
             stats.duration.record(record);
+            let provider = record.target.provider.to_string();
             stats
                 .by_provider
-                .entry(record.target.provider.to_string())
+                .entry(provider.clone())
                 .or_default()
                 .record(record.status);
+            stats
+                .by_provider_duration
+                .entry(provider)
+                .or_default()
+                .record(record);
         }
         stats
     }
