@@ -287,6 +287,65 @@ fn session_view_serializes_into_items_array_shape_without_continuity_authority()
 }
 
 #[tokio::test]
+async fn history_stats_mcp_success_rates_use_filtered_counts_and_unknown_empty_samples()
+-> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("fixtures/history_stats.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let server_handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, expected) in [
+        (serde_json::json!({"stats":true}), serde_json::json!(25.0)),
+        (
+            serde_json::json!({"stats":true,"until":"2026-01-01T11:00:00Z"}),
+            serde_json::json!(25.0),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"q","status":"success"}),
+            serde_json::json!(100.0),
+        ),
+        (
+            serde_json::json!({"stats":true,"status":"error"}),
+            serde_json::json!(0.0),
+        ),
+        (
+            serde_json::json!({"stats":true,"since":"2026-01-02T00:00:00Z"}),
+            serde_json::Value::Null,
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        let body = result_payload(result);
+        assert_eq!(
+            body.get("success_rate"),
+            Some(&expected),
+            "arguments: {arguments}"
+        );
+        if arguments == serde_json::json!({"stats":true}) {
+            assert_eq!(body["by_provider"]["p"]["success_rate"], 0.0);
+            assert_eq!(body["by_provider"]["q"]["success_rate"], 100.0);
+        }
+    }
+    client.cancel().await?;
+    server_handle.await??;
+    assert_eq!(std::fs::read_to_string(ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
 async fn history_stats_mcp_counts_all_filtered_runs_without_a_list_limit() -> anyhow::Result<()> {
     const HISTORY: &str = include_str!("fixtures/history_stats.jsonl");
     let root = tempfile::tempdir()?;

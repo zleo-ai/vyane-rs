@@ -2532,18 +2532,25 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
         if args.json {
             println!("{}", serde_json::to_string_pretty(&stats)?);
         } else {
+            let rate = stats
+                .counts
+                .success_rate()
+                .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}%"));
             println!(
-                "Total: {} (success: {}, error: {}, timeout: {}, cancelled: {})",
+                "Total: {} (success: {}, error: {}, timeout: {}, cancelled: {}, success rate: {rate})",
                 stats.counts.total,
                 stats.counts.success,
                 stats.counts.error,
                 stats.counts.timeout,
                 stats.counts.cancelled
             );
-            println!("PROVIDER\tTOTAL\tSUCCESS\tERROR\tTIMEOUT\tCANCELLED");
+            println!("PROVIDER\tTOTAL\tSUCCESS\tERROR\tTIMEOUT\tCANCELLED\tSUCCESS RATE");
             for (provider, counts) in &stats.by_provider {
+                let rate = counts
+                    .success_rate()
+                    .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}%"));
                 println!(
-                    "{provider}\t{}\t{}\t{}\t{}\t{}",
+                    "{provider}\t{}\t{}\t{}\t{}\t{}\t{rate}",
                     counts.total, counts.success, counts.error, counts.timeout, counts.cancelled
                 );
             }

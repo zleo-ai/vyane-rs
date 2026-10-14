@@ -839,7 +839,7 @@ impl VyaneMcpServer {
 
     /// Query the run ledger (most-recent-first).
     #[tool(
-        description = "Query recent run records from the ledger. Returns { items: [...] }, most recent first. With stats=true, returns counts by status and provider for all matches; omit limit.",
+        description = "Query recent run records from the ledger. Returns { items: [...] }, most recent first. With stats=true, returns counts by status and provider for all matches, including percentage success rates; omit limit.",
         input_schema = rmcp::handler::server::tool::schema_for_type::<HistoryArgs>()
     )]
     async fn vyane_history(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
