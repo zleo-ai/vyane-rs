@@ -553,9 +553,17 @@ provider/status filters before the record limit, retaining reverse append
 order. Omit it to query all time. This reuses the run ledger; source/session/
 label filtering and cost aggregation remain open parity work.
 
+An inclusive upper bound is available as `vyane history --until TIMESTAMP`,
+REST `until`, and the MCP `vyane_history` argument `until`. It uses the same
+timezone-required RFC 3339 format and compares `started_at` before pagination.
+For example, `--since 2026-01-01T12:00:00Z --until 2026-01-01T12:00:00Z`
+includes runs started at that exact instant. Either bound may be omitted;
+`since` later than `until` is rejected. Both bounds combine with provider/status
+filters and also apply to statistics.
+
 Use `vyane history --stats --json`, `GET /v1/runs?stats=true`, or
 `vyane_history` with `{"stats": true}` to count every matching ledger run.
-The same provider, status and inclusive `since` filters apply. Statistics mode
+The same provider, status and inclusive `since`/`until` filters apply. Statistics mode
 rejects an explicit `limit`; the usual list defaults do not truncate counts.
 The result contains `total`, `success`, `error`, `timeout`, `cancelled`, and
 `by_provider` with the same five counts for each final provider. A failover run

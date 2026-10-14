@@ -1463,6 +1463,9 @@ pub struct RunsQuery {
     /// Include runs started at or after this RFC 3339 timestamp (with timezone).
     #[serde(default)]
     pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Include runs started at or before this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Default and max record limits for `GET /v1/runs`.
@@ -2335,6 +2338,13 @@ async fn runs(
     State(state): State<ApiState>,
     Query(query): Query<RunsQuery>,
 ) -> Result<Json<RunsResponse>, ApiError> {
+    if query
+        .since
+        .zip(query.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(ApiError::bad_request("since must not be later than until"));
+    }
     let status = match query.status.as_deref() {
         Some(s) => Some(parse_run_status(s)?),
         None => None,
@@ -2364,6 +2374,7 @@ async fn runs(
         status,
         provider: query.provider,
         since: query.since,
+        until: query.until,
     };
 
     if query.stats {
@@ -3655,6 +3666,95 @@ mod tests {
                 .len(),
             100
         );
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_until_rest_bounds_lists_and_statistics_and_rejects_invalid_windows() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_since.jsonl");
+        let data = crate::test_support::private_tempdir();
+        let ledger = data.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "?until=2026-01-01T12:00:00Z",
+                vec!["late-old", "boundary", "before"],
+            ),
+            (
+                "?since=2026-01-01T12:00:00Z&until=2026-01-01T14:00:00%2B02:00",
+                vec!["boundary"],
+            ),
+            (
+                "?until=2026-01-01T14:00:00.001%2B02:00",
+                vec!["late-old", "after", "boundary", "before"],
+            ),
+            (
+                "?since=2026-01-01T11:00:00Z&until=2026-01-01T12:00:00Z&limit=1",
+                vec!["boundary"],
+            ),
+            (
+                "?until=2026-01-01T14:00:00Z&provider=p&status=error",
+                vec!["error"],
+            ),
+            ("?until=2026-01-01T09:00:00Z", vec![]),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            let ids: Vec<_> = body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["run_id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, expected, "query: {query}");
+        }
+        for (query, total) in [
+            ("?stats=true&until=2026-01-01T12:00:00Z", 3),
+            (
+                "?stats=true&since=2026-01-01T12:00:00Z&until=2026-01-01T12:00:00Z",
+                1,
+            ),
+            (
+                "?stats=true&until=2026-01-01T14:00:00Z&provider=p&status=error",
+                1,
+            ),
+            ("?stats=true&until=2026-01-01T09:00:00Z", 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(response).await["total"],
+                total,
+                "query: {query}"
+            );
+        }
+        for query in [
+            "?until=yesterday",
+            "?until=2026-01-01",
+            "?until=2026-01-01T12:00:00",
+            "?until=2026-02-30T12:00:00Z",
+            "?since=2026-01-02T00:00:00Z&until=2026-01-01T00:00:00Z",
+            "?stats=true&until=yesterday",
+            "?stats=true&since=2026-01-02T00:00:00Z&until=2026-01-01T00:00:00Z",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "query: {query}");
+        }
         assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
     }
 

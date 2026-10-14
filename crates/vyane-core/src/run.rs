@@ -152,7 +152,10 @@ pub struct RunQuery {
     pub owner: Option<String>,
     pub provider: Option<ProviderId>,
     pub status: Option<RunStatus>,
+    /// Inclusive lower bound on run start time; applied before the limit.
     pub since: Option<DateTime<Utc>>,
+    /// Inclusive upper bound on run start time; applied before the limit.
+    pub until: Option<DateTime<Utc>>,
     /// Most-recent-first limit. `None` = implementation default.
     pub limit: Option<usize>,
 }
