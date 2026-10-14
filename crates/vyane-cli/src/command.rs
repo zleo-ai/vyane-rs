@@ -2530,6 +2530,12 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
                 })
         })
         .collect::<Result<Vec<_>>>()?;
+    if !args.stats && args.limit == 0 {
+        if args.json {
+            println!("[]");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let has_local_filters = args.session.is_some() || !labels.is_empty();
     // These predicates inspect only the already owner-scoped local records.
     // They are not fields of the generic HTTP/MCP history filters or views.

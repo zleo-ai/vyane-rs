@@ -813,7 +813,7 @@ pub struct HistoryArgs {
     /// Count all matching runs by provider and status, instead of listing them.
     #[arg(long, conflicts_with = "limit")]
     pub stats: bool,
-    /// Maximum number of records to show.
+    /// Maximum number of records to show; zero returns no records.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
     /// Filter by run status.
