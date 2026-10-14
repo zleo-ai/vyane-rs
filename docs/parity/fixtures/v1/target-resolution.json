@@ -1,0 +1,464 @@
+{
+  "schema_version": 1,
+  "suite": "target_resolution",
+  "normalization": {
+    "reference_snapshot": "execution-behavior-v1; this supplementary capture does not refresh the older classifier/routing suites.",
+    "target": "Preserve provider/protocol/model; direct-chat maps to none and codex-cli maps to codex. Explicit configuration only; no provider inference or model catalog equivalence is claimed.",
+    "trace": "Preserve every executed attempt in order, its four target coordinates, status and reason; failed_over means another recorded attempt follows. Timing, generated ids and private execution context are omitted.",
+    "scope": "Fresh sessionless dispatch with one attempt per target and supplied candidate order; scripted adapter outcomes, not real HTTP, process execution, retry timing or candidate selection."
+  },
+  "cases": [
+    {
+      "id": "target-resolution.direct-chat",
+      "oracle_locator": {
+        "fn": "resolve_explicit_targets"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "none",
+            "model": "model-a",
+            "default_model": "unused-default"
+          }
+        ]
+      },
+      "sanitized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_chat",
+            "harness": "direct-chat",
+            "model": "model-a"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_chat",
+            "harness": "none",
+            "model": "model-a"
+          }
+        ]
+      },
+      "rust_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_chat",
+            "harness": "none",
+            "model": "model-a"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "target-resolution.responses",
+      "oracle_locator": {
+        "fn": "resolve_explicit_targets"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "none",
+            "model": "model-r",
+            "default_model": "unused-default"
+          }
+        ]
+      },
+      "sanitized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "direct-chat",
+            "model": "model-r"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "none",
+            "model": "model-r"
+          }
+        ]
+      },
+      "rust_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "none",
+            "model": "model-r"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "target-resolution.messages",
+      "oracle_locator": {
+        "fn": "resolve_explicit_targets"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "none",
+            "model": "model-m",
+            "default_model": "unused-default"
+          }
+        ]
+      },
+      "sanitized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "anthropic_messages",
+            "harness": "direct-chat",
+            "model": "model-m"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "anthropic_messages",
+            "harness": "none",
+            "model": "model-m"
+          }
+        ]
+      },
+      "rust_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "anthropic_messages",
+            "harness": "none",
+            "model": "model-m"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "target-resolution.codex-provider-separation",
+      "oracle_locator": {
+        "fn": "resolve_explicit_targets"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex",
+            "model": "model-a",
+            "default_model": "unused-default"
+          }
+        ]
+      },
+      "sanitized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex",
+            "model": "model-a"
+          }
+        ]
+      },
+      "rust_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex",
+            "model": "model-a"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "target-resolution.claude-provider-separation",
+      "oracle_locator": {
+        "fn": "resolve_explicit_targets"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          }
+        ]
+      },
+      "sanitized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b"
+          }
+        ]
+      },
+      "rust_output": {
+        "targets": [
+          {
+            "provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "target-resolution.provider-default-model",
+      "oracle_locator": {
+        "fn": "resolve_explicit_targets"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "none",
+            "model": null,
+            "default_model": "scoped-default"
+          }
+        ]
+      },
+      "sanitized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_chat",
+            "harness": "direct-chat",
+            "model": "scoped-default"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_chat",
+            "harness": "none",
+            "model": "scoped-default"
+          }
+        ]
+      },
+      "rust_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_chat",
+            "harness": "none",
+            "model": "scoped-default"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "target-resolution.profile-protocol-override",
+      "oracle_locator": {
+        "fn": "resolve_explicit_targets"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_responses",
+            "harness": "codex",
+            "model": "model-a",
+            "default_model": "unused-default"
+          }
+        ]
+      },
+      "sanitized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex",
+            "model": "model-a"
+          }
+        ]
+      },
+      "rust_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex",
+            "model": "model-a"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "target-resolution.ordered-distinct-models",
+      "oracle_locator": {
+        "fn": "resolve_explicit_targets"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ]
+      },
+      "sanitized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c"
+          }
+        ]
+      },
+      "rust_output": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    }
+  ]
+}

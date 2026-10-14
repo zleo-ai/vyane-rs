@@ -1,6 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
 mod common;
+#[path = "parity_manifest/target_failover.rs"]
+mod target_failover;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -397,6 +399,14 @@ fn assert_sha256(value: &str) {
 fn expected_public_fixtures() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
         (
+            "dispatch_trail",
+            "4936a121ef883732b4640e7b7797ae7899e864be03c67f26fa07b4f6ffab88e8",
+        ),
+        (
+            "target_resolution",
+            "d9646d33fd8d847fd7bcac3272cad397ddf750a78cc8ce03f0cd739634bce066",
+        ),
+        (
             "routing",
             "e7e026785b0fc9637a936ef8e08f008fa881cd69a5911b5073aba15763e9d572",
         ),
@@ -413,6 +423,12 @@ fn expected_public_fixtures() -> BTreeMap<&'static str, &'static str> {
 
 fn expected_scope(suite: &str) -> &'static str {
     match suite {
+        "dispatch_trail" => {
+            "fresh sessionless production dispatch and persisted attempt trails under scripted adapter outcomes with one attempt per supplied target; candidate selection, retries, timing, live protocols and session behavior remain outside this suite; timeout, auth and taxonomy differences remain explicit"
+        }
+        "target_resolution" => {
+            "explicit synthetic provider/protocol/harness/model configuration and ordered independently resolved targets; provider inference, disabled targets, model catalogs and candidate selection remain outside this suite"
+        }
         "routing" => {
             "classify_intent primary, confidence and secondary plus vyane-service primary-intent exposure; stateful history, benchmark and feedback routing are excluded"
         }
@@ -428,6 +444,86 @@ fn expected_scope(suite: &str) -> &'static str {
 
 fn expected_case_digests(suite: &str) -> BTreeMap<&'static str, &'static str> {
     let cases = match suite {
+        "dispatch_trail" => vec![
+            (
+                "dispatch-trail.primary-success",
+                "6cd963fe38bc6ca39d52d05ec7d4b36f62eaec22e9aeb56891c5d2fb4512e8d0",
+            ),
+            (
+                "dispatch-trail.error-then-success",
+                "8ed9c5a2974c0bd5d8bafb42deadb45f84a629a68bca844482bca0d384669f22",
+            ),
+            (
+                "dispatch-trail.two-errors-then-success",
+                "d880a0f4f9261669595369562cd62fe1997a3c0fb4107fde14226f4a9ba646cf",
+            ),
+            (
+                "dispatch-trail.mixed-errors-then-success",
+                "fb77a31e30ac435da6b628a145983ca1a6836f89b0c2a46b16d386809a2be98c",
+            ),
+            (
+                "dispatch-trail.exhausted",
+                "4ddc63262175c54f8a7da91c7ab60e001ee1e30fce6f5f2de223bf5b8374a443",
+            ),
+            (
+                "dispatch-trail.single-error",
+                "7828178215b843fbdce2f3718af26b3f86d057d51290cbaad6153595699384a0",
+            ),
+            (
+                "dispatch-trail.timeout",
+                "863e742fbe875c049bd0168e1221765580dd6a9976bb79b9a0aae31bec7536db",
+            ),
+            (
+                "dispatch-trail.rate-limit",
+                "db42d4104dcbec15418abe36eb23e06d9a21dedfea54a0182e5af510e7e377f9",
+            ),
+            (
+                "dispatch-trail.quota",
+                "6d4d66b6121cf8c07990c40118907bdb3ab156b524f143e47390ca230830cf92",
+            ),
+            (
+                "dispatch-trail.auth",
+                "a19cc6a401f30a7fda2c202b7d36891bdea5a8e651c8790920a46cf82e26de3a",
+            ),
+            (
+                "dispatch-trail.policy-blocked",
+                "3568669f322c87a1474032dc7b16218e2b6c1be868f8ce9b82412932d4def3d5",
+            ),
+        ],
+        "target_resolution" => vec![
+            (
+                "target-resolution.direct-chat",
+                "a19923f5a62bb9d298869bb78dd3f5295e00caa18c4bfb0e3201466133df332f",
+            ),
+            (
+                "target-resolution.responses",
+                "8133ab1e324947b8d0a03e3594f2e9ff7d14a866db638f5caca609133a0ae01b",
+            ),
+            (
+                "target-resolution.messages",
+                "db4e1b52a9155229cb7c0a31a51a9bee922f482a5559ca68454b985c37b70290",
+            ),
+            (
+                "target-resolution.codex-provider-separation",
+                "cfd69f09e7fba24eeaabfc98ba2426f6c2dfa827ac99561a2184e875386604b1",
+            ),
+            (
+                "target-resolution.claude-provider-separation",
+                "b979a1b264487499d774ce1cc56b9c80aee929efd94eda212c9a3d4614806ce7",
+            ),
+            (
+                "target-resolution.provider-default-model",
+                "7907c09319fcc780e5ee76da1530e0f88f43b3ae84ff5adce3882d61d0e323d8",
+            ),
+            (
+                "target-resolution.profile-protocol-override",
+                "740daeb004aa7ecdee75f478fa87bff3e89763563a2977542ee8171cd9745573",
+            ),
+            (
+                "target-resolution.ordered-distinct-models",
+                "eb5e8dd059b6eb865ea7ca7a3ca68a060f846263c62a8f909a9ce53e7199b5ce",
+            ),
+        ],
         "routing" => vec![
             (
                 "routing.classify_intent.implement",
@@ -633,6 +729,14 @@ fn manifest_schema_public_fixture_integrity_and_dispositions_are_closed() {
         );
 
         match suite.id.as_str() {
+            "dispatch_trail" => validate_fixture(
+                suite,
+                load_suite::<target_failover::Case<target_failover::TrailInput>>(suite),
+            ),
+            "target_resolution" => validate_fixture(
+                suite,
+                load_suite::<target_failover::Case<target_failover::ResolutionInput>>(suite),
+            ),
             "routing" => validate_fixture(suite, load_suite::<RoutingCase>(suite)),
             "failover" => validate_fixture(suite, load_suite::<FailoverCase>(suite)),
             "automatic_routing" => {

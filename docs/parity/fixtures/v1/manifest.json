@@ -65,17 +65,41 @@
       "scope": "sanitized automatic routing behavior with reference-native profile effort and no-eligible cases counted as normalized matches; Rust candidate mapping, explicit model/selector, rendered-task target selection, frontier filtering, and frozen replay remain explicit open differences",
       "normalized_fixture": "docs/parity/fixtures/v1/automatic-routing.json",
       "cases": [
-        { "id": "automatic-routing.routed-defaults", "disposition": "open_difference", "blocker": "BLOCKER EXE-05: the reference dispatch entry does not consume the Rust candidate/profile input shape, so this Rust default-route tuple cannot be claimed as a cross-implementation match." },
-        { "id": "automatic-routing.profile-effort", "disposition": "normalized_exact", "blocker": null },
-        { "id": "automatic-routing.explicit-effort", "disposition": "open_difference", "blocker": "BLOCKER EXE-05: explicit effort is accepted by the reference dispatch entry, but the selected target tuple depends on a Rust-only candidate/profile mapping that the reference entry does not consume." },
+        {
+          "id": "automatic-routing.routed-defaults",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-05: the reference dispatch entry does not consume the Rust candidate/profile input shape, so this Rust default-route tuple cannot be claimed as a cross-implementation match."
+        },
+        {
+          "id": "automatic-routing.profile-effort",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "automatic-routing.explicit-effort",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-05: explicit effort is accepted by the reference dispatch entry, but the selected target tuple depends on a Rust-only candidate/profile mapping that the reference entry does not consume."
+        },
         {
           "id": "automatic-routing.explicit-model",
           "disposition": "open_difference",
           "blocker": "BLOCKER EXE-05: the Rust automatic selector has no typed explicit-model override; adding one requires a bounded trusted input that is frozen across detached and daemon replay."
         },
-        { "id": "automatic-routing.explicit-selector", "disposition": "open_difference", "blocker": "BLOCKER EXE-05: the reference dispatch entry has no same-shaped selector-to-profile-to-target resolution contract; Rust explicit profile selection is one-sided behavior." },
-        { "id": "automatic-routing.rendered-prompt", "disposition": "open_difference", "blocker": "BLOCKER EXE-05: both implementations route rendered task text, but this selected target tuple depends on a Rust-only tag/candidate mapping and is not reference-equivalent evidence." },
-        { "id": "automatic-routing.no-eligible", "disposition": "normalized_exact", "blocker": null },
+        {
+          "id": "automatic-routing.explicit-selector",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-05: the reference dispatch entry has no same-shaped selector-to-profile-to-target resolution contract; Rust explicit profile selection is one-sided behavior."
+        },
+        {
+          "id": "automatic-routing.rendered-prompt",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-05: both implementations route rendered task text, but this selected target tuple depends on a Rust-only tag/candidate mapping and is not reference-equivalent evidence."
+        },
+        {
+          "id": "automatic-routing.no-eligible",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
         {
           "id": "automatic-routing.full-chain-frontier-guard",
           "disposition": "open_difference",
@@ -128,6 +152,117 @@
           "id": "failover.reason.quota-exhausted",
           "disposition": "open_difference",
           "blocker": "BLOCKER EXE-02: Rust intentionally combines rate limiting and quota exhaustion in ErrorKind::RateLimited; a taxonomy decision is required before these outputs can be accepted as equal."
+        }
+      ]
+    },
+    {
+      "id": "target_resolution",
+      "fixture_sha256": "d9646d33fd8d847fd7bcac3272cad397ddf750a78cc8ce03f0cd739634bce066",
+      "scope": "explicit synthetic provider/protocol/harness/model configuration and ordered independently resolved targets; provider inference, disabled targets, model catalogs and candidate selection remain outside this suite",
+      "normalized_fixture": "docs/parity/fixtures/v1/target-resolution.json",
+      "cases": [
+        {
+          "id": "target-resolution.direct-chat",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "target-resolution.responses",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "target-resolution.messages",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "target-resolution.codex-provider-separation",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "target-resolution.claude-provider-separation",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "target-resolution.provider-default-model",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "target-resolution.profile-protocol-override",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "target-resolution.ordered-distinct-models",
+          "disposition": "normalized_exact",
+          "blocker": null
+        }
+      ]
+    },
+    {
+      "id": "dispatch_trail",
+      "fixture_sha256": "4936a121ef883732b4640e7b7797ae7899e864be03c67f26fa07b4f6ffab88e8",
+      "scope": "fresh sessionless production dispatch and persisted attempt trails under scripted adapter outcomes with one attempt per supplied target; candidate selection, retries, timing, live protocols and session behavior remain outside this suite; timeout, auth and taxonomy differences remain explicit",
+      "normalized_fixture": "docs/parity/fixtures/v1/dispatch-trail.json",
+      "cases": [
+        {
+          "id": "dispatch-trail.primary-success",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "dispatch-trail.error-then-success",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "dispatch-trail.two-errors-then-success",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "dispatch-trail.mixed-errors-then-success",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "dispatch-trail.exhausted",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "dispatch-trail.single-error",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "dispatch-trail.timeout",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-02: the reference stops on a typed timeout; Rust allows a timeout to advance to the next admitted target."
+        },
+        {
+          "id": "dispatch-trail.rate-limit",
+          "disposition": "normalized_exact",
+          "blocker": null
+        },
+        {
+          "id": "dispatch-trail.quota",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-02: the reference records quota_exhausted separately; Rust records the combined RateLimited category as rate_limit."
+        },
+        {
+          "id": "dispatch-trail.auth",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-02: both executions advance after authentication failure, but the reference reason is execution_error while Rust retains Auth."
+        },
+        {
+          "id": "dispatch-trail.policy-blocked",
+          "disposition": "open_difference",
+          "blocker": "BLOCKER EXE-02: the reference preserves blocked/policy_blocked; Rust preserves error/Unsupported and does not advance."
         }
       ]
     }
