@@ -828,6 +828,12 @@ pub struct HistoryArgs {
     /// Include runs started at or before this RFC 3339 timestamp (with timezone).
     #[arg(long, value_name = "TIMESTAMP")]
     pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Exact session id in the existing local owner's records (local CLI only).
+    #[arg(long, value_name = "SESSION", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub session: Option<String>,
+    /// Exact label KEY=VALUE; repeat for AND matching (local CLI only).
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
