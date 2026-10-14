@@ -157,7 +157,7 @@
     },
     {
       "id": "target_resolution",
-      "fixture_sha256": "d9646d33fd8d847fd7bcac3272cad397ddf750a78cc8ce03f0cd739634bce066",
+      "fixture_sha256": "7b351bbdbd4b4a7ea4270f21908a5afcbb0ba372958d3492235c1d107c872ae4",
       "scope": "explicit synthetic provider/protocol/harness/model configuration and ordered independently resolved targets; provider inference, disabled targets, model catalogs and candidate selection remain outside this suite",
       "normalized_fixture": "docs/parity/fixtures/v1/target-resolution.json",
       "cases": [
@@ -205,7 +205,7 @@
     },
     {
       "id": "dispatch_trail",
-      "fixture_sha256": "4936a121ef883732b4640e7b7797ae7899e864be03c67f26fa07b4f6ffab88e8",
+      "fixture_sha256": "ef60d18eb9bec4616a08d6af35375a45e0eecd24aa716fef71f3967bfe202f89",
       "scope": "fresh sessionless production dispatch and persisted attempt trails under scripted adapter outcomes with one attempt per supplied target; candidate selection, retries, timing, live protocols and session behavior remain outside this suite; timeout, auth and taxonomy differences remain explicit",
       "normalized_fixture": "docs/parity/fixtures/v1/dispatch-trail.json",
       "cases": [

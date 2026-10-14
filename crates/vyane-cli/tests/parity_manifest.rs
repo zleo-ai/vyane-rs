@@ -400,11 +400,11 @@ fn expected_public_fixtures() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
         (
             "dispatch_trail",
-            "4936a121ef883732b4640e7b7797ae7899e864be03c67f26fa07b4f6ffab88e8",
+            "ef60d18eb9bec4616a08d6af35375a45e0eecd24aa716fef71f3967bfe202f89",
         ),
         (
             "target_resolution",
-            "d9646d33fd8d847fd7bcac3272cad397ddf750a78cc8ce03f0cd739634bce066",
+            "7b351bbdbd4b4a7ea4270f21908a5afcbb0ba372958d3492235c1d107c872ae4",
         ),
         (
             "routing",
@@ -447,47 +447,47 @@ fn expected_case_digests(suite: &str) -> BTreeMap<&'static str, &'static str> {
         "dispatch_trail" => vec![
             (
                 "dispatch-trail.primary-success",
-                "6cd963fe38bc6ca39d52d05ec7d4b36f62eaec22e9aeb56891c5d2fb4512e8d0",
+                "c6d8fd3f19cf78d4e919c0f508875c7a886412104052baa064a0b4416a12d783",
             ),
             (
                 "dispatch-trail.error-then-success",
-                "8ed9c5a2974c0bd5d8bafb42deadb45f84a629a68bca844482bca0d384669f22",
+                "f42dda9595cd94e8e0b59c06d222340934e38c036d575975488b321fff6dc3e9",
             ),
             (
                 "dispatch-trail.two-errors-then-success",
-                "d880a0f4f9261669595369562cd62fe1997a3c0fb4107fde14226f4a9ba646cf",
+                "b824040626152782a41fc14dab5f65f15b6ed011bb5c73adcb6a5a398558aade",
             ),
             (
                 "dispatch-trail.mixed-errors-then-success",
-                "fb77a31e30ac435da6b628a145983ca1a6836f89b0c2a46b16d386809a2be98c",
+                "d18376b634d3a86b4fbc8c4a8684c3dac7029d15eb0d9145d3c5516da4c35756",
             ),
             (
                 "dispatch-trail.exhausted",
-                "4ddc63262175c54f8a7da91c7ab60e001ee1e30fce6f5f2de223bf5b8374a443",
+                "7ddd6097842cbd0ba91d3b0a7f3368234f78bc977d04e0227e84bd65f1d58641",
             ),
             (
                 "dispatch-trail.single-error",
-                "7828178215b843fbdce2f3718af26b3f86d057d51290cbaad6153595699384a0",
+                "2fb76e427fa1416c364b7930a527fee5435201cf1129ce405c5667c37d1e2085",
             ),
             (
                 "dispatch-trail.timeout",
-                "863e742fbe875c049bd0168e1221765580dd6a9976bb79b9a0aae31bec7536db",
+                "bfde1399351bdb0c5014ae2a84847492b04f0dae0097eb1ec4167d6e66492fd9",
             ),
             (
                 "dispatch-trail.rate-limit",
-                "db42d4104dcbec15418abe36eb23e06d9a21dedfea54a0182e5af510e7e377f9",
+                "77754b52083ec21544f26961aaeead4f77c4a8b7dec504a71af49825dd43457f",
             ),
             (
                 "dispatch-trail.quota",
-                "6d4d66b6121cf8c07990c40118907bdb3ab156b524f143e47390ca230830cf92",
+                "f3e2a1ce7071fdb68ecaa404f5dd201cf84c53dc8ec1f37a25a76180c1ab7f00",
             ),
             (
                 "dispatch-trail.auth",
-                "a19cc6a401f30a7fda2c202b7d36891bdea5a8e651c8790920a46cf82e26de3a",
+                "560d47ce1de65048469748153817f14ca129d03bf0a92c520d2e4e21ea5c74fc",
             ),
             (
                 "dispatch-trail.policy-blocked",
-                "3568669f322c87a1474032dc7b16218e2b6c1be868f8ce9b82412932d4def3d5",
+                "6a88a7e15685a86c639c61812cc32c974eb11d8d86b012e0ea48fc7c84935598",
             ),
         ],
         "target_resolution" => vec![
@@ -505,7 +505,7 @@ fn expected_case_digests(suite: &str) -> BTreeMap<&'static str, &'static str> {
             ),
             (
                 "target-resolution.codex-provider-separation",
-                "cfd69f09e7fba24eeaabfc98ba2426f6c2dfa827ac99561a2184e875386604b1",
+                "c56606a17c12d27a626777095d3eef7c650a618a4be6e79140707af66d7991f1",
             ),
             (
                 "target-resolution.claude-provider-separation",
@@ -517,11 +517,11 @@ fn expected_case_digests(suite: &str) -> BTreeMap<&'static str, &'static str> {
             ),
             (
                 "target-resolution.profile-protocol-override",
-                "740daeb004aa7ecdee75f478fa87bff3e89763563a2977542ee8171cd9745573",
+                "532317091fbcc9f197c79433f65aefd60e7347dc3fe90567a30dab1fa5ef97ea",
             ),
             (
                 "target-resolution.ordered-distinct-models",
-                "eb5e8dd059b6eb865ea7ca7a3ca68a060f846263c62a8f909a9ce53e7199b5ce",
+                "76500b032a89cc3612255112e611d0bbbf36aa4f7b0960cacfaee7d3bd34054a",
             ),
         ],
         "routing" => vec![

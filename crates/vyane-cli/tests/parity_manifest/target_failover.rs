@@ -122,6 +122,7 @@ impl Coordinates {
                 .into(),
             model: target.model.to_string(),
         }
+        .normalize()
     }
 }
 
@@ -157,11 +158,23 @@ fn resolve(inputs: &[TargetInput]) -> Vec<BoundTarget> {
             },
         );
     }
-    config
+    let chain = config
         .resolve_failover_with("target-0", &|_| {
             panic!("fixture must not request credentials")
         })
-        .unwrap()
+        .unwrap();
+    assert_eq!(chain.len(), inputs.len());
+    for (bound, input) in chain.iter().zip(inputs) {
+        let expected = match input.harness.as_str() {
+            "none" => None,
+            "codex" | "codex-cli" => Some(HarnessKind::CodexCli),
+            "claude-code" => Some(HarnessKind::ClaudeCode),
+            "opencode" => Some(HarnessKind::OpenCode),
+            other => panic!("unsupported fixture harness: {other}"),
+        };
+        assert_eq!(bound.target.harness, expected, "built-in harness identity");
+    }
+    chain
 }
 
 fn suite<C: DeserializeOwned>(id: &str) -> GoldenSuite<C> {

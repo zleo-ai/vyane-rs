@@ -19,7 +19,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           },
@@ -130,7 +130,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           },
@@ -287,7 +287,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           },
@@ -490,7 +490,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           },
@@ -693,7 +693,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           },
@@ -896,7 +896,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           }
@@ -989,7 +989,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           },
@@ -1116,7 +1116,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           },
@@ -1273,7 +1273,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           },
@@ -1430,7 +1430,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           },
@@ -1587,7 +1587,7 @@
             "provider": "fixture-a",
             "provider_protocol": "openai_responses",
             "protocol": "openai_responses",
-            "harness": "codex",
+            "harness": "codex-cli",
             "model": "model-a",
             "default_model": "unused-default"
           },

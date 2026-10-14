@@ -48,8 +48,11 @@ implementation from this repository.
 ## Normalization and remaining differences
 
 Provider, protocol and model are preserved. Reference `direct-chat` becomes
-`none`, and `codex-cli` becomes `codex`. Reference provider defaults are expressed
-through its per-provider configuration; this does not compare implicit catalogs.
+`none`, and both outputs normalize `codex-cli` to `codex`. Fixture inputs use
+the canonical built-in `codex-cli`, and the resolved harness kind is asserted
+before execution so an unknown harness cannot pass through the scripted factory.
+Reference provider defaults are expressed through its per-provider configuration;
+this does not compare implicit catalogs.
 Generated ids, timestamps, durations, paths and unrelated runtime metadata are
 excluded. Reference `failed_over` is derived from whether another recorded
 attempt follows; its source failure trigger remains pinned and is checked
