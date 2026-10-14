@@ -74,6 +74,16 @@ impl JsonlLedger {
     /// corrupt lines that were skipped. A missing file is an empty ledger, not
     /// an error.
     fn query_blocking(path: &Path, query: RunQuery) -> Result<(Vec<RunRecord>, u64)> {
+        if query
+            .since
+            .zip(query.until)
+            .is_some_and(|(since, until)| since > until)
+        {
+            return Err(VyaneError::new(
+                ErrorKind::Config,
+                "since must not be later than until",
+            ));
+        }
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -170,7 +180,7 @@ impl Ledger for JsonlLedger {
 
 /// Whether `record` passes every filter set on `query`. Unset fields match
 /// anything. `owner` is matched exactly (owner is a scope, not a search term);
-/// `since` is compared against `started_at` (inclusive).
+/// `since` and `until` are compared against `started_at` (both inclusive).
 fn matches_query(record: &RunRecord, query: &RunQuery) -> bool {
     if let Some(owner) = &query.owner
         && record.owner != *owner
@@ -189,6 +199,11 @@ fn matches_query(record: &RunRecord, query: &RunQuery) -> bool {
     }
     if let Some(since) = query.since
         && record.started_at < since
+    {
+        return false;
+    }
+    if let Some(until) = query.until
+        && record.started_at > until
     {
         return false;
     }

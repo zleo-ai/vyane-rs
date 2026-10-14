@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use vyane_broker::ResidentBrokerSupervisor;
@@ -105,6 +105,8 @@ pub struct HistoryFilter {
     pub provider: Option<String>,
     /// Inclusive lower bound on run start time; applied before the limit.
     pub since: Option<DateTime<Utc>>,
+    /// Inclusive upper bound on run start time; applied before the limit.
+    pub until: Option<DateTime<Utc>>,
 }
 
 /// One resolved target + its raw selector, returned by [`VyaneService::resolve`].
@@ -798,6 +800,13 @@ impl VyaneService {
     }
 
     async fn history_with(&self, owner: &str, filter: HistoryFilter) -> Result<Vec<RunRecord>> {
+        if filter
+            .since
+            .zip(filter.until)
+            .is_some_and(|(since, until)| since > until)
+        {
+            bail!("since must not be later than until");
+        }
         self.runtime
             .ledger
             .query(RunQuery {
@@ -805,6 +814,7 @@ impl VyaneService {
                 provider: filter.provider.map(ProviderId::new),
                 status: filter.status,
                 since: filter.since,
+                until: filter.until,
                 limit: filter.limit,
             })
             .await

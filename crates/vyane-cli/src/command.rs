@@ -2511,6 +2511,13 @@ async fn harness_available(kind: HarnessKind) -> bool {
 }
 
 async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
+    if args
+        .since
+        .zip(args.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        bail!("since must not be later than until");
+    }
     if args.stats {
         let service = vyane_service::VyaneService::from_local_storage(StoragePaths::resolve()?)?;
         let stats = service
@@ -2519,6 +2526,7 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
                 provider: args.provider,
                 status: args.status.map(Into::into),
                 since: args.since,
+                until: args.until,
             })
             .await?;
         if args.json {
@@ -2550,6 +2558,7 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
             provider: args.provider.map(ProviderId::new),
             status: args.status.map(Into::into),
             since: args.since,
+            until: args.until,
             limit: Some(args.limit),
         })
         .await?;

@@ -338,6 +338,10 @@ pub struct HistoryArgs {
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Include runs started at or before this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One bounded route tag or candidate profile name.
@@ -442,6 +446,7 @@ impl Default for HistoryArgs {
             status: None,
             provider: None,
             since: None,
+            until: None,
             stats: false,
         }
     }
@@ -1188,6 +1193,15 @@ pub fn parse_status(s: &str) -> Result<RunStatus, &'static str> {
 }
 
 fn history_filter(args: HistoryArgs) -> std::result::Result<HistoryFilter, SafeToolError> {
+    if args
+        .since
+        .zip(args.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(SafeToolError::invalid_argument(
+            "since must not be later than until",
+        ));
+    }
     if !(1..=MAX_HISTORY_LIMIT).contains(&args.limit) {
         return Err(SafeToolError::invalid_argument(
             "limit must be between 1 and 1000",
@@ -1202,6 +1216,7 @@ fn history_filter(args: HistoryArgs) -> std::result::Result<HistoryFilter, SafeT
         status,
         provider: args.provider,
         since: args.since,
+        until: args.until,
     })
 }
 
