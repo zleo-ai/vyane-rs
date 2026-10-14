@@ -10,8 +10,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use vyane_config::ResolvedConfig;
 use vyane_core::{
     AdapterTransport, BoundTarget, CancellationToken, ErrorKind, Harness, HarnessKind,
-    HarnessLifecycleEvent, HarnessLifecycleReporter, ProviderId, RunQuery, RunStatus, Sandbox,
-    SessionRef, TaskSpec, VyaneError,
+    HarnessLifecycleEvent, HarnessLifecycleReporter, ProviderId, RunQuery, RunRecord, RunStatus,
+    Sandbox, SessionRef, TaskSpec, VyaneError,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 use vyane_service::{SessionView, VyaneService, resolve_target_chain, split_targets};
@@ -2518,17 +2518,42 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
     {
         bail!("since must not be later than until");
     }
+    let labels = args
+        .labels
+        .iter()
+        .map(|label| {
+            label
+                .split_once('=')
+                .filter(|(key, _)| !key.is_empty())
+                .ok_or_else(|| {
+                    anyhow!("history label filter must be KEY=VALUE with a nonempty key")
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let has_local_filters = args.session.is_some() || !labels.is_empty();
+    // These predicates inspect only the already owner-scoped local records.
+    // They are not fields of the generic HTTP/MCP history filters or views.
+    let matches_local = |record: &RunRecord| {
+        args.session
+            .as_deref()
+            .is_none_or(|session| record.session_id.as_deref() == Some(session))
+            && labels
+                .iter()
+                .all(|&(key, value)| record.labels.get(key).is_some_and(|actual| actual == value))
+    };
     if args.stats {
         let service = vyane_service::VyaneService::from_local_storage(StoragePaths::resolve()?)?;
-        let stats = service
-            .history_stats(vyane_service::HistoryFilter {
-                limit: None,
+        let mut records = service
+            .history(vyane_service::HistoryFilter {
+                limit: Some(usize::MAX),
                 provider: args.provider,
                 status: args.status.map(Into::into),
                 since: args.since,
                 until: args.until,
             })
             .await?;
+        records.retain(matches_local);
+        let stats = vyane_service::HistoryStats::from_records(&records);
         if args.json {
             println!("{}", serde_json::to_string_pretty(&stats)?);
         } else {
@@ -2558,7 +2583,7 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     let runtime = Runtime::new(ResolvedConfig::default(), StoragePaths::resolve()?)?;
-    let records = runtime
+    let mut records = runtime
         .ledger
         .query(RunQuery {
             owner: Some("local".to_string()),
@@ -2566,9 +2591,17 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
             status: args.status.map(Into::into),
             since: args.since,
             until: args.until,
-            limit: Some(args.limit),
+            limit: Some(if has_local_filters {
+                usize::MAX
+            } else {
+                args.limit
+            }),
         })
         .await?;
+    if has_local_filters {
+        records.retain(matches_local);
+        records.truncate(args.limit);
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&records)?);
