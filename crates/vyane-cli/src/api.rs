@@ -1449,6 +1449,9 @@ pub struct BroadcastRequest {
 /// Query params for `GET /v1/runs`.
 #[derive(Debug, Default, Deserialize)]
 pub struct RunsQuery {
+    /// Count all matching runs. An explicit list limit is incompatible with this mode.
+    #[serde(default)]
+    pub stats: bool,
     /// Max records to return. `None` defaults to 100. `0` is rejected as 400.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -1507,6 +1510,13 @@ impl From<DispatchOutcome> for DispatchResponse {
 #[derive(Debug, Serialize)]
 struct ItemsEnvelope<T: Serialize> {
     items: Vec<T>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum RunsResponse {
+    Records(ItemsEnvelope<RunView>),
+    Stats(vyane_service::HistoryStats),
 }
 
 #[derive(Debug, Serialize)]
@@ -2324,12 +2334,15 @@ async fn broadcast(
 async fn runs(
     State(state): State<ApiState>,
     Query(query): Query<RunsQuery>,
-) -> Result<Json<ItemsEnvelope<RunView>>, ApiError> {
+) -> Result<Json<RunsResponse>, ApiError> {
     let status = match query.status.as_deref() {
         Some(s) => Some(parse_run_status(s)?),
         None => None,
     };
 
+    if query.stats && query.limit.is_some() {
+        return Err(ApiError::bad_request("stats cannot be combined with limit"));
+    }
     let limit = match query.limit {
         Some(0) => {
             return Err(ApiError::bad_request(
@@ -2342,6 +2355,7 @@ async fn runs(
             )));
         }
         Some(n) => Some(n),
+        None if query.stats => None,
         None => Some(DEFAULT_RUN_LIMIT),
     };
 
@@ -2352,6 +2366,17 @@ async fn runs(
         since: query.since,
     };
 
+    if query.stats {
+        let stats = state.service.history_stats(filter).await.map_err(|error| {
+            eprintln!(
+                "{}",
+                crate::output::format_run_ledger_query_error_line(&format!("{error:#}"))
+            );
+            ApiError::internal("run ledger unavailable")
+        })?;
+        return Ok(Json(RunsResponse::Stats(stats)));
+    }
+
     let records = state.service.history_views(filter).await.map_err(|error| {
         eprintln!(
             "{}",
@@ -2359,7 +2384,9 @@ async fn runs(
         );
         ApiError::internal("run ledger unavailable")
     })?;
-    Ok(Json(ItemsEnvelope { items: records }))
+    Ok(Json(RunsResponse::Records(ItemsEnvelope {
+        items: records,
+    })))
 }
 
 async fn sessions(
@@ -3572,6 +3599,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_stats_rest_counts_all_filtered_runs_without_a_list_limit() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_stats.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, total) in [
+            ("?stats=true", 120),
+            ("?stats=true&since=2026-01-01T14:00:00%2B02:00", 80),
+            (
+                "?stats=true&provider=p&status=error&since=2026-01-01T12:00:00Z",
+                20,
+            ),
+            ("?stats=true&since=2026-01-02T00:00:00Z", 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["total"], total, "query: {query}");
+            assert!(body["by_provider"].get("foreign-provider-canary").is_none());
+            assert!(!body.to_string().contains("STATS_PRIVATE_DATA_CANARY"));
+            if total == 120 {
+                assert_eq!(
+                    body["by_provider"]["p"],
+                    serde_json::json!({"total":90,"success":0,"error":30,"timeout":30,"cancelled":30})
+                );
+            }
+        }
+        for query in [
+            "?stats=true&limit=1",
+            "?stats=true&status=unknown",
+            "?stats=true&since=yesterday",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "query: {query}");
+        }
+        let response = app
+            .oneshot(goal_request("/v1/runs", Some(API_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(
+            response_json(response).await["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            100
+        );
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
     async fn history_since_rest_filters_before_limit_and_rejects_invalid_dates() {
         const HISTORY: &str = include_str!("../tests/fixtures/history_since.jsonl");
         let data = crate::test_support::private_tempdir();
@@ -3686,6 +3773,9 @@ mod tests {
         let Json(run_views) = runs(State(state.clone()), Query(RunsQuery::default()))
             .await
             .unwrap();
+        let RunsResponse::Records(run_views) = run_views else {
+            panic!("default history request must return record views");
+        };
         assert_eq!(run_views.items.len(), 3);
         let Json(session_views) = sessions(State(state)).await.unwrap();
         assert_eq!(session_views.items.len(), 1);

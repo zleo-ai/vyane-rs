@@ -287,6 +287,84 @@ fn session_view_serializes_into_items_array_shape_without_continuity_authority()
 }
 
 #[tokio::test]
+async fn history_stats_mcp_counts_all_filtered_runs_without_a_list_limit() -> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("fixtures/history_stats.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let server_handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, total) in [
+        (serde_json::json!({"stats":true}), 120),
+        (
+            serde_json::json!({"stats":true,"since":"2026-01-01T14:00:00+02:00"}),
+            80,
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"p","status":"error","since":"2026-01-01T12:00:00Z"}),
+            20,
+        ),
+        (
+            serde_json::json!({"stats":true,"since":"2026-01-02T00:00:00Z"}),
+            0,
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        let body = result_payload(result);
+        assert_eq!(body["total"], total, "arguments: {arguments}");
+        assert!(body["by_provider"].get("foreign-provider-canary").is_none());
+        assert!(!body.to_string().contains("STATS_PRIVATE_DATA_CANARY"));
+        if total == 120 {
+            assert_eq!(body["success"], 30);
+            assert_eq!(body["error"], 30);
+            assert_eq!(body["timeout"], 30);
+            assert_eq!(body["cancelled"], 30);
+        }
+    }
+    for arguments in [
+        serde_json::json!({"stats":true,"limit":1}),
+        serde_json::json!({"stats":true,"status":"unknown"}),
+        serde_json::json!({"stats":true,"since":"yesterday"}),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_eq!(result_payload(result)["error"]["code"], "invalid_argument");
+    }
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("vyane_history")
+                .with_arguments(serde_json::json!({}).as_object().unwrap().clone()),
+        )
+        .await?;
+    assert_eq!(
+        result_payload(result)["items"].as_array().unwrap().len(),
+        20
+    );
+    client.cancel().await?;
+    server_handle.await??;
+    assert_eq!(std::fs::read_to_string(ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
 async fn history_since_mcp_filters_before_limit_and_rejects_invalid_dates() -> anyhow::Result<()> {
     const HISTORY: &str = include_str!("fixtures/history_since.jsonl");
     let root = tempfile::tempdir()?;
