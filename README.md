@@ -551,7 +551,7 @@ timestamp with a timezone (`Z` or an explicit offset); percent-encode `+` as
 `%2B` in a REST query. The cutoff compares `started_at` and combines with
 provider/status filters before the record limit, retaining reverse append
 order. Omit it to query all time. This reuses the run ledger; source filtering
-and duration/cost aggregation remain open parity work.
+and cost aggregation remain open parity work.
 
 An inclusive upper bound is available as `vyane history --until TIMESTAMP`,
 REST `until`, and the MCP `vyane_history` argument `until`. It uses the same
@@ -580,8 +580,17 @@ The result contains `total`, `success`, `error`, `timeout`, `cancelled`, and
 `by_provider` with the same five counts for each final provider. A failover run
 counts once, regardless of its attempt count. Missing or empty storage returns
 zero counts and an empty provider map. Statistics contain no run ids, prompts,
-paths, labels, raw errors or cost estimates; duration and cost aggregation are
-separate remaining work.
+paths, labels, raw errors or cost estimates. Cost aggregation remains separate work.
+
+The overall `duration` object derives whole-run wall-clock elapsed time from
+saved `started_at` and `finished_at`: `samples` counts nonnegative spans and
+`invalid` counts reversed timestamps. Each valid span is truncated to whole
+milliseconds; `total_ms` sums those samples and `mean_ms` averages them, rounded
+to one decimal millisecond. All run statuses contribute valid timings, and the
+existing filters apply before measurement. Empty or all-invalid samples return
+`null` for both values (CLI text: `n/a`); a measured zero stays `0`. An aggregate
+total outside `u64` is `null`, while its sample count and mean remain available.
+Provider groups retain their existing counts and success rates.
 
 Each count object also includes `success_rate`: successful runs as a percentage
 of all matching runs, rounded to one decimal. Error, timeout and cancelled runs

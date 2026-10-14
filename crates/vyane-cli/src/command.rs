@@ -2569,6 +2569,18 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
                 stats.counts.timeout,
                 stats.counts.cancelled
             );
+            let total_duration = stats
+                .duration
+                .total_ms()
+                .map_or_else(|| "n/a".to_string(), |value| format!("{value} ms"));
+            let mean_duration = stats
+                .duration
+                .mean_ms()
+                .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"));
+            println!(
+                "Duration: total {total_duration}, mean {mean_duration} (samples: {}, invalid: {})",
+                stats.duration.samples, stats.duration.invalid
+            );
             println!("PROVIDER\tTOTAL\tSUCCESS\tERROR\tTIMEOUT\tCANCELLED\tSUCCESS RATE");
             for (provider, counts) in &stats.by_provider {
                 let rate = counts

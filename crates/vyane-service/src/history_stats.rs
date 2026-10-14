@@ -57,12 +57,72 @@ impl Serialize for RunCounts {
     }
 }
 
+/// Whole-run wall-clock timings derived from saved start/finish timestamps.
+/// Reversed timestamps are counted separately instead of becoming zero samples.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HistoryDurations {
+    pub samples: usize,
+    pub invalid: usize,
+    total_ms: u128,
+}
+
+impl HistoryDurations {
+    /// Sum of measured millisecond samples. No sample, or a sum outside u64,
+    /// has no representable total in this projection.
+    #[must_use]
+    pub fn total_ms(&self) -> Option<u64> {
+        if self.samples == 0 {
+            return None;
+        }
+        u64::try_from(self.total_ms).ok()
+    }
+
+    /// Mean of valid samples, rounded to one decimal millisecond.
+    #[must_use]
+    pub fn mean_ms(&self) -> Option<f64> {
+        if self.samples == 0 {
+            return None;
+        }
+        let mean = self.total_ms as f64 / self.samples as f64;
+        format!("{mean:.1}").parse().ok()
+    }
+
+    fn record(&mut self, record: &RunRecord) {
+        let elapsed = record.finished_at.signed_duration_since(record.started_at);
+        let Ok(duration) = elapsed.to_std() else {
+            self.invalid += 1;
+            return;
+        };
+        self.samples += 1;
+        // A representable chrono timestamp span fits comfortably in u64 ms;
+        // a u128 sum also covers every possible in-memory slice on supported
+        // platforms without wrapping when many long samples are combined.
+        self.total_ms += duration.as_millis();
+    }
+}
+
+impl Serialize for HistoryDurations {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = serializer.serialize_struct("HistoryDurations", 4)?;
+        fields.serialize_field("samples", &self.samples)?;
+        fields.serialize_field("invalid", &self.invalid)?;
+        fields.serialize_field("total_ms", &self.total_ms())?;
+        fields.serialize_field("mean_ms", &self.mean_ms())?;
+        fields.end()
+    }
+}
+
 /// Allowlisted aggregates only: no prompts, paths, labels, raw errors or costs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct HistoryStats {
     #[serde(flatten)]
     pub counts: RunCounts,
+    pub duration: HistoryDurations,
     pub by_provider: BTreeMap<String, RunCounts>,
 }
 
@@ -72,6 +132,7 @@ impl HistoryStats {
         let mut stats = Self::default();
         for record in records {
             stats.counts.record(record.status);
+            stats.duration.record(record);
             stats
                 .by_provider
                 .entry(record.target.provider.to_string())
@@ -79,5 +140,44 @@ impl HistoryStats {
                 .record(record.status);
         }
         stats
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn history_duration_large_total_is_unknown_without_wrapping_or_losing_the_mean() {
+        let mut record: RunRecord = serde_json::from_str(
+            r#"{
+            "run_id":"duration-overflow","owner":"local",
+            "started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:00:01Z",
+            "task_digest":"d","sandbox":"read-only",
+            "target":{"provider":"p","protocol":"openai_chat","model":"m"},
+            "transport":"direct_http","attempts":[],"status":"success"
+        }"#,
+        )
+        .unwrap();
+        record.started_at = chrono::DateTime::<chrono::Utc>::MIN_UTC;
+        record.finished_at = chrono::DateTime::<chrono::Utc>::MAX_UTC;
+        let stats = HistoryStats::from_records(&vec![record; 2048]);
+        assert_eq!(stats.duration.samples, 2048);
+        assert_eq!(stats.duration.invalid, 0);
+        assert_eq!(stats.duration.total_ms(), None);
+        assert!(
+            stats
+                .duration
+                .mean_ms()
+                .is_some_and(|value| value.is_finite() && value > 1.0e16)
+        );
+        let body = serde_json::to_value(stats).unwrap();
+        assert!(body["duration"]["total_ms"].is_null());
+        assert!(
+            body["duration"]["mean_ms"]
+                .as_f64()
+                .is_some_and(|value| value.is_finite())
+        );
     }
 }
