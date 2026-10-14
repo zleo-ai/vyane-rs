@@ -120,5 +120,5 @@
 {"run_id":"stats-119","owner":"local","started_at":"2026-01-01T12:00:00Z","finished_at":"2026-01-01T12:00:01Z","task_digest":"d","sandbox":"read-only","target":{"provider":"p","protocol":"openai_chat","model":"m"},"transport":"direct_http","attempts":[],"status":"cancelled","task_preview":"STATS_PRIVATE_DATA_CANARY","error":"STATS_PRIVATE_DATA_CANARY","labels":{"private":"STATS_PRIVATE_DATA_CANARY"}}
 {"run_id":"foreign-0","owner":"other-owner","started_at":"2026-01-01T12:00:00Z","finished_at":"2026-01-01T16:00:00Z","task_digest":"d","sandbox":"read-only","target":{"provider":"foreign-provider-canary","protocol":"openai_chat","model":"m"},"transport":"direct_http","attempts":[],"status":"success"}
 {"run_id":"foreign-1","owner":"other-owner","started_at":"2026-01-01T12:00:00Z","finished_at":"2026-01-01T16:00:00Z","task_digest":"d","sandbox":"read-only","target":{"provider":"foreign-provider-canary","protocol":"openai_chat","model":"m"},"transport":"direct_http","attempts":[],"status":"success"}
-not-json
 
+not-json
