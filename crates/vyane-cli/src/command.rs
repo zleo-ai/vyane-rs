@@ -2581,14 +2581,29 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
                 "Duration: total {total_duration}, mean {mean_duration} (samples: {}, invalid: {})",
                 stats.duration.samples, stats.duration.invalid
             );
-            println!("PROVIDER\tTOTAL\tSUCCESS\tERROR\tTIMEOUT\tCANCELLED\tSUCCESS RATE");
+            println!(
+                "PROVIDER\tTOTAL\tSUCCESS\tERROR\tTIMEOUT\tCANCELLED\tSUCCESS RATE\tDURATION TOTAL\tDURATION MEAN\tDURATION SAMPLES\tDURATION INVALID"
+            );
             for (provider, counts) in &stats.by_provider {
                 let rate = counts
                     .success_rate()
                     .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}%"));
+                let duration = &stats.by_provider_duration[provider];
+                let total_duration = duration
+                    .total_ms()
+                    .map_or_else(|| "n/a".to_string(), |value| format!("{value} ms"));
+                let mean_duration = duration
+                    .mean_ms()
+                    .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"));
                 println!(
-                    "{provider}\t{}\t{}\t{}\t{}\t{}\t{rate}",
-                    counts.total, counts.success, counts.error, counts.timeout, counts.cancelled
+                    "{provider}\t{}\t{}\t{}\t{}\t{}\t{rate}\t{total_duration}\t{mean_duration}\t{}\t{}",
+                    counts.total,
+                    counts.success,
+                    counts.error,
+                    counts.timeout,
+                    counts.cancelled,
+                    duration.samples,
+                    duration.invalid
                 );
             }
         }

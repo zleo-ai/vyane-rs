@@ -590,7 +590,13 @@ to one decimal millisecond. All run statuses contribute valid timings, and the
 existing filters apply before measurement. Empty or all-invalid samples return
 `null` for both values (CLI text: `n/a`); a measured zero stays `0`. An aggregate
 total outside `u64` is `null`, while its sample count and mean remain available.
-Provider groups retain their existing counts and success rates.
+Provider groups retain their existing counts and success rates. The separate
+`by_provider_duration` map uses the same final-provider keys and the same four
+duration fields for each group. Every sample covers the whole recorded run span,
+including preceding failover attempts; grouping assigns that span to the final
+provider. Filters are applied first, and each mean uses its own valid sample count.
+All-invalid groups remain present with null measurements; no matches produce an
+empty map. CLI text adds the same duration columns to its provider table.
 
 Each count object also includes `success_rate`: successful runs as a percentage
 of all matching runs, rounded to one decimal. Error, timeout and cancelled runs
