@@ -322,6 +322,9 @@ pub struct BroadcastArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryArgs {
+    /// Return counts for all matching runs. Cannot be combined with an explicit limit.
+    #[serde(default)]
+    pub stats: bool,
     /// Maximum records to return. Defaults to 20; valid range is 1..=1000.
     #[serde(default = "default_history_limit")]
     pub limit: usize,
@@ -439,6 +442,7 @@ impl Default for HistoryArgs {
             status: None,
             provider: None,
             since: None,
+            stats: false,
         }
     }
 }
@@ -830,18 +834,31 @@ impl VyaneMcpServer {
 
     /// Query the run ledger (most-recent-first).
     #[tool(
-        description = "Query recent run records from the ledger. Returns { items: [...] }, most recent first.",
+        description = "Query recent run records from the ledger. Returns { items: [...] }, most recent first. With stats=true, returns counts by status and provider for all matches; omit limit.",
         input_schema = rmcp::handler::server::tool::schema_for_type::<HistoryArgs>()
     )]
     async fn vyane_history(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        let explicit_limit = arguments.contains_key("limit");
         let args: HistoryArgs = match parse_arguments(arguments) {
             Ok(args) => args,
             Err(error) => return Ok(error_json(error)),
         };
+        let stats = args.stats;
+        if stats && explicit_limit {
+            return Ok(error_json(SafeToolError::invalid_argument(
+                "stats cannot be combined with limit",
+            )));
+        }
         let filter = match history_filter(args) {
             Ok(filter) => filter,
             Err(error) => return Ok(error_json(error)),
         };
+        if stats {
+            return match self.service.history_stats(filter).await {
+                Ok(counts) => Ok(success_json(&counts)),
+                Err(error) => Ok(error_json(classify_service_error(&error))),
+            };
+        }
         match self.service.history_views(filter).await {
             Ok(records) => Ok(success_json(&ToolItems { items: records })),
             Err(error) => Ok(error_json(classify_service_error(&error))),
@@ -1181,7 +1198,7 @@ fn history_filter(args: HistoryArgs) -> std::result::Result<HistoryFilter, SafeT
         Some(status) => Some(parse_status(status).map_err(SafeToolError::invalid_argument)?),
     };
     Ok(HistoryFilter {
-        limit: Some(args.limit),
+        limit: (!args.stats).then_some(args.limit),
         status,
         provider: args.provider,
         since: args.since,

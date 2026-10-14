@@ -40,6 +40,7 @@ mod factory;
 mod goal;
 mod goal_continuity_runner;
 mod goal_observation;
+mod history_stats;
 mod inprocess_agent;
 mod kernel_boundary;
 mod kernel_store;
@@ -124,6 +125,7 @@ pub use goal_observation::{
     GoalObservationWatcherErrorCode, MAX_GOAL_OBSERVATION_CONCURRENCY,
     MAX_GOAL_OBSERVATION_WATCHERS, MAX_GOAL_OBSERVATIONS_PER_WATCHER,
 };
+pub use history_stats::{HistoryStats, RunCounts};
 pub use inprocess_agent::{
     InProcessAgentComponents, InProcessAgentEffect, InProcessAgentOperation,
     InProcessAgentOperationContext, InProcessAssemblyError, InProcessAuthorityError,

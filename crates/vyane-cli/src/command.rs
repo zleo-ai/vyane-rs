@@ -2511,6 +2511,37 @@ async fn harness_available(kind: HarnessKind) -> bool {
 }
 
 async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
+    if args.stats {
+        let service = vyane_service::VyaneService::from_local_storage(StoragePaths::resolve()?)?;
+        let stats = service
+            .history_stats(vyane_service::HistoryFilter {
+                limit: None,
+                provider: args.provider,
+                status: args.status.map(Into::into),
+                since: args.since,
+            })
+            .await?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&stats)?);
+        } else {
+            println!(
+                "Total: {} (success: {}, error: {}, timeout: {}, cancelled: {})",
+                stats.counts.total,
+                stats.counts.success,
+                stats.counts.error,
+                stats.counts.timeout,
+                stats.counts.cancelled
+            );
+            println!("PROVIDER\tTOTAL\tSUCCESS\tERROR\tTIMEOUT\tCANCELLED");
+            for (provider, counts) in &stats.by_provider {
+                println!(
+                    "{provider}\t{}\t{}\t{}\t{}\t{}",
+                    counts.total, counts.success, counts.error, counts.timeout, counts.cancelled
+                );
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let runtime = Runtime::new(ResolvedConfig::default(), StoragePaths::resolve()?)?;
     let records = runtime
         .ledger

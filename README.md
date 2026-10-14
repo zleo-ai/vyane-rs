@@ -553,6 +553,17 @@ provider/status filters before the record limit, retaining reverse append
 order. Omit it to query all time. This reuses the run ledger; source/session/
 label filtering and cost aggregation remain open parity work.
 
+Use `vyane history --stats --json`, `GET /v1/runs?stats=true`, or
+`vyane_history` with `{"stats": true}` to count every matching ledger run.
+The same provider, status and inclusive `since` filters apply. Statistics mode
+rejects an explicit `limit`; the usual list defaults do not truncate counts.
+The result contains `total`, `success`, `error`, `timeout`, `cancelled`, and
+`by_provider` with the same five counts for each final provider. A failover run
+counts once, regardless of its attempt count. Missing or empty storage returns
+zero counts and an empty provider map. Statistics contain no run ids, prompts,
+paths, labels, raw errors or cost estimates; duration and cost aggregation are
+separate remaining work.
+
 SSE streaming events (`POST /v1/dispatch/stream`):
 
 ```
