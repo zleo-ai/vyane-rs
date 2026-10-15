@@ -4,6 +4,8 @@ This document expands on the design encoded in `vyane-core`. Where it describes
 types, it mirrors the frozen source in `crates/vyane-core/src/`; that source is
 the authority if the two ever disagree.
 
+![CLI, REST and MCP call the service and kernel; each target binds provider, protocol, harness and model; executions produce run records.](assets/target-flow.svg)
+
 ## The four-layer target model
 
 Everything in Vyane is built on four independent layers. None can be derived

@@ -1,35 +1,35 @@
 # Vyane
 
-**Run and coordinate AI model tasks from one Rust CLI and orchestration kernel.**
+**Run coding agents and model APIs through one Rust CLI.**
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Português (Brasil)](README.pt-BR.md)
 
-Source baseline: `b46c194` · Workspace version: `0.1.0` · Updated: 2026-10-15.
-English is authoritative. See the [translation policy](docs/TRANSLATING.md).
+For developers who use more than one coding agent or model provider: give your targets names, send a task to one or several, and keep the results and attempt history together. Use Claude Code or Codex CLI for coding tasks, or call a model API directly for text responses.
 
-Vyane dispatches a task to one configured target, broadcasts it to several, or tries an explicit failover chain. Targets can use Claude Code or Codex CLI harnesses, or call HTTP model endpoints directly. It is for developers building local agent workflows and Rust applications that need explicit routing, execution permissions, cancellation, and run records.
+> **Early development.** Source installation only; APIs are unstable and some capabilities remain partial or missing. Native session resume and automatic restart replay are not complete. See [current boundaries](docs/PROJECT-STATUS.md).
 
-![Abstract terminal windows connect through a copper coordination hub to result cards.](docs/assets/vyane-hero.webp)
+## See it run
 
-*AI-generated concept illustration; not an architecture diagram. [Asset notes](docs/assets/README.md).*
+[Run the terminal demo](docs/EXAMPLES.md): the installed CLI dispatches a task, broadcasts to two targets, then recovers from a scripted primary failure. It uses local HTTP fixtures, needs no keys, and makes no live-model calls.
 
-## Status and limits
+```text
+Local HTTP fixtures only; no live model calls.
+dispatch: fixture: chat-model; recorded attempts=1
+broadcast: 2 separate successful results (chat-model, review-model)
+failover: fixture: review-model; recorded attempts=2
+```
 
-This is an early, source-build project with unstable APIs. The Cargo version is **0.1.0**; roadmap labels such as v0.2–v0.4 describe implementation milestones, not published releases. On 2026-10-15 the repository had no Git tags or GitHub Releases. Use the source quickstart below; registry installation is not a verified distribution path. The [release checklist](docs/RELEASING.md) records a current blocker: 18 workspace crates, but only 17 entries in the publication order (`vyane-quota` is missing).
+## Three ways to use it
 
-| Available in the public source | Boundary |
-| --- | --- |
-| Dispatch, broadcast, explicit failover, streaming and local history | A direct HTTP target provides model responses, not filesystem or shell tools. |
-| Deterministic routing and declarative workflows | Routing depends on your profiles; it is not an automatic quality guarantee. |
-| CLI, loopback REST API and stdio MCP | Frontends expose different subsets; see the [CLI guide](docs/CLI-GUIDE.md). |
-| Durable tasks, local messages/goals and Linux resident Process/Native runs | Native runs are fresh and sessionless; approval resume, native session resume, and automatic restart replay remain open. |
-| Explicit permissions, scrubbed child environments and run accounting | CLI sandbox enforcement is delegated to the selected harness. Owner fields and loopback authentication do not provide hostile same-user or multi-user isolation. |
-
-Linux and macOS are the CI platforms; some resident execution and sandbox features are Linux-specific. Windows support is not claimed. Model access, credentials and any coding-agent CLI must be supplied separately. Provider calls may incur costs; building and the offline checks below do not call models.
+| When you want to… | Use | What you get |
+| --- | --- | --- |
+| Run a task with a chosen agent or model | [`dispatch --target chat`](docs/EXAMPLES.md#one-task-one-target) | One result and a local run record. Coding harnesses require separate installation and setup. |
+| Compare answers to the same prompt | [`broadcast --targets chat,review`](docs/EXAMPLES.md#one-prompt-several-targets) | Concurrent runs with separate results; you judge the answers. |
+| Try a configured backup when a call fails | [`dispatch --target resilient`](docs/EXAMPLES.md#an-explicit-backup) | An ordered failover chain for eligible errors, with each attempt recorded. This is not session handoff. |
 
 ## Quickstart
 
-Install stable Rust with Cargo and a platform C/C++ build toolchain. The declared minimum Rust version is 1.88. The repository selects stable with rustfmt and Clippy. Run from the repository root:
+**1. Install from source.** Requires stable Rust/Cargo (minimum Rust 1.88) and a C/C++ build toolchain. Linux and macOS are the CI platforms; Windows support is not claimed.
 
 ```sh
 git clone https://github.com/zleo-ai/vyane-rs.git
@@ -37,103 +37,55 @@ cd vyane-rs
 cargo install --locked --path crates/vyane-cli --root ./target/install
 VYANE="$PWD/target/install/bin/vyane"
 "$VYANE" --version
-"$VYANE" --help
 ```
 
-The version should print `vyane 0.1.0`. This installs into this checkout, so it does not replace another `vyane` on your PATH. Keep this shell open for the following commands. To reproduce this documentation snapshot, check out `b46c194` before installing; `main` can change.
+Expected version: `vyane 0.1.0`. The binary stays inside this checkout, so an existing `vyane` on your PATH is not replaced. Keep this shell open.
 
-### First run without credentials
+**2. Get a first result without keys.** The bundled example only previews routing; it sends no model request.
 
 ```sh
-cat > ./target/offline-config.toml <<'TOML'
-[providers.offline]
-base_url = "https://example.invalid/v1"
-auth_style = "bearer"
-protocol = "openai_chat"
-default_model = "offline-placeholder"
-
-[profiles.offline]
-provider = "offline"
-harness = "none"
-model = "offline-placeholder"
-TOML
-"$VYANE" --config ./target/offline-config.toml check
-"$VYANE" --config ./target/offline-config.toml route "Explain this function" --json
+"$VYANE" --config docs/examples/offline.toml check
+"$VYANE" --config docs/examples/offline.toml route "Explain this function" --json
 ```
 
-`check` should report a valid configuration with the `offline` profile. `route` returns JSON with `"selection_key": "offline"` and `"model": "offline-placeholder"` without dispatching. This is an offline configuration example, not a mock model response or a working provider; do not dispatch to its deliberately invalid endpoint.
+Look for the `offline` profile and `"selection_key": "offline"` in the JSON. Its endpoint is deliberately invalid; do not dispatch to it.
 
-### Configure a real target
+**3. Connect your own target.** Follow [provider setup](docs/QUICKSTART.md#configure-a-real-target), then try the [three examples](docs/EXAMPLES.md). Supply your own model access and credentials; real calls may incur provider charges. The offline preview does not validate a live provider.
 
-Create `./target/model-config.toml` with the following shape. Replace the example endpoint and model with values supported by your provider; `example.invalid` is deliberately not a working service.
+## What works today
 
-```toml
-[providers.demo]
-base_url = "https://example.invalid/v1"
-api_key_env = "VYANE_DEMO_API_KEY"
-auth_style = "bearer"
-protocol = "openai_chat"
-default_model = "YOUR_PROVIDER_MODEL_ID"
-
-[profiles.chat]
-provider = "demo"
-protocol = "openai_chat"
-harness = "none"
-model = "YOUR_PROVIDER_MODEL_ID"
-```
-
-Set `VYANE_DEMO_API_KEY` through your normal secret manager or shell environment; never put its value in the TOML or commit it. Then:
-
-```sh
-"$VYANE" --config ./target/model-config.toml check
-"$VYANE" --config ./target/model-config.toml dispatch "Explain a Rust trait in one paragraph" --target chat
-```
-
-The first command checks configuration and credential presence; it does not prove the endpoint accepts your credentials or model. The second sends a real request once the placeholders are replaced. Live provider success is not part of the offline quickstart verification. For coding harnesses, permissions, multiple profiles and failover, see [configuration examples](profiles.example.toml) and the [CLI guide](docs/CLI-GUIDE.md).
-
-## How targets work
-
-![CLI, REST and MCP call the service and kernel; each target binds provider, protocol, harness and model; executions produce run records.](docs/assets/target-flow.svg)
-
-| Field | Meaning |
+| Available in the source | Boundary |
 | --- | --- |
-| `provider` | Endpoint, credential source and billing identity. |
-| `protocol` | Wire format: OpenAI Chat, OpenAI Responses or Anthropic Messages. |
-| `harness` | Execution adapter such as Claude Code or Codex CLI; `none` means direct HTTP. |
-| `model` | A model identifier within that provider's namespace. |
+| Dispatch, broadcast, explicit failover and streaming | Direct HTTP returns model text; it does not attach local files or provide shell tools. |
+| Claude Code and Codex CLI adapters | CLI subprocesses, not Codex App Server RPC or a direct Claude Agent SDK integration. You supply the CLI and access; the harness enforces its sandbox. |
+| Profile-based routing and local run history | Routing follows your configuration; it does not guarantee answer quality. |
+| CLI, REST and MCP entry points | Each exposes a different subset. See the [CLI guide](docs/CLI-GUIDE.md). |
 
-A profile binds these four fields. Each failover target is resolved separately, so a model identifier is not silently reused against another provider. The kernel depends on shared traits; the service assembles concrete adapters. See [architecture](docs/ARCHITECTURE.md) for dependency and authority details.
+Resident execution, durable workflows and local goals are evolving. Native runs are fresh and sessionless; native approval/session resume and automatic restart replay remain open. Owner fields and loopback authentication do not provide hostile same-user or multi-user isolation. See [status and limits](docs/PROJECT-STATUS.md) before building on these surfaces.
 
-## Examples and reference
+## Go deeper
 
-After configuring the named profiles, these commands illustrate the next steps:
+- [Architecture and target model](docs/ARCHITECTURE.md) · [Configuration reference](profiles.example.toml) · [CLI, REST and MCP guide](docs/CLI-GUIDE.md)
+- [Capability matrix and reproducible evidence](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [Roadmap](docs/ROADMAP.md)
+- [Changelog](docs/CHANGELOG.md) · [Version and release policy](docs/RELEASING.md)
 
-```sh
-"$VYANE" --config ./target/model-config.toml dispatch "Explain this algorithm" --target chat --stream
-"$VYANE" --config ./target/model-config.toml broadcast "Compare two implementation approaches" --targets chat,review
-"$VYANE" --config ./target/model-config.toml route "Review this design" --json
-```
+<details>
+<summary>Evidence snapshot</summary>
 
-The broadcast example requires a second profile named `review`. Prompts are literal text: mentioning a file does not attach its contents to a direct HTTP request. The [CLI guide](docs/CLI-GUIDE.md) covers workflows, daemon lifecycle, REST authentication, MCP, local messaging and goals. Use `--help` on each subcommand for the current command surface.
+The [public capability matrix](docs/parity/ORIGINAL-VYANE-PARITY.md) tracks 53 capabilities across eight domains: 7 implemented, 23 partial, 12 missing, 9 deliberately different or awaiting a decision, and 2 planned. The [sanitized manifest](docs/parity/fixtures/v1/manifest.json) contains 44 cases in 5 suites: 30 normalized matches and 14 open differences. These bounded checks are not a whole-system parity percentage.
 
-## Relationship to Python Vyane
+</details>
 
-This repository is the public Rust implementation of capabilities from the original private Python Vyane system. It is not a drop-in replacement: Python commands, configuration, stored sessions, workflows and operational integrations must be checked individually before migration. Do not point both implementations at the same state directory without a documented migration path.
-
-The [public capability matrix](docs/parity/ORIGINAL-VYANE-PARITY.md) tracks 53 capabilities across eight domains: 7 implemented, 23 partial, 12 missing, 9 deliberately different or awaiting a decision, and 2 planned. The [sanitized manifest](docs/parity/fixtures/v1/manifest.json) contains 44 cases in 5 suites: 30 normalized matches and 14 open differences. These are bounded behavior checks, not a whole-system parity percentage. Recompute the public Rust evidence with:
-
-```sh
-python3 .github/scripts/parity-report.py --format markdown
-```
-
-This runs Rust fixture checks and validates the stored sanitized attestation; it does not run the private reference implementation. Public contributors do not need access to private source. See the [roadmap](docs/ROADMAP.md) for open work and the [changelog](docs/CHANGELOG.md) for changes in the public repository.
+This is the public Rust implementation of capabilities from the original private Python Vyane system. It is not a drop-in replacement: commands, configuration, stored sessions and workflows need individual migration checks. Do not share state directories without a documented migration path. Public contributors do not need the private source.
 
 ## Contribute and get help
 
-Start with [CONTRIBUTING.md](CONTRIBUTING.md) for checks and review rules. Useful contributions include reproducible bug reports, smaller examples, translation corrections and tests for documented capability gaps. Search [Issues](https://github.com/zleo-ai/vyane-rs/issues) and [open PRs](https://github.com/zleo-ai/vyane-rs/pulls) before starting overlapping work. Include the source revision, OS, Rust version, a minimal reproduction and sanitized output. Never include keys, private prompts or personal filesystem paths.
-
-For vulnerabilities, follow [SECURITY.md](SECURITY.md) before posting details. Translation coverage and review status are in [TRANSLATING.md](docs/TRANSLATING.md); release and version maintenance are in [RELEASING.md](docs/RELEASING.md).
+Try an example, report a reproducible problem, improve a translation, or tackle a documented gap. Check [Issues](https://github.com/zleo-ai/vyane-rs/issues) and [open PRs](https://github.com/zleo-ai/vyane-rs/pulls), then read [CONTRIBUTING.md](CONTRIBUTING.md). Include a source revision and sanitized output; omit keys, private prompts and personal paths. Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Contributions use the same terms; see [contributing](CONTRIBUTING.md#licensing).
+[MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Contributions use the same terms.
+
+---
+
+Source baseline: `fe43941` · Workspace: `0.1.0` · Updated: 2026-10-15. English is authoritative; see [translation coverage and review status](docs/TRANSLATING.md). Roadmap milestones are not published releases.

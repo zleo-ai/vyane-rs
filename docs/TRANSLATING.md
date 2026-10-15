@@ -7,9 +7,10 @@ choice, not a measured user-demographic claim.
 
 ## Coverage and review status
 
-All versions cover the same sections: purpose/audience, status/limits, source
-installation, offline first run, provider setup, target model, examples, Python
-migration boundary, contribution/security and licensing.
+All versions cover the same sections: purpose/audience, the local fixture demo,
+three uses, source installation and offline first run, current boundaries,
+deep-document links and a collapsed evidence snapshot, Python migration boundary, contribution/security and licensing.
+Full provider setup, architecture and parity detail live in linked English guides.
 
 | Locale | File | Content source | Review status |
 | --- | --- | --- | --- |
@@ -22,7 +23,7 @@ migration boundary, contribution/security and licensing.
 | Deutsch | [README.de.md](../README.de.md) | English README | Machine-assisted draft; native-speaker review pending |
 | Português (Brasil) | [README.pt-BR.md](../README.pt-BR.md) | English README | Machine-assisted draft; native-speaker review pending |
 
-Each README records source baseline `b46c194`, workspace `0.1.0`, and update date
+Each README records source baseline `fe43941`, workspace `0.1.0`, and update date
 2026-10-15. The baseline identifies the implementation whose facts were checked;
 the English text is the README in the same documentation revision. The source
 text hash in `translation-source.json` detects English text drift, not semantic

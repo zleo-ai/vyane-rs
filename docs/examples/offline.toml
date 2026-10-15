@@ -1,0 +1,11 @@
+# Routing preview only: this deliberately invalid endpoint must not be dispatched.
+[providers.offline]
+base_url = "https://example.invalid/v1"
+auth_style = "bearer"
+protocol = "openai_chat"
+default_model = "offline-placeholder"
+
+[profiles.offline]
+provider = "offline"
+harness = "none"
+model = "offline-placeholder"
