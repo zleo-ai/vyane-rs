@@ -19,6 +19,10 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Changed
 
+- Lead all eight READMEs with user scenarios, a reproducible local CLI demo and
+  a shorter first-run path; retain full setup and migration detail in
+  [QUICKSTART.md](QUICKSTART.md) and [PROJECT-STATUS.md](PROJECT-STATUS.md).
+
 - Move detailed CLI, REST, MCP and workflow examples from the README into
   [CLI-GUIDE.md](CLI-GUIDE.md). The README now distinguishes source capabilities,
   release availability and migration limits.

@@ -1,35 +1,35 @@
 # Vyane
 
-**Execute e coordene tarefas de modelos de IA a partir de uma única CLI e de um núcleo de orquestração em Rust.**
+**Execute agentes de programação e APIs de modelos por uma única CLI em Rust.**
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Português (Brasil)](README.pt-BR.md)
 
-Revisão de referência: `b46c194` · Versão do workspace: `0.1.0` · Atualizado em: 2026-10-15.
-A versão em inglês é a referência oficial. Esta tradução é um rascunho assistido por máquina; não passou por revisão de falantes nativos. Consulte a [política de tradução](docs/TRANSLATING.md).
+Para desenvolvedores que usam mais de um agente de programação ou provedor de modelos: dê nomes aos destinos, envie uma tarefa para um ou vários deles e mantenha os resultados e o histórico de tentativas juntos. Use Claude Code ou Codex CLI para programar, ou chame uma API de modelos diretamente para obter respostas em texto.
 
-O Vyane envia uma tarefa a um destino configurado, distribui a tarefa para vários destinos ou tenta uma cadeia explícita de destinos alternativos em caso de falha. Os destinos podem usar os ambientes de execução do Claude Code ou do Codex CLI, ou chamar diretamente endpoints HTTP de modelos. O projeto é voltado a desenvolvedores que criam fluxos de trabalho locais com agentes e aplicações Rust que precisam de roteamento explícito, permissões de execução, cancelamento e registros de execução.
+> **Desenvolvimento inicial.** Instalação apenas pelo código-fonte; as APIs são instáveis e algumas capacidades continuam parciais ou ausentes. A retomada de sessões nativas e a reexecução automática após reiniciar ainda não estão prontas. Veja os [limites atuais](docs/PROJECT-STATUS.md).
 
-![Janelas abstratas de terminal se conectam a cartões de resultados por meio de um centro de coordenação em tom de cobre.](docs/assets/vyane-hero.webp)
+## Veja em funcionamento
 
-*Ilustração conceitual gerada por IA; não é um diagrama de arquitetura. [Notas sobre o recurso](docs/assets/README.md).*
+[Execute a demonstração no terminal](docs/EXAMPLES.md): a CLI instalada executa uma tarefa, envia para dois destinos em paralelo e se recupera de uma falha programada no destino principal. A demonstração usa respostas HTTP de teste locais, não precisa de chaves e não chama modelos reais.
 
-## Estado e limitações
+```text
+Local HTTP fixtures only; no live model calls.
+dispatch: fixture: chat-model; recorded attempts=1
+broadcast: 2 separate successful results (chat-model, review-model)
+failover: fixture: review-model; recorded attempts=2
+```
 
-Este projeto está em uma fase inicial, é compilado a partir do código-fonte e tem APIs instáveis. A versão do Cargo é **0.1.0**; rótulos do roteiro, como v0.2–v0.4, descrevem marcos de implementação, não versões publicadas. Em 2026-10-15, o repositório não tinha tags Git nem GitHub Releases. Use o início rápido a partir do código-fonte abaixo; a instalação por um registro de pacotes não é uma forma de distribuição verificada. A [lista de verificação de publicação](docs/RELEASING.md) registra um impedimento atual: 18 crates no workspace, mas apenas 17 entradas na ordem de publicação (`vyane-quota` está ausente).
+## Três formas de usar
 
-| Disponível no código público | Limitação |
-| --- | --- |
-| Envio para um destino, distribuição para vários, failover explícito, streaming e histórico local | Um destino HTTP direto fornece respostas do modelo, não ferramentas de sistema de arquivos ou shell. |
-| Roteamento determinístico e fluxos de trabalho declarativos | O roteamento depende dos seus perfis; não garante automaticamente a qualidade. |
-| CLI, API REST na interface de loopback e MCP por stdio | As interfaces expõem subconjuntos diferentes; consulte o [guia da CLI](docs/CLI-GUIDE.md). |
-| Tarefas persistentes, mensagens e objetivos locais, e execuções residentes Process/Native no Linux | As execuções Native começam do zero e não têm sessão; a retomada após aprovação, a retomada de sessões nativas e a reexecução automática após reinício ainda estão pendentes. |
-| Permissões explícitas, ambientes de processos filhos sanitizados e contabilização de execuções | A aplicação do sandbox da CLI é delegada ao ambiente de execução selecionado. Os campos de proprietário e a autenticação de loopback não oferecem isolamento contra processos hostis do mesmo usuário nem isolamento entre usuários. |
-
-Linux e macOS são as plataformas de CI; alguns recursos de execução residente e sandbox são específicos do Linux. Não se afirma que há suporte ao Windows. O acesso aos modelos, as credenciais e qualquer CLI de agente de programação devem ser fornecidos separadamente. As chamadas a provedores podem gerar custos; a compilação e as verificações offline abaixo não chamam modelos.
+| Quando você quiser… | Use | O que recebe |
+| --- | --- | --- |
+| Executar uma tarefa com um agente ou modelo escolhido | [`dispatch --target chat`](docs/EXAMPLES.md#one-task-one-target) | Um resultado e um registro local. Os adaptadores de agentes precisam de instalação e configuração separadas. |
+| Comparar respostas ao mesmo prompt | [`broadcast --targets chat,review`](docs/EXAMPLES.md#one-prompt-several-targets) | Execuções simultâneas com resultados separados; você avalia as respostas. |
+| Tentar um destino reserva configurado quando uma chamada falhar | [`dispatch --target resilient`](docs/EXAMPLES.md#an-explicit-backup) | Uma cadeia ordenada de failover para erros elegíveis, com cada tentativa registrada. Isso não transfere a sessão. |
 
 ## Início rápido
 
-Instale o Rust estável com o Cargo e as ferramentas de compilação C/C++ da sua plataforma. A versão mínima declarada do Rust é 1.88. O repositório seleciona o canal estável com rustfmt e Clippy. Execute a partir da raiz do repositório:
+**1. Instale pelo código-fonte.** É necessário Rust/Cargo estável (no mínimo Rust 1.88) e ferramentas de compilação C/C++. A CI cobre Linux e macOS; não declaramos suporte a Windows.
 
 ```sh
 git clone https://github.com/zleo-ai/vyane-rs.git
@@ -37,103 +37,48 @@ cd vyane-rs
 cargo install --locked --path crates/vyane-cli --root ./target/install
 VYANE="$PWD/target/install/bin/vyane"
 "$VYANE" --version
-"$VYANE" --help
 ```
 
-A versão deve exibir `vyane 0.1.0`. A instalação ocorre dentro desta cópia do repositório, portanto não substitui outro `vyane` no seu PATH. Mantenha este shell aberto para os próximos comandos. Para reproduzir este estado da documentação, selecione a revisão `b46c194` antes de instalar; `main` pode mudar.
+Versão esperada: `vyane 0.1.0`. O binário fica nesta cópia do repositório, sem substituir outro `vyane` no PATH. Mantenha este shell aberto.
 
-### Primeira execução sem credenciais
+**2. Obtenha um primeiro resultado sem chaves.** O exemplo incluído apenas mostra uma prévia do roteamento; não envia solicitações a modelos.
 
 ```sh
-cat > ./target/offline-config.toml <<'TOML'
-[providers.offline]
-base_url = "https://example.invalid/v1"
-auth_style = "bearer"
-protocol = "openai_chat"
-default_model = "offline-placeholder"
-
-[profiles.offline]
-provider = "offline"
-harness = "none"
-model = "offline-placeholder"
-TOML
-"$VYANE" --config ./target/offline-config.toml check
-"$VYANE" --config ./target/offline-config.toml route "Explain this function" --json
+"$VYANE" --config docs/examples/offline.toml check
+"$VYANE" --config docs/examples/offline.toml route "Explain this function" --json
 ```
 
-`check` deve informar que a configuração é válida e inclui o perfil `offline`. `route` retorna JSON com `"selection_key": "offline"` e `"model": "offline-placeholder"` sem enviar uma tarefa. Este é um exemplo de configuração offline, não uma resposta simulada de modelo nem um provedor funcional; não envie tarefas ao endpoint deliberadamente inválido.
+Procure o perfil `offline` e `"selection_key": "offline"` no JSON. O endpoint é inválido de propósito; não envie tarefas para ele.
 
-### Configurar um destino real
+**3. Conecte seu próprio destino.** Siga a [configuração do provedor](docs/QUICKSTART.md#configure-a-real-target) e experimente os [três exemplos](docs/EXAMPLES.md). Você fornece acesso ao modelo e credenciais; chamadas reais podem gerar cobranças do provedor. A prévia offline não valida um provedor real.
 
-Crie `./target/model-config.toml` com a estrutura abaixo. Substitua o endpoint e o modelo de exemplo por valores aceitos pelo seu provedor; `example.invalid` foi escolhido justamente por não ser um serviço funcional.
+## O que funciona hoje
 
-```toml
-[providers.demo]
-base_url = "https://example.invalid/v1"
-api_key_env = "VYANE_DEMO_API_KEY"
-auth_style = "bearer"
-protocol = "openai_chat"
-default_model = "YOUR_PROVIDER_MODEL_ID"
-
-[profiles.chat]
-provider = "demo"
-protocol = "openai_chat"
-harness = "none"
-model = "YOUR_PROVIDER_MODEL_ID"
-```
-
-Defina `VYANE_DEMO_API_KEY` pelo seu gerenciador de segredos habitual ou pelo ambiente do shell; nunca coloque o valor no TOML nem o inclua em um commit. Em seguida:
-
-```sh
-"$VYANE" --config ./target/model-config.toml check
-"$VYANE" --config ./target/model-config.toml dispatch "Explain a Rust trait in one paragraph" --target chat
-```
-
-O primeiro comando verifica a configuração e a presença das credenciais; não comprova que o endpoint aceita suas credenciais ou o modelo. O segundo envia uma solicitação real depois que os valores de exemplo forem substituídos. O sucesso de uma chamada a um provedor real não faz parte da verificação do início rápido offline. Para ambientes de execução de agentes de programação, permissões, múltiplos perfis e failover, consulte os [exemplos de configuração](profiles.example.toml) e o [guia da CLI](docs/CLI-GUIDE.md).
-
-## Como os destinos funcionam
-
-![CLI, REST e MCP chamam o serviço e o núcleo; cada destino associa provedor, protocolo, ambiente de execução e modelo; as execuções produzem registros.](docs/assets/target-flow.svg)
-
-| Campo | Significado |
+| Disponível no código-fonte | Limite |
 | --- | --- |
-| `provider` | Endpoint, origem das credenciais e identidade de faturamento. |
-| `protocol` | Formato de comunicação: OpenAI Chat, OpenAI Responses ou Anthropic Messages. |
-| `harness` | Adaptador de execução, como Claude Code ou Codex CLI; `none` significa HTTP direto. |
-| `model` | Identificador de modelo dentro do namespace desse provedor. |
+| Execução individual, envio paralelo, failover explícito e streaming | HTTP direto retorna texto do modelo; não anexa arquivos locais nem fornece ferramentas de shell. |
+| Adaptadores para Claude Code e Codex CLI | Subprocessos CLI, sem Codex App Server RPC nem integração direta com Claude Agent SDK. Você fornece a CLI e o acesso; o adaptador aplica seu sandbox. |
+| Roteamento por perfis e histórico local | O roteamento segue sua configuração; não garante a qualidade das respostas. |
+| Entradas CLI, REST e MCP | Cada uma expõe um subconjunto diferente. Veja o [guia da CLI](docs/CLI-GUIDE.md). |
 
-Um perfil associa esses quatro campos. Cada destino de failover é resolvido separadamente, portanto um identificador de modelo não é reutilizado silenciosamente com outro provedor. O núcleo depende de traits compartilhados; o serviço reúne os adaptadores concretos. Consulte a [arquitetura](docs/ARCHITECTURE.md) para detalhes sobre dependências e limites de autoridade.
+Execução residente, workflows persistentes e objetivos locais continuam em evolução. Execuções nativas começam do zero e não mantêm sessão; a retomada de aprovações e sessões nativas e a reexecução automática após reiniciar continuam pendentes. Campos de proprietário e autenticação de loopback não isolam acessos hostis do mesmo usuário ou de múltiplos usuários. Leia o [estado e as limitações](docs/PROJECT-STATUS.md) antes de desenvolver sobre essas funções.
 
-## Exemplos e referência
+## Saiba mais
 
-Depois de configurar os perfis indicados, estes comandos ilustram os próximos passos:
+- [Arquitetura e modelo de destinos](docs/ARCHITECTURE.md) · [Referência de configuração](profiles.example.toml) · [Guia de CLI, REST e MCP](docs/CLI-GUIDE.md)
+- [Matriz de capacidades e evidências reproduzíveis](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [Roteiro](docs/ROADMAP.md)
+- [Histórico de mudanças](docs/CHANGELOG.md) · [Política de versões e lançamentos](docs/RELEASING.md)
 
-```sh
-"$VYANE" --config ./target/model-config.toml dispatch "Explain this algorithm" --target chat --stream
-"$VYANE" --config ./target/model-config.toml broadcast "Compare two implementation approaches" --targets chat,review
-"$VYANE" --config ./target/model-config.toml route "Review this design" --json
-```
+Esta é a implementação pública em Rust de capacidades do sistema privado Python Vyane original. Não é uma substituição direta: comandos, configuração, sessões salvas e workflows precisam de verificações individuais de migração. Não compartilhe diretórios de estado sem um procedimento documentado. Colaboradores públicos não precisam acessar o código privado.
 
-O exemplo de broadcast exige um segundo perfil chamado `review`. Os prompts são texto literal: mencionar um arquivo não anexa seu conteúdo a uma solicitação HTTP direta. O [guia da CLI](docs/CLI-GUIDE.md) aborda fluxos de trabalho, ciclo de vida do daemon, autenticação REST, MCP, mensagens locais e objetivos. Use `--help` em cada subcomando para consultar os comandos e as opções atuais.
+## Contribua e peça ajuda
 
-## Relação com o Python Vyane
-
-Este repositório é a implementação pública em Rust de capacidades do sistema privado original Python Vyane. Não é uma substituição direta: comandos Python, configuração, sessões armazenadas, fluxos de trabalho e integrações operacionais devem ser verificados individualmente antes da migração. Não aponte as duas implementações para o mesmo diretório de estado sem um caminho de migração documentado.
-
-A [matriz pública de capacidades](docs/parity/ORIGINAL-VYANE-PARITY.md) acompanha 53 capacidades em oito áreas: 7 implementadas, 23 parciais, 12 ausentes, 9 deliberadamente diferentes ou aguardando uma decisão e 2 planejadas. O [manifesto sanitizado](docs/parity/fixtures/v1/manifest.json) contém 44 casos em 5 suítes: 30 correspondências normalizadas e 14 diferenças em aberto. São verificações delimitadas de comportamento, não um percentual de paridade do sistema inteiro. Recalcule as evidências públicas da implementação em Rust com:
-
-```sh
-python3 .github/scripts/parity-report.py --format markdown
-```
-
-Isso executa as verificações de fixtures em Rust e valida a atestação sanitizada armazenada; não executa a implementação privada de referência. Colaboradores públicos não precisam de acesso ao código privado. Consulte o [roteiro](docs/ROADMAP.md) para o trabalho pendente e o [registro de alterações](docs/CHANGELOG.md) para as mudanças no repositório público.
-
-## Contribuir e obter ajuda
-
-Comece por [CONTRIBUTING.md](CONTRIBUTING.md) para conhecer as verificações e as regras de revisão. Contribuições úteis incluem relatos de bugs reproduzíveis, exemplos menores, correções de tradução e testes para lacunas de capacidade documentadas. Pesquise nas [Issues](https://github.com/zleo-ai/vyane-rs/issues) e nas [PRs abertas](https://github.com/zleo-ai/vyane-rs/pulls) antes de iniciar um trabalho que possa se sobrepor a outro. Inclua a revisão do código-fonte, o sistema operacional, a versão do Rust, uma reprodução mínima e a saída sanitizada. Nunca inclua chaves, prompts privados ou caminhos pessoais do sistema de arquivos.
-
-Para vulnerabilidades, siga [SECURITY.md](SECURITY.md) antes de publicar detalhes. A cobertura e o estado de revisão das traduções estão em [TRANSLATING.md](docs/TRANSLATING.md); a manutenção de versões e publicações está em [RELEASING.md](docs/RELEASING.md).
+Experimente um exemplo, relate um problema reproduzível, melhore uma tradução ou resolva uma lacuna documentada. Confira as [Issues](https://github.com/zleo-ai/vyane-rs/issues) e os [PRs abertos](https://github.com/zleo-ai/vyane-rs/pulls), depois leia [CONTRIBUTING.md](CONTRIBUTING.md). Inclua a revisão do código e uma saída sem dados sensíveis; omita chaves, prompts privados e caminhos pessoais. Relate vulnerabilidades seguindo [SECURITY.md](SECURITY.md).
 
 ## Licença
 
-Licença dupla [MIT](LICENSE-MIT) ou [Apache-2.0](LICENSE-APACHE), à sua escolha. As contribuições seguem os mesmos termos; consulte o [guia de contribuição](CONTRIBUTING.md#licensing).
+[MIT](LICENSE-MIT) ou [Apache-2.0](LICENSE-APACHE), à sua escolha. As contribuições seguem os mesmos termos.
+
+---
+
+Base do código: `fe43941` · Workspace: `0.1.0` · Atualizado: 2026-10-15. O inglês é a referência; esta tradução assistida por máquina aguarda revisão humana por falantes nativos. Veja a [cobertura e o estado das traduções](docs/TRANSLATING.md). Marcos do roteiro não são versões publicadas.
