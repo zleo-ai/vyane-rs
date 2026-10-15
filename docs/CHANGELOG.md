@@ -41,6 +41,9 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Fixed
 
+- Bound repeated workflow prompt-file expansion before materialization and
+  legacy hashing, using the existing plan step and aggregate prompt budgets.
+
 - Anthropic input-usage normalization includes ordinary, cache-creation and
   cache-read input. Cache-read subcounts include reads only; cache creation still
   uses the ordinary input rate for estimates. Specialized cache/reasoning rates

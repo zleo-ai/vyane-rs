@@ -51,7 +51,10 @@ paths fail validation. Unknown fields, including `vars`, `caller_id`, `owner`,
 
 The existing source budgets apply: 1 MiB TOML, 128 prompt entries, 4 MiB per
 prompt, 4,096 bytes per canonical relative path, and 16 MiB total UTF-8 source
-bytes including paths. Runtime checks enforce byte limits; JSON Schema string
+bytes including paths. Source materialization also rejects more than 4,096
+steps or 16 MiB of expanded prompt content before repeated-reference hashing or
+allocation; compiled plans retain their existing total-content checks.
+Runtime checks enforce byte limits; JSON Schema string
 length hints alone do not enforce the UTF-8 byte budget.
 
 ```json

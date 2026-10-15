@@ -2225,7 +2225,7 @@ mod tests {
             <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
 
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
         for tool in &tools {
             let expected = match tool.name.as_ref() {
                 "vyane_dispatch" => rmcp::handler::server::tool::schema_for_type::<
@@ -2245,6 +2245,9 @@ mod tests {
                 >(),
                 "vyane_check" => rmcp::handler::server::tool::schema_for_type::<
                     rmcp::handler::server::wrapper::Parameters<CheckArgs>,
+                >(),
+                "vyane_workflow_plan" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<WorkflowPlanArgs>,
                 >(),
                 other => panic!("unexpected tool {other}"),
             };
