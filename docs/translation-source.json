@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "source": "README.md",
+  "source_sha256": "ad3175fe2bfcec75b0b9a0b94b58509690bb7398673c5db3600dbefe784faee9",
+  "implementation_baseline": "b46c194757ad28572f9dd360c0b1a4456819b3cb",
+  "workspace_version": "0.1.0",
+  "updated": "2026-10-15",
+  "scope": "complete_readme",
+  "locales": {
+    "README.de.md": {
+      "status": "machine_assisted_draft",
+      "native_human_review": "pending",
+      "source_sha256": "ad3175fe2bfcec75b0b9a0b94b58509690bb7398673c5db3600dbefe784faee9"
+    },
+    "README.es.md": {
+      "status": "machine_assisted_draft",
+      "native_human_review": "pending",
+      "source_sha256": "ad3175fe2bfcec75b0b9a0b94b58509690bb7398673c5db3600dbefe784faee9"
+    },
+    "README.fr.md": {
+      "status": "machine_assisted_draft",
+      "native_human_review": "pending",
+      "source_sha256": "ad3175fe2bfcec75b0b9a0b94b58509690bb7398673c5db3600dbefe784faee9"
+    },
+    "README.ja.md": {
+      "status": "machine_assisted_draft",
+      "native_human_review": "pending",
+      "source_sha256": "ad3175fe2bfcec75b0b9a0b94b58509690bb7398673c5db3600dbefe784faee9"
+    },
+    "README.ko.md": {
+      "status": "machine_assisted_draft",
+      "native_human_review": "pending",
+      "source_sha256": "ad3175fe2bfcec75b0b9a0b94b58509690bb7398673c5db3600dbefe784faee9"
+    },
+    "README.pt-BR.md": {
+      "status": "machine_assisted_draft",
+      "native_human_review": "pending",
+      "source_sha256": "ad3175fe2bfcec75b0b9a0b94b58509690bb7398673c5db3600dbefe784faee9"
+    },
+    "README.zh-CN.md": {
+      "status": "machine_assisted_draft",
+      "native_human_review": "pending",
+      "source_sha256": "ad3175fe2bfcec75b0b9a0b94b58509690bb7398673c5db3600dbefe784faee9"
+    }
+  },
+  "meaning": "Hashes detect source drift only. They do not certify semantic accuracy or native-speaker review."
+}

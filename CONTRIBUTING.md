@@ -3,11 +3,22 @@
 Vyane is early-bootstrap and its APIs are unstable, but the bar for merged code
 is already firm. Thanks for helping build it.
 
+## Start here
+
+Use the [README quickstart](README.md#quickstart) for source installation.
+For a bug or support request, search existing issues/PRs and include a public
+source revision, platform, minimal reproduction and sanitized output. Follow
+[SECURITY.md](SECURITY.md) for vulnerabilities.
+
+Documentation maintenance: [translations](docs/TRANSLATING.md),
+[changelog and versions](docs/RELEASING.md), and
+[public project operations](docs/MAINTAINING.md).
+
 ## Toolchain
 
 - **Stable Rust**, **edition 2024** (see `rust-toolchain.toml`; MSRV is pinned
   in the workspace `Cargo.toml`).
-- Install the pinned toolchain with `rustup` — it will pick up
+- Install the configured stable channel with `rustup` — it will pick up
   `rust-toolchain.toml` and the `rustfmt` + `clippy` components automatically.
 
 ## Checks that must pass
@@ -36,6 +47,9 @@ in non-test code.
 
 ```
 vyane-core        types, traits, errors, env policy — no runtime
+vyane-agent       owner-scoped AgentRun queue, workers, leases and recovery
+vyane-quota       bounded upstream quota snapshots through optional connectors
+vyane-broker      bounded delivery pumps and lifecycle projections
 vyane-message     owner-safe transactional messages, deliveries, leases, outbox
 vyane-goal        owner-scoped goal snapshots and immutable lifecycle/progress events
 vyane-task        secret-free durable task lifecycle metadata
@@ -195,6 +209,10 @@ configuration). You can still request Copilot manually, but that does
 **not** count as independent review for any of the three tiers.
 
 ## Releases
+
+See [RELEASING.md](docs/RELEASING.md) for version selection, changelog upkeep,
+release notes and the current package-preflight blocker. The authorization
+requirements below still apply.
 
 Crates.io publication is manual and requires authority distinct from merging,
 creating a tag, or possessing a registry credential:
