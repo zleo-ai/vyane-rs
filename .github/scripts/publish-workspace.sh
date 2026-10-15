@@ -21,6 +21,7 @@ readonly PUBLISH_ORDER=(
   vyane-agent
   vyane-message
   vyane-goal
+  vyane-quota
   vyane-task
   vyane-provider
   vyane-config

@@ -45,6 +45,10 @@ This is a curated history, not a complete reconstruction of all development.
   legacy hashing, and reject oversized source metadata before diagnostic
   expansion, using the existing plan safety budgets.
 
+- Include `vyane-quota` in the workspace publication order so all 18 crates
+  pass the membership and dependency-order checks before packaging; add offline
+  preflight regression coverage with synthetic archives
+  ([#215](https://github.com/zleo-ai/vyane-rs/pull/215)).
 - Anthropic input-usage normalization includes ordinary, cache-creation and
   cache-read input. Cache-read subcounts include reads only; cache creation still
   uses the ordinary input rate for estimates. Specialized cache/reasoning rates
@@ -68,8 +72,8 @@ This is a curated history, not a complete reconstruction of all development.
 - Full Python Vyane parity is not delivered. The public snapshot has 44 selected
   behavior cases (30 normalized matches, 14 open differences); see the
   [capability matrix](parity/ORIGINAL-VYANE-PARITY.md) for broader gaps.
-- Package preflight is blocked: the 18-crate workspace includes `vyane-quota`,
-  which is absent from the 17-entry publication order. Source installation does
-  not establish registry readiness. See [RELEASING.md](RELEASING.md).
+- Real package and registry readiness remain unverified. The publication-order
+  regression uses synthetic archives; its success and source installation do
+  not establish publishable artifacts. See [RELEASING.md](RELEASING.md).
 - README translations are machine-assisted drafts pending native-speaker review;
   structural checks do not establish linguistic or semantic accuracy.
