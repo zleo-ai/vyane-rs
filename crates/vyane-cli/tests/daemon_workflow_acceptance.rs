@@ -449,7 +449,7 @@ async fn mcp_workflow_tools_use_the_authenticated_resident_daemon() -> anyhow::R
         .into_iter()
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 9);
+    assert_eq!(names.len(), 10);
     assert!(names.iter().any(|name| name == "vyane_workflow_submit"));
 
     let source = fs::read_to_string(workflow)?;
