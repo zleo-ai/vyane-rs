@@ -1,17 +1,58 @@
-# 变更日志
+# Changelog
+
+User-visible changes in the public repository. Versions follow the
+[release policy](RELEASING.md). There are no confirmed tagged releases as of
+2026-10-15; the workspace version `0.1.0` is not evidence of publication.
+This is a curated history, not a complete reconstruction of all development.
 
 ## Unreleased
 
-- 将 `async-trait` 的最低版本升级至 `0.1.92`，移除宏生成的冗余 `#[must_use]`，修复新 Rust 工具链下的 Clippy `double_must_use` 错误。
-# 更新记录
+### Added
 
-## Unreleased
+- Local history filters for session and labels, measured whole-run duration
+  statistics, and durations grouped by final provider
+  ([#208](https://github.com/zleo-ai/vyane-rs/pull/208),
+  [#209](https://github.com/zleo-ai/vyane-rs/pull/209),
+  [#210](https://github.com/zleo-ai/vyane-rs/pull/210)).
+- A source-build quickstart, seven README translations, a shared translation
+  policy, security-reporting guidance and a documented version/release checklist.
 
-- 修正 Anthropic Messages 用量归一化：输入总量包含普通输入、缓存创建和缓存读取，缓存子计数仅包含读取，避免缓存读取多于普通输入时少计费用；缓存创建仍按普通输入费率估算。
-- 修正费用估算：为缓存输入／推理输出配置专用费率时，从输入／输出总量中扣除对应子计数后分别计费，避免重复收费；超出总量的异常子计数钳制到对应总量。
-# 更新日志
+### Changed
 
-## Unreleased
+- Move detailed CLI, REST, MCP and workflow examples from the README into
+  [CLI-GUIDE.md](CLI-GUIDE.md). The README now distinguishes source capabilities,
+  release availability and migration limits.
+- Raise the `async-trait` minimum to `0.1.92` to avoid generated redundant
+  `#[must_use]` warnings on newer Rust toolchains
+  ([#197](https://github.com/zleo-ai/vyane-rs/pull/197)).
 
-- 补齐安全路由对 `authenticate` / `authorize` 及其过去式、第三人称单数、进行时的识别；保留完整词边界，避免 `author`、`authority`、`authoritative` 和嵌词误报。
-- 修复路由诊断标签与偏好匹配的归一化不一致：`front end` / `front-end` 等分隔符写法使用同一规则查找，诊断保留实际命中的原始标签。
+### Fixed
+
+- Anthropic input-usage normalization includes ordinary, cache-creation and
+  cache-read input. Cache-read subcounts include reads only; cache creation still
+  uses the ordinary input rate for estimates. Specialized cache/reasoning rates
+  deduct their subcounts from totals before billing, with anomalous subcounts
+  capped to totals to avoid double charging
+  ([#194](https://github.com/zleo-ai/vyane-rs/pull/194)).
+- Security routing recognizes inflections of `authenticate` and `authorize`
+  while retaining word boundaries to avoid unrelated-word matches
+  ([#195](https://github.com/zleo-ai/vyane-rs/pull/195)).
+- Routing diagnostics and preferences normalize labels such as `front end` and
+  `front-end` consistently while preserving the original matched label
+  ([#196](https://github.com/zleo-ai/vyane-rs/pull/196)).
+- A zero local-history limit returns before storage access
+  ([#211](https://github.com/zleo-ai/vyane-rs/pull/211)).
+- Offline parity reports pin capability identities and run their report
+  regression tests in CI
+  ([#212](https://github.com/zleo-ai/vyane-rs/pull/212)).
+
+### Known limitations
+
+- Full Python Vyane parity is not delivered. The public snapshot has 44 selected
+  behavior cases (30 normalized matches, 14 open differences); see the
+  [capability matrix](parity/ORIGINAL-VYANE-PARITY.md) for broader gaps.
+- Package preflight is blocked: the 18-crate workspace includes `vyane-quota`,
+  which is absent from the 17-entry publication order. Source installation does
+  not establish registry readiness. See [RELEASING.md](RELEASING.md).
+- README translations are machine-assisted drafts pending native-speaker review;
+  structural checks do not establish linguistic or semantic accuracy.
