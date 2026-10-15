@@ -42,6 +42,9 @@ jobs:
       - name: Check minimum supported Rust version
         run: cargo check --workspace --all-targets --locked
 
+      - name: Test workspace publication plan without uploading
+        run: python3 .github/scripts/test-publish-workspace.py
+
   test:
     timeout-minutes: 30
     strategy:

@@ -2,7 +2,9 @@
 
 ## Current evidence
 
-Checked on 2026-10-15 against source baseline `b46c194`:
+Initial inventory checked on 2026-10-15 against source baseline `b46c194`;
+publication-order evidence updated by
+[#215](https://github.com/zleo-ai/vyane-rs/pull/215):
 
 | Surface | Observed state |
 | --- | --- |
@@ -10,14 +12,14 @@ Checked on 2026-10-15 against source baseline `b46c194`:
 | Remote Git tags / GitHub Releases | No tags and no Releases returned by the GitHub API. |
 | `docs/CHANGELOG.md` | One `Unreleased` section; no historical release date is inferred. |
 | Roadmap v0.1–v0.4 headings | Implementation scope labels, not registry versions or release history. |
-| Publication preflight | Fails before packaging: `workspace packages missing from PUBLISH_ORDER: vyane-quota`. The publication script enumerates 17 of 18 workspace crates. |
+| Publication preflight | The publication order now covers all 18 workspace crates, including `vyane-quota`, in dependency order. Offline regression exercises the real preflight with synthetic archives; real Cargo packaging remains unverified. |
 | Registry distribution | Not established by a source build or GitHub release inventory. Do not recommend `cargo install vyane-cli` until the actual published artifact and ownership are verified. |
 
 Do not bump versions, manufacture historical tags or dates, or claim package
-readiness to make these surfaces appear consistent. Fix the missing publication
-member in a separately reviewed release-script change, then rerun preflight.
-No publication, tag creation, or protected-environment approval is part of a
-documentation update.
+readiness to make these surfaces appear consistent. The missing-member check
+is repaired; an authorized release candidate still needs a real package
+preflight and registry verification. No publication, tag creation, or
+protected-environment approval follows from this repair or a documentation update.
 
 ## Version policy
 
