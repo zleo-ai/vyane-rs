@@ -422,11 +422,20 @@ dependency-closed, journal-recorded all-success prefix, and executes the
 remaining suffix live.
 The source remains unchanged; daemon restart still never implies replay.
 
-This closes the repository-local shared typed-plan prerequisite, not workflow
-parity. Dynamic control flow, nested workflows, shared budgets, a compatibility
-frontend, changed-plan call matching, CLI/REST/MCP plan transport, sanitized
-cross-implementation fixtures, and a production-complete model-tier policy
-remain open.
+Inspect a workflow before execution with `vyane workflow plan workflow.toml`.
+The default output lists steps, dependencies, unresolved target names, requested
+sandbox levels and the plan digest. Add `--json` to export the existing schema v1
+payload, including prompt text, system instructions and workdirs; it is not a
+sanitized public view. Planning reads the workflow and declared prompt files,
+but does not load runtime configuration, resolve targets, render templates,
+call models or create a journal. Requested capabilities do not authorize
+execution or establish runtime readiness.
+
+This closes the repository-local shared typed-plan prerequisite and CLI static
+plan inspection/export, not workflow parity. Dynamic control flow, nested
+workflows, shared budgets, a compatibility frontend, changed-plan call matching,
+plan import and REST/MCP plan transport, sanitized cross-implementation fixtures,
+and a production-complete model-tier policy remain open.
 
 The frontier guard is fail-closed across the selected profile and its failover
 chain. Detached auto-routed jobs send a secret-free target snapshot once over a

@@ -9,6 +9,10 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Added
 
+- `vyane workflow plan FILE [--json]` inspects a static workflow before
+  execution. Human output lists dependencies and requested capabilities;
+  JSON exports the existing full plan payload, including prompt text
+  ([#214](https://github.com/zleo-ai/vyane-rs/pull/214)).
 - Local history filters for session and labels, measured whole-run duration
   statistics, and durations grouped by final provider
   ([#208](https://github.com/zleo-ai/vyane-rs/pull/208),
