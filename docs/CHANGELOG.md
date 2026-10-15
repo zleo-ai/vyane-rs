@@ -42,7 +42,8 @@ This is a curated history, not a complete reconstruction of all development.
 ### Fixed
 
 - Bound repeated workflow prompt-file expansion before materialization and
-  legacy hashing, using the existing plan step and aggregate prompt budgets.
+  legacy hashing, and reject oversized source metadata before diagnostic
+  expansion, using the existing plan safety budgets.
 
 - Anthropic input-usage normalization includes ordinary, cache-creation and
   cache-read input. Cache-read subcounts include reads only; cache creation still
