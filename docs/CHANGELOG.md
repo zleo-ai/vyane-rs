@@ -9,6 +9,11 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Added
 
+- MCP `vyane_workflow_plan` compiles caller-supplied workflow sources into the
+  existing static plan schema without filesystem lookup or execution. The
+  bounded response includes supplied prompt text; base and CLI MCP tool counts
+  are now seven and ten respectively.
+
 - `vyane workflow plan FILE [--json]` inspects a static workflow before
   execution. Human output lists dependencies and requested capabilities;
   JSON exports the existing full plan payload, including prompt text
@@ -35,6 +40,10 @@ This is a curated history, not a complete reconstruction of all development.
   ([#197](https://github.com/zleo-ai/vyane-rs/pull/197)).
 
 ### Fixed
+
+- Bound repeated workflow prompt-file expansion before materialization and
+  legacy hashing, and reject oversized source metadata before diagnostic
+  expansion, using the existing plan safety budgets.
 
 - Include `vyane-quota` in the workspace publication order so all 18 crates
   pass the membership and dependency-order checks before packaging; add offline

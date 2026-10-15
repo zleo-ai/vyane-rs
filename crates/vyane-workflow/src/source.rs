@@ -13,6 +13,12 @@ use vyane_core::Sandbox;
 
 use crate::error::{WorkflowError, WorkflowResult};
 use crate::model::{OnError, StepTargets, Workflow, WorkflowRouteHints, WorkflowStep};
+use crate::plan::{
+    WORKFLOW_PLAN_MAX_DEPENDENCY_EDGES, WORKFLOW_PLAN_MAX_NEEDS, WORKFLOW_PLAN_MAX_ROUTE_VALUES,
+    WORKFLOW_PLAN_MAX_STEP_ID_BYTES, WORKFLOW_PLAN_MAX_STEPS, WORKFLOW_PLAN_MAX_TARGETS,
+    WORKFLOW_PLAN_MAX_TOTAL_BYTES, WORKFLOW_PLAN_MAX_TOTAL_ROUTE_VALUES,
+    WORKFLOW_PLAN_MAX_TOTAL_TARGETS,
+};
 
 pub const WORKFLOW_SOURCE_MAX_TOML_BYTES: usize = 1024 * 1024;
 pub const WORKFLOW_SOURCE_MAX_PROMPT_BYTES: usize = 4 * 1024 * 1024;
@@ -297,6 +303,9 @@ impl WorkflowSourceBundle {
             }
         }
 
+        // Repeated references can expand one bounded source into many owned
+        // prompt strings. Bound that expansion before legacy hashing or cloning.
+        validate_materialization_budget(&raw, &entries)?;
         let legacy_file_sha256 = legacy_source_hash(&self.workflow_toml, &raw, &entries)?;
         let file_sha256 = source_hash(&self.workflow_toml, &entries);
         build_workflow(display_path, raw, &entries, legacy_file_sha256, file_sha256)
@@ -388,6 +397,70 @@ fn declared_prompt_paths(raw: &RawRoot) -> WorkflowResult<BTreeSet<WorkflowSourc
         });
     }
     Ok(declared)
+}
+
+fn validate_materialization_budget(
+    raw: &RawRoot,
+    entries: &BTreeMap<WorkflowSourcePath, &str>,
+) -> WorkflowResult<()> {
+    if raw.steps.len() > WORKFLOW_PLAN_MAX_STEPS {
+        return Err(WorkflowError::InvalidWorkflowPlan {
+            reason: format!("workflow exceeds {WORKFLOW_PLAN_MAX_STEPS} steps"),
+        });
+    }
+    let mut prompt_bytes = 0usize;
+    let mut dependency_edges = 0usize;
+    let mut targets = 0usize;
+    let mut route_values = 0usize;
+    for (index, step) in raw.steps.iter().enumerate() {
+        let fan_out = step.fan_out.as_ref().map_or(0, Vec::len);
+        dependency_edges = dependency_edges.saturating_add(step.needs.len());
+        targets = targets
+            .saturating_add(fan_out)
+            .saturating_add(usize::from(step.target.is_some()));
+        let oversized_route = step.route.as_ref().is_some_and(|route| {
+            route_values = route_values
+                .saturating_add(route.tags.len())
+                .saturating_add(route.candidates.len())
+                .saturating_add(usize::from(route.stage.is_some()))
+                .saturating_add(usize::from(route.tier.is_some()));
+            route.tags.len() > WORKFLOW_PLAN_MAX_ROUTE_VALUES
+                || route.candidates.len() > WORKFLOW_PLAN_MAX_ROUTE_VALUES
+        });
+        // Later graph/route diagnostics include the step id for every bad
+        // entry. Reject oversized metadata before that multiplication, too.
+        if step.id.as_deref().map_or(0, str::len) > WORKFLOW_PLAN_MAX_STEP_ID_BYTES
+            || step.needs.len() > WORKFLOW_PLAN_MAX_NEEDS
+            || fan_out > WORKFLOW_PLAN_MAX_TARGETS
+            || oversized_route
+            || dependency_edges > WORKFLOW_PLAN_MAX_DEPENDENCY_EDGES
+            || targets > WORKFLOW_PLAN_MAX_TOTAL_TARGETS
+            || route_values > WORKFLOW_PLAN_MAX_TOTAL_ROUTE_VALUES
+        {
+            return Err(WorkflowError::InvalidWorkflowPlan {
+                reason: "workflow source metadata exceeds plan safety limits".into(),
+            });
+        }
+        let bytes = if let Some(prompt) = &step.prompt {
+            prompt.len()
+        } else if let Some(path) = &step.prompt_file {
+            let path = path
+                .parse::<WorkflowSourcePath>()
+                .map_err(|_| WorkflowError::InvalidWorkflowPromptPath { step: index + 1 })?;
+            entries.get(&path).map_or(0, |content| content.len())
+        } else {
+            0
+        };
+        prompt_bytes = prompt_bytes.saturating_add(bytes);
+        if prompt_bytes > WORKFLOW_PLAN_MAX_TOTAL_BYTES {
+            return Err(WorkflowError::InvalidWorkflowPlan {
+                reason: format!(
+                    "materialized workflow prompts exceed {WORKFLOW_PLAN_MAX_TOTAL_BYTES} bytes"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn build_workflow(

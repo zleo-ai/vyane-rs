@@ -15,9 +15,11 @@ exposes a different subset of operations; they are not interchangeable:
 | **REST API** | `vyane serve --addr 127.0.0.1:9721` | programmatic access from any HTTP client |
 | **MCP** | `vyane mcp` | let other agents (Claude, Codex, …) call vyane as a tool |
 
-The production CLI MCP surface contains nine tools: dispatch, broadcast,
-history, sessions, `vyane_route`, `vyane_check`, and authenticated durable
-workflow submit/status/cancel. Generic success payloads have a 1 MiB cap;
+The production CLI MCP surface contains ten tools: dispatch, broadcast,
+history, sessions, `vyane_route`, `vyane_check`, `vyane_workflow_plan`, and
+authenticated durable workflow submit/status/cancel. The library's base server
+contains seven tools; only submit/status/cancel require an injected control port.
+Generic success payloads have a 1 MiB cap;
 the two new diagnostics use stricter, smaller bounds. `vyane_route` is a
 Rust-side deterministic preview extension, not a same-name parity claim
 against the fixed reference baseline. `vyane_check` performs static
@@ -29,7 +31,7 @@ the ceiling, dispatch/broadcast returns bounded run receipts with
 `operation_status="completed"` and `detail_omitted=true`; callers must not retry
 those receipts as though execution failed.
 
-Workflow callers provide a canonical UUIDv7 plus a bounded self-contained
+Workflow submission callers provide a canonical UUIDv7 plus a bounded self-contained
 source bundle. The MCP layer cannot provide owner, controller, token, or an
 execution path. The CLI freezes its own startup directory and re-authenticates
 the exact resident daemon for every workflow operation. Responses contain only
@@ -37,6 +39,53 @@ the caller id, lifecycle state, and a closed failure code. Explicit step
 workdirs and sandboxes above read-only are rejected before daemon contact. This is durable
 workflow control, not general task, board, collaboration, or multi-principal
 MCP parity.
+
+## Static workflow plans over MCP
+
+`vyane_workflow_plan` accepts a required nonempty `workflow_toml` string and
+optional `prompt_files` (default `[]`), each containing exactly `path` and
+`content`. Every declared prompt file must be supplied in memory; host files
+are never consulted. Extra, missing, duplicate, noncanonical or absolute prompt
+paths fail validation. Unknown fields, including `vars`, `caller_id`, `owner`,
+`execution_cwd` and credentials, are rejected.
+
+The existing source budgets apply: 1 MiB TOML, 128 prompt entries, 4 MiB per
+prompt, 4,096 bytes per canonical relative path, and 16 MiB total UTF-8 source
+bytes including paths. Source materialization also rejects more than 4,096
+steps or 16 MiB of expanded prompt content before repeated-reference hashing or
+allocation. Existing step-id, per-step list and global dependency/target/route
+limits are also checked before diagnostics can repeat metadata; compiled plans
+retain their existing total-content checks.
+Runtime checks enforce byte limits; JSON Schema string
+length hints alone do not enforce the UTF-8 byte budget.
+
+```json
+{
+  "workflow_toml": "[workflow]\nname='preview'\n[[step]]\nid='one'\ntarget='unconfigured'\nprompt='Inspect {{vars.topic}}'"
+}
+```
+
+The successful JSON text payload is the same `WorkflowPlan` schema v1 exported
+by `workflow plan --json`: materialized DAG, unresolved targets, unrendered
+templates, requested capabilities, and deterministic source/plan checksums.
+It includes caller-supplied prompts, system text and workdirs, so it is **not a
+redacted view**. Workdirs and requested sandboxes are represented without
+granting permission or establishing execution readiness. The checksum is a
+drift check, not authentication or authorization.
+
+This tool performs bounded synchronous compilation only: no target resolution,
+template rendering, daemon contact, model call, run/journal creation or separate
+background task. Repeating the same sources produces the same plan. There is
+no execution to retry or cancel. The MCP server retains its existing startup
+configuration requirements and local scope; this tool adds no principal or
+owner authority and accesses no stored workflow.
+
+Errors use the existing successful MCP-result envelope with `status="error"`:
+`invalid_argument` for invalid sources or schema, and `limit_exceeded` if the
+serialized plan exceeds 1 MiB. Error messages are fixed and never include raw
+parse errors or input text. An oversized plan is not truncated or executed;
+reduce the sources to retrieve it through MCP. Existing tools and plan schema
+remain compatible; clients enumerating tools now see one additional tool.
 
 ## Local A2A inbox
 
@@ -432,9 +481,10 @@ call models or create a journal. Requested capabilities do not authorize
 execution or establish runtime readiness.
 
 This closes the repository-local shared typed-plan prerequisite and CLI static
-plan inspection/export, not workflow parity. Dynamic control flow, nested
+plan inspection/export plus MCP source-to-plan compilation, not workflow parity.
+Dynamic control flow, nested
 workflows, shared budgets, a compatibility frontend, changed-plan call matching,
-plan import and REST/MCP plan transport, sanitized cross-implementation fixtures,
+plan import and REST plan transport, sanitized cross-implementation fixtures,
 and a production-complete model-tier policy remain open.
 
 The frontier guard is fail-closed across the selected profile and its failover
