@@ -14,7 +14,7 @@ VYANE="$PWD/target/install/bin/vyane"
 "$VYANE" --help
 ```
 
-The version should print `vyane 0.1.0`. This installs into this checkout, so it does not replace another `vyane` on your PATH. Keep this shell open for the following commands. To reproduce this documentation snapshot, check out `fe43941` before installing; `main` can change.
+The version should print `vyane 0.1.0`. This installs into this checkout, so it does not replace another `vyane` on your PATH. Keep this shell open for the following commands. The `fe43941` baseline identifies the implementation used for verification; it predates the bundled demo files. Reproduce the examples from a revision containing this documentation and `docs/examples/`, and record `git rev-parse HEAD` alongside your output.
 
 ### First run without credentials
 

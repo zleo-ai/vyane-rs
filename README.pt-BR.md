@@ -69,6 +69,13 @@ Execução residente, workflows persistentes e objetivos locais continuam em evo
 - [Matriz de capacidades e evidências reproduzíveis](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [Roteiro](docs/ROADMAP.md)
 - [Histórico de mudanças](docs/CHANGELOG.md) · [Política de versões e lançamentos](docs/RELEASING.md)
 
+<details>
+<summary>Resumo das evidências</summary>
+
+A [matriz pública de capacidades](docs/parity/ORIGINAL-VYANE-PARITY.md) acompanha 53 capacidades em 8 áreas: 7 implementadas, 23 parciais, 12 ausentes, 9 deliberadamente diferentes ou aguardando decisão e 2 planejadas. O [manifesto sem dados sensíveis](docs/parity/fixtures/v1/manifest.json) contém 44 casos em 5 conjuntos: 30 correspondências após normalização e 14 diferenças em aberto. Essas verificações limitadas não representam uma porcentagem de paridade do sistema inteiro.
+
+</details>
+
 Esta é a implementação pública em Rust de capacidades do sistema privado Python Vyane original. Não é uma substituição direta: comandos, configuração, sessões salvas e workflows precisam de verificações individuais de migração. Não compartilhe diretórios de estado sem um procedimento documentado. Colaboradores públicos não precisam acessar o código privado.
 
 ## Contribua e peça ajuda

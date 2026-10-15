@@ -69,6 +69,13 @@ L’exécution résidente, les workflows persistants et les objectifs locaux év
 - [Matrice des capacités et preuves reproductibles](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [Feuille de route](docs/ROADMAP.md)
 - [Journal des modifications](docs/CHANGELOG.md) · [Politique de versions et de publication](docs/RELEASING.md)
 
+<details>
+<summary>État des preuves</summary>
+
+La [matrice publique des capacités](docs/parity/ORIGINAL-VYANE-PARITY.md) suit 53 capacités dans 8 domaines : 7 implémentées, 23 partielles, 12 absentes, 9 volontairement différentes ou en attente de décision et 2 planifiées. Le [manifeste expurgé](docs/parity/fixtures/v1/manifest.json) contient 44 cas dans 5 suites : 30 correspondances après normalisation et 14 différences ouvertes. Ces vérifications limitées ne représentent pas un pourcentage de parité du système entier.
+
+</details>
+
 Ce dépôt est l’implémentation publique en Rust de capacités du système privé Python Vyane d’origine. Il ne le remplace pas directement : commandes, configuration, sessions enregistrées et workflows nécessitent chacun une vérification de migration. Ne partagez pas les répertoires d’état sans procédure documentée. Les contributeurs publics n’ont pas besoin du code privé.
 
 ## Contribuer et demander de l’aide

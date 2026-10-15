@@ -69,6 +69,13 @@ Resident execution, durable workflows and local goals are evolving. Native runs 
 - [Capability matrix and reproducible evidence](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [Roadmap](docs/ROADMAP.md)
 - [Changelog](docs/CHANGELOG.md) · [Version and release policy](docs/RELEASING.md)
 
+<details>
+<summary>Evidence snapshot</summary>
+
+The [public capability matrix](docs/parity/ORIGINAL-VYANE-PARITY.md) tracks 53 capabilities across eight domains: 7 implemented, 23 partial, 12 missing, 9 deliberately different or awaiting a decision, and 2 planned. The [sanitized manifest](docs/parity/fixtures/v1/manifest.json) contains 44 cases in 5 suites: 30 normalized matches and 14 open differences. These bounded checks are not a whole-system parity percentage.
+
+</details>
+
 This is the public Rust implementation of capabilities from the original private Python Vyane system. It is not a drop-in replacement: commands, configuration, stored sessions and workflows need individual migration checks. Do not share state directories without a documented migration path. Public contributors do not need the private source.
 
 ## Contribute and get help

@@ -69,6 +69,13 @@ VYANE="$PWD/target/install/bin/vyane"
 - [機能一覧と再現可能な証拠](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [ロードマップ](docs/ROADMAP.md)
 - [変更履歴](docs/CHANGELOG.md) · [バージョンとリリース方針](docs/RELEASING.md)
 
+<details>
+<summary>検証状況のスナップショット</summary>
+
+[公開機能一覧](docs/parity/ORIGINAL-VYANE-PARITY.md)は 8 分野の 53 機能を追跡しています。実装済み 7、部分実装 23、未実装 12、意図的な差異または判断待ち 9、計画中 2 です。[機密情報を除いたマニフェスト](docs/parity/fixtures/v1/manifest.json)には 5 スイート、44 ケースがあり、正規化後の一致が 30、未解決の差異が 14 あります。限定的な検証であり、システム全体の互換性の割合ではありません。
+
+</details>
+
 非公開の元の Python Vyane システムの機能を Rust で公開実装したものです。そのまま置き換えられるものではなく、コマンド、設定、保存済みセッション、ワークフローを個別に移行確認する必要があります。文書化された移行手順なしで状態ディレクトリを共有しないでください。公開プロジェクトへの貢献に非公開ソースへのアクセスは不要です。
 
 ## 貢献と問い合わせ

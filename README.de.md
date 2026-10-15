@@ -57,7 +57,7 @@ Achte auf das Profil `offline` und `"selection_key": "offline"` im JSON. Der End
 | Im Quellcode verfügbar | Grenze |
 | --- | --- |
 | Einzelausführung, parallele Verteilung, explizites Failover und Streaming | Direktes HTTP liefert Modelltext; es hängt keine lokalen Dateien an und stellt keine Shell-Werkzeuge bereit. |
-| Adapter für Claude Code und Codex CLI | CLI-Unterprozesse, keine Codex-App-Server-RPC- oder direkte Claude-Agent-SDK-Integration. CLI und Zugang stellst du selbst bereit; der Harness setzt seine Sandbox durch. |
+| Adapter für Claude Code und Codex CLI | CLI-Unterprozesse, keine Integration von Codex App Server RPC oder direkte Integration des Claude Agent SDK. CLI und Zugang stellst du selbst bereit; der Harness setzt seine Sandbox durch. |
 | Profilbasiertes Routing und lokale Laufhistorie | Routing folgt deiner Konfiguration; es garantiert keine Antwortqualität. |
 | CLI-, REST- und MCP-Einstiegspunkte | Jeder stellt eine andere Teilmenge bereit. Siehe [CLI-Handbuch](docs/CLI-GUIDE.md). |
 
@@ -68,6 +68,13 @@ Residente Ausführung, persistente Workflows und lokale Ziele werden weiterentwi
 - [Architektur und Zielmodell](docs/ARCHITECTURE.md) · [Konfigurationsreferenz](profiles.example.toml) · [CLI-, REST- und MCP-Handbuch](docs/CLI-GUIDE.md)
 - [Funktionsmatrix und reproduzierbare Nachweise](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [Roadmap](docs/ROADMAP.md)
 - [Änderungsprotokoll](docs/CHANGELOG.md) · [Versions- und Veröffentlichungsrichtlinien](docs/RELEASING.md)
+
+<details>
+<summary>Stand der Nachweise</summary>
+
+Die [öffentliche Funktionsmatrix](docs/parity/ORIGINAL-VYANE-PARITY.md) erfasst 53 Funktionen in 8 Bereichen: 7 implementiert, 23 teilweise implementiert, 12 fehlend, 9 bewusst abweichend oder noch zu entscheiden und 2 geplant. Das [bereinigte Manifest](docs/parity/fixtures/v1/manifest.json) enthält 44 Fälle in 5 Testsuiten: 30 Übereinstimmungen nach Normalisierung und 14 offene Unterschiede. Diese begrenzten Prüfungen sind keine prozentuale Paritätsangabe für das Gesamtsystem.
+
+</details>
 
 Dies ist die öffentliche Rust-Implementierung von Funktionen des ursprünglichen privaten Python-Vyane-Systems. Sie ist kein direkt austauschbarer Ersatz: Befehle, Konfiguration, gespeicherte Sitzungen und Workflows erfordern jeweils eigene Migrationsprüfungen. Nutze Zustandsverzeichnisse nicht gemeinsam, solange kein dokumentierter Migrationsweg vorliegt. Öffentliche Mitwirkende benötigen keinen Zugriff auf den privaten Quellcode.
 

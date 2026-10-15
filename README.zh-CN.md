@@ -69,6 +69,13 @@ VYANE="$PWD/target/install/bin/vyane"
 - [能力矩阵与可复现证据](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [路线图](docs/ROADMAP.md)
 - [更新日志](docs/CHANGELOG.md) · [版本与发布规范](docs/RELEASING.md)
 
+<details>
+<summary>证据快照</summary>
+
+[公开能力矩阵](docs/parity/ORIGINAL-VYANE-PARITY.md)记录当前状态。矩阵按 8 个域追踪 53 个能力项：7 个 implemented、23 个 partial、12 个 missing、9 个刻意不同或待决策、2 个 planned。implemented 表示已实现，partial 表示部分实现，missing 表示缺失，planned 表示已规划。[脱敏清单](docs/parity/fixtures/v1/manifest.json)包含 5 个套件、44 个用例：30 个经规范化后匹配，14 个仍有未解决差异。这些有限范围的检查不能换算成整个系统的对齐百分比。
+
+</details>
+
 这是原有私有 Python Vyane 系统部分能力的公开 Rust 实现，不能直接替换原系统。命令、配置、已保存的会话和工作流都需要分别核对迁移方式。没有明确迁移方案时，不要共享状态目录。公开贡献不需要访问私有源码。
 
 ## 贡献与求助

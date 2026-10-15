@@ -69,6 +69,13 @@ La ejecución residente, los flujos persistentes y los objetivos locales siguen 
 - [Matriz de capacidades y evidencia reproducible](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [Hoja de ruta](docs/ROADMAP.md)
 - [Registro de cambios](docs/CHANGELOG.md) · [Política de versiones y publicaciones](docs/RELEASING.md)
 
+<details>
+<summary>Resumen de la evidencia</summary>
+
+La [matriz pública de capacidades](docs/parity/ORIGINAL-VYANE-PARITY.md) sigue 53 capacidades en 8 áreas: 7 implementadas, 23 parciales, 12 ausentes, 9 deliberadamente diferentes o pendientes de decisión y 2 planificadas. El [manifiesto sin datos sensibles](docs/parity/fixtures/v1/manifest.json) contiene 44 casos en 5 conjuntos: 30 coincidencias tras normalización y 14 diferencias abiertas. Estas comprobaciones acotadas no son un porcentaje de paridad de todo el sistema.
+
+</details>
+
 Esta es la implementación pública en Rust de capacidades del sistema privado original Python Vyane. No es un reemplazo directo: hay que comprobar por separado la migración de comandos, configuración, sesiones guardadas y flujos. No compartas directorios de estado sin un procedimiento de migración documentado. Los colaboradores públicos no necesitan el código privado.
 
 ## Contribuye y pide ayuda

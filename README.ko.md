@@ -69,6 +69,13 @@ VYANE="$PWD/target/install/bin/vyane"
 - [기능 매트릭스와 재현 가능한 증거](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [로드맵](docs/ROADMAP.md)
 - [변경 이력](docs/CHANGELOG.md) · [버전과 릴리스 정책](docs/RELEASING.md)
 
+<details>
+<summary>검증 현황</summary>
+
+[공개 기능 매트릭스](docs/parity/ORIGINAL-VYANE-PARITY.md)는 8개 영역의 53개 기능을 추적합니다. 구현 완료 7개, 부분 구현 23개, 미구현 12개, 의도적 차이 또는 결정 대기 9개, 계획 단계 2개입니다. [민감 정보를 제거한 매니페스트](docs/parity/fixtures/v1/manifest.json)에는 5개 모음의 44개 사례가 있으며 정규화 후 일치 30개, 미해결 차이 14개입니다. 제한된 범위의 검사이며 전체 시스템의 동등성 비율이 아닙니다.
+
+</details>
+
 기존 비공개 Python Vyane 시스템의 기능을 Rust로 공개 구현한 프로젝트입니다. 그대로 대체할 수는 없으며 명령, 설정, 저장된 세션과 워크플로를 각각 검토한 후 이전해야 합니다. 문서화된 이전 절차 없이 상태 디렉터리를 공유하지 마세요. 공개 프로젝트에 기여할 때 비공개 소스 접근은 필요하지 않습니다.
 
 ## 기여와 도움 요청

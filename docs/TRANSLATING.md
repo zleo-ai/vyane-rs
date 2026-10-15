@@ -9,7 +9,7 @@ choice, not a measured user-demographic claim.
 
 All versions cover the same sections: purpose/audience, the local fixture demo,
 three uses, source installation and offline first run, current boundaries,
-deep-document links, Python migration boundary, contribution/security and licensing.
+deep-document links and a collapsed evidence snapshot, Python migration boundary, contribution/security and licensing.
 Full provider setup, architecture and parity detail live in linked English guides.
 
 | Locale | File | Content source | Review status |
