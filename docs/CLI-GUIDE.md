@@ -6,8 +6,8 @@ also installed, use the explicit Rust binary path from the quickstart.
 
 ## Protocol entry points
 
-Vyane supports three interchangeable front-ends, all sharing the same
-`vyane-service` layer so dispatch semantics are identical:
+Vyane supports three front-ends that share the `vyane-service` layer. Each
+exposes a different subset of operations; they are not interchangeable:
 
 | protocol | command | use case |
 |----------|---------|----------|
