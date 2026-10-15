@@ -43,6 +43,11 @@ fn plan_command(root: &Path) -> Command {
         .arg(root.join("must-not-be-loaded.toml"))
         .args(["workflow", "plan"])
         .arg(root.join("workflow.toml"));
+    // Keep instrumented subprocess profiles in the collector's output directory,
+    // so the fixture directory remains a check for application side effects.
+    if let Some(profile_file) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile_file);
+    }
     command
 }
 
