@@ -585,6 +585,11 @@ pub struct A2aReadArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkflowCommand {
+    /// Inspect a static workflow plan without executing any steps.
+    #[command(
+        long_about = "Compile a workflow TOML file and its prompt files into the existing static plan. This does not resolve targets, render templates, load runtime configuration, call models, or create a run journal. The plan describes requested capabilities, not execution authorization."
+    )]
+    Plan(WorkflowPlanArgs),
     /// Run a workflow TOML file.
     Run(WorkflowRunArgs),
     /// Submit a workflow source bundle to the resident daemon.
@@ -863,6 +868,15 @@ pub struct SessionResetNativeArgs {
     #[arg(long, value_name = "REVISION")]
     pub expected_revision: u64,
     /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowPlanArgs {
+    /// Workflow TOML file to inspect; prompt files are relative to this file.
+    pub file: PathBuf,
+    /// Emit the full plan payload, including prompts, system text, and workdirs.
     #[arg(long)]
     pub json: bool,
 }

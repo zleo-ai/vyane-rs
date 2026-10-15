@@ -29,8 +29,8 @@ use crate::cli::{
     BroadcastArgs, Cli, Command, DaemonCommand, DispatchArgs, HistoryArgs, ReviewArgs, RouteArgs,
     ServeArgs, SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs,
     TaskCancelArgs, TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCancelArgs,
-    WorkflowCommand, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs, WorkflowStatusArgs,
-    WorkflowSubmitArgs,
+    WorkflowCommand, WorkflowPlanArgs, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs,
+    WorkflowStatusArgs, WorkflowSubmitArgs,
 };
 use crate::daemon_client::DaemonWorkflowClient;
 use crate::output::{BroadcastJson, BroadcastRow, DurableTaskStatusJson, RunJson, TaskRow};
@@ -74,6 +74,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Sessions(args) => run_sessions(args).await,
         Command::Session(command) => run_session(command).await,
         Command::Workflow(command) => match command {
+            WorkflowCommand::Plan(args) => plan_workflow(args),
             WorkflowCommand::Run(args) => run_workflow(cli.config, args).await,
             WorkflowCommand::Submit(args) => submit_daemon_workflow(args).await,
             WorkflowCommand::Status(args) => status_daemon_workflow(args).await,
@@ -2913,6 +2914,39 @@ async fn cancel_daemon_workflow(args: WorkflowCancelArgs) -> Result<ExitCode> {
             "{}",
             crate::output::format_workflow_cancel_line(&task.id, task.state)
         );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn plan_workflow(args: WorkflowPlanArgs) -> Result<ExitCode> {
+    let plan = match Workflow::from_path(&args.file).and_then(|workflow| workflow.compile_plan()) {
+        Ok(plan) => plan,
+        Err(error) => {
+            print_workflow_error(&error);
+            return Ok(workflow_error_exit(&error));
+        }
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        println!("Workflow: {}", plan.name);
+        println!("Static plan: targets are unresolved; templates are not rendered.");
+        println!(
+            "Steps: {}; max concurrency: {}; requested maximum sandbox: {}",
+            plan.steps.len(),
+            plan.max_concurrency,
+            plan.capability_manifest.maximum_sandbox.as_str()
+        );
+        for step in &plan.steps {
+            println!(
+                "  {} | needs: [{}] | targets: [{}] | requested sandbox: {}",
+                step.id,
+                step.needs.join(", "),
+                step.targets.target_names().join(", "),
+                step.sandbox.as_str()
+            );
+        }
+        println!("Plan digest: {}", plan.plan_sha256);
     }
     Ok(ExitCode::SUCCESS)
 }
