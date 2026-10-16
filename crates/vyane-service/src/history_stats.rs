@@ -116,13 +116,73 @@ impl Serialize for HistoryDurations {
     }
 }
 
-/// Allowlisted aggregates only: no prompts, paths, labels, raw errors or costs.
+/// Coverage and sum of saved run costs, without guessing missing prices.
+/// Values are approximate USD amounts already present in the record, not bills.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct HistoryCosts {
+    /// Finite nonnegative amounts, including explicitly recorded zero.
+    pub known: usize,
+    pub unknown: usize,
+    pub invalid: usize,
+    pub overflowed: bool,
+    total_usd: f64,
+}
+
+// The private accumulator is always finite: invalid inputs and overflowing
+// additions never enter it, so reflexivity holds and HistoryStats keeps Eq.
+impl Eq for HistoryCosts {}
+
+impl HistoryCosts {
+    /// Sum of known amounts only. Missing/invalid prices do not become zero.
+    /// No known values or an overflowing sum has no representable total.
+    #[must_use]
+    pub fn known_total_usd(&self) -> Option<f64> {
+        (self.known != 0 && !self.overflowed).then_some(self.total_usd)
+    }
+
+    fn record(&mut self, cost: Option<f64>) {
+        match cost {
+            None => self.unknown += 1,
+            Some(value) if !value.is_finite() || value < 0.0 => self.invalid += 1,
+            Some(value) => {
+                self.known += 1;
+                if !self.overflowed {
+                    let sum = self.total_usd + value;
+                    if sum.is_finite() {
+                        self.total_usd = sum;
+                    } else {
+                        self.overflowed = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Serialize for HistoryCosts {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = serializer.serialize_struct("HistoryCosts", 5)?;
+        fields.serialize_field("known", &self.known)?;
+        fields.serialize_field("unknown", &self.unknown)?;
+        fields.serialize_field("invalid", &self.invalid)?;
+        fields.serialize_field("known_total_usd", &self.known_total_usd())?;
+        fields.serialize_field("overflowed", &self.overflowed)?;
+        fields.end()
+    }
+}
+
+/// Allowlisted aggregates only: no prompts, paths, labels or raw errors.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct HistoryStats {
     #[serde(flatten)]
     pub counts: RunCounts,
     pub duration: HistoryDurations,
+    pub cost: HistoryCosts,
     pub by_provider: BTreeMap<String, RunCounts>,
     /// Whole recorded run spans grouped by their final provider.
     pub by_provider_duration: BTreeMap<String, HistoryDurations>,
@@ -135,6 +195,7 @@ impl HistoryStats {
         for record in records {
             stats.counts.record(record.status);
             stats.duration.record(record);
+            stats.cost.record(record.cost_usd);
             let provider = record.target.provider.to_string();
             stats
                 .by_provider

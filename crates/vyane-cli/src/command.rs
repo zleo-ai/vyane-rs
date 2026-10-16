@@ -2633,6 +2633,14 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
                 "Duration: total {total_duration}, mean {mean_duration} (samples: {}, invalid: {})",
                 stats.duration.samples, stats.duration.invalid
             );
+            let known_cost = stats
+                .cost
+                .known_total_usd()
+                .map_or_else(|| "n/a".to_string(), |value| value.to_string());
+            println!(
+                "Known saved cost: {known_cost} USD (known: {}, unknown: {}, invalid: {}, overflowed: {})",
+                stats.cost.known, stats.cost.unknown, stats.cost.invalid, stats.cost.overflowed
+            );
             println!(
                 "PROVIDER\tTOTAL\tSUCCESS\tERROR\tTIMEOUT\tCANCELLED\tSUCCESS RATE\tDURATION TOTAL\tDURATION MEAN\tDURATION SAMPLES\tDURATION INVALID"
             );

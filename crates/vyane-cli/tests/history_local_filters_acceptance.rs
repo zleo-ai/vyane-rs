@@ -244,6 +244,7 @@ fn local_history_filter_statistics_use_every_match_and_keep_private_projection()
             "by_provider",
             "by_provider_duration",
             "cancelled",
+            "cost",
             "duration",
             "error",
             "success",

@@ -3610,6 +3610,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_cost_rest_projects_owned_filtered_saved_values() {
+        const HISTORY: &str = include_str!("../../vyane-service/tests/fixtures/history_cost.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "?stats=true",
+                serde_json::json!({"known":123,"unknown":1,"invalid":1,"known_total_usd":62.0,"overflowed":false}),
+            ),
+            (
+                "?stats=true&provider=q",
+                serde_json::json!({"known":1,"unknown":1,"invalid":1,"known_total_usd":0.75,"overflowed":false}),
+            ),
+            (
+                "?stats=true&status=timeout",
+                serde_json::json!({"known":0,"unknown":1,"invalid":0,"known_total_usd":null,"overflowed":false}),
+            ),
+            (
+                "?stats=true&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T13:00:00Z",
+                serde_json::json!({"known":1,"unknown":1,"invalid":1,"known_total_usd":1.25,"overflowed":false}),
+            ),
+            (
+                "?stats=true&provider=absent",
+                serde_json::json!({"known":0,"unknown":0,"invalid":0,"known_total_usd":null,"overflowed":false}),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["cost"], expected, "{query}");
+            assert!(!body.to_string().contains("COST_PRIVATE_CANARY"));
+        }
+        let denied = app
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
     async fn provider_duration_rest_projects_complete_owned_final_provider_groups() {
         const HISTORY: &str = include_str!("../tests/fixtures/history_duration.jsonl");
         let root = crate::test_support::private_tempdir();

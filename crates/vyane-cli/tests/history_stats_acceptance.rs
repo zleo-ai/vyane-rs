@@ -188,7 +188,7 @@ fn history_stats_rejects_an_explicit_limit_and_reports_empty_storage() {
         .clone();
     assert_eq!(
         serde_json::from_slice::<Value>(&output).unwrap(),
-        json!({"total":0,"success":0,"error":0,"timeout":0,"cancelled":0,"success_rate":null,"duration":{"samples":0,"invalid":0,"total_ms":null,"mean_ms":null},"by_provider":{},"by_provider_duration":{}})
+        json!({"total":0,"success":0,"error":0,"timeout":0,"cancelled":0,"success_rate":null,"duration":{"samples":0,"invalid":0,"total_ms":null,"mean_ms":null},"by_provider":{},"by_provider_duration":{},"cost":{"known":0,"unknown":0,"invalid":0,"known_total_usd":null,"overflowed":false}})
     );
     assert!(!root.path().join("ledger.jsonl").exists());
 }
