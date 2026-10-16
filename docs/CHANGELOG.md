@@ -41,6 +41,11 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Fixed
 
+- Skip and count JSONL run-record lines containing invalid UTF-8 instead of
+  silently replacing bad bytes inside JSON strings and accepting altered data.
+  Valid Unicode and neighboring complete records remain readable; reads do not
+  rewrite the ledger.
+
 - Bound repeated workflow prompt-file expansion before materialization and
   legacy hashing, and reject oversized source metadata before diagnostic
   expansion, using the existing plan safety budgets.

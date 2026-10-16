@@ -92,11 +92,6 @@ impl JsonlLedger {
             Err(e) => return Err(e.into()),
         };
 
-        // from_utf8_lossy: a record line is UTF-8 JSON; bytes that aren't UTF-8
-        // (true corruption) become replacement chars and fail to parse, which
-        // is the correct "skip and count" outcome.
-        let text = String::from_utf8_lossy(&bytes);
-
         // Most-recent records are appended last, so walk the file backwards.
         // `limit` caps how many *matching* records we collect, not how many we
         // scan; `None` means return every match.
@@ -104,7 +99,13 @@ impl JsonlLedger {
         let mut out: Vec<RunRecord> = Vec::new();
         let mut skipped = 0u64;
 
-        for line in text.rsplit('\n') {
+        for line in bytes.rsplit(|&byte| byte == b'\n') {
+            // Validate each original line before parsing. Lossy decoding can
+            // turn corrupt string values or keys into valid, altered records.
+            let Ok(line) = std::str::from_utf8(line) else {
+                skipped += 1;
+                continue;
+            };
             let trimmed = line.trim_end();
             if trimmed.is_empty() {
                 // A blank line (e.g. the slot after a trailing newline) is not
