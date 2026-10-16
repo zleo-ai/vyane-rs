@@ -10,7 +10,7 @@
 # this public repo does not attach a self-hosted runner.
 #
 # Strict tier depends on the maintainer-side vyane review pipeline
-# (`VYANE_PROJECT`, overridable). External contributors cannot run it
+# (`VYANE_PROJECT` must point at it). External contributors cannot run it
 # themselves; a maintainer runs that round on their behalf.
 #
 # Usage:
@@ -30,7 +30,7 @@ unset CLICOLOR_FORCE FORCE_COLOR GH_FORCE_TTY || true
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly REPO="zleo-ai/vyane-rs"
-readonly VYANE_PROJECT="${VYANE_PROJECT:-/home/maple/AIOS/vyane}"
+readonly VYANE_PROJECT="${VYANE_PROJECT:-}"
 readonly MAX_DIFF_BYTES=$((400 * 1024))
 readonly GITHUB_BODY_LIMIT=60000
 
@@ -538,6 +538,7 @@ EOF
 run_strict() {
   echo "严格档要求对抗式多轮审查，且开发 / 审查 / 合并必须是三次独立的 agent run；本脚本只承担其中一轮。"
   command -v uv >/dev/null 2>&1 || die "uv not found (required for strict-tier vyane review)"
+  [[ -n "$VYANE_PROJECT" ]] || die "set VYANE_PROJECT to the maintainer vyane checkout"
   [[ -d "$VYANE_PROJECT" ]] || die "vyane project not found: ${VYANE_PROJECT}"
   mkdir -p "$STRICT_OUT"
 
