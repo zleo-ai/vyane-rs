@@ -24,7 +24,7 @@
       "--help"
     ],
     "exit_code": 0,
-    "stdout": "Validate configuration and show local readiness\n\nUsage: vyane check [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stdout": "Validate configuration and show local readiness\n\nUsage: vyane check [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --json           Emit static configuration diagnostics as JSON without probing harnesses\n  -h, --help           Print help\n",
     "stderr": ""
   },
   {

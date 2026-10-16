@@ -26,8 +26,8 @@ use vyane_workflow::{
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{
-    BroadcastArgs, Cli, Command, DaemonCommand, DispatchArgs, HistoryArgs, ReviewArgs, RouteArgs,
-    ServeArgs, SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs,
+    BroadcastArgs, CheckArgs, Cli, Command, DaemonCommand, DispatchArgs, HistoryArgs, ReviewArgs,
+    RouteArgs, ServeArgs, SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs,
     TaskCancelArgs, TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCancelArgs,
     WorkflowCommand, WorkflowPlanArgs, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs,
     WorkflowStatusArgs, WorkflowSubmitArgs,
@@ -67,7 +67,7 @@ fn is_local_detached_dispatch(record: &TaskRecord) -> bool {
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::Check => run_check(cli.config).await,
+        Command::Check(args) => run_check(cli.config, args).await,
         Command::Dispatch(args) => run_dispatch(cli.config, args).await,
         Command::Broadcast(args) => run_broadcast(cli.config, args).await,
         Command::History(args) => run_history(args).await,
@@ -133,10 +133,15 @@ async fn run_mcp(config_path: Option<PathBuf>) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
+async fn run_check(config_path: Option<PathBuf>, args: CheckArgs) -> Result<ExitCode> {
     let loaded = match load_config(config_path.as_deref()) {
         Ok(loaded) => loaded,
         Err(error) => {
+            if args.json {
+                return Ok(print_check_json_error(
+                    vyane_service::DiagnosticErrorKind::ConfigInvalid,
+                ));
+            }
             eprintln!(
                 "{}",
                 crate::output::format_config_error_line(&format!("{error:#}"))
@@ -144,6 +149,10 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
             return Ok(ExitCode::from(2));
         }
     };
+
+    if args.json {
+        return Ok(print_check_json(&loaded));
+    }
 
     let file_entries = loaded
         .files
@@ -266,6 +275,42 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
     crate::output::print_permission_check(&permissions);
 
     Ok(ExitCode::SUCCESS)
+}
+
+// Keep JSON on the existing bounded, allowlisted static path. In particular,
+// never serialize LoadedConfig or forward a config loader's source error.
+fn print_check_json(loaded: &LoadedConfig) -> ExitCode {
+    use vyane_service::{DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError, DiagnosticErrorKind};
+    let report = match vyane_service::check_config(loaded) {
+        Ok(report) => report,
+        Err(error) => {
+            let kind = error
+                .downcast_ref::<DiagnosticError>()
+                .map_or(DiagnosticErrorKind::ConfigInvalid, |error| error.kind);
+            return print_check_json_error(kind);
+        }
+    };
+    match serde_json::to_string(&report) {
+        Ok(json) if json.len() <= DIAGNOSTIC_MAX_OUTPUT_BYTES => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        _ => print_check_json_error(DiagnosticErrorKind::BudgetExceeded),
+    }
+}
+
+fn print_check_json_error(kind: vyane_service::DiagnosticErrorKind) -> ExitCode {
+    use vyane_service::DiagnosticErrorKind;
+    let message = match kind {
+        DiagnosticErrorKind::InvalidInput => "request contains an invalid argument",
+        DiagnosticErrorKind::ConfigInvalid => "vyane configuration is invalid",
+        DiagnosticErrorKind::BudgetExceeded => "diagnostic safety limit exceeded",
+    };
+    println!(
+        "{}",
+        serde_json::json!({"error": {"code": kind.as_str(), "message": message}})
+    );
+    ExitCode::from(2)
 }
 
 async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
