@@ -116,6 +116,81 @@ impl Serialize for HistoryDurations {
     }
 }
 
+/// One reported token field, aggregated independently across saved runs.
+/// Missing fields remain unknown; a reported zero is a known observation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HistoryTokenTotal {
+    pub known: usize,
+    pub unknown: usize,
+    total: u128,
+}
+
+impl HistoryTokenTotal {
+    /// Known partial total. None means no observations or a sum outside u64.
+    #[must_use]
+    pub fn total_tokens(&self) -> Option<u64> {
+        if self.known == 0 {
+            return None;
+        }
+        u64::try_from(self.total).ok()
+    }
+
+    #[must_use]
+    pub fn overflowed(&self) -> bool {
+        self.total > u128::from(u64::MAX)
+    }
+
+    fn record(&mut self, tokens: Option<u64>) {
+        match tokens {
+            Some(value) => {
+                self.known += 1;
+                // A slice contains at most usize::MAX records; on supported
+                // platforms, that many u64 values fit in a u128 accumulator.
+                self.total += u128::from(value);
+            }
+            None => self.unknown += 1,
+        }
+    }
+}
+
+impl Serialize for HistoryTokenTotal {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = serializer.serialize_struct("HistoryTokenTotal", 4)?;
+        fields.serialize_field("known", &self.known)?;
+        fields.serialize_field("unknown", &self.unknown)?;
+        fields.serialize_field("total_tokens", &self.total_tokens())?;
+        fields.serialize_field("overflowed", &self.overflowed())?;
+        fields.end()
+    }
+}
+
+/// Observed input/output and optional detail fields, without estimating usage.
+/// Detail fields are not added to their parent fields or used to infer prices.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct HistoryUsage {
+    pub input_tokens: HistoryTokenTotal,
+    pub output_tokens: HistoryTokenTotal,
+    pub reasoning_tokens: HistoryTokenTotal,
+    pub cached_input_tokens: HistoryTokenTotal,
+}
+
+impl HistoryUsage {
+    fn record(&mut self, record: &RunRecord) {
+        let usage = record.usage.as_ref();
+        self.input_tokens.record(usage.map(|u| u.input_tokens));
+        self.output_tokens.record(usage.map(|u| u.output_tokens));
+        self.reasoning_tokens
+            .record(usage.and_then(|u| u.reasoning_tokens));
+        self.cached_input_tokens
+            .record(usage.and_then(|u| u.cached_input_tokens));
+    }
+}
+
 /// Allowlisted aggregates only: no prompts, paths, labels, raw errors or costs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
@@ -123,6 +198,8 @@ pub struct HistoryStats {
     #[serde(flatten)]
     pub counts: RunCounts,
     pub duration: HistoryDurations,
+    /// Per-field known totals and missing-observation counts from stored usage.
+    pub usage: HistoryUsage,
     pub by_provider: BTreeMap<String, RunCounts>,
     /// Whole recorded run spans grouped by their final provider.
     pub by_provider_duration: BTreeMap<String, HistoryDurations>,
@@ -135,6 +212,7 @@ impl HistoryStats {
         for record in records {
             stats.counts.record(record.status);
             stats.duration.record(record);
+            stats.usage.record(record);
             let provider = record.target.provider.to_string();
             stats
                 .by_provider
