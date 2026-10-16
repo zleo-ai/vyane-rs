@@ -9,6 +9,10 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Added
 
+- `vyane check --json` exposes bounded static configuration diagnostics for
+  scripts, with redacted reports and fixed JSON errors. It never probes a
+  provider or starts a harness; the existing text check stays unchanged.
+
 - MCP `vyane_workflow_plan` compiles caller-supplied workflow sources into the
   existing static plan schema without filesystem lookup or execution. The
   bounded response includes supplied prompt text; base and CLI MCP tool counts

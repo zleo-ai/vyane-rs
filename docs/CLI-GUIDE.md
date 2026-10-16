@@ -40,6 +40,40 @@ workdirs and sandboxes above read-only are rejected before daemon contact. This 
 workflow control, not general task, board, collaboration, or multi-principal
 MCP parity.
 
+## Static configuration JSON
+
+`vyane check --json` exposes the same static `ConfigCheckReport` as MCP
+`vyane_check`. It uses the normal user/project or explicit `--config PATH`
+layers, sibling secrets files, and managed permission ceilings. It reads
+configuration locally, never probes a provider or live credential, launches a
+harness, contacts the daemon, or opens runtime storage. Plain `vyane check`
+keeps its existing human-readable output and local harness checks.
+
+The successful stdout document contains `status` (`valid` or `partial`),
+`scope="static_config_only"`, provider/profile counts and summaries, effective
+permission ceilings, and closed issue codes with fixed messages. Configured
+provider IDs and profile names are included; keep secrets out of these labels.
+Paths, endpoint URLs, model names, environment-variable names, credential
+values, and raw source errors are omitted. Permission summaries describe
+ceilings, not execution grants. Credential presence does not prove validity.
+
+Both valid and partial reports exit **0**: inspect `status` and `issues` to
+decide readiness. Loading or diagnostic failures exit **2** and emit only
+`{"error":{"code":"config_invalid","message":"vyane configuration is invalid"}}`
+on stdout. Diagnostic limit failures instead use `budget_exceeded` and
+`diagnostic safety limit exceeded`; invalid diagnostic inputs use
+`invalid_input` and `request contains an invalid argument`. These errors have
+no raw config text or paths. Clap argument errors retain the normal stderr
+help/exit-2 behavior, before the JSON operation starts.
+
+The existing diagnostic input budgets apply, including at most 256 total
+provider/profile rows; a successful JSON document is capped at 256 KiB
+(excluding the trailing newline). Oversized diagnostics fail rather than
+returning a truncated report. Repeating the command with unchanged loaded
+configuration and environment produces the same report; no retry causes an
+execution. This adds a CLI consumer of existing Rust diagnostics and does not
+claim full configuration-lifecycle or cross-implementation parity.
+
 ## Static workflow plans over MCP
 
 `vyane_workflow_plan` accepts a required nonempty `workflow_toml` string and

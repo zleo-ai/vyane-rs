@@ -25,7 +25,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Validate configuration and show local readiness.
-    Check,
+    Check(CheckArgs),
     /// Run one task against a profile, provider/model, or auto-routed target.
     Dispatch(DispatchArgs),
     /// Run one task against several targets concurrently.
@@ -63,6 +63,13 @@ pub enum Command {
     /// Internal: execute a detached run. Not for direct use.
     #[command(name = "__worker", hide = true)]
     Worker(WorkerArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CheckArgs {
+    /// Emit static configuration diagnostics as JSON without probing harnesses.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Subcommand)]
