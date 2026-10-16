@@ -9,6 +9,10 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Added
 
+- History statistics summarize saved USD costs across CLI, REST and MCP,
+  with explicit unknown/invalid coverage and overflow instead of treating
+  missing prices as free runs. No price lookup or ledger rewrite occurs.
+
 - MCP `vyane_workflow_plan` compiles caller-supplied workflow sources into the
   existing static plan schema without filesystem lookup or execution. The
   bounded response includes supplied prompt text; base and CLI MCP tool counts
