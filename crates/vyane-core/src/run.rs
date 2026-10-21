@@ -157,6 +157,7 @@ pub struct RunQuery {
     /// Inclusive upper bound on run start time; applied before the limit.
     pub until: Option<DateTime<Utc>>,
     /// Most-recent-first limit. `None` = implementation default.
+    /// Zero requests no records.
     pub limit: Option<usize>,
 }
 
