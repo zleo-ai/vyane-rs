@@ -1199,3 +1199,118 @@ async fn provider_duration_mcp_projects_complete_owned_final_provider_groups() -
     assert_eq!(std::fs::read_to_string(&ledger)?, HISTORY);
     Ok(())
 }
+
+#[tokio::test]
+async fn history_cost_mcp_projects_owned_filtered_saved_values() -> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("../../vyane-service/tests/fixtures/history_cost.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let handle = tokio::spawn(async move {
+        VyaneMcpServer::new(service)
+            .serve(server_transport)
+            .await?
+            .waiting()
+            .await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, expected) in [
+        (
+            serde_json::json!({"stats":true}),
+            serde_json::json!({"known":123,"unknown":1,"invalid":1,"known_total_usd":62.0,"overflowed":false}),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"q"}),
+            serde_json::json!({"known":1,"unknown":1,"invalid":1,"known_total_usd":0.75,"overflowed":false}),
+        ),
+        (
+            serde_json::json!({"stats":true,"status":"timeout"}),
+            serde_json::json!({"known":0,"unknown":1,"invalid":0,"known_total_usd":null,"overflowed":false}),
+        ),
+        (
+            serde_json::json!({"stats":true,"since":"2026-01-01T13:00:00+02:00","until":"2026-01-01T13:00:00Z"}),
+            serde_json::json!({"known":1,"unknown":1,"invalid":1,"known_total_usd":1.25,"overflowed":false}),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"absent"}),
+            serde_json::json!({"known":0,"unknown":0,"invalid":0,"known_total_usd":null,"overflowed":false}),
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        let body = result_payload(result);
+        assert_eq!(body["cost"], expected, "{arguments}");
+        assert!(!body.to_string().contains("COST_PRIVATE_CANARY"));
+    }
+    client.cancel().await?;
+    handle.await??;
+    assert_eq!(std::fs::read_to_string(&ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_usage_mcp_counts_all_owned_filtered_samples() -> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("../../vyane-service/tests/fixtures/history_usage.jsonl");
+    const EXPECTED: &str =
+        include_str!("../../vyane-service/tests/fixtures/history_usage_expected.json");
+    let expected: serde_json::Value = serde_json::from_str(EXPECTED)?;
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, case, total) in [
+        (serde_json::json!({"stats":true}), "all", 126),
+        (serde_json::json!({"stats":true,"provider":"q"}), "q", 2),
+        (
+            serde_json::json!({"stats":true,"status":"error"}),
+            "zero",
+            1,
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"p","since":"2026-01-01T13:00:00+02:00","until":"2026-01-01T14:00:00Z"}),
+            "window",
+            2,
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"absent"}),
+            "empty",
+            0,
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        let body = result_payload(result);
+        assert_eq!(body["total"], total);
+        assert_eq!(body["usage"], expected[case], "{arguments}");
+        assert!(!body.to_string().contains("USAGE_PRIVATE_CANARY"));
+        assert!(body.get("session_id").is_none() && body.get("labels").is_none());
+    }
+    client.cancel().await?;
+    handle.await??;
+    assert_eq!(std::fs::read_to_string(ledger)?, HISTORY);
+    Ok(())
+}

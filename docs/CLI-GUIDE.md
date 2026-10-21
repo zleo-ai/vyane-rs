@@ -266,8 +266,7 @@ History accepts an inclusive start-time cutoff through
 timestamp with a timezone (`Z` or an explicit offset); percent-encode `+` as
 `%2B` in a REST query. The cutoff compares `started_at` and combines with
 provider/status filters before the record limit, retaining reverse append
-order. Omit it to query all time. This reuses the run ledger; source filtering
-and cost aggregation remain open parity work.
+order. Omit it to query all time. This reuses the run ledger; source filtering and automatic cost attribution remain open parity work.
 
 An inclusive upper bound is available as `vyane history --until TIMESTAMP`,
 REST `until`, and the MCP `vyane_history` argument `until`. It uses the same
@@ -301,7 +300,7 @@ The result contains `total`, `success`, `error`, `timeout`, `cancelled`, and
 `by_provider` with the same five counts for each final provider. A failover run
 counts once, regardless of its attempt count. Missing or empty storage returns
 zero counts and an empty provider map. Statistics contain no run ids, prompts,
-paths, labels, raw errors or cost estimates. Cost aggregation remains separate work.
+paths, labels or raw errors. Saved costs are summarized separately below.
 
 The overall `duration` object derives whole-run wall-clock elapsed time from
 saved `started_at` and `finished_at`: `samples` counts nonnegative spans and
@@ -324,6 +323,43 @@ of all matching runs, rounded to one decimal. Error, timeout and cancelled runs
 remain in the denominator. Provider groups use their own counts, and all filters
 apply before computing rates. With no matching runs the overall rate is `null`
 (CLI text: `n/a`); a nonempty group with no successes has a measured rate of `0.0`.
+
+Statistics also include a `cost` object with `known`, `unknown`, `invalid`,
+`known_total_usd`, and `overflowed`. It sums only existing `cost_usd` values:
+finite nonnegative amounts (including explicit zero) are known; missing values
+are unknown; negative or nonfinite in-memory values are invalid. The three
+counts partition the matching runs. `known_total_usd` is the partial sum of
+known amounts, not an estimate of missing prices or an invoice. It is `null`
+when there are no known amounts or their sum exceeds finite `f64` range; the
+latter sets `overflowed=true`. JSON keeps approximate floating-point amounts
+without decimal rounding, and human output labels the sum as known saved cost.
+
+The same additive object is returned by CLI, REST and MCP statistics. Owner and
+request filters apply first, and each matching run contributes once regardless
+of status or attempt count. No price table, model call, historical repricing or
+ledger write occurs. Current dispatch does not automatically populate
+`cost_usd`, so its records remain unknown here. Existing list responses and
+provider groups keep their shape; this is not per-attempt or provider billing.
+The same three stats responses also include `usage`, with `input_tokens`,
+`output_tokens`, `reasoning_tokens` and `cached_input_tokens` objects. Each object
+has `known` and `unknown` run counts, `total_tokens` (the sum of reported values),
+and `overflowed`. Missing usage, or an absent optional detail field, increments
+that field's unknown count; a reported zero is known. No observations produce
+`total_tokens: null`, with `overflowed: false`; a sum above `u64::MAX` produces
+`null` with `overflowed: true`. Other fields and counts remain available. Totals
+use exact integer accumulation; JSON consumers must retain unsigned 64-bit
+integer precision rather than coercing them to floating point.
+
+Owner and query filters apply before these aggregates, and all matching runs
+contribute regardless of status or list defaults. Each saved run contributes
+once, even when it contains multiple attempts. Optional detail fields are summed
+independently as recorded: they are not added to input/output totals, clamped,
+inferred from output length, or treated as prices. These are known partial sums,
+not a claim that every attempt or upstream charge was measured. CLI text prints
+the same four summaries (`n/a` for a null total). This additive stats field does
+not change list responses, authentication, existing errors, or stored records;
+stats still rejects an explicit limit. Clients should tolerate additional stats
+fields. This change does not collect previously missing usage or price data.
 
 SSE streaming events (`POST /v1/dispatch/stream`):
 

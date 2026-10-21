@@ -1,0 +1,132 @@
+{
+  "all": {
+    "input_tokens": {
+      "known": 4,
+      "unknown": 122,
+      "total_tokens": 130,
+      "overflowed": false
+    },
+    "output_tokens": {
+      "known": 4,
+      "unknown": 122,
+      "total_tokens": 52,
+      "overflowed": false
+    },
+    "reasoning_tokens": {
+      "known": 3,
+      "unknown": 123,
+      "total_tokens": 5,
+      "overflowed": false
+    },
+    "cached_input_tokens": {
+      "known": 3,
+      "unknown": 123,
+      "total_tokens": 29,
+      "overflowed": false
+    }
+  },
+  "q": {
+    "input_tokens": {
+      "known": 1,
+      "unknown": 1,
+      "total_tokens": 100,
+      "overflowed": false
+    },
+    "output_tokens": {
+      "known": 1,
+      "unknown": 1,
+      "total_tokens": 40,
+      "overflowed": false
+    },
+    "reasoning_tokens": {
+      "known": 0,
+      "unknown": 2,
+      "total_tokens": null,
+      "overflowed": false
+    },
+    "cached_input_tokens": {
+      "known": 1,
+      "unknown": 1,
+      "total_tokens": 25,
+      "overflowed": false
+    }
+  },
+  "zero": {
+    "input_tokens": {
+      "known": 1,
+      "unknown": 0,
+      "total_tokens": 0,
+      "overflowed": false
+    },
+    "output_tokens": {
+      "known": 1,
+      "unknown": 0,
+      "total_tokens": 0,
+      "overflowed": false
+    },
+    "reasoning_tokens": {
+      "known": 1,
+      "unknown": 0,
+      "total_tokens": 0,
+      "overflowed": false
+    },
+    "cached_input_tokens": {
+      "known": 1,
+      "unknown": 0,
+      "total_tokens": 0,
+      "overflowed": false
+    }
+  },
+  "window": {
+    "input_tokens": {
+      "known": 2,
+      "unknown": 0,
+      "total_tokens": 20,
+      "overflowed": false
+    },
+    "output_tokens": {
+      "known": 2,
+      "unknown": 0,
+      "total_tokens": 7,
+      "overflowed": false
+    },
+    "reasoning_tokens": {
+      "known": 2,
+      "unknown": 0,
+      "total_tokens": 3,
+      "overflowed": false
+    },
+    "cached_input_tokens": {
+      "known": 1,
+      "unknown": 1,
+      "total_tokens": 0,
+      "overflowed": false
+    }
+  },
+  "empty": {
+    "input_tokens": {
+      "known": 0,
+      "unknown": 0,
+      "total_tokens": null,
+      "overflowed": false
+    },
+    "output_tokens": {
+      "known": 0,
+      "unknown": 0,
+      "total_tokens": null,
+      "overflowed": false
+    },
+    "reasoning_tokens": {
+      "known": 0,
+      "unknown": 0,
+      "total_tokens": null,
+      "overflowed": false
+    },
+    "cached_input_tokens": {
+      "known": 0,
+      "unknown": 0,
+      "total_tokens": null,
+      "overflowed": false
+    }
+  }
+}
