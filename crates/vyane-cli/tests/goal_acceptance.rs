@@ -251,7 +251,7 @@ fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
             "--priority",
             "1",
             // Machine-checkable criteria so the public path can record durable
-            // independent verification artifacts before completion (EOS-652 P2).
+            // independent verification artifacts before completion (goal verifier P2).
             "--acceptance",
             "custom:cmd:true",
             "--acceptance",
