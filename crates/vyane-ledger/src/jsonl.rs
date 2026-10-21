@@ -84,6 +84,9 @@ impl JsonlLedger {
                 "since must not be later than until",
             ));
         }
+        if query.limit == Some(0) {
+            return Ok((Vec::new(), 0));
+        }
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

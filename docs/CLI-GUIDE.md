@@ -291,7 +291,9 @@ these arguments or expose the hidden session/label metadata.
 A local CLI list with `--limit 0` returns no records (JSON: `[]`) without opening
 local storage. Its filter arguments are still validated first. Positive limits,
 list defaults and statistics retain their behavior; REST/MCP keep their existing
-positive-limit validation.
+positive-limit validation. The JSONL SDK also returns no records for
+`RunQuery.limit = Some(0)`, without reading the ledger; a reversed time window
+is still rejected first.
 
 Use `vyane history --stats --json`, `GET /v1/runs?stats=true`, or
 `vyane_history` with `{"stats": true}` to count every matching ledger run.

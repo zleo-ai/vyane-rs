@@ -325,3 +325,116 @@ async fn filters_combine() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].run_id, "match");
 }
+
+#[tokio::test]
+async fn zero_limit_query_returns_no_records_and_preserves_positive_scoping() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("zero-query.jsonl");
+    let ledger = JsonlLedger::new(&path);
+    let a = record("owned-old");
+    let mut foreign = record("foreign-new");
+    foreign.owner = "foreign".into();
+    let c = record("owned-new");
+    for row in [&a, &foreign, &c] {
+        ledger.append(row).await.unwrap();
+    }
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"malformed-tail\n")
+        .unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let zero = RunQuery {
+        owner: Some("local".into()),
+        provider: Some(ProviderId::new("openai")),
+        status: Some(RunStatus::Success),
+        limit: Some(0),
+        ..Default::default()
+    };
+    assert!(ledger.query(zero).await.unwrap().is_empty());
+    assert_eq!(
+        ledger.skipped_lines(),
+        0,
+        "zero query must not scan corrupt tail"
+    );
+    let one = RunQuery {
+        owner: Some("local".into()),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let rows = ledger.query(one).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].run_id, "owned-new");
+    assert_eq!(ledger.skipped_lines(), 1);
+    let all = ledger
+        .query(RunQuery {
+            owner: Some("local".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        all.iter().map(|r| r.run_id.as_str()).collect::<Vec<_>>(),
+        vec!["owned-new", "owned-old"]
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn zero_limit_query_skips_storage_but_still_rejects_reversed_window() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("directory-instead-of-ledger");
+    std::fs::create_dir(&path).unwrap();
+    let ledger = JsonlLedger::new(&path);
+    assert!(
+        ledger
+            .query(RunQuery {
+                limit: Some(0),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(ledger.skipped_lines(), 0);
+    assert!(
+        ledger
+            .query(RunQuery {
+                limit: Some(1),
+                ..Default::default()
+            })
+            .await
+            .is_err()
+    );
+    let since = "2026-01-02T00:00:00Z".parse().unwrap();
+    let until = "2026-01-01T00:00:00Z".parse().unwrap();
+    let error = ledger
+        .query(RunQuery {
+            since: Some(since),
+            until: Some(until),
+            limit: Some(0),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("since must not be later than until")
+    );
+    let missing = dir.path().join("absent/ledger.jsonl");
+    let ledger = JsonlLedger::new(&missing);
+    assert!(
+        ledger
+            .query(RunQuery {
+                limit: Some(0),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!missing.parent().unwrap().exists());
+}
