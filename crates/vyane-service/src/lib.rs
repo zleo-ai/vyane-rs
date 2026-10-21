@@ -125,7 +125,9 @@ pub use goal_observation::{
     GoalObservationWatcherErrorCode, MAX_GOAL_OBSERVATION_CONCURRENCY,
     MAX_GOAL_OBSERVATION_WATCHERS, MAX_GOAL_OBSERVATIONS_PER_WATCHER,
 };
-pub use history_stats::{HistoryCosts, HistoryDurations, HistoryStats, RunCounts};
+pub use history_stats::{
+    HistoryCosts, HistoryDurations, HistoryStats, HistoryTokenTotal, HistoryUsage, RunCounts,
+};
 pub use inprocess_agent::{
     InProcessAgentComponents, InProcessAgentEffect, InProcessAgentOperation,
     InProcessAgentOperationContext, InProcessAssemblyError, InProcessAuthorityError,

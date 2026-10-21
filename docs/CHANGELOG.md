@@ -12,6 +12,8 @@ This is a curated history, not a complete reconstruction of all development.
 - History statistics summarize saved USD costs across CLI, REST and MCP,
   with explicit unknown/invalid coverage and overflow instead of treating
   missing prices as free runs. No price lookup or ledger rewrite occurs.
+- Add saved token-usage statistics to CLI, REST and MCP history stats, with
+  per-field known/missing counts, exact partial totals and explicit overflow.
 
 - `vyane check --json` exposes bounded static configuration diagnostics for
   scripts, with redacted reports and fixed JSON errors. It never probes a

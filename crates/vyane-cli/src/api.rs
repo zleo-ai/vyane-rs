@@ -1519,7 +1519,7 @@ struct ItemsEnvelope<T: Serialize> {
 #[serde(untagged)]
 enum RunsResponse {
     Records(ItemsEnvelope<RunView>),
-    Stats(vyane_service::HistoryStats),
+    Stats(Box<vyane_service::HistoryStats>),
 }
 
 #[derive(Debug, Serialize)]
@@ -2385,7 +2385,7 @@ async fn runs(
             );
             ApiError::internal("run ledger unavailable")
         })?;
-        return Ok(Json(RunsResponse::Stats(stats)));
+        return Ok(Json(RunsResponse::Stats(Box::new(stats))));
     }
 
     let records = state.service.history_views(filter).await.map_err(|error| {
@@ -3655,6 +3655,49 @@ mod tests {
             .unwrap();
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(std::fs::read_to_string(&ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_usage_rest_counts_owned_filtered_samples_and_preserves_auth() {
+        const HISTORY: &str =
+            include_str!("../../vyane-service/tests/fixtures/history_usage.jsonl");
+        const EXPECTED: &str =
+            include_str!("../../vyane-service/tests/fixtures/history_usage_expected.json");
+        let expected: serde_json::Value = serde_json::from_str(EXPECTED).unwrap();
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, case, total) in [
+            ("?stats=true", "all", 126),
+            ("?stats=true&provider=q", "q", 2),
+            ("?stats=true&status=error", "zero", 1),
+            (
+                "?stats=true&provider=p&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T14:00:00Z",
+                "window",
+                2,
+            ),
+            ("?stats=true&provider=absent", "empty", 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["total"], total);
+            assert_eq!(body["usage"], expected[case], "{query}");
+            assert!(!body.to_string().contains("USAGE_PRIVATE_CANARY"));
+            assert!(body.get("session_id").is_none() && body.get("labels").is_none());
+        }
+        let response = app
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
     }
 
     #[tokio::test]

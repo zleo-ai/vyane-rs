@@ -2641,6 +2641,22 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
                 "Known saved cost: {known_cost} USD (known: {}, unknown: {}, invalid: {}, overflowed: {})",
                 stats.cost.known, stats.cost.unknown, stats.cost.invalid, stats.cost.overflowed
             );
+            for (label, tokens) in [
+                ("Input tokens", &stats.usage.input_tokens),
+                ("Output tokens", &stats.usage.output_tokens),
+                ("Reasoning tokens", &stats.usage.reasoning_tokens),
+                ("Cached input tokens", &stats.usage.cached_input_tokens),
+            ] {
+                let total = tokens
+                    .total_tokens()
+                    .map_or_else(|| "n/a".to_owned(), |v| v.to_string());
+                println!(
+                    "{label}: {total} (known: {}, unknown: {}, overflowed: {})",
+                    tokens.known,
+                    tokens.unknown,
+                    tokens.overflowed()
+                );
+            }
             println!(
                 "PROVIDER\tTOTAL\tSUCCESS\tERROR\tTIMEOUT\tCANCELLED\tSUCCESS RATE\tDURATION TOTAL\tDURATION MEAN\tDURATION SAMPLES\tDURATION INVALID"
             );
