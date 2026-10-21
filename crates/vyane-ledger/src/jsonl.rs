@@ -74,6 +74,19 @@ impl JsonlLedger {
     /// corrupt lines that were skipped. A missing file is an empty ledger, not
     /// an error.
     fn query_blocking(path: &Path, query: RunQuery) -> Result<(Vec<RunRecord>, u64)> {
+        if query
+            .since
+            .zip(query.until)
+            .is_some_and(|(since, until)| since > until)
+        {
+            return Err(VyaneError::new(
+                ErrorKind::Config,
+                "since must not be later than until",
+            ));
+        }
+        if query.limit == Some(0) {
+            return Ok((Vec::new(), 0));
+        }
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -82,11 +95,6 @@ impl JsonlLedger {
             Err(e) => return Err(e.into()),
         };
 
-        // from_utf8_lossy: a record line is UTF-8 JSON; bytes that aren't UTF-8
-        // (true corruption) become replacement chars and fail to parse, which
-        // is the correct "skip and count" outcome.
-        let text = String::from_utf8_lossy(&bytes);
-
         // Most-recent records are appended last, so walk the file backwards.
         // `limit` caps how many *matching* records we collect, not how many we
         // scan; `None` means return every match.
@@ -94,7 +102,13 @@ impl JsonlLedger {
         let mut out: Vec<RunRecord> = Vec::new();
         let mut skipped = 0u64;
 
-        for line in text.rsplit('\n') {
+        for line in bytes.rsplit(|&byte| byte == b'\n') {
+            // Validate each original line before parsing. Lossy decoding can
+            // turn corrupt string values or keys into valid, altered records.
+            let Ok(line) = std::str::from_utf8(line) else {
+                skipped += 1;
+                continue;
+            };
             let trimmed = line.trim_end();
             if trimmed.is_empty() {
                 // A blank line (e.g. the slot after a trailing newline) is not
@@ -170,7 +184,7 @@ impl Ledger for JsonlLedger {
 
 /// Whether `record` passes every filter set on `query`. Unset fields match
 /// anything. `owner` is matched exactly (owner is a scope, not a search term);
-/// `since` is compared against `started_at` (inclusive).
+/// `since` and `until` are compared against `started_at` (both inclusive).
 fn matches_query(record: &RunRecord, query: &RunQuery) -> bool {
     if let Some(owner) = &query.owner
         && record.owner != *owner
@@ -189,6 +203,11 @@ fn matches_query(record: &RunRecord, query: &RunQuery) -> bool {
     }
     if let Some(since) = query.since
         && record.started_at < since
+    {
+        return false;
+    }
+    if let Some(until) = query.until
+        && record.started_at > until
     {
         return false;
     }

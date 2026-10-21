@@ -1,0 +1,309 @@
+[
+  {
+    "name": "root-long-help",
+    "args": [
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Vyane assembles configured providers, protocols, CLI harnesses, the dispatch kernel, and local storage into one command-line tool.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check      Validate configuration and show local readiness\n  dispatch   Run one task against a profile, provider/model, or auto-routed target\n  broadcast  Run one task against several targets concurrently\n  history    Show recent run ledger records\n  sessions   List saved session records\n  session    Inspect and safely reset local continuity sessions\n  workflow   Run, resume, and list declarative workflows\n  review     Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route      Show what the router would pick for a task (dry-run, no dispatch)\n  task       Inspect and manage detached background runs\n  serve      Start the bearer-authenticated loopback HTTP API server\n  daemon     Run and control the authenticated local workflow daemon\n  a2a        Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  goal       Create, inspect, and advance owner-scoped local goals\n  mcp        Run the MCP server over stdio (for use as an MCP tool server)\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n  -h, --help\n          Print help (see a summary with '-h')\n\n  -V, --version\n          Print version\n",
+    "stderr": ""
+  },
+  {
+    "name": "root-short-help",
+    "args": [
+      "-h"
+    ],
+    "exit_code": 0,
+    "stdout": "Run configured AI targets with failover and a local run ledger.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check      Validate configuration and show local readiness\n  dispatch   Run one task against a profile, provider/model, or auto-routed target\n  broadcast  Run one task against several targets concurrently\n  history    Show recent run ledger records\n  sessions   List saved session records\n  session    Inspect and safely reset local continuity sessions\n  workflow   Run, resume, and list declarative workflows\n  review     Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route      Show what the router would pick for a task (dry-run, no dispatch)\n  task       Inspect and manage detached background runs\n  serve      Start the bearer-authenticated loopback HTTP API server\n  daemon     Run and control the authenticated local workflow daemon\n  a2a        Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  goal       Create, inspect, and advance owner-scoped local goals\n  mcp        Run the MCP server over stdio (for use as an MCP tool server)\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help (see more with '--help')\n  -V, --version        Print version\n",
+    "stderr": ""
+  },
+  {
+    "name": "check-help",
+    "args": [
+      "check",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Validate configuration and show local readiness\n\nUsage: vyane check [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --json           Emit static configuration diagnostics as JSON without probing harnesses\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "dispatch-help",
+    "args": [
+      "dispatch",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Run one task against a profile, provider/model, or auto-routed target\n\nUsage: vyane dispatch [OPTIONS] --target <TARGET> <TASK>\n\nArguments:\n  <TASK>  Task text to submit\n\nOptions:\n      --config <PATH>      Config file to load instead of the default user + project files\n      --target <TARGET>    Target profile, provider/model pair, or `auto`. Use `profile:auto` to select a profile literally named `auto`\n      --workdir <PATH>     Working directory for harness runs\n      --sandbox <SANDBOX>  Workspace permission level for harness runs [default: read-only] [possible values: read-only, write, full]\n      --session <ID>       Continue or create a logical session id\n      --system <TEXT>      System prompt for direct HTTP, appended instructions for harnesses\n      --timeout <SECS>     Attempt timeout in seconds; absent means no timeout\n      --label <k=v>        Label to store on the run record; repeatable as key=value. Router output fields such as routing.provider and routing.effort are reserved\n      --no-frontier        For `--target auto`, prohibit frontier-tier routing\n      --detach             Run in the background: spawn a detached worker, print its id, and exit without waiting. Inspect it later with `vyane task`\n      --json               Emit machine-readable JSON\n      --stream             Stream deltas to stdout as they arrive for one direct-HTTP or CLI-harness target; falls back to non-streaming for sessions or failover chains\n  -h, --help               Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "broadcast-help",
+    "args": [
+      "broadcast",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Run one task against several targets concurrently\n\nUsage: vyane broadcast [OPTIONS] --targets <a,b,c> <TASK>\n\nArguments:\n  <TASK>  Task text to submit to each target\n\nOptions:\n      --config <PATH>      Config file to load instead of the default user + project files\n      --targets <a,b,c>    Comma-separated target list; each target is a profile or provider/model\n      --workdir <PATH>     Working directory for harness runs\n      --sandbox <SANDBOX>  Workspace permission level for harness runs [default: read-only] [possible values: read-only, write, full]\n      --system <TEXT>      System prompt for direct HTTP, appended instructions for harnesses\n      --timeout <SECS>     Attempt timeout in seconds; absent means no timeout\n      --label <k=v>        Label to store on each run record; repeatable as key=value\n      --json               Emit machine-readable JSON\n  -h, --help               Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "history-help",
+    "args": [
+      "history",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Show recent run ledger records\n\nUsage: vyane history [OPTIONS]\n\nOptions:\n      --config <PATH>        Config file to load instead of the default user + project files\n      --stats                Count all matching runs by provider and status, instead of listing them\n      --limit <LIMIT>        Maximum number of records to show; zero returns no records [default: 20]\n      --status <STATUS>      Filter by run status [possible values: success, error, timeout, cancelled]\n      --provider <PROVIDER>  Filter by provider id\n      --since <TIMESTAMP>    Include runs started at or after this RFC 3339 timestamp (with timezone)\n      --until <TIMESTAMP>    Include runs started at or before this RFC 3339 timestamp (with timezone)\n      --session <SESSION>    Exact session id in the existing local owner's records (local CLI only)\n      --label <KEY=VALUE>    Exact label KEY=VALUE; repeat for AND matching (local CLI only)\n      --json                 Emit machine-readable JSON\n  -h, --help                 Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "sessions-help",
+    "args": [
+      "sessions",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "List saved session records\n\nUsage: vyane sessions [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "session-help",
+    "args": [
+      "session",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Inspect and safely reset local continuity sessions\n\nUsage: vyane session [OPTIONS] <COMMAND>\n\nCommands:\n  list          List redacted, revision-aware continuity sessions\n  inspect       Inspect one redacted continuity session\n  reset-native  Remove native harness continuity using revision-fenced compare-and-swap\n  help          Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "workflow-help",
+    "args": [
+      "workflow",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Run, resume, and list declarative workflows\n\nUsage: vyane workflow [OPTIONS] <COMMAND>\n\nCommands:\n  plan    Inspect a static workflow plan without executing any steps\n  run     Run a workflow TOML file\n  submit  Submit a workflow source bundle to the resident daemon\n  status  Show one daemon-owned workflow task\n  cancel  Request cancellation of one daemon-owned workflow task\n  resume  Resume a workflow run from its journal\n  replay  Replay a journal-recorded all-success prefix into a new workflow run\n  list    List workflow journals\n  help    Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "review-help",
+    "args": [
+      "review",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Run a built-in multi-model review pipeline (implement → review → synthesize)\n\nUsage: vyane review [OPTIONS] --implementer <TARGET> --reviewers <a,b,c> --synthesizer <TARGET> <TASK>\n\nArguments:\n  <TASK>  Task / prompt text to implement and review\n\nOptions:\n      --config <PATH>         Config file to load instead of the default user + project files\n      --implementer <TARGET>  Target profile for the implementation step\n      --reviewers <a,b,c>     Comma-separated reviewer target profiles (e.g. \"opus,gpt,sonnet\")\n      --synthesizer <TARGET>  Target profile for the synthesis step\n      --workdir <PATH>        Working directory for harness runs\n      --timeout-secs <SECS>   Per-attempt timeout in seconds\n      --json                  Emit machine-readable JSON\n  -h, --help                  Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "route-help",
+    "args": [
+      "route",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Show what the router would pick for a task (dry-run, no dispatch)\n\nUsage: vyane route [OPTIONS] <TASK>\n\nArguments:\n  <TASK>  Task text to analyze\n\nOptions:\n      --config <PATH>         Config file to load instead of the default user + project files\n      --stage <STAGE>         Override the routing stage (e.g. \"plan\", \"review\", \"architecture\")\n      --tier <TIER>           Override the tier directly: economy, mainline, or frontier\n      --tags <a,b,c>          Extra tags beyond what's inferred from the task text (comma-separated)\n      --candidates <a,b,c>    Restrict routing to these profile names only (comma-separated)\n      --changed-files <N>     Number of changed files (routing signal)\n      --dependency-edges <N>  Number of cross-file dependency edges (routing signal)\n      --retry-count <N>       Retry count — how many times this task has been retried (routing signal)\n      --no-frontier           Prohibit frontier-tier routing\n      --json                  Emit machine-readable JSON\n  -h, --help                  Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "task-help",
+    "args": [
+      "task",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Inspect and manage detached background runs\n\nUsage: vyane task [OPTIONS] <COMMAND>\n\nCommands:\n  list    List detached runs, most recent first\n  status  Show one detached run's status and recent log lines\n  cancel  Terminate a detached run's process group\n  help    Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "serve-help",
+    "args": [
+      "serve",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Start the bearer-authenticated loopback HTTP API server\n\nUsage: vyane serve [OPTIONS]\n\nOptions:\n      --addr <ADDR>    Loopback listen address. Non-loopback addresses are rejected [default: 127.0.0.1:9721]\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "daemon-help",
+    "args": [
+      "daemon",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Run and control the authenticated local workflow daemon\n\nUsage: vyane daemon [OPTIONS] <COMMAND>\n\nCommands:\n  run     Run the daemon in the foreground\n  start   Start the daemon in a detached session and wait for readiness\n  status  Verify the recorded daemon process and authenticated health endpoint\n  stop    Gracefully stop the exact recorded daemon process\n  help    Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "a2a-help",
+    "args": [
+      "a2a",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Use a local SQLite inbox; this is not authenticated A2A protocol transport\n\nUsage: vyane a2a [OPTIONS] <COMMAND>\n\nCommands:\n  send   Queue one local message for an agent mailbox\n  inbox  List one local agent mailbox without changing delivery state\n  read   Deliver one exact mailbox message, then acknowledge after stdout flushes\n  help   Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-help",
+    "args": [
+      "goal",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Create, inspect, and advance owner-scoped local goals\n\nUsage: vyane goal [OPTIONS] <COMMAND>\n\nCommands:\n  create              Create a queued goal\n  get                 Show one goal and its append-only events\n  list                List goals by priority and recent activity\n  next                Show the highest-priority queued goal\n  start               Move a queued or paused goal to in_progress\n  claim               Atomically claim a queued goal for a worker under a lease\n  claim-next          Atomically select and claim the highest-priority queued goal\n  renew               Heartbeat: extend the lease currently held by a worker\n  reclaim             Take over a goal whose lease has expired\n  satisfy             Record that an acceptance criterion was actually verified\n  verify              Run bounded local acceptance checks and persist successful criteria\n  pursue              Repeatedly verify and dispatch fresh bounded work segments until achieved or paused\n  continuity-next     Project the current continuity next action without mutating or dispatching\n  continuity-queue    Queue one approval bound to the current ready takeover or review step; never dispatches\n  continuity-decide   Explicitly approve or reject one pending continuity approval\n  continuity-execute  Consume one approved continuity approval and execute exactly once\n  continuity-signal   Record one exact external continuity readiness signal; never dispatches\n  progress            Append a progress event without changing lifecycle state\n  pause               Pause an in-progress goal; releases any lease (holder-only while leased)\n  resume              Resume a paused goal; resumed goals are always unleased\n  done                Mark an in-progress goal completed\n  fail                Mark an in-progress goal failed\n  cancel              Cancel a queued, in-progress, or paused goal\n  help                Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "mcp-help",
+    "args": [
+      "mcp",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Run the MCP server over stdio (for use as an MCP tool server)\n\nUsage: vyane mcp [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "workflow-plan-help",
+    "args": [
+      "workflow",
+      "plan",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Compile a workflow TOML file and its prompt files into the existing static plan. This does not resolve targets, render templates, load runtime configuration, call models, or create a run journal. The plan describes requested capabilities, not execution authorization.\n\nUsage: vyane workflow plan [OPTIONS] <FILE>\n\nArguments:\n  <FILE>\n          Workflow TOML file to inspect; prompt files are relative to this file\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n      --json\n          Emit the full plan payload, including prompts, system text, and workdirs\n\n  -h, --help\n          Print help (see a summary with '-h')\n",
+    "stderr": ""
+  },
+  {
+    "name": "missing-command",
+    "args": [],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: 'vyane' requires a subcommand but one was not provided\n  [subcommands: check, dispatch, broadcast, history, sessions, session, workflow, review, route, task, serve, daemon, a2a, goal, mcp, __worker, help]\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "unknown-command",
+    "args": [
+      "unknown-contract-command"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: unrecognized subcommand 'unknown-contract-command'\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "missing-dispatch-task",
+    "args": [
+      "dispatch"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: the following required arguments were not provided:\n  --target <TARGET>\n  <TASK>\n\nUsage: vyane dispatch --target <TARGET> <TASK>\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "missing-workflow-command",
+    "args": [
+      "workflow"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "Run, resume, and list declarative workflows\n\nUsage: vyane workflow [OPTIONS] <COMMAND>\n\nCommands:\n  plan    Inspect a static workflow plan without executing any steps\n  run     Run a workflow TOML file\n  submit  Submit a workflow source bundle to the resident daemon\n  status  Show one daemon-owned workflow task\n  cancel  Request cancellation of one daemon-owned workflow task\n  resume  Resume a workflow run from its journal\n  replay  Replay a journal-recorded all-success prefix into a new workflow run\n  list    List workflow journals\n  help    Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n"
+  },
+  {
+    "name": "missing-plan-file",
+    "args": [
+      "workflow",
+      "plan"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: the following required arguments were not provided:\n  <FILE>\n\nUsage: vyane workflow plan <FILE>\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "unknown-history-option",
+    "args": [
+      "history",
+      "--unknown-contract-option"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: unexpected argument '--unknown-contract-option' found\n\nUsage: vyane history [OPTIONS]\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "invalid-history-status",
+    "args": [
+      "history",
+      "--status",
+      "not-a-status"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: invalid value 'not-a-status' for '--status <STATUS>'\n  [possible values: success, error, timeout, cancelled]\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "invalid-history-timestamp",
+    "args": [
+      "history",
+      "--since",
+      "not-a-timestamp"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: invalid value 'not-a-timestamp' for '--since <TIMESTAMP>': input contains invalid characters\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "conflicting-history-options",
+    "args": [
+      "history",
+      "--stats",
+      "--limit",
+      "1"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: the argument '--stats' cannot be used with '--limit <LIMIT>'\n\nUsage: vyane history --stats\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "history-zero-json",
+    "args": [
+      "history",
+      "--limit",
+      "0",
+      "--json"
+    ],
+    "exit_code": 0,
+    "stdout": "[]\n",
+    "stderr": ""
+  },
+  {
+    "name": "history-invalid-label",
+    "args": [
+      "history",
+      "--label",
+      "invalid",
+      "--limit",
+      "0"
+    ],
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "error: history label filter must be KEY=VALUE with a nonempty key\n"
+  },
+  {
+    "name": "history-inverted-window",
+    "args": [
+      "history",
+      "--since",
+      "2026-01-02T00:00:00Z",
+      "--until",
+      "2026-01-01T00:00:00Z",
+      "--limit",
+      "0"
+    ],
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "error: since must not be later than until\n"
+  }
+]

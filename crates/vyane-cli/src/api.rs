@@ -1449,6 +1449,9 @@ pub struct BroadcastRequest {
 /// Query params for `GET /v1/runs`.
 #[derive(Debug, Default, Deserialize)]
 pub struct RunsQuery {
+    /// Count all matching runs. An explicit list limit is incompatible with this mode.
+    #[serde(default)]
+    pub stats: bool,
     /// Max records to return. `None` defaults to 100. `0` is rejected as 400.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -1457,6 +1460,12 @@ pub struct RunsQuery {
     pub status: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Include runs started at or after this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Include runs started at or before this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Default and max record limits for `GET /v1/runs`.
@@ -1504,6 +1513,13 @@ impl From<DispatchOutcome> for DispatchResponse {
 #[derive(Debug, Serialize)]
 struct ItemsEnvelope<T: Serialize> {
     items: Vec<T>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum RunsResponse {
+    Records(ItemsEnvelope<RunView>),
+    Stats(Box<vyane_service::HistoryStats>),
 }
 
 #[derive(Debug, Serialize)]
@@ -2321,12 +2337,22 @@ async fn broadcast(
 async fn runs(
     State(state): State<ApiState>,
     Query(query): Query<RunsQuery>,
-) -> Result<Json<ItemsEnvelope<RunView>>, ApiError> {
+) -> Result<Json<RunsResponse>, ApiError> {
+    if query
+        .since
+        .zip(query.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(ApiError::bad_request("since must not be later than until"));
+    }
     let status = match query.status.as_deref() {
         Some(s) => Some(parse_run_status(s)?),
         None => None,
     };
 
+    if query.stats && query.limit.is_some() {
+        return Err(ApiError::bad_request("stats cannot be combined with limit"));
+    }
     let limit = match query.limit {
         Some(0) => {
             return Err(ApiError::bad_request(
@@ -2339,6 +2365,7 @@ async fn runs(
             )));
         }
         Some(n) => Some(n),
+        None if query.stats => None,
         None => Some(DEFAULT_RUN_LIMIT),
     };
 
@@ -2346,7 +2373,20 @@ async fn runs(
         limit,
         status,
         provider: query.provider,
+        since: query.since,
+        until: query.until,
     };
+
+    if query.stats {
+        let stats = state.service.history_stats(filter).await.map_err(|error| {
+            eprintln!(
+                "{}",
+                crate::output::format_run_ledger_query_error_line(&format!("{error:#}"))
+            );
+            ApiError::internal("run ledger unavailable")
+        })?;
+        return Ok(Json(RunsResponse::Stats(Box::new(stats))));
+    }
 
     let records = state.service.history_views(filter).await.map_err(|error| {
         eprintln!(
@@ -2355,7 +2395,9 @@ async fn runs(
         );
         ApiError::internal("run ledger unavailable")
     })?;
-    Ok(Json(ItemsEnvelope { items: records }))
+    Ok(Json(RunsResponse::Records(ItemsEnvelope {
+        items: records,
+    })))
 }
 
 async fn sessions(
@@ -3568,6 +3610,482 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_cost_rest_projects_owned_filtered_saved_values() {
+        const HISTORY: &str = include_str!("../../vyane-service/tests/fixtures/history_cost.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "?stats=true",
+                serde_json::json!({"known":123,"unknown":1,"invalid":1,"known_total_usd":62.0,"overflowed":false}),
+            ),
+            (
+                "?stats=true&provider=q",
+                serde_json::json!({"known":1,"unknown":1,"invalid":1,"known_total_usd":0.75,"overflowed":false}),
+            ),
+            (
+                "?stats=true&status=timeout",
+                serde_json::json!({"known":0,"unknown":1,"invalid":0,"known_total_usd":null,"overflowed":false}),
+            ),
+            (
+                "?stats=true&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T13:00:00Z",
+                serde_json::json!({"known":1,"unknown":1,"invalid":1,"known_total_usd":1.25,"overflowed":false}),
+            ),
+            (
+                "?stats=true&provider=absent",
+                serde_json::json!({"known":0,"unknown":0,"invalid":0,"known_total_usd":null,"overflowed":false}),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["cost"], expected, "{query}");
+            assert!(!body.to_string().contains("COST_PRIVATE_CANARY"));
+        }
+        let denied = app
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_usage_rest_counts_owned_filtered_samples_and_preserves_auth() {
+        const HISTORY: &str =
+            include_str!("../../vyane-service/tests/fixtures/history_usage.jsonl");
+        const EXPECTED: &str =
+            include_str!("../../vyane-service/tests/fixtures/history_usage_expected.json");
+        let expected: serde_json::Value = serde_json::from_str(EXPECTED).unwrap();
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, case, total) in [
+            ("?stats=true", "all", 126),
+            ("?stats=true&provider=q", "q", 2),
+            ("?stats=true&status=error", "zero", 1),
+            (
+                "?stats=true&provider=p&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T14:00:00Z",
+                "window",
+                2,
+            ),
+            ("?stats=true&provider=absent", "empty", 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["total"], total);
+            assert_eq!(body["usage"], expected[case], "{query}");
+            assert!(!body.to_string().contains("USAGE_PRIVATE_CANARY"));
+            assert!(body.get("session_id").is_none() && body.get("labels").is_none());
+        }
+        let response = app
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn provider_duration_rest_projects_complete_owned_final_provider_groups() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_duration.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "?stats=true",
+                serde_json::json!({"p":{"samples":33,"invalid":0,"total_ms":4250,"mean_ms":128.8},"q":{"samples":1,"invalid":1,"total_ms":2750,"mean_ms":2750.0}}),
+            ),
+            (
+                "?stats=true&provider=p",
+                serde_json::json!({"p":{"samples":33,"invalid":0,"total_ms":4250,"mean_ms":128.8}}),
+            ),
+            (
+                "?stats=true&status=cancelled",
+                serde_json::json!({"q":{"samples":0,"invalid":1,"total_ms":null,"mean_ms":null}}),
+            ),
+            (
+                "?stats=true&provider=p&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T14:00:00Z",
+                serde_json::json!({"p":{"samples":2,"invalid":0,"total_ms":0,"mean_ms":0.0}}),
+            ),
+            ("?stats=true&provider=absent", serde_json::json!({})),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["by_provider_duration"], expected, "{query}");
+            assert!(!body.to_string().contains("DURATION_PRIVATE_CANARY"));
+            assert_eq!(
+                body["by_provider"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .collect::<Vec<_>>(),
+                body["by_provider_duration"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .collect::<Vec<_>>()
+            );
+        }
+        let response = app
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_duration_rest_projects_owned_filtered_record_timings() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_duration.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, total, expected) in [
+            (
+                "?stats=true",
+                35,
+                serde_json::json!({"samples":34,"invalid":1,"total_ms":7000,"mean_ms":205.9}),
+            ),
+            (
+                "?stats=true&provider=q",
+                2,
+                serde_json::json!({"samples":1,"invalid":1,"total_ms":2750,"mean_ms":2750.0}),
+            ),
+            (
+                "?stats=true&status=cancelled",
+                1,
+                serde_json::json!({"samples":0,"invalid":1,"total_ms":null,"mean_ms":null}),
+            ),
+            (
+                "?stats=true&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T14:00:00Z&provider=p",
+                2,
+                serde_json::json!({"samples":2,"invalid":0,"total_ms":0,"mean_ms":0.0}),
+            ),
+            (
+                "?stats=true&provider=absent",
+                0,
+                serde_json::json!({"samples":0,"invalid":0,"total_ms":null,"mean_ms":null}),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["total"], total, "{query}");
+            assert_eq!(body["duration"], expected, "{query}");
+            assert!(!body.to_string().contains("DURATION_PRIVATE_CANARY"));
+            assert!(body.get("session_id").is_none() && body.get("labels").is_none());
+        }
+        let response = app
+            .clone()
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(goal_request("/v1/runs", Some(API_TOKEN)))
+            .await
+            .unwrap();
+        let body = response_json(response).await;
+        assert_eq!(body["items"].as_array().unwrap().len(), 35);
+        assert!(
+            body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r.get("duration").is_none()
+                    && r.get("labels").is_none()
+                    && r.get("session_id").is_none())
+        );
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_stats_rest_success_rates_use_filtered_counts_and_unknown_empty_samples() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_stats.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            ("?stats=true", serde_json::json!(25.0)),
+            (
+                "?stats=true&until=2026-01-01T11:00:00Z",
+                serde_json::json!(25.0),
+            ),
+            (
+                "?stats=true&provider=q&status=success",
+                serde_json::json!(100.0),
+            ),
+            ("?stats=true&status=error", serde_json::json!(0.0)),
+            (
+                "?stats=true&since=2026-01-02T00:00:00Z",
+                serde_json::Value::Null,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body.get("success_rate"), Some(&expected), "query: {query}");
+            if query == "?stats=true" {
+                assert_eq!(body["by_provider"]["p"]["success_rate"], 0.0);
+                assert_eq!(body["by_provider"]["q"]["success_rate"], 100.0);
+            }
+        }
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_stats_rest_counts_all_filtered_runs_without_a_list_limit() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_stats.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, total) in [
+            ("?stats=true", 120),
+            ("?stats=true&since=2026-01-01T14:00:00%2B02:00", 80),
+            (
+                "?stats=true&provider=p&status=error&since=2026-01-01T12:00:00Z",
+                20,
+            ),
+            ("?stats=true&since=2026-01-02T00:00:00Z", 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["total"], total, "query: {query}");
+            assert!(body["by_provider"].get("foreign-provider-canary").is_none());
+            assert!(!body.to_string().contains("STATS_PRIVATE_DATA_CANARY"));
+            if total == 120 {
+                assert_eq!(
+                    body["by_provider"]["p"],
+                    serde_json::json!({"total":90,"success":0,"error":30,"timeout":30,"cancelled":30,"success_rate":0.0})
+                );
+            }
+        }
+        for query in [
+            "?stats=true&limit=1",
+            "?stats=true&status=unknown",
+            "?stats=true&since=yesterday",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "query: {query}");
+        }
+        let response = app
+            .oneshot(goal_request("/v1/runs", Some(API_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(
+            response_json(response).await["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            100
+        );
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_until_rest_bounds_lists_and_statistics_and_rejects_invalid_windows() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_since.jsonl");
+        let data = crate::test_support::private_tempdir();
+        let ledger = data.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "?until=2026-01-01T12:00:00Z",
+                vec!["late-old", "boundary", "before"],
+            ),
+            (
+                "?since=2026-01-01T12:00:00Z&until=2026-01-01T14:00:00%2B02:00",
+                vec!["boundary"],
+            ),
+            (
+                "?until=2026-01-01T14:00:00.001%2B02:00",
+                vec!["late-old", "after", "boundary", "before"],
+            ),
+            (
+                "?since=2026-01-01T11:00:00Z&until=2026-01-01T12:00:00Z&limit=1",
+                vec!["boundary"],
+            ),
+            (
+                "?until=2026-01-01T14:00:00Z&provider=p&status=error",
+                vec!["error"],
+            ),
+            ("?until=2026-01-01T09:00:00Z", vec![]),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            let ids: Vec<_> = body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["run_id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, expected, "query: {query}");
+        }
+        for (query, total) in [
+            ("?stats=true&until=2026-01-01T12:00:00Z", 3),
+            (
+                "?stats=true&since=2026-01-01T12:00:00Z&until=2026-01-01T12:00:00Z",
+                1,
+            ),
+            (
+                "?stats=true&until=2026-01-01T14:00:00Z&provider=p&status=error",
+                1,
+            ),
+            ("?stats=true&until=2026-01-01T09:00:00Z", 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(response).await["total"],
+                total,
+                "query: {query}"
+            );
+        }
+        for query in [
+            "?until=yesterday",
+            "?until=2026-01-01",
+            "?until=2026-01-01T12:00:00",
+            "?until=2026-02-30T12:00:00Z",
+            "?since=2026-01-02T00:00:00Z&until=2026-01-01T00:00:00Z",
+            "?stats=true&until=yesterday",
+            "?stats=true&since=2026-01-02T00:00:00Z&until=2026-01-01T00:00:00Z",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "query: {query}");
+        }
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_since_rest_filters_before_limit_and_rejects_invalid_dates() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_since.jsonl");
+        let data = crate::test_support::private_tempdir();
+        let ledger = data.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "",
+                vec![
+                    "late-old",
+                    "error",
+                    "other-provider",
+                    "after",
+                    "boundary",
+                    "before",
+                ],
+            ),
+            (
+                "?since=2026-01-01T12:00:00Z",
+                vec!["error", "other-provider", "after", "boundary"],
+            ),
+            (
+                "?since=2026-01-01T14:00:00%2B02:00&provider=p&status=success",
+                vec!["after", "boundary"],
+            ),
+            (
+                "?since=2026-01-01T12:00:00Z&provider=p&status=success&limit=1",
+                vec!["after"],
+            ),
+            ("?since=2026-01-02T00:00:00Z", vec![]),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            let ids: Vec<_> = body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|record| record["run_id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, expected, "query: {query}");
+        }
+        for since in [
+            "yesterday",
+            "2026-01-01",
+            "2026-01-01T12:00:00",
+            "2026-02-30T12:00:00Z",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(
+                    &format!("/v1/runs?since={since}"),
+                    Some(API_TOKEN),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "since: {since}");
+        }
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
     async fn rest_dispatch_broadcast_history_and_sessions_share_the_frozen_local_scope() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3614,6 +4132,9 @@ mod tests {
         let Json(run_views) = runs(State(state.clone()), Query(RunsQuery::default()))
             .await
             .unwrap();
+        let RunsResponse::Records(run_views) = run_views else {
+            panic!("default history request must return record views");
+        };
         assert_eq!(run_views.items.len(), 3);
         let Json(session_views) = sessions(State(state)).await.unwrap();
         assert_eq!(session_views.items.len(), 1);

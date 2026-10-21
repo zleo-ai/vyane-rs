@@ -21,8 +21,8 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
-chrono = { workspace = true }
 rmcp = { workspace = true, features = ["client"] }
 tempfile = { workspace = true }

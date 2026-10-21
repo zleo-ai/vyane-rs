@@ -1,0 +1,1691 @@
+{
+  "schema_version": 1,
+  "suite": "dispatch_trail",
+  "normalization": {
+    "reference_snapshot": "execution-behavior-v1; this supplementary capture does not refresh the older classifier/routing suites.",
+    "target": "Preserve provider/protocol/model; direct-chat maps to none and codex-cli maps to codex. Explicit configuration only; no provider inference or model catalog equivalence is claimed.",
+    "trace": "Preserve every executed attempt in order, its four target coordinates, status and reason; failed_over means another recorded attempt follows. Timing, generated ids and private execution context are omitted.",
+    "scope": "Fresh sessionless dispatch with one attempt per target and supplied candidate order; scripted adapter outcomes, not real HTTP, process execution, retry timing or candidate selection."
+  },
+  "cases": [
+    {
+      "id": "dispatch-trail.primary-success",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "success",
+          "success",
+          "success"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "success",
+            "error_code": "",
+            "trigger_reason": ""
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "dispatch-trail.error-then-success",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "execution_error",
+          "success",
+          "success"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "error",
+            "error_code": "execution_error",
+            "trigger_reason": ""
+          },
+          {
+            "ordinal": 2,
+            "resolved_provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "status": "success",
+            "error_code": "",
+            "trigger_reason": "execution_error"
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "dispatch-trail.two-errors-then-success",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "execution_error",
+          "execution_error",
+          "success"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "error",
+            "error_code": "execution_error",
+            "trigger_reason": ""
+          },
+          {
+            "ordinal": 2,
+            "resolved_provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "status": "error",
+            "error_code": "execution_error",
+            "trigger_reason": "execution_error"
+          },
+          {
+            "ordinal": 3,
+            "resolved_provider": "fixture-c",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "status": "success",
+            "error_code": "",
+            "trigger_reason": "execution_error"
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "model": "model-c"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 3,
+            "target": {
+              "provider": "fixture-c",
+              "protocol": "openai_chat",
+              "harness": "opencode",
+              "model": "model-c"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "model": "model-c"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 3,
+            "target": {
+              "provider": "fixture-c",
+              "protocol": "openai_chat",
+              "harness": "opencode",
+              "model": "model-c"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "model": "model-c"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "dispatch-trail.mixed-errors-then-success",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "execution_error",
+          "rate_limit",
+          "success"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "error",
+            "error_code": "execution_error",
+            "trigger_reason": ""
+          },
+          {
+            "ordinal": 2,
+            "resolved_provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "status": "error",
+            "error_code": "rate_limit",
+            "trigger_reason": "execution_error"
+          },
+          {
+            "ordinal": 3,
+            "resolved_provider": "fixture-c",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "status": "success",
+            "error_code": "",
+            "trigger_reason": "execution_error"
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "model": "model-c"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "error",
+            "reason": "rate_limit",
+            "failed_over": true
+          },
+          {
+            "ordinal": 3,
+            "target": {
+              "provider": "fixture-c",
+              "protocol": "openai_chat",
+              "harness": "opencode",
+              "model": "model-c"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "model": "model-c"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "error",
+            "reason": "rate_limit",
+            "failed_over": true
+          },
+          {
+            "ordinal": 3,
+            "target": {
+              "provider": "fixture-c",
+              "protocol": "openai_chat",
+              "harness": "opencode",
+              "model": "model-c"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "model": "model-c"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "dispatch-trail.exhausted",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "execution_error",
+          "execution_error",
+          "execution_error"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "error",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "error",
+            "error_code": "execution_error",
+            "trigger_reason": ""
+          },
+          {
+            "ordinal": 2,
+            "resolved_provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "status": "error",
+            "error_code": "execution_error",
+            "trigger_reason": "execution_error"
+          },
+          {
+            "ordinal": 3,
+            "resolved_provider": "fixture-c",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "status": "error",
+            "error_code": "execution_error",
+            "trigger_reason": "execution_error"
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "model": "model-c"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "error",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 3,
+            "target": {
+              "provider": "fixture-c",
+              "protocol": "openai_chat",
+              "harness": "opencode",
+              "model": "model-c"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "model": "model-c"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "error",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 3,
+            "target": {
+              "provider": "fixture-c",
+              "protocol": "openai_chat",
+              "harness": "opencode",
+              "model": "model-c"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          },
+          {
+            "provider": "fixture-c",
+            "model": "model-c"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "dispatch-trail.single-error",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "execution_error"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "error",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "error",
+            "error_code": "execution_error",
+            "trigger_reason": ""
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "error",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "error",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "dispatch-trail.timeout",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "timeout",
+          "success",
+          "success"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "timeout",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "timeout",
+            "error_code": "timeout",
+            "trigger_reason": ""
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "timeout",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "timeout",
+            "reason": "timeout",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "timeout",
+            "reason": "timeout",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "disposition": "open_difference",
+      "blocker": "BLOCKER EXE-02: the reference stops on a typed timeout; Rust allows a timeout to advance to the next admitted target."
+    },
+    {
+      "id": "dispatch-trail.rate-limit",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "rate_limit",
+          "success",
+          "success"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "error",
+            "error_code": "rate_limit",
+            "trigger_reason": ""
+          },
+          {
+            "ordinal": 2,
+            "resolved_provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "status": "success",
+            "error_code": "",
+            "trigger_reason": "rate_limit"
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "rate_limit",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "rate_limit",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "disposition": "normalized_exact",
+      "blocker": null
+    },
+    {
+      "id": "dispatch-trail.quota",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "quota_exhausted",
+          "success",
+          "success"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "error",
+            "error_code": "quota_exhausted",
+            "trigger_reason": ""
+          },
+          {
+            "ordinal": 2,
+            "resolved_provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "status": "success",
+            "error_code": "",
+            "trigger_reason": "quota_exhausted"
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "quota_exhausted",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "rate_limit",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "disposition": "open_difference",
+      "blocker": "BLOCKER EXE-02: the reference records quota_exhausted separately; Rust records the combined RateLimited category as rate_limit."
+    },
+    {
+      "id": "dispatch-trail.auth",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "auth",
+          "success",
+          "success"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "error",
+            "error_code": "execution_error",
+            "trigger_reason": ""
+          },
+          {
+            "ordinal": 2,
+            "resolved_provider": "fixture-b",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "status": "success",
+            "error_code": "",
+            "trigger_reason": "execution_error"
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "execution_error",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "success",
+        "output": "fixture reply",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "auth",
+            "failed_over": true
+          },
+          {
+            "ordinal": 2,
+            "target": {
+              "provider": "fixture-b",
+              "protocol": "anthropic_messages",
+              "harness": "claude-code",
+              "model": "model-b"
+            },
+            "status": "success",
+            "reason": "",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          },
+          {
+            "provider": "fixture-b",
+            "model": "model-b"
+          }
+        ]
+      },
+      "disposition": "open_difference",
+      "blocker": "BLOCKER EXE-02: both executions advance after authentication failure, but the reference reason is execution_error while Rust retains Auth."
+    },
+    {
+      "id": "dispatch-trail.policy-blocked",
+      "oracle_locator": {
+        "fn": "dispatch_scripted_attempts"
+      },
+      "input": {
+        "targets": [
+          {
+            "provider": "fixture-a",
+            "provider_protocol": "openai_responses",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-b",
+            "provider_protocol": "anthropic_messages",
+            "protocol": "anthropic_messages",
+            "harness": "claude-code",
+            "model": "model-b",
+            "default_model": "unused-default"
+          },
+          {
+            "provider": "fixture-c",
+            "provider_protocol": "openai_chat",
+            "protocol": "openai_chat",
+            "harness": "opencode",
+            "model": "model-c",
+            "default_model": "unused-default"
+          }
+        ],
+        "behaviors": [
+          "policy_blocked",
+          "success",
+          "success"
+        ]
+      },
+      "sanitized_oracle_output": {
+        "status": "blocked",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "resolved_provider": "fixture-a",
+            "protocol": "openai_responses",
+            "harness": "codex-cli",
+            "model": "model-a",
+            "status": "blocked",
+            "error_code": "policy_blocked",
+            "trigger_reason": ""
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "normalized_oracle_output": {
+        "status": "blocked",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "blocked",
+            "reason": "policy_blocked",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "rust_output": {
+        "status": "error",
+        "output": "",
+        "attempts": [
+          {
+            "ordinal": 1,
+            "target": {
+              "provider": "fixture-a",
+              "protocol": "openai_responses",
+              "harness": "codex",
+              "model": "model-a"
+            },
+            "status": "error",
+            "reason": "unsupported",
+            "failed_over": false
+          }
+        ],
+        "calls": [
+          {
+            "provider": "fixture-a",
+            "model": "model-a"
+          }
+        ]
+      },
+      "disposition": "open_difference",
+      "blocker": "BLOCKER EXE-02: the reference preserves blocked/policy_blocked; Rust preserves error/Unsupported and does not advance."
+    }
+  ]
+}

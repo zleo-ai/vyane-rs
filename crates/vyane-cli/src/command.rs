@@ -10,8 +10,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use vyane_config::ResolvedConfig;
 use vyane_core::{
     AdapterTransport, BoundTarget, CancellationToken, ErrorKind, Harness, HarnessKind,
-    HarnessLifecycleEvent, HarnessLifecycleReporter, ProviderId, RunQuery, RunStatus, Sandbox,
-    SessionRef, TaskSpec, VyaneError,
+    HarnessLifecycleEvent, HarnessLifecycleReporter, ProviderId, RunQuery, RunRecord, RunStatus,
+    Sandbox, SessionRef, TaskSpec, VyaneError,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 use vyane_service::{SessionView, VyaneService, resolve_target_chain, split_targets};
@@ -26,11 +26,11 @@ use vyane_workflow::{
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{
-    BroadcastArgs, Cli, Command, DaemonCommand, DispatchArgs, HistoryArgs, ReviewArgs, RouteArgs,
-    ServeArgs, SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs,
+    BroadcastArgs, CheckArgs, Cli, Command, DaemonCommand, DispatchArgs, HistoryArgs, ReviewArgs,
+    RouteArgs, ServeArgs, SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs,
     TaskCancelArgs, TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCancelArgs,
-    WorkflowCommand, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs, WorkflowStatusArgs,
-    WorkflowSubmitArgs,
+    WorkflowCommand, WorkflowPlanArgs, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs,
+    WorkflowStatusArgs, WorkflowSubmitArgs,
 };
 use crate::daemon_client::DaemonWorkflowClient;
 use crate::output::{BroadcastJson, BroadcastRow, DurableTaskStatusJson, RunJson, TaskRow};
@@ -67,13 +67,14 @@ fn is_local_detached_dispatch(record: &TaskRecord) -> bool {
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::Check => run_check(cli.config).await,
+        Command::Check(args) => run_check(cli.config, args).await,
         Command::Dispatch(args) => run_dispatch(cli.config, args).await,
         Command::Broadcast(args) => run_broadcast(cli.config, args).await,
         Command::History(args) => run_history(args).await,
         Command::Sessions(args) => run_sessions(args).await,
         Command::Session(command) => run_session(command).await,
         Command::Workflow(command) => match command {
+            WorkflowCommand::Plan(args) => plan_workflow(args),
             WorkflowCommand::Run(args) => run_workflow(cli.config, args).await,
             WorkflowCommand::Submit(args) => submit_daemon_workflow(args).await,
             WorkflowCommand::Status(args) => status_daemon_workflow(args).await,
@@ -132,10 +133,15 @@ async fn run_mcp(config_path: Option<PathBuf>) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
+async fn run_check(config_path: Option<PathBuf>, args: CheckArgs) -> Result<ExitCode> {
     let loaded = match load_config(config_path.as_deref()) {
         Ok(loaded) => loaded,
         Err(error) => {
+            if args.json {
+                return Ok(print_check_json_error(
+                    vyane_service::DiagnosticErrorKind::ConfigInvalid,
+                ));
+            }
             eprintln!(
                 "{}",
                 crate::output::format_config_error_line(&format!("{error:#}"))
@@ -143,6 +149,10 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
             return Ok(ExitCode::from(2));
         }
     };
+
+    if args.json {
+        return Ok(print_check_json(&loaded));
+    }
 
     let file_entries = loaded
         .files
@@ -265,6 +275,42 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
     crate::output::print_permission_check(&permissions);
 
     Ok(ExitCode::SUCCESS)
+}
+
+// Keep JSON on the existing bounded, allowlisted static path. In particular,
+// never serialize LoadedConfig or forward a config loader's source error.
+fn print_check_json(loaded: &LoadedConfig) -> ExitCode {
+    use vyane_service::{DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError, DiagnosticErrorKind};
+    let report = match vyane_service::check_config(loaded) {
+        Ok(report) => report,
+        Err(error) => {
+            let kind = error
+                .downcast_ref::<DiagnosticError>()
+                .map_or(DiagnosticErrorKind::ConfigInvalid, |error| error.kind);
+            return print_check_json_error(kind);
+        }
+    };
+    match serde_json::to_string(&report) {
+        Ok(json) if json.len() <= DIAGNOSTIC_MAX_OUTPUT_BYTES => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        _ => print_check_json_error(DiagnosticErrorKind::BudgetExceeded),
+    }
+}
+
+fn print_check_json_error(kind: vyane_service::DiagnosticErrorKind) -> ExitCode {
+    use vyane_service::DiagnosticErrorKind;
+    let message = match kind {
+        DiagnosticErrorKind::InvalidInput => "request contains an invalid argument",
+        DiagnosticErrorKind::ConfigInvalid => "vyane configuration is invalid",
+        DiagnosticErrorKind::BudgetExceeded => "diagnostic safety limit exceeded",
+    };
+    println!(
+        "{}",
+        serde_json::json!({"error": {"code": kind.as_str(), "message": message}})
+    );
+    ExitCode::from(2)
 }
 
 async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
@@ -2511,17 +2557,154 @@ async fn harness_available(kind: HarnessKind) -> bool {
 }
 
 async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
+    if args
+        .since
+        .zip(args.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        bail!("since must not be later than until");
+    }
+    let labels = args
+        .labels
+        .iter()
+        .map(|label| {
+            label
+                .split_once('=')
+                .filter(|(key, _)| !key.is_empty())
+                .ok_or_else(|| {
+                    anyhow!("history label filter must be KEY=VALUE with a nonempty key")
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !args.stats && args.limit == 0 {
+        if args.json {
+            println!("[]");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let has_local_filters = args.session.is_some() || !labels.is_empty();
+    // These predicates inspect only the already owner-scoped local records.
+    // They are not fields of the generic HTTP/MCP history filters or views.
+    let matches_local = |record: &RunRecord| {
+        args.session
+            .as_deref()
+            .is_none_or(|session| record.session_id.as_deref() == Some(session))
+            && labels
+                .iter()
+                .all(|&(key, value)| record.labels.get(key).is_some_and(|actual| actual == value))
+    };
+    if args.stats {
+        let service = vyane_service::VyaneService::from_local_storage(StoragePaths::resolve()?)?;
+        let mut records = service
+            .history(vyane_service::HistoryFilter {
+                limit: Some(usize::MAX),
+                provider: args.provider,
+                status: args.status.map(Into::into),
+                since: args.since,
+                until: args.until,
+            })
+            .await?;
+        records.retain(matches_local);
+        let stats = vyane_service::HistoryStats::from_records(&records);
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&stats)?);
+        } else {
+            let rate = stats
+                .counts
+                .success_rate()
+                .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}%"));
+            println!(
+                "Total: {} (success: {}, error: {}, timeout: {}, cancelled: {}, success rate: {rate})",
+                stats.counts.total,
+                stats.counts.success,
+                stats.counts.error,
+                stats.counts.timeout,
+                stats.counts.cancelled
+            );
+            let total_duration = stats
+                .duration
+                .total_ms()
+                .map_or_else(|| "n/a".to_string(), |value| format!("{value} ms"));
+            let mean_duration = stats
+                .duration
+                .mean_ms()
+                .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"));
+            println!(
+                "Duration: total {total_duration}, mean {mean_duration} (samples: {}, invalid: {})",
+                stats.duration.samples, stats.duration.invalid
+            );
+            let known_cost = stats
+                .cost
+                .known_total_usd()
+                .map_or_else(|| "n/a".to_string(), |value| value.to_string());
+            println!(
+                "Known saved cost: {known_cost} USD (known: {}, unknown: {}, invalid: {}, overflowed: {})",
+                stats.cost.known, stats.cost.unknown, stats.cost.invalid, stats.cost.overflowed
+            );
+            for (label, tokens) in [
+                ("Input tokens", &stats.usage.input_tokens),
+                ("Output tokens", &stats.usage.output_tokens),
+                ("Reasoning tokens", &stats.usage.reasoning_tokens),
+                ("Cached input tokens", &stats.usage.cached_input_tokens),
+            ] {
+                let total = tokens
+                    .total_tokens()
+                    .map_or_else(|| "n/a".to_owned(), |v| v.to_string());
+                println!(
+                    "{label}: {total} (known: {}, unknown: {}, overflowed: {})",
+                    tokens.known,
+                    tokens.unknown,
+                    tokens.overflowed()
+                );
+            }
+            println!(
+                "PROVIDER\tTOTAL\tSUCCESS\tERROR\tTIMEOUT\tCANCELLED\tSUCCESS RATE\tDURATION TOTAL\tDURATION MEAN\tDURATION SAMPLES\tDURATION INVALID"
+            );
+            for (provider, counts) in &stats.by_provider {
+                let rate = counts
+                    .success_rate()
+                    .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}%"));
+                let duration = &stats.by_provider_duration[provider];
+                let total_duration = duration
+                    .total_ms()
+                    .map_or_else(|| "n/a".to_string(), |value| format!("{value} ms"));
+                let mean_duration = duration
+                    .mean_ms()
+                    .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"));
+                println!(
+                    "{provider}\t{}\t{}\t{}\t{}\t{}\t{rate}\t{total_duration}\t{mean_duration}\t{}\t{}",
+                    counts.total,
+                    counts.success,
+                    counts.error,
+                    counts.timeout,
+                    counts.cancelled,
+                    duration.samples,
+                    duration.invalid
+                );
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let runtime = Runtime::new(ResolvedConfig::default(), StoragePaths::resolve()?)?;
-    let records = runtime
+    let mut records = runtime
         .ledger
         .query(RunQuery {
             owner: Some("local".to_string()),
             provider: args.provider.map(ProviderId::new),
             status: args.status.map(Into::into),
-            since: None,
-            limit: Some(args.limit),
+            since: args.since,
+            until: args.until,
+            limit: Some(if has_local_filters {
+                usize::MAX
+            } else {
+                args.limit
+            }),
         })
         .await?;
+    if has_local_filters {
+        records.retain(matches_local);
+        records.truncate(args.limit);
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&records)?);
@@ -2800,6 +2983,39 @@ async fn cancel_daemon_workflow(args: WorkflowCancelArgs) -> Result<ExitCode> {
             "{}",
             crate::output::format_workflow_cancel_line(&task.id, task.state)
         );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn plan_workflow(args: WorkflowPlanArgs) -> Result<ExitCode> {
+    let plan = match Workflow::from_path(&args.file).and_then(|workflow| workflow.compile_plan()) {
+        Ok(plan) => plan,
+        Err(error) => {
+            print_workflow_error(&error);
+            return Ok(workflow_error_exit(&error));
+        }
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        println!("Workflow: {}", plan.name);
+        println!("Static plan: targets are unresolved; templates are not rendered.");
+        println!(
+            "Steps: {}; max concurrency: {}; requested maximum sandbox: {}",
+            plan.steps.len(),
+            plan.max_concurrency,
+            plan.capability_manifest.maximum_sandbox.as_str()
+        );
+        for step in &plan.steps {
+            println!(
+                "  {} | needs: [{}] | targets: [{}] | requested sandbox: {}",
+                step.id,
+                step.needs.join(", "),
+                step.targets.target_names().join(", "),
+                step.sandbox.as_str()
+            );
+        }
+        println!("Plan digest: {}", plan.plan_sha256);
     }
     Ok(ExitCode::SUCCESS)
 }

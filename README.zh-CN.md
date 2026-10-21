@@ -1,585 +1,91 @@
 # Vyane
 
-**A multi-model agent-orchestration kernel, in Rust.**
-（一个用 Rust 写的多模型 agent 编排内核。）
+**用一个 Rust CLI 调用编程代理和模型 API。**
 
-[![CI](https://github.com/zleo-ai/vyane-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/zleo-ai/vyane-rs/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可协议)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
-&nbsp;·&nbsp; [English](README.md)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Português (Brasil)](README.pt-BR.md)
 
-Vyane 是一个内核——以及内核之上的一个 CLI——用来在**两类目标**之间 dispatch、
-broadcast 和 failover 任务：一类是 coding-agent harness（Claude Code、Codex
-CLI 等），一类是裸的 HTTP model endpoint。给它一个任务加一个 target，它就把任务
-跑起来；给它多个 target，它就并发扇出（broadcast）或按序故障转移（failover）。一次
-运行究竟是在带文件系统和工具的 coding CLI 里发生，还是作为一次普通的 HTTP chat
-completion，只是 target 上的一个字段——不是另一个工具、另一份配置、另一套心智模型。
+如果你同时使用多个编程代理或模型服务，Vyane 可以让你给目标起好名字，把任务交给其中一个或多个，并集中保留结果和尝试记录。编程任务可交给 Claude Code 或 Codex CLI，也可以直接调用模型 API 获取文本回答。
 
-真正带来正确性的是**四层 target 模型**——provider ≠ protocol ≠ harness ≠ model，
-四者从配置一路到 run ledger 始终是独立字段。于是 **relay 不是 protocol**（它是恰好
-讲某种 protocol 的 provider），**coding CLI 不是 provider**（它是仍然需要 provider
-的 harness），**一个 model id 只在它所属的 provider 内部有效**。
+> **开发早期。** 目前从源码安装，API 尚不稳定，部分能力仍未完成或缺失。原生会话恢复和重启后自动重放尚未完成。请先了解[当前边界](docs/PROJECT-STATUS.md)。
 
-具体带来四件事：**天然干净的子进程环境**（子 agent 从 scrub 后的基线启动，凭据不泄漏）；
-**永不跨 provider 泄漏 model id 的 failover 链**；**整链 capability admission**（`Write`/`Full`
-不会静默落到 chat-only target，Linux mutating run 会把准入时打开的目录对象带过 child spawn）；
-以及 **append-only JSONL run ledger**
-（记录 prompt digest 而非正文、完整 attempt 轨迹、owner-scoped 从第一天起）。
+## 看看它怎么运行
 
-## 起源
+[运行终端演示](docs/EXAMPLES.md)：安装后的 CLI 先执行单个任务，再向两个目标广播，最后在模拟的主目标故障后切换成功。演示使用本地 HTTP 夹具，不需要密钥，也不调用真实模型。
 
-`vyane-rs` 是 Vyane 的开源 Rust 实现。Vyane 本体是一套私有的个人 AI-OS 执行底座，自
-2026 年初起就在跑真实的多模型开发流水线。现在它在开源世界里被逐能力重建，并持续跟随私有
-系统演进——所以这里的设计反映的是日常使用中真正扛住了的东西，而不是凭空的推测。
+```text
+Local HTTP fixtures only; no live model calls.
+dispatch: fixture: chat-model; recorded attempts=1
+broadcast: 2 separate successful results (chat-model, review-model)
+failover: fixture: review-model; recorded attempts=2
+```
 
-## 这个仓库是怎么写出来的
+## 三个用途
 
-由一支被编排调度的 AI coding agent 舰队开发：不同的前沿模型负责写代码、互相对抗性
-交叉审查、再修复审查中发现的问题。代码改动按
-[CONTRIBUTING.md](CONTRIBUTING.md#independent-review-three-tiers)
-的三档独立审查执行（文档类 CI 绿即合；常规代码一轮独立模型审查；高风险面对抗式多轮审查），
-再加上 `cargo fmt` / `clippy` / `cargo test` 三道关卡——产品改动不会只凭写代码的那个模型自己说了算。
+| 你想要…… | 使用 | 得到什么 |
+| --- | --- | --- |
+| 指定代理或模型执行任务 | [`dispatch --target chat`](docs/EXAMPLES.md#one-task-one-target) | 一份结果和本地运行记录。编程代理需要另行安装和配置。 |
+| 比较同一问题的不同回答 | [`broadcast --targets chat,review`](docs/EXAMPLES.md#one-prompt-several-targets) | 并发执行并分别返回结果，由你判断答案。 |
+| 调用失败时尝试配置好的备用目标 | [`dispatch --target resilient`](docs/EXAMPLES.md#an-explicit-backup) | 对符合条件的错误按顺序切换，记录每次尝试。这不是会话接力。 |
 
-## 状态
+## 快速开始
 
-**仓内 v0.1 到 v0.3 里程碑及 v0.4 实现范围已经交付。外部 crates.io 发布（发布到 Rust
-公共包注册表）是延期的分发动作，不是功能里程碑，而且必须另行获得授权；tag 或 registry
-token 都不等于这项授权。手动发布 workflow 还要求受保护的 `crates-io` environment 由非发起人
-reviewer 批准，并要求输入的 release tag、当前 `main` 与 workflow SHA 精确指向同一个 commit；
-registry token 只注入最终 publish step。17 个 crate 的本地 package preflight 已通过，但没有任何 crate
-实际发布。这不表示已经完全对齐原始私有 Vyane。** 在当前公开集成基线上，固定双仓
-矩阵按 8 个域追踪 53 个能力项：7 个 `implemented`、23 个 `partial`、12 个 `missing`、
-9 个刻意不同或待决策、2 个 `planned`。native harness、
-连续性、协作、治理、可观测性和接口仍有大量工作。未加限定的“完全对齐”默认指
-whole-system capability parity：私有凭据和部署细节不进入本公开仓，但对应 generic contract
-与 optional/private adapter 边界仍须可验证。live daemon pause/resume 与重启后自动 replay
-只是两个明确的 daemon 限制，不是全部剩余差距。详见
-[原始 Vyane 对齐基线](docs/parity/ORIGINAL-VYANE-PARITY.md)。API 仍处于发布前不稳定阶段。
-公开 parity manifest 目前包含 classifier、failover 与 automatic-routing 三套共 25 个净化 case：
-15 个在声明的 normalization 后一致，10 个保留为明确的 open difference 或 Rust 单边 scope
-difference。运行 `python3 .github/scripts/parity-report.py --format markdown` 会重算当前 Rust
-行为、验证已存净化 attestation 并输出离线报告；它不会执行私有参考实现。
-
-| 能力 | crate | 状态 |
-|------|-------|------|
-| 核心类型系统（含 process-local workdir pin） | `vyane-core` | [x] 含 non-serializable live native-side-effect authority contract |
-| config & profiles | `vyane-config` | [x] |
-| OpenAI Chat/Responses + Anthropic Messages | `vyane-protocol` | [x] 基础 client；[~] 有界 typed tool turn 与 per-wire authorized path 目前只覆盖非流式 OpenAI Chat |
-| Claude Code + Codex CLI harnesses（含 stdout 事件流） | `vyane-harness` | [x] additive scoped execution 可同时携带 Linux pinned workdir 与 live spawn authority；Process AgentRun host 已为 fresh sessionless CLI run 构造该 authority，gated capture/streaming 会在 wrapper spawn 与真实 target release 前重验。这仍是 adapter-delegated，不是 host sandbox |
-| native permission/tool 执行接缝（尚不是通用 `Harness` 实现） | `vyane-harness` + `vyane-service` | [~] resident fresh/sessionless native AgentRun lane 已组合 scope atomic validation、per-wire model authorization、有界 turn driver 与 durable completion；WP-83 至 WP-88 及 WP-90 已接入 descriptor-relative read/search/write/edit、Linux Bubblewrap command、独立 command HTTPS destination、hosted web search、bounded web fetch、分层配置权限上限与 descriptor-bound command writable roots。WP-91 将每层每工具的 allow/ask/deny 决定冻结进 durable policy，WP-92 增加只允许在任何 tool side effect 前推进的有界 direct OpenAI Chat target failover。session authority、checkpoint/session commit、approval resume、automatic replay 与 native resume 仍待完成 |
-| dispatch / broadcast / failover kernel + streaming | `vyane-kernel` | [x] early execution id、整链 trusted capability admission、one-shot prepared dispatch 与 original-ordinal failover evidence |
-| append-only run ledger + owner 隔离 session record | `vyane-ledger` | [x] direct-HTTP transcript continuity、strict revisioned V2 snapshot、store-level CAS `Reset` / `ForkFresh` / `Commit` 与 exact 本地文件系统执行期 lease 已具备；CLI/service 仅提供 owner-local list/inspect/reset-native，没有公开 fork、REST mutation、分布式 lease 协议或生产 native resume |
-| 可 replay 的 owner-scoped event store | `vyane-ledger` | [~] storage/cursor、有界 message/AgentRun lifecycle 投影，以及 daemon 内 owner-bound 常驻 broker/projector assembly 已具备；delivery lane、dispatch/workflow producer、subscription、retention 与统一 timeline 尚未完成 |
-| 不含敏感正文的持久化 task metadata | `vyane-task` | [x] schema v2 以 `(owner,id)` 隔离 snapshot/event/CAS，并事务迁移 v1；内置前端仍显式选择 `local` |
-| owner-scoped 持久 AgentRun queue、worker topology 与 recovery 真相 | `vyane-agent` | [~] exact lease/deadline、active permit、有界 tree cancel、无正文 completion receipt/outbox 及 resident execution/recovery/publication 已为窄 Linux `Process` 与 fresh/sessionless Native lane 完成生产 assembly，并提供 authenticated loopback submit/status/output/cancel API。仍无 `Remote`、native session/resume、distinct principal、live pause/resume 或自动 replay |
-| owner-scoped 事务型 message/delivery store | `vyane-message` | [~] multi-mailbox strict FIFO、延迟/幂等投递、fenced lease、TTL、ack/nack、无正文 outbox、外部 receipt 对账、隐藏 staged completion publication、有界 mailbox page 与 exact mailbox claim 已具备 |
-| owner-scoped goal 生命周期与进度真相源 | `vyane-goal` | [~] 同一 SQLite 事务更新当前快照并追加不可变事件；WP-68 至 WP-75 补齐有界验证/evidence、pursuit/checkpoint/daemon 组合，以及显式批准控制的 takeover 与 review handback。WP-76 增加精确 typed quota-reset 摄取，WP-77 将同一持久 decision 与 one-shot dispatch 边界扩展到 ready 的 primary continuation。WP-78 增加带 observation ID 与单调序号的 typed review-check pass/fail 证据，以及显式批准的 repair handback：旧观察重放不能重新开门；再次失败会重新打开 repair，resume 会递归绑定最新 repair/review/takeover 证据。WP-79 增加基于当前 goal revision 与 approval 证据的只读 operator next-action 投影。WP-80 仅通过 opt-in、owner-frozen、bearer-authenticated loopback REST GET 暴露这个原子、脱敏的快照。WP-81 增加独立的 owner-frozen/source-bound mutation port 与 one-shot 有界 typed watcher poller，只记录现有 continuity signal。WP-82 增加 purpose-authenticated、one-shot 有界 runner，只能用 exact projection fence 调用分别配置的 queue 与 approved-execution port；它没有 decision port，所有 approval decision 仍必须人工完成。具体 port、daemon 调度、runtime-native resume 与通用 authenticated goal service 仍待后续层 |
-| 有界、平台中立的 upstream quota snapshot | `vyane-quota` | [~] 已有 closed card/window/balance 与错误 schema、connector identity 校验、稳定排序、有界并发、整次操作 timeout、失败隔离、禁 redirect HTTP 与 body cap；仍无具体 provider connector、credential loader、持久历史、轮询 daemon、CLI snapshot surface 或自动动作 |
-| 有界 replay-safe delivery broker + 无正文 EventLog projectors | `vyane-broker` | [~] fake-adapter 契约、复用 stable source event id 的 message/AgentRun lifecycle 投影，以及 daemon 内显式 non-`Clone` `ResidentBrokerSupervisor` 已具备；当前 delivery lane 刻意为空，worker/message glue 与远程 A2A/Channels adapter 仍缺 |
-| 声明式 workflow 引擎（DAG + journal/resume/replay） | `vyane-workflow` | [x] exact-plan replay 新建 run 并复用 journal 记录的全成功前缀 |
-| 常驻 workflow 与 Process/Native AgentRun daemon（带认证的本地控制面） | `vyane-cli` | [x] workflow 控制，以及 Linux CLI-harness Process 与 fresh/sessionless Native AgentRun submit/status/output/cancel；无 native session resume、自动 replay 或 live pause/resume |
-| 后台任务（`--detach` + `task` 命令） | `vyane-cli` | [x] |
-| CLI（含 workflow / task / daemon / a2a / goal 等命令） | `vyane-cli` | [x] revision-aware session control、本地 `a2a send/inbox/read` 与 owner-scoped `goal` 生命周期/进度命令已具备；旧 `sessions` 保持兼容 |
-| 共享服务层 | `vyane-service` | [x] `OwnerContextFactory` 完成 authentication/resolution 并拒绝 authenticated `local`；`OwnerScopedService` 冻结 dispatch/stream/query/session/reset；AgentRun components 已含 prepared authorized harness dispatch、配对的 Process/Native backend、exact message-completion handback，以及 daemon 使用的通用 resident host；ordinary dispatch 不启动它们 |
-| REST API | `vyane-cli` + `axum` | [x] per-start bearer、loopback Host/Origin 校验、拒绝 non-loopback bind、allowlisted view 与 assembly-frozen local service scope；bearer 尚不代表 distinct principal，也不是 hostile same-UID 或多用户隔离 |
-| 确定性路由 | `vyane-router` | [x] |
-| MCP server | `vyane-mcp` + `rmcp` 3.3 | [x] CLI 提供 9 个工具：原 6 个执行/查询/诊断工具，加经认证的持久 workflow submit/status/cancel；generic success output 上限为 1 MiB；stdio 双时代握手让 `initialize` 停在 2025-11-25，并可通过 `server/discover` 协商 MCP 2026-07-28 |
-| solution-review workflow（implement → fan-out review → synthesize） | `vyane-cli`（review module） | [x] 尚不是原仓结构化 git diff/PR review 产品 |
-
-Capability admission 刻意窄于 sandbox。`ReadOnly` 可用于 chat 或 harness target；`Write`/`Full`
-要求现存 workdir 和受信任的内置 Claude/Codex CLI editing manifest，direct HTTP 与未知 adapter
-会在构造 executor 前被拒绝。mutating dispatch 当前在非 Linux 平台 fail closed。Pinned descriptor
-能防止 workdir 路径被 rename/symlink replacement 重定向，但不能约束同 UID 的恶意 child 或绝对
-路径访问。exact `NativeSessionDomain` 存储契约与 store-level CAS transition 已经落地，但它们只是
-证据，不是 resume authority。regular dispatch 现在必须取得 exact
-`(owner, session_id, execution_id)` lease，先持有 lease 再加载 continuity，并一直持有到 model
-执行结束与 revision-CAS completion update。文件系统 store 用 owner-only advisory lock 实现本地
-crash-release fence，direct control mutation 也走同一 authority；同 session 竞争运行会在 executor
-构造前完成有界等待：前一持有者及时释放时顺序取得 lease，否则返回 `Conflict`，两者都不会重叠。
-这不是带 generation/TTL 的分布式 lease 协议，model 之后的 session commit 仍是
-best-effort，不能描述成严格持久续接。regular dispatch 仍会在构造 executor 前拒绝 legacy-unbound
-或 domain-bound native harness state；streaming dispatch 则更早拒绝任何 session，发生在
-session-store load、capability probe 和 executor 构造之前。纯 direct-HTTP transcript 只能通过
-regular dispatch 继续。owner-local CLI/service 仅提供 list、inspect 和 revision-checked
-reset-native；没有公开 fork、REST mutation 或生产 native resume。
-
-native authority 仍是未完成的 integration seam。独立的 OpenAI Chat typed-turn 路径会在
-每次显式 wire send 前即时重验，并在等待 authority、发送、读取 response body 和 retry backoff
-期间持续响应 cancellation。共享 HTTP client 不跟随 redirect，也不做隐式 retry，因此一次显式
-attempt 对应一次 authority check。`ToolRegistry::execute_authorized` 也只在 allowed call 的 executor
-被 poll 前重验；deny/ask/invalid/unknown/cancelled/expired 都保持纯决策，revocation 不会变成
-model-facing tool text。`AgentRunModelToolAuthority` 现在提供 fresh、sessionless scope 的 concrete
-bridge：它持有 permit/scope，在 Tokio blocking pool 中针对每个 one-based model send 或 tool
-operation 重验 AgentRun store，并拒绝 session-bearing scope、checkpoint effect 和 session commit。
-fresh/sessionless resident Native lane 现在会注册并调用这条 bridge；它仍未组合 session lease 与
-exact native-session domain。
-
-paired in-process operation 现在可把 lifetime-bound effect authority 绑定到一个 exact fresh、
-sessionless `NativeExecutionScope`。bind 会先原子重验 owner/run/generation/lease/deadline/controller
-以及 exact target/prompt/policy digest；之后每个 one-based model send/tool operation 都重复完整
-native-scope validation。session/resume、checkpoint/session commit、raw store/permit access、Clone/Serde
-继续关闭。这条 authority composition seam 现在支撑 WP-65/WP-66 的 concrete fresh/sessionless
-Native operation 与 result handback，但不授权 session-aware execution。精确边界见
-[WP-52](docs/plan/WP-52.md)、[WP-65](docs/plan/WP-65.md) 与 [WP-66](docs/plan/WP-66.md)。
-
-`NativeTurnDriver` 现在提供 resident Native lane 的有界串行 model/tool loop：默认最多 8 个 model turn，hard cap
-为 32；每 turn 最多一个 tool call；初始 advertised tool-name set 必须与 registry-name set 完全
-相等；每个 request/response 都会校验，并在 permission/tool future 运行前用 worst-case bounded
-tool result 对完整下一轮 transcript 做 preflight。model send 与 allowed tool 只走 authorized entry。
-refusal、approval-required、parallel call、tool-choice violation、cancel、timeout、budget exhaustion
-均为 typed terminal stop；usage 以 saturating addition 聚合，tool side effect 可能发生后的 model
-failure 会转成 redacted non-replayable stop，而不是向外返回可 failover error。invalid JSON argument
-只生成静态、不回显原文的 tool result，绝不执行。tool description/schema 只是 non-authoritative
-model guidance；每个 `NativeTool` 必须校验实际收到的 argument。
-
-driver outcome 不可序列化且 `Debug` 已脱敏。显式 fresh/sessionless resident Native lane 会
-用分别授权的 filesystem read/search/write/edit、sandboxed command、command network、hosted search
-与 bounded fetch tool 构造它；分层配置只能收紧显式请求，`ask` 仍是 terminal approval-required stop。
-它仍窄于通用 `Harness`；checkpoint/session-commit consumer、approval resume 与 native resume 仍缺。
-Claude Code / Codex CLI 外部 harness 继续使用统一的 `read-only` / `write` / `full`
-语义；每个配置层可用 `[harness_permissions] max_sandbox` 贡献独立上限，整条 CLI-harness
-failover chain 取最严格值，超限请求在 REST/workflow task identity、journal、
-调度记录持久化或 spawn 前失败。配置不接受任意 vendor flags。
-managed policy 优先使用 `VYANE_MANAGED_PERMISSION_CONFIG`，旧
-`VYANE_MANAGED_NATIVE_CONFIG` 仅作为兼容别名。精确边界见
-[WP-93](docs/plan/WP-93.md)。
-另有 `AgentProjectionComponents::open` 提供显式 owner-bound one-shot AgentRun projector 路径，同时
-封装 raw store。ordinary dispatch 不会打开该数据库，也不会启动 projection 或其他 resident work。
-
-`vyane-service::AgentRunRecoveryDriver` 是另一条显式 fixed-owner、non-`Clone` 的 one-shot seam。
-构造时冻结 owner、注入的 store、options，并限制每种 `ControllerKind` 至多一个 trusted adapter；
-`recover_once` 会消费 driver。recovery claim 与最终 confirm 都放到 Tokio blocking pool。单次最多
-claim 64 个 ticket、并发 poll 16 个 adapter；单个 adapter timeout hard cap 为 60 秒，durable
-operation lease hard cap 为 5 分钟，且 lease 必须严格长于 timeout 加 settlement margin。blocking
-claim 开始前就建立 caller-local monotonic 保守窗口，因此 claim latency 会被扣除，custom store 的
-wall clock 也不能延长 adapter authority。只有 controller 为空的 ticket，或 adapter 对 exact
-controller 明确返回 `Gone`，才会进入 `confirm_controller_gone`；report/error 均不含正文，recovery
-ticket 也不会跨过 adapter 边界。
-
-单独看这仍不是常驻 worker-health 或执行循环；WP-51 最初组合 paired in-process backend，WP-61
-在 workflow daemon 中以通用 supervisor 组合 exact Linux `Process` adapter，WP-66 再组装
-fresh/sessionless Native lane。当前仍没有 `Remote` adapter、session-aware resume、live pause/resume
-或自动 replay。controller adapter 必须在每次 effect 前重验完整
-identity；无法排除 identity reuse 时必须无 effect 地返回 `Unavailable`；timeout、drop 或 settlement
-failure 后仍须可安全重复。custom store 的 blocking call 无法被强制取消，adapter timeout 只约束
-future polling，不能证明不可中断的外部 effect 已停止。精确边界见
-[WP-45](docs/plan/WP-45.md)。
-
-`vyane-service::AgentRunExecutionDriver` 以另一条 fixed-owner、non-`Clone`、消费式 one-shot
-路径处理 newly due runs。整次 claim 在 Tokio blocking pool 完成后才进入 item work；单次 hard cap
-为 64 runs、16 个并发 poll、5 分钟 lease，heartbeat interval 限于 100ms 到 60s 且必须小于
-lease。monotonic base 在 claim 前建立。每个 item 生成彼此独立的 256-bit prospective controller
-id 与 fingerprint，严格按 claim → durable start → permit → pre-effect heartbeat → first poll
-推进。trusted executor 仍须在每个真实 effect 线性化点重验 permit；driver 也会闭合校验 custom
-store 每次 transition 的返回值。
-
-只有证明所有 effect 已停止的 `Quiesced` closed outcome 才授权 driver 发起 terminal settle；单个
-item future 独占并推进 receipt。在该证明之前，cancel、timeout、panic、drop、`Unknown` 或
-heartbeat failure 不授权新的 settlement，并可能保留 `Starting` 或 `Running` 交给 WP-45
-exact-identity recovery。blocking settlement 一旦开始便无法中断，且可能在 waiter 被 drop 后仍完成；
-custom store 也可能 mutate-then-error，因此 settlement failure report 只能表示结果不确定。
-WP-47 仍是通用 one-shot contract；WP-61 已以 fresh sessionless CLI-harness executor、exact
-Process controller 与 message handback 完成窄范围生产 assembly。它没有增加 native execution、
-`Remote`、session-aware resume、live pause/resume 或自动 replay。精确边界见
-[WP-47](docs/plan/WP-47.md) 与 [WP-61](docs/plan/WP-61.md)。
-
-`InProcessAgentComponents` 为上述 one-shot drivers 提供第一组 concrete pairing：进程内每个
-owner 全局只允许一个 live backend，即使 competing assembly 使用不同 store pointer 也保守拒绝；
-该 backend 绑定一个 store 与 structured operation，并铸造 paired `InProcess` execution/recovery
-drivers。exact id/fingerprint matching、基于 `Notify` 的 cancel/exit
-observation，以及 fail-closed 的 4096-entry tombstone 上限，避免 late/reused controller 被误认。
-durable confirmation 会回收 exact tombstone；失败/不确定 confirmation 保留它，回收后才发生的 late
-registration 仍须在 operation 前再次重验 permit。operation 获得 lifetime-bound、non-`Clone` effect
-authority，并须在每个 effect 前消费一次 freshly revalidated permit proof。
-
-`ResidentInProcessAgentSupervisor` 可消费该 exact pairing，形成相互隔离的 execution/recovery/completion-publication
-polling loop。poll/backoff 均有界；degraded/error/panic cycle 使用 capped exponential backoff；它不创建
-task、channel、runtime、payload queue 或 replay policy，也不会自动 enqueue resume。supervisor cancellation
-会阻止新 cycle，并传入已 poll 的 executor；Process backend 会 terminate/reap exact group、写入 stopped
-lifecycle，driver await 该 item 后 completion loop 再完成 final drain。强制 drop 仍放弃该保证，custom
-blocking store 也使 drain 没有固定 wall-clock 上限。通用
-`ResidentAgentSupervisor` 先在 daemon 中承载 concrete Linux Process backend；WP-66 随后把
-fresh/sessionless in-process Native operation 生产组装为第二条 lane。通用 handback 契约见
-[WP-53](docs/plan/WP-53.md)，原 resident 边界见 [WP-51](docs/plan/WP-51.md)，生产 Process/Native
-范围分别见 [WP-61](docs/plan/WP-61.md) 与 [WP-66](docs/plan/WP-66.md)。
-
-WP-61 host 只通过 workflow daemon 接受 authenticated loopback AgentRun 请求。它将 prompt 写入
-private create-only spool，并冻结 exact resolved target chain、capability plan、canonical workdir、
-sandbox、timeout、system text 与 labels；仅允许 fresh、sessionless CLI harness target。executor 在
-wrapper spawn 与每次真实 target release 前重验 active permit 与 frozen snapshot；private controller
-sidecar 在进入 `Running` 前完成持久 reservation，并在 target release 前推进为 exact Linux process
-identity。顺序 failover 会先停止旧 controller 再启动新
-controller。成功同时要求 quiesced process lifecycle 与 typed terminal proof；Claude 即便 exit 0，
-缺少 JSON `result` 也会失败。completion 以 stable key staging，只在 exact message publication 后返回。
-
-Native lane 在 durable creation 前冻结 private prompt spool、direct OpenAI Chat target chain、
-policy digest、workdir identity、timeout 与 turn limit。首次 wire 前会重新解析完整 chain，
-每次 model/tool effect 都重验 live authority，并且只允许在任何 tool side effect 前按共享
-eligible error taxonomy fail over。filesystem、command、command network、hosted search 与
-bounded fetch 工具分别授权，配置只能收紧显式请求。见 [WP-66](docs/plan/WP-66.md) 及
-[WP-83](docs/plan/WP-83.md) 至 [WP-88](docs/plan/WP-88.md)，以及
-[WP-90](docs/plan/WP-90.md) 至 [WP-92](docs/plan/WP-92.md)。
-
-daemon 在既有 bearer 与 loopback 限制下暴露 `POST /v1/agent-runs` 及 status、output、cancel route。
-启动先执行 exact backend recovery，绝不 replay input；graceful shutdown 先关闭 admission、
-drain 已准入的 submit/cancel initializer，再 signal AgentRun supervisor，并与 workflow supervisor
-并行 await。active Process group 会 cooperative terminate/reap，随后 completion 完成 final drain。
-这不是 `Remote` 或 session-aware native host，不支持 native resume、live pause/resume 或自动 replay，
-本地 bearer 也仍不代表 distinct principal 或 hostile same-UID isolation。见
-[WP-61](docs/plan/WP-61.md) 与 [WP-66](docs/plan/WP-66.md)。
-Process lane 的 graceful drain 与 daemon-level Native graceful-shutdown race 均已有
-acceptance 覆盖，包括有 deadline 上限的 restart settlement，且不 replay input、不发布
-output。启动与强杀重启 fixture 的稳定化见 [WP-95](docs/plan/WP-95.md) 与
-[WP-96](docs/plan/WP-96.md)。
-
-service 层也增加 principal-derived owner 的 phase-A boundary。`OwnerContextFactory` 冻结 trusted
-authenticator/resolver，隐藏 `AuthenticatedPrincipal` 构造，并拒绝 authenticated principal 进入保留
-`local` namespace；`OwnerScopedService` 将 owner 同时冻结到 dispatch、single-target stream、history、
-session inspect 与 revision-checked reset。REST 在 router assembly 时把 dispatch/broadcast/run/session/
-stream 全部冻结进同一个 local scope，但当前 bearer 尚不代表不同 principal。精确边界见
-[WP-49](docs/plan/WP-49.md)。
-
-durable task schema v2 已以 `(owner,id)` 作为 snapshot/event/lease/CAS 真相键，并通过事务迁移验证
-row/event count、composite FK、schema 与 event sequence high-water。REST output artifact 使用 opaque
-owner/task-qualified segment，并只对已验证的 local UUID task 提供 legacy read fallback。内置 task
-control 仍只选择 `local`，旧 detached filesystem scaffold 仍是 local compatibility subsystem；这推进了
-storage isolation，但不是 multi-user REST 声明。精确边界见 [WP-50](docs/plan/WP-50.md)。
-
-`vyane-broker::ResidentBrokerSupervisor` 是另一条显式、non-`Clone` 的 library driver。它消费自身
-进入 `run` future，并发持有互不重叠且 owner/store-bound 的 delivery lanes、message maintenance、
-message projection 与 AgentEvent projection。batch、总 delivery concurrency 与指数 error backoff
-均经过校验且有硬上限；单个 lane 的 error/panic 不会停止其他 lane 或 projector。driver 不创建
-detached task、channel、runtime 或第二队列：embedding caller 必须提供 Tokio runtime 与 cancellation
-token，并 await 该 future。取消只在 cycle 之间观察；已经开始的操作会 drain 当前有界 cycle，
-而直接 drop 外层 future 会放弃 graceful-drain 保证。
-
-目前没有 service、CLI 或 daemon 的生产 assembly 构造这个 driver。它不执行或恢复 AgentRun，
-不提供 controller/message handback，不实现 A2A/Channels，也不增加 live pause/resume 或自动 replay。
-精确边界见 [WP-44](docs/plan/WP-44.md)。
-
-### 协议入口
-
-Vyane 支持三种可互换的前端，全部共享同一个 `vyane-service` 层：
-
-| 协议 | 命令 | 用途 |
-|------|------|------|
-| **CLI** | `vyane dispatch --target prod "task"` | 交互式 / 脚本化一次性运行 |
-| **REST API** | `vyane serve --addr 127.0.0.1:9721` | 任意 HTTP 客户端编程访问 |
-| **MCP** | `vyane mcp` | 让其他 agent（Claude、Codex 等）作为工具调用 |
-
-MCP 目前有 6 个工具：dispatch、broadcast、history、sessions、`vyane_route`、`vyane_check`。
-generic success payload 有 1 MiB 上限；两个新增 diagnostic 使用更小、更严格的边界。
-`vyane_route` 是 Rust 侧确定性预览扩展，不代表与固定参考基线存在同名等价能力；
-`vyane_check` 只做静态配置分析，不探测网络 endpoint、不启动 harness，也不验证真实 credential。
-所有 success result 共用 generic 输出上限，但旧 execution tool 的输入字段尚未具备 diagnostics
-那样统一的逐字段预算。若执行已完成但完整 detail 超过上限，dispatch/broadcast 会返回带 run id 的
-有界 receipt，并明确 `operation_status="completed"`、`detail_omitted=true`；调用方不得把它当成未执行
-而自动重试。
-
-### 本地 A2A 收件箱
-
-CLI 直接把事务型 message store 接成同机 durable inbox：
+**1. 从源码安装。** 需要 stable Rust/Cargo（最低 Rust 1.88）和 C/C++ 构建工具链。CI 覆盖 Linux 和 macOS；目前不声明支持 Windows。
 
 ```sh
-vyane a2a send reviewer --from builder --kind review "ready for review" --json
-vyane a2a inbox reviewer --json
-vyane a2a read reviewer <message-id> --json
+git clone https://github.com/zleo-ai/vyane-rs.git
+cd vyane-rs
+cargo install --locked --path crates/vyane-cli --root ./target/install
+VYANE="$PWD/target/install/bin/vyane"
+"$VYANE" --version
 ```
 
-`inbox` 只读，不会暗中改 delivery 状态。`read` 必须同时给出收件 mailbox 和 message id，
-再沿用现有 fenced claim → delivered → acknowledged 状态机；它会先完整写出并 flush 响应，
-再执行 acknowledge。写失败时消息仍可回收；flush 后崩溃则可能重复交付，但不会静默丢失。
-因此 JSON 中是 ack 前的 `delivered` 快照，进程以零退出才表示随后 acknowledge 也成功。
-可用 `--delay-seconds`、
-`--include-future`、`--include-read`、`--limit`、`--owner`（兼容别名
-`--owner-user-id`）与 `--db` 显式控制；默认数据库是 Vyane 标准数据目录下的
-`messages.sqlite3`。
+预期版本为 `vyane 0.1.0`。二进制文件位于当前仓库内，不会覆盖 PATH 中已有的 `vyane`。请保留这个终端会话。
 
-这不是 A2A HTTP 实现：没有 Agent Card、discovery、远程 send/get/cancel、SSE、push 或
-Channels adapter。`--owner` 和 `--from` 都由调用方提供：前者只是逻辑存储 scope，后者只是
-sender label，均不是经过认证得到的 principal authority / identity。不能把这个 CLI 直接暴露为
-hostile multi-user service。精确边界见
-[WP-59](docs/plan/WP-59.md)。
-
-### 本地 Goal
-
-CLI 以单一 SQLite 真相源提供 owner-scoped goal 生命周期：
+**2. 不用密钥，先得到一个结果。** 内置示例只预览路由，不发送模型请求。
 
 ```sh
-vyane goal create --title "Ship a release" \
-  --acceptance 'test-passes:cmd:cargo test --workspace' --json
-vyane goal next --auto-start --json
-vyane goal progress <goal-id> --stage implementation --detail "tests added" --json
-vyane goal verify <goal-id> --workdir . --json
-vyane goal claim <goal-id> --worker pursuer --json
-vyane goal pursue <goal-id> --worker pursuer --target builder --workdir . --sandbox write --json
-vyane goal done <goal-id> --summary "all checks passed" --json
+"$VYANE" --config docs/examples/offline.toml check
+"$VYANE" --config docs/examples/offline.toml route "Explain this function" --json
 ```
 
-`create/get/list/next/start/progress/verify/pursue/pause/resume/done/fail/cancel` 共用稳定 JSON
-成功/错误 envelope。每次 mutation 都在同一事务里更新查询快照并追加不可变 revision event；
-队列按 priority 升序、再按创建时间升序。默认数据库位于 Vyane 标准数据目录下的
-`goals.sqlite3`，也可用 `--db` 指定本地文件。`--owner`（兼容别名
-`--owner-user-id`）只是调用方选择的存储 scope，不是认证 authority；foreign id 与 absent id
-在 store 边界保持同形。
+检查是否出现 `offline` 配置，以及 JSON 中的 `"selection_key": "offline"`。示例地址故意无效，不要向它派发任务。
 
-acceptance 的 `KIND:TARGET` 仍是持久化 descriptor。`goal verify` 只执行显式本地 `cmd:`
-检查：固定 canonical workdir、清理继承环境、限制时间与输出，并在 Unix 上用独立 process group
-清理超时子树；通过项再走现有 lease-fenced mutation。goal 必须处于 `in_progress`，存在 active
-lease 时必须传匹配的 `--worker`。它不会自动完成或 pursuit goal，也不会
-暗中调用网络/看板 adapter、quota handoff 或 goal REST/MCP service。精确边界见
-[WP-60](docs/plan/WP-60.md)、[WP-68](docs/plan/WP-68.md) 与
-[WP-69](docs/plan/WP-69.md)。每次 verification 都会保存为私有、不可变、带 digest
-校验的 artifact，并由 `goal get --json` 返回；它只是证据，不是完成权限。
+**3. 接入自己的目标。** 按[服务商配置说明](docs/QUICKSTART.md#configure-a-real-target)完成设置，再试[三个示例](docs/EXAMPLES.md)。模型访问权限和凭据由你提供，真实调用可能产生服务商费用。离线预览不验证真实服务是否可用。
 
-`goal pursue` 是显式有界外循环：verify、经普通 target/failover kernel dispatch 一个 fresh
-sessionless segment、再 reverify。它要求并续租 exact active worker lease；只有全部 criterion
-通过后 pursuer 才能完成 goal。schema-v4 checkpoint 会随 progress 事件原子保存跨重启累计的
-segment/failure 计数、runtime/workdir identity、最后 run 与 verification id。pause 后显式
-resume 并由新 worker claim，即可从 checkpoint 继续；旧 revision、worker 或 lease generation
-会 fail closed。缺少
-criterion、最终 manual confirmation、预算耗尽、cancellation 或连续失败会 pause，外部 lifecycle 变化会 stop。
-手动命令不会静默 start goal、不会恢复 runtime-native session，也不做 quota/approval handoff；
-常驻 daemon 可按下文显式选择启用同一 pursuer。
-生产 CLI 当前只接受与 dispatch ledger 一致的 `local` single-user owner，避免 goal 与执行
-authority 静默分叉。见 [WP-70](docs/plan/WP-70.md)、[WP-71](docs/plan/WP-71.md)
-与 [WP-72](docs/plan/WP-72.md)、[WP-73](docs/plan/WP-73.md)。
+## 现在能做什么
 
-`goal continuity-next <goal-id> --json` 只读投影当前 goal revision、quota boundary、handoff
-step 与持久 approval 证据，返回 queue、decide、execute、记录 signal、等待、处理 blocked
-execution 或 continuity complete 之一。它不会执行动作，也不会编造 workdir、decision 或 signal
-evidence。精确边界见 [WP-79](docs/plan/WP-79.md)。
+| 源码中已有的能力 | 边界 |
+| --- | --- |
+| 单目标执行、多目标广播、显式故障切换和流式输出 | 直接 HTTP 调用返回模型文本，不会自动附加本地文件，也不提供终端工具。 |
+| Claude Code 和 Codex CLI 适配器 | 通过 CLI 子进程接入，未接入 Codex App Server RPC 或直接的 Claude Agent SDK。你需自行提供 CLI 和访问权限；沙箱由所选代理执行。 |
+| 按配置路由和本地运行历史 | 路由依据配置选择目标，不保证答案质量。 |
+| CLI、REST 和 MCP 入口 | 各入口覆盖的能力不同，见 [CLI 指南](docs/CLI-GUIDE.md)。 |
 
-REST assembler 显式选择构造 goal read component，并通过 bearer-authenticated loopback REST 的
-`GET /v1/goals/{id}/continuity-next` 暴露同一投影。这个 REST `GoalReadService` 实例在构造时冻结
-`local` owner，并在一个只读事务中观察 goal 与 approval 证据，只返回 allowlist 脱敏 DTO；request
-不能选择 owner。该组件没有 goal list/get、MCP、queue、decision、execution、signal 或 runner
-surface，也不能完成 goal。bearer 不是 distinct principal，不提供 hostile multi-user 或
-same-UID 隔离；这个 fresh continuity view 也不等于 runtime-native session resume。精确边界见
-[WP-80](docs/plan/WP-80.md)。
+常驻执行、持久化工作流和本地目标管理仍在演进。原生运行每次都是新运行，没有会话连续性；原生审批恢复、会话恢复和重启后自动重放仍未完成。owner 字段和回环地址认证不能隔离恶意的同用户或多用户访问。使用这些能力构建应用前，请阅读[状态与限制](docs/PROJECT-STATUS.md)。
 
-`GoalObservationIngress` 是独立 opt-in mutation component：构造时冻结 authority 提供的 owner，
-再把受信任的非秘密 watcher identity 绑定为 signal source；它只接受精确匹配当前 quota/primary
-target boundary 的 typed quota-reset 或带序号 review-check observation。one-shot
-`GoalObservationRunner` 限制 watcher 数、并发、timeout 与 batch 大小，隔离单 watcher 失败，并按
-确定的 watcher 顺序写入合格 batch。它没有 HTTP/MCP/CLI endpoint、具体 connector、周期 loop、
-approval 或 execution authority，也不能完成 goal。精确边界见 [WP-81](docs/plan/WP-81.md)。
+## 深入了解
 
-`GoalContinuityRunner` 对有限 goal 集消费该闭合 next-action view。read、queue、execute credential
-分别通过各自 purpose policy 认证，并必须解析到同一 owner；每个 port 也保留同一 opaque owner
-context，assembly 会拒绝错绑。queue 与 approved-execution port 只会收到 exact goal revision、
-quota boundary、step 与 approval fence。runner 没有 decision port、裸
-dispatch 输入、retry 或周期 loop；本 crate 也不提供具体 queue/execution adapter。精确边界见
-[WP-82](docs/plan/WP-82.md)。
+- [架构与目标模型](docs/ARCHITECTURE.md) · [配置参考](profiles.example.toml) · [CLI、REST 和 MCP 指南](docs/CLI-GUIDE.md)
+- [能力矩阵与可复现证据](docs/PROJECT-STATUS.md#relationship-to-python-vyane) · [路线图](docs/ROADMAP.md)
+- [更新日志](docs/CHANGELOG.md) · [版本与发布规范](docs/RELEASING.md)
 
-`vyane serve` 会拒绝非 loopback bind；每次启动都会生成 256-bit bearer capability，并把它原子写入
-启动日志所示的私有 `serve.token`（Unix 上为 mode-0600，数据目录为 mode-0700），所有 endpoint
-（包括 health）均要求该 bearer。Router 还会
-拒绝非 loopback `Host`/`Origin` 与 cross-site browser request，阻断 DNS rebinding。run/session 响应
-使用 allowlisted public view，不直接序列化内部 store record。恶意同 UID 进程仍可读取 token，
-因此它是本地单用户控制面，不是 hostile same-UID 或多用户安全边界；调用 curl 时应通过 stdin
-config 读取 token，避免把 bearer 放进 argv 或环境变量。非 Unix 平台应把 `VYANE_DATA_DIR` 放在
-系统管理的用户私有目录；Vyane 不会替调用方给自行选择的共享目录重设平台 ACL。
+<details>
+<summary>证据快照</summary>
 
-### 常驻 workflow daemon
+[公开能力矩阵](docs/parity/ORIGINAL-VYANE-PARITY.md)记录当前状态。矩阵按 8 个域追踪 53 个能力项：7 个 implemented、23 个 partial、12 个 missing、9 个刻意不同或待决策、2 个 planned。implemented 表示已实现，partial 表示部分实现，missing 表示缺失，planned 表示已规划。[脱敏清单](docs/parity/fixtures/v1/manifest.json)包含 5 个套件、44 个用例：30 个经规范化后匹配，14 个仍有未解决差异。这些有限范围的检查不能换算成整个系统的对齐百分比。
 
-workflow daemon 是独立于 `vyane serve` 的本地控制面。daemon 接受 workflow 后，
-提交它的 CLI 退出也不会终止这次运行：
+</details>
 
-```sh
-vyane daemon start                         # 后台启动并等待就绪
-vyane daemon start --goal-auto-pursue \
-  --goal-target builder --goal-workdir . --goal-sandbox write
-vyane daemon status --json
-vyane workflow submit workflow.toml --var env=dev
-vyane workflow status <uuidv7> --json
-vyane workflow cancel <uuidv7>
-vyane daemon stop
-```
+这是原有私有 Python Vyane 系统部分能力的公开 Rust 实现，不能直接替换原系统。命令、配置、已保存的会话和工作流都需要分别核对迁移方式。没有明确迁移方案时，不要共享状态目录。公开贡献不需要访问私有源码。
 
-`daemon run` 会在前台运行同一个 supervisor。listener 只接受 loopback 地址；所有
-endpoint（包括 `/health`）都要求每次启动新生成的 256-bit bearer token。token 与
-owner-only daemon descriptor 分文件保存。控制 API 包括 `POST /v1/workflows`、
-`GET /v1/workflows/:id` 和 `POST /v1/workflows/:id/cancel`。Linux 上另有
-`POST /v1/agent-runs`、`GET /v1/agent-runs/:id`、`GET /v1/agent-runs/:id/output` 与
-`POST /v1/agent-runs/:id/cancel`，承载 [WP-61](docs/plan/WP-61.md) 与
-[WP-66](docs/plan/WP-66.md) 的 fresh/sessionless Process 和 Native lane。所有 route
-均不启用宽松 CORS。
-这用于防止意外的浏览器和跨进程访问，不是抵御同一 OS 用户下恶意代码的 sandbox。
+## 贡献与求助
 
-客户端会先认证记录中的精确 daemon，再读取本地 workflow source。它把 workflow
-TOML 与所有声明的 `prompt_file` 作为只存在于请求和 live execution 中的 source
-bundle 发送出去；daemon 不会在自己的文件系统上解析这些 source path。语义限制为：
-TOML 1 MiB、每个 prompt 4 MiB、bundle 总计 16 MiB、最多 128 个 prompt entry，
-每条 bundle path 最多 4,096 bytes。变量最多 128 个，key 最多 256 bytes、单个
-value 最多 1 MiB、总计最多 4 MiB。请求还携带 canonical submission working
-directory（最多 4,096 bytes）：未设置或相对的 step `workdir` 从这里解析，绝对
-`workdir` 保持不变。
+可以先试一个示例、报告可复现的问题、改进翻译，或补齐已记录的能力缺口。先查看 [Issues](https://github.com/zleo-ai/vyane-rs/issues) 和[进行中的 PR](https://github.com/zleo-ai/vyane-rs/pulls)，再阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。报告中请注明源码版本并提供脱敏输出，不要附上密钥、私密提示词或个人路径。安全漏洞请按 [SECURITY.md](SECURITY.md) 披露。
 
-客户端默认生成 canonical UUIDv7，并在发送请求前把它输出到 stderr。使用
-`--id <uuidv7>` 可对结果做核对或进行幂等重试：只有 daemon workflow scope、
-normalized source、working directory 与 variables 全部一致时才返回已有 task；
-任何不一致都会冲突，且不会重放旧 payload。task id 与 workflow journal id 完全一致。
-daemon 重启时会按精确 controller identity 清理遗留执行，并将废弃的 daemon task
-标记为 `interrupted`，不会自动 resume 或 replay。前台 `workflow resume` 仍是显式的、
-面向 journal 的命令。
+## 许可证
 
-Goal 自动 pursuit 默认关闭。`--goal-auto-pursue` 必须同时给出显式 target 与 canonical
-workdir；sandbox、verifier、segment 和单次 invocation 预算仍由有界参数控制。daemon 一次只处理
-一个 `local` goal：先续接可接管的 `in_progress` 工作，再原子 claim 下一个 queued goal。新一代
-daemon 可沿用仍有效的稳定 worker lease 与 WP-71 checkpoint；过期 lease 仍通过常规 generation
-fence reclaim。语义上 paused、已经 terminal 或由其他活跃 worker 持有的 goal 不会被自动 resume
-或窃取。关闭 daemon 时会取消 fresh runtime effect，但保留 running checkpoint，不把进程中断伪装成
-业务 pause。本分片不增加 goal HTTP API、quota/approval handoff、runtime-native session resume、
-remote owner 或并行 goal scheduler。
+可任选 [MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE)。贡献采用相同条款。
 
-### 智能路由
+---
 
-`vyane route "task text"` 预览路由决策；`vyane dispatch --target auto` 会执行同一
-决策，并把 profile/provider/model、tier、effort、score、intent、tag 记录进 ledger。路由器从结构性
-信号（changed files、dependency edges、retry count、prompt length、inferred tags）
-计算复杂度评分，映射到 economy / mainline / frontier 三档，再按 profile 的
-`tier`/`tags`/`stage` 元数据解析偏好：
-
-```
-vyane route "write an ADR for the system architecture" --changed-files 20
-vyane route "simple task" --tier frontier
-vyane dispatch "fix the parser" --target auto
-vyane dispatch "review auth" --target auto --no-frontier
-```
-
-Workflow step 也支持 `target = "auto"`，并可在 `[step.route]` 中设置
-`stage`、`tier`、`tags`、`candidates`、`allow_frontier`、`effort`；选择发生在模板 prompt
-渲染完成后。`allow_frontier = false` 会对选中 profile 及其 failover 链整体
-fail-closed。名为 `auto` 的普通 profile 可用 `profile:auto` 显式选择；provider
-名称若以保留前缀 `profile:` 开头，可用 `target:<provider>/<model>` 消歧。
-`routing.provider`、`routing.effort` 等决策标签由 Vyane 保留写入，调用方不能伪造。
-`effort` 是 `low`/`medium`/`high`/`xhigh` 的 closed typed 值，只允许用于 deferred
-single target；explicit target 或 `fan_out` 携带 route hints 会在 dispatch 前 fail closed。
-有效 effort 的优先级为 workflow explicit effort > 选中 profile 配置的 effort > decision tier
-默认值，并统一写入整条 failover chain 的 canonical `routing.effort`。recorded、detached、daemon
-幂等重试及 journal resume 都冻结这个有效值；非法值不会回显输入，普通 `effort` label 也不能伪造
-保留字段。精确边界见 [WP-46](docs/plan/WP-46.md)。`WorkflowPlan` schema v1 现已成为
-compile、prepare、run、resume 共用的有界、严格、与源文件路径无关的执行 payload，冻结物化 DAG、
-typed target/route、无损 timeout、请求能力摘要、source claim 与 canonical plan checksum。它不是
-安全的公开 view；checksum 也不是认证、来源证明或执行授权。plan-only continuation 必须与 journal
-中的 digest 精确匹配；只有仍持有 source 的兼容 API 才能在核验 exact source hash 后迁移旧 journal。
-精确边界见 [WP-54](docs/plan/WP-54.md)。[WP-58](docs/plan/WP-58.md) 新增显式 exact-plan
-replay/fork：读取 terminal source journal，新建 UUIDv7 journal，只复用 dependency-closed 且由
-journal 记录的全成功前缀，再 live 执行剩余步骤；source 不变，daemon restart 仍不隐含 replay。这仍不是完整
-workflow parity；dynamic control flow、nested workflow、shared budget、compatibility frontend、
-changed-plan call matching、CLI/REST/MCP plan wire、净化的跨实现 fixtures 与 production-complete
-model-tier policy 仍未完成。
-detached 任务会通过一次性的私有 stdin pipe 把不含 secret 的目标快照交给 worker，
-不会把快照或请求正文落盘；endpoint、extra passthrough 和 harness env-inject 仅在
-该临时快照中使用摘要/结构，不携带原始值。worker 若发现配置漂移会拒绝执行。
-
-### Solution-review workflow
-
-`vyane review` 在已有的 workflow 引擎上跑一个三步 solution-review workflow：
-implement → fan-out review → synthesize。它还不是原仓包含结构化 git diff/PR、finding
-artifact、verifier 和 publication 的 review 产品。
-
-```
-vyane review 'implement a sorting function' \
-  --implementer sonnet \
-  --reviewers opus,gpt \
-  --synthesizer opus
-```
-
-## 架构
-
-```
-       CLI              REST API           MCP
-   vyane dispatch     vyane serve       vyane mcp
-        │                  │                  │
-        └──────────┬───────┴──────────┬───────┘
-                   ▼                  ▼
-              vyane-service（共享 facade）
-                   │
-                   ▼
-            ┌─────────────┐
-            │   kernel    │  early execution id,
-            │  dispatch / │  whole-chain admission,
-            │  broadcast  │  attempts + RunRecord
-            └──────┬──────┘
-      ┌────────────┴────────────┐
-      ▼                         ▼
-direct-http protocol         cli-wrap harnesses
-clients (ChatClient)         (Harness, scrubbed env)
-OpenAI Chat / Responses,     Claude Code, Codex CLI, …
-Anthropic Messages                    │
-      └────────────┬──────────────┘
-                   ▼
-       append-only JSONL ledger
-        (digests, attempt trail)
-          + session store
-       SQLite task metadata
-     (CAS lifecycle, no payload)
-  SQLite transactional message store
-（message/delivery/receipt/outbox 真相）
-       SQLite goal lifecycle store
-（同事务 snapshot + immutable event）
-        bounded delivery broker
-（replay-safe adapter + 无正文 EventLog 投影）
-     SQLite AgentRun / worker store
-（lease、topology、recovery、tree cancel、无正文 outbox）
-```
-
-17 个 crate，kernel 只依赖 `vyane-core` traits。详见
-[ARCHITECTURE.md](docs/ARCHITECTURE.md)。
-
-## 使用方法
-
-配置是一个 TOML 文件。完整结构见 [`profiles.example.toml`](profiles.example.toml)。
-
-```toml
-[providers.anthropic]
-base_url      = "https://api.anthropic.com"
-api_key_env   = "ANTHROPIC_API_KEY"
-auth_style    = "x_api_key"
-protocol      = "anthropic_messages"
-default_model = "a-capable-anthropic-model"
-
-[profiles.review]
-provider = "anthropic"
-protocol = "anthropic_messages"
-harness  = "none"
-model    = "a-capable-anthropic-model"
-```
-
-```sh
-vyane check                              # 校验配置
-vyane dispatch "task" --target review    # 派发
-vyane dispatch "task" --target auto      # 自动分档并真实派发
-vyane broadcast "task" --targets a,b,c   # 扇出
-vyane dispatch "task" --target x --stream  # 流式
-vyane route "task"                       # 路由 dry-run
-vyane review "task" --implementer ...    # 评审流水线
-vyane serve                              # REST API 服务器
-vyane mcp                                # MCP server
-```
-
-## 设计原则
-
-- **Boring dependencies**：用广为人知的 crate，不花哨。
-- **Secrets never serialize**：凭据类型在类型层面不可序列化。
-- **声明和 evidence 不是 authority**：capability manifest/scope 可序列化用于 audit；prepared
-  plan、pinned directory handle 与 active permit 保持 process-local，并在 provenance drift 时 fail closed。
-- **ledger 存 digest 不存 prompt**。
-- **子进程环境默认 scrub**。
-- **没有隐藏 timeout**。
-- **记录带 owner**：多用户隔离从第一天起就有。
-
-## 文档
-
-- [Architecture](docs/ARCHITECTURE.md) — four-layer model、crate map、dispatch 生命周期、streaming、failover 语义。
-- [Architecture decisions](docs/adr/README.md) — 已接受的产品差异及仍待完成的验收门槛。
-- [Roadmap](docs/ROADMAP.md) — v0.1 ~ v0.4 里程碑。
-- [原始 Vyane 对齐基线](docs/parity/ORIGINAL-VYANE-PARITY.md) — 固定双仓能力矩阵与验收门槛。
-- [Contributing](CONTRIBUTING.md) — toolchain、检查项、PR 约定、crate map。
-- [AGENTS.md](AGENTS.md) — 给 coding agent 的公开仓规则（不写私有路径或凭据）。
-
-## 许可协议
-
-在 [MIT](LICENSE-MIT) 与 [Apache License, Version 2.0](LICENSE-APACHE) 之间任选其一。
+源码基线：`fe43941` · 工作区版本：`0.1.0` · 更新：2026-10-15。英文版为权威来源；本版为机器辅助翻译，尚待母语人工审校，详见[翻译覆盖与审校状态](docs/TRANSLATING.md)。路线图里程碑不等于已发布版本。
