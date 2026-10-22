@@ -221,6 +221,11 @@ impl NewEvent {
 
     fn validate(&self) -> EventResult<()> {
         validate_text("event_id", &self.event_id, MAX_REFERENCE_BYTES)?;
+        if self.event_id.trim().is_empty() {
+            return Err(EventLogError::InvalidInput(
+                "event_id must not be only whitespace".into(),
+            ));
+        }
         validate_text("owner", &self.owner, MAX_OWNER_BYTES)?;
         validate_event_type(&self.event_type)?;
         validate_optional_text("trace_id", self.trace_id.as_deref(), MAX_REFERENCE_BYTES)?;
