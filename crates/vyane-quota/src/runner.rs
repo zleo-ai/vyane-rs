@@ -92,7 +92,9 @@ impl QuotaConnectorError {
     }
 
     /// Detail kept for a caller is truncated to [`MAX_CONNECTOR_ERROR_BYTES`]
-    /// and omits every line that assigns a token or password.
+    /// and omits every line that assigns a token or password. A camelCase
+    /// suffix counts. A bare line that only continues an empty or unclosed
+    /// value is omitted too.
     #[must_use]
     pub fn with_detail(code: QuotaConnectorErrorCode, detail: &str) -> Self {
         Self {
@@ -109,8 +111,18 @@ impl QuotaConnectorError {
 
 fn bound_connector_error(detail: &str) -> String {
     let mut kept = String::new();
+    let mut drop_bare_continuation = false;
     for line in detail.lines() {
+        if drop_bare_continuation {
+            drop_bare_continuation = false;
+            // The previous assignment's value was empty or unclosed, so this
+            // line is that value unless it starts a new field.
+            if !line_has_assignment_separator(line) {
+                continue;
+            }
+        }
         if line_assigns_token_or_password(line) {
+            drop_bare_continuation = secret_value_continues(line);
             continue;
         }
         if !kept.is_empty() {
@@ -159,12 +171,65 @@ fn is_key_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
 }
 
+fn line_has_assignment_separator(line: &str) -> bool {
+    line.bytes().any(|byte| byte == b'=' || byte == b':')
+}
+
+fn secret_value_continues(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        if !matches!(byte, b'=' | b':') || !key_before_separator_is_token_or_password(bytes, index)
+        {
+            return false;
+        }
+        let raw = line[index + 1..].trim_start_matches([' ', '\t']);
+        if raw.is_empty() {
+            return true;
+        }
+        let quote = raw.as_bytes()[0];
+        if quote == b'"' || quote == b'\'' {
+            raw.bytes().filter(|byte| *byte == quote).count() % 2 == 1
+        } else {
+            false
+        }
+    })
+}
+
 fn key_names_token_or_password(key: &str) -> bool {
     let key = key.trim_matches(|character| matches!(character, '.' | '_' | '-'));
-    let Some(last) = key.rsplit(['_', '-', '.']).next() else {
+    if key.is_empty() {
         return false;
-    };
-    last.eq_ignore_ascii_case("token") || last.eq_ignore_ascii_case("password")
+    }
+    let last = key.rsplit(['_', '-', '.']).next().unwrap_or(key);
+    is_exact_secret_name(last) || camel_secret_suffix(last)
+}
+
+fn is_exact_secret_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("token") || name.eq_ignore_ascii_case("password")
+}
+
+fn camel_secret_suffix(name: &str) -> bool {
+    for suffix in ["token", "password"] {
+        if name.len() <= suffix.len() {
+            continue;
+        }
+        let (stem, tail) = name.split_at(name.len() - suffix.len());
+        if !tail.eq_ignore_ascii_case(suffix) {
+            continue;
+        }
+        let Some(boundary) = stem.chars().next_back() else {
+            continue;
+        };
+        let Some(first) = tail.chars().next() else {
+            continue;
+        };
+        if (boundary.is_ascii_lowercase() || boundary.is_ascii_digit())
+            && first.is_ascii_uppercase()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn truncate_to_bytes(value: &str, max_bytes: usize) -> String {
@@ -423,6 +488,16 @@ mod tests {
             ("Password: super-secret-password", ""),
             ("api_token=super-secret-token", ""),
             ("user-password=super-secret-password", ""),
+            ("accessToken=super-secret-token", ""),
+            ("refreshToken: super-secret-token", ""),
+            ("userPassword=super-secret-password", ""),
+            ("\"refreshToken\":\"super-secret-token\"", ""),
+            ("password:\nsuper-secret-password", ""),
+            ("\"access_token\": \"super-\nsecret-token\"", ""),
+            (
+                "password:\nerror: upstream timeout",
+                "error: upstream timeout",
+            ),
             ("\"password\": \"super-secret-password\"", ""),
             ("token =", ""),
             ("upstream failed token=super-secret-token", ""),
