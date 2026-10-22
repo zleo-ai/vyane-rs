@@ -30,8 +30,14 @@ use crate::workdir::WorkdirIdentity;
 pub struct SessionRef(pub String);
 
 impl SessionRef {
+    /// # Panics
+    ///
+    /// Panics if `id` is empty. A session id is a continuity key, so the
+    /// existing constructor rejects an empty value instead of storing one.
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let id = id.into();
+        assert!(!id.is_empty(), "session id must not be empty");
+        Self(id)
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -255,7 +261,7 @@ fn default_owner() -> String {
 mod tests {
     use super::{
         NativeSessionBinding, NativeSessionDomain, NativeSessionState, NativeSessionTransition,
-        SessionUpdate,
+        SessionRef, SessionUpdate,
     };
     use crate::target::{HarnessKind, ModelId, Protocol, ProviderId, Target};
     use crate::workdir::WorkdirIdentity;
@@ -298,6 +304,13 @@ mod tests {
                 runtime_scope_digest: "r".into(),
             },
         }
+    }
+
+    #[test]
+    fn session_ref_new_rejects_empty_id() {
+        let rejected = std::panic::catch_unwind(|| SessionRef::new(""));
+        assert!(rejected.is_err(), "empty session id must be rejected");
+        assert_eq!(SessionRef::new("sess-1").as_str(), "sess-1");
     }
 
     #[test]
