@@ -1,6 +1,6 @@
 use vyane_workflow::{
-    WORKFLOW_PLAN_MAX_STEPS, WORKFLOW_SOURCE_MAX_PROMPT_BYTES, WorkflowError, WorkflowSourceBundle,
-    WorkflowSourceEntry,
+    WORKFLOW_PLAN_MAX_STEP_ID_BYTES, WORKFLOW_PLAN_MAX_STEPS, WORKFLOW_SOURCE_MAX_PROMPT_BYTES,
+    WorkflowError, WorkflowSourceBundle, WorkflowSourceEntry,
 };
 
 fn repeated_prompt_bundle(steps: usize, prompt_bytes: usize) -> WorkflowSourceBundle {
@@ -59,6 +59,28 @@ fn source_materialization_bounds_step_count_before_building_steps() {
             .len(),
         WORKFLOW_PLAN_MAX_STEPS
     );
+}
+
+#[test]
+fn source_materialization_bounds_step_id_bytes() {
+    fn bundle(id_bytes: usize) -> WorkflowSourceBundle {
+        WorkflowSourceBundle {
+            workflow_toml: format!(
+                "[workflow]\nname='bounded'\n[[step]]\nid='{}'\ntarget='auto'\nprompt='x'\n",
+                "x".repeat(id_bytes)
+            ),
+            prompt_files: vec![],
+        }
+    }
+
+    let accepted = bundle(WORKFLOW_PLAN_MAX_STEP_ID_BYTES)
+        .materialize()
+        .expect("step id at byte limit");
+    assert_eq!(accepted.steps[0].id.len(), WORKFLOW_PLAN_MAX_STEP_ID_BYTES);
+    assert!(matches!(
+        bundle(WORKFLOW_PLAN_MAX_STEP_ID_BYTES + 1).materialize(),
+        Err(WorkflowError::InvalidWorkflowPlan { .. })
+    ));
 }
 
 #[test]
