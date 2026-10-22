@@ -207,6 +207,10 @@ fn unsafe_paths_are_rejected_and_spaces_are_kept() {
         "foo\\bar",
         "foo\nbar",
         "foo\0bar",
+        " ",
+        "   ",
+        "foo/ /bar",
+        "/ ",
     ];
     for path in rejected {
         assert_eq!(
