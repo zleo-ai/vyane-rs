@@ -1514,7 +1514,7 @@ fn assert_optional_lease_fence(
 }
 
 fn validate_owner(owner: &str) -> KernelStoreResult<()> {
-    if owner.is_empty() || owner.len() > 128 {
+    if owner.trim().is_empty() || owner.len() > 128 {
         return Err(KernelStoreError::InvalidInput("owner"));
     }
     Ok(())
@@ -1649,6 +1649,35 @@ mod tests {
             .apply_effect_once("o", "effect:1", &"d".repeat(64), None, None, now())
             .unwrap_err();
         assert!(matches!(err, KernelStoreError::DuplicateEffect { .. }));
+    }
+
+    #[test]
+    fn whitespace_only_effect_owner_is_rejected_and_internal_space_is_idempotent() {
+        let dir = crate::test_support::private_tempdir();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let digest = "a".repeat(64);
+        for owner in ["   ", "\t", "\n", "\u{00A0}"] {
+            let err = store
+                .apply_effect_once(owner, "effect-1", &digest, None, None, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::InvalidInput("owner")),
+                "{owner:?} -> {err:?}"
+            );
+            let text = err.to_string();
+            assert!(!text.contains(owner), "{text}");
+            assert_eq!(store.effect_count(owner).unwrap(), 0);
+        }
+        assert!(
+            store
+                .apply_effect_once("local user", "effect-1", &digest, None, None, now())
+                .unwrap()
+        );
+        assert!(
+            !store
+                .apply_effect_once("local user", "effect-1", &digest, None, None, now())
+                .unwrap()
+        );
     }
 
     #[test]
