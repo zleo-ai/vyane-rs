@@ -243,6 +243,9 @@ impl PermissionRule {
         if argument.is_empty() {
             return Err(PermissionRuleError::EmptyArgumentName);
         }
+        if !valid_policy_text(&argument, MAX_ARGUMENT_NAME_BYTES) {
+            return Err(PermissionRuleError::InvalidPolicyText);
+        }
         let source = pattern.into();
         let regex =
             Regex::new(&source).map_err(|source| PermissionRuleError::InvalidArgumentRegex {
@@ -1049,6 +1052,37 @@ mod tests {
                 tool: " ".into(),
                 effect: PermissionEffect::Allow,
                 arguments: BTreeMap::new(),
+            }],
+        };
+        assert!(matches!(
+            blank.validate(),
+            Err(PermissionRuleError::InvalidPolicyText)
+        ));
+    }
+
+    #[test]
+    fn permission_rule_argument_name_rejects_whitespace() {
+        let allow = PermissionRule::new("write_file", PermissionEffect::Allow).unwrap();
+        for name in [" ", " path ", "path "] {
+            assert!(
+                matches!(
+                    allow.clone().with_argument_pattern(name, "^ok$"),
+                    Err(PermissionRuleError::InvalidPolicyText)
+                ),
+                "{name:?}"
+            );
+        }
+        assert!(matches!(
+            allow.clone().with_argument_pattern("", "^ok$"),
+            Err(PermissionRuleError::EmptyArgumentName)
+        ));
+        assert!(allow.with_argument_pattern("path", "^ok$").is_ok());
+        let blank = NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![NativeToolPermissionRule {
+                tool: "write_file".into(),
+                effect: PermissionEffect::Allow,
+                arguments: BTreeMap::from([(" ".into(), "^ok$".into())]),
             }],
         };
         assert!(matches!(
