@@ -941,7 +941,7 @@ impl VyaneService {
             params.labels,
         )?;
         if let Some(session) = params.session {
-            task.session = Some(SessionRef::new(session));
+            task.session = Some(SessionRef::try_new(session)?);
         }
         Ok(task)
     }
@@ -1196,6 +1196,27 @@ mod tests {
             StoragePaths::from_data_dir(directory.path()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn empty_dispatch_session_is_a_config_error() {
+        let directory = TempDir::new().unwrap();
+        let service = service(&directory);
+        let result = service.task_from_dispatch(DispatchParams {
+            task: "hello".into(),
+            target: "provider/model".into(),
+            workdir: None,
+            sandbox: Sandbox::ReadOnly,
+            session: Some(String::new()),
+            system: None,
+            timeout_secs: None,
+            labels: Vec::new(),
+        });
+        let Err(error) = result else {
+            panic!("empty session must not panic or succeed");
+        };
+        let vyane = error.downcast_ref::<vyane_core::VyaneError>().unwrap();
+        assert_eq!(vyane.kind, ErrorKind::Config);
     }
 
     struct PrincipalResolver;

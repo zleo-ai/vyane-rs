@@ -342,7 +342,7 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
                 .insert("routing.allow_frontier".into(), "false".into());
         }
         if let Some(session) = args.session.as_ref() {
-            task.session = Some(SessionRef::new(session.clone()));
+            task.session = Some(SessionRef::try_new(session.clone())?);
         }
         let plan = vyane_service::plan_dispatch(&loaded, &args.target, &mut task)?;
         Ok((loaded, plan, task))
@@ -2375,7 +2375,7 @@ fn task_from_job(job: &JobSpec) -> Result<TaskSpec> {
         job.labels.clone(),
     )?;
     if let Some(session) = &job.session {
-        task.session = Some(SessionRef::new(session.clone()));
+        task.session = Some(SessionRef::try_new(session.clone())?);
     }
     Ok(task)
 }
