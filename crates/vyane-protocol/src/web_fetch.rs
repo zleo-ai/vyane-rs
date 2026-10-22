@@ -208,7 +208,7 @@ fn validate_request_bounds(req: &WebFetchRequest) -> Result<()> {
     Ok(())
 }
 
-fn valid_policy_domain(domain: &str) -> bool {
+pub(crate) fn valid_policy_domain(domain: &str) -> bool {
     if domain.is_empty()
         || domain.len() > 253
         || domain != domain.to_ascii_lowercase()

@@ -1316,6 +1316,21 @@ pub(crate) mod openai_responses {
         allowed_domains: Vec<String>,
     }
 
+    fn hosted_search_domains_invalid(domains: &[String]) -> bool {
+        if domains.is_empty() || domains.len() > 128 {
+            return true;
+        }
+        if domains
+            .iter()
+            .any(|domain| !crate::web_fetch::valid_policy_domain(domain))
+        {
+            return true;
+        }
+        let mut sorted = domains.to_vec();
+        sorted.sort();
+        sorted.windows(2).any(|pair| pair[0] == pair[1])
+    }
+
     impl TryFrom<&CoreWebSearchRequest> for HostedWebSearchRequest {
         type Error = VyaneError;
 
@@ -1347,13 +1362,10 @@ pub(crate) mod openai_responses {
                 || req.query.len() > 16 * 1024
                 || req.max_searches == 0
                 || req.max_searches > 16
-                || req.allowed_domains.as_ref().is_some_and(|domains| {
-                    domains.is_empty()
-                        || domains.len() > 128
-                        || domains
-                            .iter()
-                            .any(|domain| domain.is_empty() || domain.len() > 253)
-                })
+                || req
+                    .allowed_domains
+                    .as_ref()
+                    .is_some_and(|domains| hosted_search_domains_invalid(domains))
             {
                 return Err(VyaneError::new(
                     ErrorKind::Config,
@@ -1568,5 +1580,47 @@ pub(crate) fn role_name(role: Role) -> &'static str {
         Role::System => "system",
         Role::User => "user",
         Role::Assistant => "assistant",
+    }
+}
+
+#[cfg(test)]
+mod hosted_search_domain_tests {
+    use super::openai_responses::HostedWebSearchRequest;
+    use vyane_core::{ErrorKind, GenParams, ModelId, WebSearchContextSize, WebSearchRequest};
+
+    fn request(domains: Option<Vec<String>>) -> WebSearchRequest {
+        WebSearchRequest {
+            model: ModelId::new("gpt"),
+            query: "rust".into(),
+            allowed_domains: domains,
+            max_searches: 1,
+            context_size: WebSearchContextSize::Medium,
+            params: GenParams::default(),
+        }
+    }
+
+    fn assert_invalid(domains: Vec<String>) {
+        let error = HostedWebSearchRequest::try_from(&request(Some(domains))).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Config);
+        let text = error.to_string();
+        assert!(
+            text.contains("hosted web-search request is invalid"),
+            "{text}"
+        );
+        assert!(!text.contains("Example.com"), "{text}");
+        assert!(!text.contains("127.0.0.1"), "{text}");
+    }
+
+    #[test]
+    fn hosted_search_rejects_non_dns_domains() {
+        for domain in ["Example.com", "127.0.0.1", "localhost", "*.example.com"] {
+            assert_invalid(vec![domain.into()]);
+        }
+        assert_invalid(vec!["docs.rs".into(), "docs.rs".into()]);
+        assert!(
+            HostedWebSearchRequest::try_from(&request(Some(vec!["docs.example.com".into()])))
+                .is_ok()
+        );
+        assert!(HostedWebSearchRequest::try_from(&request(None)).is_ok());
     }
 }
