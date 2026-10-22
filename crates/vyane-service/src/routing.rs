@@ -340,6 +340,18 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
 }
 
 fn validate_route_param_values(config: &ResolvedConfig, params: &RouteParams) -> Result<()> {
+    if let Some(stage) = params.stage.as_deref() {
+        reject_route_control_chars(stage)?;
+    }
+    if let Some(tier) = params.explicit_tier.as_deref() {
+        reject_route_control_chars(tier)?;
+    }
+    for tag in &params.extra_tags {
+        reject_route_control_chars(tag)?;
+    }
+    for name in &params.candidate_profiles {
+        reject_route_control_chars(name)?;
+    }
     if let Some(tier) = params.explicit_tier.as_deref()
         && !matches!(
             tier.trim().to_ascii_lowercase().as_str(),
@@ -645,9 +657,11 @@ pub fn route_params_from_labels(
         ..Default::default()
     };
     if let Some(stage) = labels.get("routing.stage").or_else(|| labels.get("stage")) {
+        reject_route_control_chars(stage)?;
         params.stage = Some(stage.clone());
     }
     if let Some(tier) = labels.get("routing.tier").or_else(|| labels.get("tier")) {
+        reject_route_control_chars(tier)?;
         params.explicit_tier = Some(tier.clone());
     }
     if let Some(effort) = labels.get("routing.effort") {
@@ -665,6 +679,9 @@ pub fn route_params_from_labels(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        for tag in &params.extra_tags {
+            reject_route_control_chars(tag)?;
+        }
     }
     if let Some(raw) = labels
         .get("routing.allow_frontier")
@@ -686,8 +703,18 @@ pub fn route_params_from_labels(
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .collect();
+        for name in &params.candidate_profiles {
+            reject_route_control_chars(name)?;
+        }
     }
     Ok(params)
+}
+
+fn reject_route_control_chars(value: &str) -> Result<()> {
+    if value.chars().any(char::is_control) {
+        bail!("routing value must not contain control characters");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1288,6 +1315,31 @@ effort = "xhigh"
                 .iter()
                 .all(|bound| bound.params.effort == Some(Effort::Low))
         );
+    }
+
+    #[test]
+    fn routing_stage_rejects_control_characters() {
+        for stage in ["review\n", "\u{0001}"] {
+            let labels = BTreeMap::from([("routing.stage".into(), stage.into())]);
+            let error = route_params_from_labels("task".into(), &labels).unwrap_err();
+            let text = format!("{error:#}");
+            assert!(!text.contains(stage), "{text}");
+            assert!(text.contains("control"));
+        }
+        let labels = BTreeMap::from([("routing.stage".into(), "code review".into())]);
+        let params = route_params_from_labels("task".into(), &labels).unwrap();
+        assert_eq!(params.stage.as_deref(), Some("code review"));
+
+        let error = route_task(
+            &make_config(),
+            RouteParams {
+                task: "hello".into(),
+                stage: Some("review\n".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(!format!("{error:#}").contains("review\n"));
     }
 
     #[test]
