@@ -19,11 +19,11 @@
 //! may be lost with the page cache. Crash-durable accounting is a deliberate
 //! non-goal for the plain-files v0.1 backend.
 //!
-//! `query` reads the file and walks it **most-recent-first**, skipping any line
-//! that fails to parse (counted, never fatal). Reading takes no lock; if a
-//! read ever races an in-flight append it will simply treat the still-incomplete
-//! trailing line as corrupt and skip it, which is exactly the graceful path the
-//! corrupt-line tolerance is designed for.
+//! `query` reads the file and walks it **most-recent-first**. A line that fails
+//! to parse is counted and skipped, never fatal. A complete JSON value followed
+//! by a corrupt tail on that same line is kept; only the tail is counted, so
+//! the tail cannot hide the value or any earlier line. Reading takes no lock;
+//! a race with an in-flight append uses that same path.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -103,32 +103,28 @@ impl JsonlLedger {
         let mut skipped = 0u64;
 
         for line in bytes.rsplit(|&byte| byte == b'\n') {
-            // Validate each original line before parsing. Lossy decoding can
-            // turn corrupt string values or keys into valid, altered records.
-            let Ok(line) = std::str::from_utf8(line) else {
-                skipped += 1;
+            let Some(line) = query_line(line) else {
                 continue;
             };
-            let trimmed = line.trim_end();
-            if trimmed.is_empty() {
-                // A blank line (e.g. the slot after a trailing newline) is not
-                // a corrupt record — just an empty separator. Skip silently.
-                continue;
+            let (records, corrupt) = records_on_line(line);
+            if corrupt {
+                // Unparseable bytes: count them so a caller can detect
+                // corruption. Never panic, and never discard a value already
+                // parsed ahead of the tail.
+                skipped += 1;
             }
-            match serde_json::from_str::<RunRecord>(trimmed) {
-                Ok(record) => {
-                    if matches_query(&record, &query) {
-                        out.push(record);
-                        if out.len() >= limit {
-                            break;
-                        }
+            let mut stop = false;
+            for record in records.into_iter().rev() {
+                if matches_query(&record, &query) {
+                    out.push(record);
+                    if out.len() >= limit {
+                        stop = true;
+                        break;
                     }
                 }
-                Err(_) => {
-                    // Unparseable non-empty line: skip it, but count it so a
-                    // caller can detect corruption. Never panic.
-                    skipped += 1;
-                }
+            }
+            if stop {
+                break;
             }
         }
 
@@ -180,6 +176,49 @@ impl Ledger for JsonlLedger {
         self.skipped_lines.store(skipped, Ordering::Relaxed);
         Ok(records)
     }
+}
+
+/// Bytes to parse for one physical line.
+///
+/// Blank separators are not corruption. Invalid UTF-8 stays intact so a bad
+/// byte inside a value cannot be lossily repaired into a different record;
+/// a complete value before that tail is recovered by [`records_on_line`].
+fn query_line(line: &[u8]) -> Option<&[u8]> {
+    match std::str::from_utf8(line) {
+        Ok(text) => {
+            let trimmed = text.trim_end();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.as_bytes())
+            }
+        }
+        Err(_) => Some(line),
+    }
+}
+
+/// Complete records on one line, plus whether a corrupt tail (or a wholly
+/// unparseable line) was present.
+///
+/// Values are in file order. Callers walk them newest-first. Parsing stops at
+/// the first bad value, so invalid UTF-8 inside a record still rejects that
+/// record instead of repairing it.
+fn records_on_line(line: &[u8]) -> (Vec<RunRecord>, bool) {
+    let mut records = Vec::new();
+    let mut corrupt = false;
+    for item in serde_json::Deserializer::from_slice(line).into_iter::<RunRecord>() {
+        match item {
+            Ok(record) => records.push(record),
+            Err(_) => {
+                corrupt = true;
+                break;
+            }
+        }
+    }
+    if records.is_empty() {
+        corrupt = true;
+    }
+    (records, corrupt)
 }
 
 /// Whether `record` passes every filter set on `query`. Unset fields match

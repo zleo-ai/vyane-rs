@@ -166,6 +166,44 @@ async fn corrupt_lines_are_skipped_and_counted() {
 }
 
 #[tokio::test]
+async fn corrupt_trailing_record_does_not_hide_earlier_valid_records() {
+    // A finished record needs no trailing newline. Corruption glued onto that
+    // same line must not hide it, or the earlier line ahead of it.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("corrupt-tail.jsonl");
+    let older = record("older");
+    let newer = record("newer");
+    let mut bytes = serde_json::to_vec(&older).unwrap();
+    bytes.push(b'\n');
+    bytes.extend_from_slice(&serde_json::to_vec(&newer).unwrap());
+    bytes.extend_from_slice(b"\xff\xfetorn-tail");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let ledger = JsonlLedger::new(&path);
+    let got = ledger.query(RunQuery::default()).await.unwrap();
+    assert_eq!(
+        got.iter()
+            .map(|row| row.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["newer", "older"]
+    );
+    assert_eq!(ledger.skipped_lines(), 1);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+    let limited = ledger
+        .query(RunQuery {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].run_id, "newer");
+    assert_eq!(ledger.skipped_lines(), 1);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[tokio::test]
 async fn query_filters_by_owner() {
     let dir = TempDir::new().unwrap();
     let ledger = JsonlLedger::new(dir.path().join("owners.jsonl"));
