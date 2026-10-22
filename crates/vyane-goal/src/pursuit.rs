@@ -302,7 +302,7 @@ fn validate_optional_run_id(value: Option<&str>) -> Result<()> {
 
 fn validate_optional_checkpoint_id(field: &str, value: Option<&str>) -> Result<()> {
     if let Some(value) = value
-        && (value.is_empty() || value.len() > 256 || value.chars().any(char::is_control))
+        && (value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control))
     {
         return Err(GoalStoreError::InvalidInput(format!("{field} is invalid")));
     }
@@ -1121,6 +1121,45 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn checkpoint(verification: Option<&str>, run: Option<&str>) -> GoalPursuitCheckpoint {
+        let now = chrono::DateTime::UNIX_EPOCH;
+        GoalPursuitCheckpoint {
+            owner: "owner".into(),
+            goal_id: "goal-1".into(),
+            checkpoint_revision: 1,
+            goal_revision: 1,
+            claim_generation: 1,
+            worker_id: "worker-1".into(),
+            runtime: "native".into(),
+            workdir: std::path::PathBuf::from("/tmp/work"),
+            started_at: now,
+            updated_at: now,
+            segments_started: 1,
+            segments_completed: 0,
+            consecutive_failures: 0,
+            status: PursuitCheckpointStatus::Running,
+            last_run_id: run.map(str::to_string),
+            last_verification_id: verification.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn pursuit_checkpoint_rejects_whitespace_only_verification_id() {
+        for verification in ["   ", "\u{00A0}"] {
+            match checkpoint(Some(verification), None).validate() {
+                Err(GoalStoreError::InvalidInput(message)) => {
+                    assert!(message.contains("verification id"));
+                    assert!(!message.contains(verification));
+                }
+                other => panic!("whitespace verification id must be invalid, got {other:?}"),
+            }
+        }
+        assert!(checkpoint(Some("verification-1"), None).validate().is_ok());
+        assert!(checkpoint(Some("verification 1"), None).validate().is_ok());
+        assert!(checkpoint(None, None).validate().is_ok());
+        assert!(checkpoint(None, Some("   ")).validate().is_err());
+    }
 
     #[test]
     fn pursuit_lease_seconds_ceils_remaining_and_adds_settlement_margin() {
