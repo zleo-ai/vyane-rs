@@ -880,6 +880,87 @@ fn verification_artifact_size_and_digest_guards_fail_closed() {
 }
 
 #[test]
+fn corrupt_verification_json_blocks_completion_even_with_waiver() {
+    let (directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    let mut goal = new_goal("corrupt-json", "Corrupt JSON", 2, at);
+    goal.acceptance_criteria = vec![AcceptanceCriterion::new("custom", "cmd:true")];
+    store.create(OWNER_A, goal).expect("create");
+    store.start(OWNER_A, "corrupt-json", at).expect("start");
+    let before = store
+        .get(OWNER_A, "corrupt-json")
+        .expect("get before")
+        .expect("goal before");
+
+    // Matching digest selects the JSON fail-closed branch, not the digest check.
+    let payload = "{not-json";
+    let digest = Sha256::digest(payload.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let connection =
+        Connection::open(directory.path().join("goals.sqlite3")).expect("open raw database");
+    connection
+        .execute(
+            "INSERT INTO goal_verifications (verification_id, owner, goal_id, recorded_at_ms, \
+             worker_id, payload_json, payload_sha256) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+            rusqlite::params![
+                "verification-corrupt-json",
+                OWNER_A,
+                "corrupt-json",
+                at.timestamp_millis(),
+                payload,
+                digest,
+            ],
+        )
+        .expect("inject corrupt artifact");
+
+    let error = store
+        .done(
+            OWNER_A,
+            "corrupt-json",
+            None,
+            Some("should not complete"),
+            Some("waiver must not skip a corrupt artifact"),
+            at + TimeDelta::seconds(1),
+        )
+        .expect_err("corrupt artifact must fail closed before waiver");
+    assert!(
+        matches!(
+            &error,
+            GoalStoreError::CorruptData(message)
+                if message.contains("verification artifact payload is not valid JSON")
+        ),
+        "{error}"
+    );
+
+    let after = store
+        .get(OWNER_A, "corrupt-json")
+        .expect("get after")
+        .expect("goal after");
+    assert_eq!(after, before);
+    let events = store.events(OWNER_A, "corrupt-json").expect("events");
+    assert!(
+        events.iter().all(|event| {
+            event.kind != GoalEventKind::Completed && event.kind != GoalEventKind::CriteriaWaived
+        }),
+        "corrupt artifact must not emit completion or waiver events"
+    );
+    assert!(matches!(
+        store.verifications(OWNER_A, "corrupt-json"),
+        Err(GoalStoreError::Sqlite(_))
+    ));
+    let remaining: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM goal_verifications WHERE owner = ?1 AND goal_id = ?2",
+            rusqlite::params![OWNER_A, "corrupt-json"],
+            |row| row.get(0),
+        )
+        .expect("count artifacts");
+    assert_eq!(remaining, 1);
+}
+
+#[test]
 fn verification_history_returns_latest_hundred_in_insert_order() {
     let (_directory, store) = fixture();
     let at = timestamp(1_700_000_000);
