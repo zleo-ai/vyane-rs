@@ -541,6 +541,18 @@ mod tests {
     }
 
     #[test]
+    fn registry_get_maps_unknown_provider_to_not_found() {
+        let mut registry = ProviderRegistry::new();
+        registry.insert("anthropic", anthropic_provider());
+
+        let err = registry.get("missing-provider").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotFound);
+        assert_eq!(err.message, "unknown provider `missing-provider`");
+        assert!(!err.failover_eligible());
+        assert!(registry.get("anthropic").is_ok());
+    }
+
+    #[test]
     fn provider_roundtrips_through_toml() {
         let provider = anthropic_provider();
         let serialized = toml::to_string(&provider).unwrap();
