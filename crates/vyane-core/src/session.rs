@@ -30,14 +30,23 @@ use crate::workdir::WorkdirIdentity;
 pub struct SessionRef(pub String);
 
 impl SessionRef {
+    /// Maximum UTF-8 byte length of a caller-supplied session id.
+    ///
+    /// The session store uses this same limit.
+    pub const MAX_ID_BYTES: usize = 1024;
+
     /// Fallible constructor for a caller-supplied session id.
     ///
-    /// An empty id is a config error. Input boundaries use this so a blank
-    /// `--session` or JSON field returns `Result` instead of panicking.
+    /// Empty, overlong, and NUL-containing ids are config errors. Input
+    /// boundaries use this so a blank `--session` or JSON field returns
+    /// `Result` instead of panicking.
     pub fn try_new(id: impl Into<String>) -> crate::Result<Self> {
         let id = id.into();
-        if id.is_empty() {
-            return Err(crate::VyaneError::config("session id must not be empty"));
+        if id.is_empty() || id.len() > Self::MAX_ID_BYTES || id.contains('\0') {
+            return Err(crate::VyaneError::config(format!(
+                "session id must contain 1..={} UTF-8 bytes without NUL",
+                Self::MAX_ID_BYTES
+            )));
         }
         Ok(Self(id))
     }
@@ -331,6 +340,11 @@ mod tests {
             Ok(session) => assert_eq!(session.as_str(), "sess-1"),
             Err(_) => panic!("non-empty session id must be accepted"),
         }
+        let at_limit = "s".repeat(SessionRef::MAX_ID_BYTES);
+        assert!(SessionRef::try_new(at_limit).is_ok());
+        let too_long = "s".repeat(SessionRef::MAX_ID_BYTES + 1);
+        assert!(SessionRef::try_new(too_long).is_err());
+        assert!(SessionRef::try_new("sess\0id").is_err());
     }
 
     #[test]
