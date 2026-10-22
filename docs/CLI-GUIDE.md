@@ -336,12 +336,35 @@ when there are no known amounts or their sum exceeds finite `f64` range; the
 latter sets `overflowed=true`. JSON keeps approximate floating-point amounts
 without decimal rounding, and human output labels the sum as known saved cost.
 
+Dispatch records that `cost_usd` on the run from the optional config table
+`[cost.models.<model>]`. The key is the model id, not the profile name. Rates
+are USD per 1,000,000 tokens. `input_per_mtok` and `output_per_mtok` are
+required; `reasoning_per_mtok` and `cache_read_per_mtok` are optional. Unknown
+price fields are rejected, and each rate must be a non-negative finite number.
+A later config layer replaces that model's whole entry. Reasoning tokens are a
+subset of output and cached tokens are a subset of input, not extra tokens. A
+subset count larger than its parent is clamped to the parent. When set,
+`reasoning_per_mtok` replaces the output rate for the reasoning subset, and
+`cache_read_per_mtok` replaces the input rate for the cached subset; an omitted
+subset rate bills those tokens at the parent rate. When the model has a rate
+and the run has usage, `cost_usd` is that rate applied to the recorded usage.
+A missing rate stays empty: an omitted table or an unlisted model leaves
+`cost_usd` null. It is not stored as zero and is not filled from a built-in
+price list. A run with no usage stays empty as well. A configured rate with
+zero usage can record `0`.
+
+```toml
+[cost.models."a-capable-anthropic-model"]
+input_per_mtok = 5.0
+output_per_mtok = 25.0
+```
+
 The same additive object is returned by CLI, REST and MCP statistics. Owner and
 request filters apply first, and each matching run contributes once regardless
-of status or attempt count. No price table, model call, historical repricing or
-ledger write occurs. Current dispatch does not automatically populate
-`cost_usd`, so its records remain unknown here. Existing list responses and
-provider groups keep their shape; this is not per-attempt or provider billing.
+of status or attempt count. Statistics do not call a model, reprice history, or
+write the ledger. A run whose rate was missing stays unknown in this sum.
+Existing list responses and provider groups keep their shape; this is not
+per-attempt or provider billing.
 The same three stats responses also include `usage`, with `input_tokens`,
 `output_tokens`, `reasoning_tokens` and `cached_input_tokens` objects. Each object
 has `known` and `unknown` run counts, `total_tokens` (the sum of reported values),
@@ -361,7 +384,8 @@ not a claim that every attempt or upstream charge was measured. CLI text prints
 the same four summaries (`n/a` for a null total). This additive stats field does
 not change list responses, authentication, existing errors, or stored records;
 stats still rejects an explicit limit. Clients should tolerate additional stats
-fields. This change does not collect previously missing usage or price data.
+fields. This usage aggregate does not backfill previously missing usage or
+rewrite prices already stored on a run.
 
 SSE streaming events (`POST /v1/dispatch/stream`):
 
