@@ -510,6 +510,11 @@ impl WorkflowPlan {
                         "workflow plan step `{}` workdir contains NUL",
                         step.id
                     ));
+                } else if workdir.chars().any(char::is_control) {
+                    problems.push(format!(
+                        "workflow plan step `{}` workdir contains a control character",
+                        step.id
+                    ));
                 }
             }
             if step
@@ -1330,6 +1335,29 @@ effort = "high"
 
         let mut spaced = base.clone();
         spaced.steps[1].route.stage = Some("code review".into());
+        assert!(rebind(spaced).verify().is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_control_characters_in_workdir() {
+        let base = workflow(&source("stable")).compile_plan().unwrap();
+        assert!(base.verify().is_ok());
+
+        let mut newline = base.clone();
+        newline.steps[0].workdir = Some("foo\nbar".into());
+        let newline = rebind(newline);
+        reject_existing(&newline, "workdir contains a control character");
+        let error = WorkflowPlan::from_json(&serde_json::to_vec(&newline).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("foo\nbar"), "{error}");
+
+        let mut tab = base.clone();
+        tab.steps[0].workdir = Some("foo\tbar".into());
+        reject_existing(&rebind(tab), "workdir contains a control character");
+
+        let mut spaced = base;
+        spaced.steps[0].workdir = Some("my workspace".into());
         assert!(rebind(spaced).verify().is_ok());
     }
 
