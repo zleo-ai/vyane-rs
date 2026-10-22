@@ -227,6 +227,7 @@ impl NewEvent {
             ));
         }
         validate_text("owner", &self.owner, MAX_OWNER_BYTES)?;
+        reject_whitespace_only_owner(&self.owner)?;
         validate_event_type(&self.event_type)?;
         validate_optional_text("trace_id", self.trace_id.as_deref(), MAX_REFERENCE_BYTES)?;
         validate_optional_text(
@@ -394,6 +395,7 @@ impl EventLog {
         limit: usize,
     ) -> EventResult<EventPage> {
         validate_text("owner", owner, MAX_OWNER_BYTES)?;
+        reject_whitespace_only_owner(owner)?;
         validate_stream_id(stream_id)?;
         let expected_digest = stream_digest(owner, stream_id);
         if (cursor.sequence != 0 || cursor.byte_offset != 0)
@@ -896,6 +898,15 @@ fn event_path(root: &Path, owner: &str, stream_id: &str) -> PathBuf {
 
 fn lock_path(root: &Path, owner: &str, stream_id: &str) -> PathBuf {
     owner_directory(root, owner).join(format!("{stream_id}.lock"))
+}
+
+fn reject_whitespace_only_owner(owner: &str) -> EventResult<()> {
+    if owner.trim().is_empty() {
+        return Err(EventLogError::InvalidInput(
+            "owner must not be only whitespace".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_stream_id(value: &str) -> EventResult<()> {

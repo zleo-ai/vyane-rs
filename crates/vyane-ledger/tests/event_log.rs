@@ -459,6 +459,43 @@ async fn whitespace_only_event_id_is_rejected_and_internal_space_is_kept() {
 }
 
 #[tokio::test]
+async fn whitespace_only_event_owner_is_rejected_and_internal_space_is_kept() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("events");
+    let log = EventLog::new(&root);
+    for owner in ["   ", "\t", "\n"] {
+        let error = log
+            .append(
+                "task-1",
+                event(owner, "worker.started"),
+                EventDurability::Durable,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.as_str(), "invalid_input");
+        let text = error.to_string();
+        assert!(text.contains("owner"), "{text}");
+        assert!(!text.contains(owner), "{text}");
+        assert!(!owner_root(&root, owner).exists());
+        let read = log.read_after(owner, "task-1", 0, 10).await.unwrap_err();
+        assert_eq!(read.as_str(), "invalid_input");
+        assert!(!owner_root(&root, owner).exists());
+    }
+
+    let stored = log
+        .append(
+            "task-1",
+            event("local user", "worker.started"),
+            EventDurability::Durable,
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.owner, "local user");
+    let page = log.read_after("local user", "task-1", 0, 10).await.unwrap();
+    assert_eq!(page.events[0].owner, "local user");
+}
+
+#[tokio::test]
 async fn event_type_tokens_are_bounded_ascii_and_do_not_append_when_rejected() {
     let directory = TempDir::new().unwrap();
     let root = directory.path().join("events");
