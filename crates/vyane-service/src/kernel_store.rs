@@ -868,6 +868,7 @@ impl KernelStore {
     /// or clobber a higher generation with a lower one).
     pub fn put_lease_fence(&self, fence: &LeaseFence, now: DateTime<Utc>) -> KernelStoreResult<()> {
         validate_owner(&fence.owner)?;
+        validate_digest(&fence.policy_digest)?;
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing: Option<(String, i64)> = tx
@@ -1651,6 +1652,39 @@ mod tests {
     }
 
     #[test]
+    fn lease_fence_rejects_a_digest_that_is_not_lowercase_hex() {
+        let dir = crate::test_support::private_tempdir();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let mut fence = LeaseFence {
+            owner: "o".into(),
+            run_id: "run".into(),
+            lease_owner: "lease-a".into(),
+            generation: 1,
+            revision: 1,
+            token: "tok".into(),
+            policy_digest: "a".repeat(64),
+            expires_at_ms: None,
+        };
+        for digest in ["", "   ", &"A".repeat(64)] {
+            fence.policy_digest = (*digest).into();
+            let err = store.put_lease_fence(&fence, now()).unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::InvalidInput(_)),
+                "{digest:?} -> {err:?}"
+            );
+            let text = err.to_string();
+            if !digest.is_empty() {
+                assert!(!text.contains(digest), "{text}");
+            }
+            assert!(store.get_lease_fence("o", "run").unwrap().is_none());
+        }
+        fence.policy_digest = "a".repeat(64);
+        store.put_lease_fence(&fence, now()).unwrap();
+        let got = store.get_lease_fence("o", "run").unwrap().unwrap();
+        assert_eq!(got.policy_digest, "a".repeat(64));
+    }
+
+    #[test]
     fn stale_lease_generation_cannot_overwrite_fence() {
         let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
@@ -1661,7 +1695,7 @@ mod tests {
             generation: 5,
             revision: 3,
             token: "tok-a".into(),
-            policy_digest: "p".repeat(64),
+            policy_digest: "a".repeat(64),
             expires_at_ms: None,
         };
         store.put_lease_fence(&high, now()).unwrap();
@@ -3469,7 +3503,7 @@ mod tests {
                     generation: 4,
                     revision: 1,
                     token: "tok-g".into(),
-                    policy_digest: "p".repeat(64),
+                    policy_digest: "a".repeat(64),
                     expires_at_ms: None,
                 },
                 now(),
@@ -3530,7 +3564,7 @@ mod tests {
                     generation: 4,
                     revision: 1,
                     token: "tok-d".into(),
-                    policy_digest: "q".repeat(64),
+                    policy_digest: "b".repeat(64),
                     expires_at_ms: None,
                 },
                 now(),
