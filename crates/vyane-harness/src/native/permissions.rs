@@ -221,6 +221,9 @@ impl PermissionRule {
         if tool_pattern.is_empty() {
             return Err(PermissionRuleError::EmptyToolPattern);
         }
+        if !valid_policy_text(&tool_pattern, MAX_TOOL_PATTERN_BYTES) {
+            return Err(PermissionRuleError::InvalidPolicyText);
+        }
         Ok(Self {
             tool_matcher: parse_fnmatch_pattern(&tool_pattern),
             tool_pattern,
@@ -1018,6 +1021,40 @@ mod tests {
 
     fn context() -> ToolContext {
         ToolContext::new(std::env::current_dir().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn permission_rule_new_rejects_whitespace_only_tool_patterns() {
+        assert!(matches!(
+            PermissionRule::new(" ", PermissionEffect::Allow),
+            Err(PermissionRuleError::InvalidPolicyText)
+        ));
+        assert!(matches!(
+            PermissionRule::new("\t", PermissionEffect::Allow),
+            Err(PermissionRuleError::InvalidPolicyText)
+        ));
+        assert!(matches!(
+            PermissionRule::new(" write_*", PermissionEffect::Allow),
+            Err(PermissionRuleError::InvalidPolicyText)
+        ));
+        assert!(matches!(
+            PermissionRule::new("", PermissionEffect::Allow),
+            Err(PermissionRuleError::EmptyToolPattern)
+        ));
+        assert!(PermissionRule::new("write_*", PermissionEffect::Deny).is_ok());
+        assert!(PermissionRule::new("*", PermissionEffect::Allow).is_ok());
+        let blank = NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![NativeToolPermissionRule {
+                tool: " ".into(),
+                effect: PermissionEffect::Allow,
+                arguments: BTreeMap::new(),
+            }],
+        };
+        assert!(matches!(
+            blank.validate(),
+            Err(PermissionRuleError::InvalidPolicyText)
+        ));
     }
 
     #[test]
