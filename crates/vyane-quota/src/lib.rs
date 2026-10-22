@@ -5,7 +5,8 @@
 //! [`QuotaConnector`]; [`QuotaSnapshotRunner`] reads a finite connector set
 //! with stable ordering, bounded concurrency and per-connector timeouts.
 //! Connector error detail kept for a caller is truncated to 1024 bytes and
-//! omits lines that assign a token or password.
+//! omits lines that assign a token or password, including a camelCase suffix
+//! and one bare continuation of that value.
 
 mod http;
 mod model;
