@@ -8,11 +8,18 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use vyane_core::{
     Effort, ErrorKind, ModelId, ModelTokenRate, Protocol, Sandbox, VyaneError, WebSearchContextSize,
 };
 use vyane_provider::ProviderPatch;
+
+/// Config document version this crate will load.
+///
+/// An omitted `schema_version` is this version. Any other explicit value is
+/// rejected while the document is parsed, before a layer can be merged.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
 /// One parsed config layer: `[providers.*]`, `[profiles.*]`, optional
 /// `[cost.models.*]` rates, and optional monotonic permission ceilings.
@@ -20,7 +27,12 @@ use vyane_provider::ProviderPatch;
 /// `#[serde(deny_unknown_fields)]` is deliberately not set on the root, so
 /// unrelated sections do not break parsing of the sections this crate owns.
 /// A model rate table is closed: unknown price fields are rejected.
+///
+/// `schema_version` is checked and then dropped. It is not a field, so
+/// in-code construction stays valid: no field means the supported document,
+/// and an explicit unknown version never becomes a [`RawRoot`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "SchemaCheckedRoot")]
 pub struct RawRoot {
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderPatch>,
@@ -39,6 +51,69 @@ pub struct RawRoot {
     /// Optional CLI-harness sandbox ceiling contributed by this exact layer.
     #[serde(default)]
     pub harness_permissions: Option<HarnessPermissionCeiling>,
+}
+
+#[derive(Debug)]
+struct UnsupportedSchemaVersion {
+    found: i64,
+}
+
+impl fmt::Display for UnsupportedSchemaVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unsupported config schema_version {}; expected {} or omitted",
+            self.found, CONFIG_SCHEMA_VERSION
+        )
+    }
+}
+
+/// Field mirror used only so `schema_version` can be read without storing it
+/// on [`RawRoot`].
+#[derive(Deserialize)]
+#[serde(remote = "RawRoot")]
+struct RawRootFields {
+    #[serde(default)]
+    providers: BTreeMap<String, ProviderPatch>,
+    #[serde(default)]
+    profiles: BTreeMap<String, ProfilePatch>,
+    #[serde(default)]
+    cost: RawCostTable,
+    #[serde(default)]
+    native_permissions: Option<NativePermissionCeiling>,
+    #[serde(default)]
+    harness_permissions: Option<HarnessPermissionCeiling>,
+}
+
+struct DecodedRoot(RawRoot);
+
+impl<'de> Deserialize<'de> for DecodedRoot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawRootFields::deserialize(deserializer).map(DecodedRoot)
+    }
+}
+
+#[derive(Deserialize)]
+struct SchemaCheckedRoot {
+    #[serde(default)]
+    schema_version: Option<i64>,
+    #[serde(flatten)]
+    root: DecodedRoot,
+}
+
+impl TryFrom<SchemaCheckedRoot> for RawRoot {
+    type Error = UnsupportedSchemaVersion;
+
+    fn try_from(value: SchemaCheckedRoot) -> Result<Self, Self::Error> {
+        match value.schema_version {
+            None => Ok(value.root.0),
+            Some(version) if version == i64::from(CONFIG_SCHEMA_VERSION) => Ok(value.root.0),
+            Some(found) => Err(UnsupportedSchemaVersion { found }),
+        }
+    }
 }
 
 /// Optional `[cost]` table. Rates are USD per 1,000,000 tokens (`*_per_mtok`).
