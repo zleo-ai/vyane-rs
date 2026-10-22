@@ -208,7 +208,7 @@ fn validate_path(path: &Path) -> Result<(), WorktreePlanError> {
     }
     let mut saw_normal = false;
     for part in parts {
-        if part.is_empty() || part == "." || part == ".." {
+        if part.is_empty() || part.trim().is_empty() || part == "." || part == ".." {
             return Err(WorktreePlanError::InvalidPath);
         }
         saw_normal = true;
