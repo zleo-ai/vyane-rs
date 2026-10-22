@@ -210,3 +210,38 @@ fn parse_placeholder(raw: &str) -> Placeholder<'_> {
     }
     Placeholder::Unknown(raw)
 }
+
+#[derive(Debug)]
+pub(crate) struct ReferencedStep {
+    pub step: String,
+    pub fan_out: bool,
+}
+
+/// Step references that are fully closed placeholders.
+///
+/// An unclosed tail does not erase an earlier reference. Escaped `{{{{`
+/// braces stay literal and are not references.
+pub(crate) fn step_placeholders(template: &str) -> Vec<ReferencedStep> {
+    let mut out = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        rest = &rest[start..];
+        if rest.starts_with("{{{{") {
+            rest = &rest[4..];
+            continue;
+        }
+        let Some(end) = rest[2..].find("}}") else {
+            break;
+        };
+        if let Placeholder::StepOutput { step, fan_out } =
+            parse_placeholder(rest[2..2 + end].trim())
+        {
+            out.push(ReferencedStep {
+                step: step.to_string(),
+                fan_out,
+            });
+        }
+        rest = &rest[2 + end + 2..];
+    }
+    out
+}

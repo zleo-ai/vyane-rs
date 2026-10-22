@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -8,6 +8,8 @@ use vyane_core::{Effort, Sandbox};
 
 use crate::error::{WorkflowError, WorkflowResult};
 use crate::model::{OnError, StepTargets, Workflow, WorkflowRouteHints};
+use crate::template::step_placeholders;
+use crate::validate::MAX_TEMPLATE_ANCESTOR_RELATIONS;
 
 pub const WORKFLOW_PLAN_SCHEMA_V1: u32 = 1;
 pub const WORKFLOW_PLAN_MAX_STEPS: usize = 4_096;
@@ -542,6 +544,10 @@ impl WorkflowPlan {
         if self.capability_manifest != expected_manifest {
             problems.push("workflow plan capability manifest does not match its steps".into());
         }
+        // Plan bytes are accepted before any resolver exists. Close step
+        // references here so a digest-consistent plan cannot name a step
+        // outside its transitive needs. This stays a static DAG check.
+        reject_invalid_step_references(&self.steps, &mut problems);
         if problems.is_empty() {
             let expected_digest = self.compute_digest()?;
             if self.plan_sha256 != expected_digest {
@@ -768,6 +774,153 @@ fn validate_graph(steps: &[WorkflowPlanStep], ids: &BTreeSet<&str>, problems: &m
     if visited != ids.len() {
         problems.push("workflow plan dependency graph contains a cycle".into());
     }
+}
+
+enum StepReferenceGraph<'a> {
+    Cyclic,
+    OverBudget,
+    Ready(BTreeMap<&'a str, BTreeSet<&'a str>>),
+}
+
+fn reject_invalid_step_references(steps: &[WorkflowPlanStep], problems: &mut Vec<String>) {
+    let references = steps
+        .iter()
+        .map(|step| step_placeholders(&step.prompt_template))
+        .collect::<Vec<_>>();
+    if references.iter().all(Vec::is_empty) {
+        return;
+    }
+    let ancestors = match step_reference_ancestors(steps) {
+        StepReferenceGraph::Cyclic => {
+            let cycle = "workflow plan dependency graph contains a cycle";
+            if !problems.iter().any(|problem| problem == cycle) {
+                problems.push(cycle.to_string());
+            }
+            return;
+        }
+        StepReferenceGraph::OverBudget => {
+            problems.push(format!(
+                "workflow template ancestor relations exceed {MAX_TEMPLATE_ANCESTOR_RELATIONS}"
+            ));
+            return;
+        }
+        StepReferenceGraph::Ready(ancestors) => ancestors,
+    };
+    for (step, references) in steps.iter().zip(references) {
+        let available = ancestors.get(step.id.as_str()).cloned().unwrap_or_default();
+        for reference in references {
+            if !available.contains(reference.step.as_str()) {
+                problems.push(format!(
+                    "step `{}` references `{}` but it is not in its transitive needs",
+                    step.id, reference.step
+                ));
+                continue;
+            }
+            let Some(referenced) = steps
+                .iter()
+                .find(|candidate| candidate.id == reference.step)
+            else {
+                problems.push(format!(
+                    "step `{}` references unknown step `{}`",
+                    step.id, reference.step
+                ));
+                continue;
+            };
+            let referenced_fan_out =
+                matches!(referenced.targets, WorkflowPlanTargets::FanOut { .. });
+            if referenced_fan_out && !reference.fan_out {
+                problems.push(format!(
+                    "step `{}` references fan_out step `{}` with `.output`; use `.outputs`",
+                    step.id, reference.step
+                ));
+            } else if !referenced_fan_out && reference.fan_out {
+                problems.push(format!(
+                    "step `{}` references single-target step `{}` with `.outputs`; use `.output`",
+                    step.id, reference.step
+                ));
+            }
+        }
+    }
+}
+
+fn step_reference_ancestors(steps: &[WorkflowPlanStep]) -> StepReferenceGraph<'_> {
+    let mut indegree = BTreeMap::<&str, usize>::new();
+    let mut dependents = BTreeMap::<&str, Vec<&str>>::new();
+    let mut dependencies = BTreeMap::<&str, Vec<&str>>::new();
+    for step in steps {
+        indegree.entry(step.id.as_str()).or_insert(0);
+        dependents.entry(step.id.as_str()).or_default();
+        dependencies.entry(step.id.as_str()).or_default();
+    }
+    for step in steps {
+        let Some(step_dependencies) = dependencies.get_mut(step.id.as_str()) else {
+            continue;
+        };
+        let mut seen = BTreeSet::new();
+        for need in &step.needs {
+            if !seen.insert(need.as_str())
+                || need == &step.id
+                || !indegree.contains_key(need.as_str())
+            {
+                continue;
+            }
+            step_dependencies.push(need.as_str());
+            *indegree.entry(step.id.as_str()).or_default() += 1;
+            dependents
+                .entry(need.as_str())
+                .or_default()
+                .push(step.id.as_str());
+        }
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(id, degree)| (*degree == 0).then_some(*id))
+        .collect::<VecDeque<_>>();
+    let mut order = Vec::with_capacity(indegree.len());
+    while let Some(id) = ready.pop_front() {
+        order.push(id);
+        let Some(children) = dependents.get(id) else {
+            continue;
+        };
+        for child in children {
+            let Some(degree) = indegree.get_mut(child) else {
+                continue;
+            };
+            *degree = degree.saturating_sub(1);
+            if *degree == 0 {
+                ready.push_back(child);
+            }
+        }
+    }
+    if order.len() != indegree.len() {
+        return StepReferenceGraph::Cyclic;
+    }
+
+    let mut ancestors = BTreeMap::<&str, BTreeSet<&str>>::new();
+    let mut relations = 0usize;
+    for id in order {
+        let mut set = BTreeSet::new();
+        for need in dependencies.get(id).into_iter().flatten() {
+            if set.insert(*need) {
+                if relations == MAX_TEMPLATE_ANCESTOR_RELATIONS {
+                    return StepReferenceGraph::OverBudget;
+                }
+                relations += 1;
+            }
+            if let Some(inherited) = ancestors.get(need) {
+                for ancestor in inherited {
+                    if set.insert(ancestor) {
+                        if relations == MAX_TEMPLATE_ANCESTOR_RELATIONS {
+                            return StepReferenceGraph::OverBudget;
+                        }
+                        relations += 1;
+                    }
+                }
+            }
+        }
+        ancestors.insert(id, set);
+    }
+    StepReferenceGraph::Ready(ancestors)
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -1108,5 +1261,60 @@ effort = "high"
                 WorkflowPlanFeatureSupport::Supported => panic!("feature must be unsupported"),
             }
         }
+    }
+
+    fn rebind(mut plan: WorkflowPlan) -> WorkflowPlan {
+        plan.capability_manifest = WorkflowCapabilityManifest::from_steps(&plan.steps);
+        plan.plan_sha256 = plan.compute_digest().unwrap();
+        plan
+    }
+
+    fn reject_existing(plan: &WorkflowPlan, needle: &str) {
+        let bytes = serde_json::to_vec(plan).unwrap();
+        let error = WorkflowPlan::from_json(&bytes).unwrap_err().to_string();
+        assert!(error.contains(needle), "{error}");
+    }
+
+    #[test]
+    fn existing_plan_rejects_invalid_step_reference() {
+        let base = workflow(&source("stable")).compile_plan().unwrap();
+
+        let mut missing = base.clone();
+        missing.steps[1].prompt_template = "{{steps.missing.output}}".into();
+        reject_existing(&rebind(missing), "references `missing`");
+
+        let mut unknown_need = base.clone();
+        unknown_need.steps[1].needs = vec!["missing".into()];
+        reject_existing(&rebind(unknown_need), "needs unknown step `missing`");
+
+        let mut sibling = base.clone();
+        let mut other = sibling.steps[1].clone();
+        other.order = 2;
+        other.id = "other".into();
+        other.needs.clear();
+        other.prompt_template = "other".into();
+        other.route = WorkflowPlanRouteHints::default();
+        sibling.steps[1].prompt_template = "{{steps.other.output}}".into();
+        sibling.steps.push(other);
+        reject_existing(&rebind(sibling), "references `other`");
+
+        let mut accessor = base.clone();
+        accessor.steps[1].prompt_template = "{{steps.find.output}}".into();
+        reject_existing(&rebind(accessor), "use `.outputs`");
+
+        let mut transitive = base.clone();
+        let mut mid = transitive.steps[1].clone();
+        mid.order = 1;
+        mid.id = "mid".into();
+        mid.needs = vec!["find".into()];
+        mid.prompt_template = "mid".into();
+        mid.route = WorkflowPlanRouteHints::default();
+        transitive.steps[1].order = 2;
+        transitive.steps[1].needs = vec!["mid".into()];
+        transitive.steps[1].prompt_template = "{{steps.find.outputs}}".into();
+        transitive.steps.insert(1, mid);
+        let transitive = rebind(transitive);
+        let loaded = WorkflowPlan::from_json(&serde_json::to_vec(&transitive).unwrap()).unwrap();
+        assert_eq!(loaded.steps[2].prompt_template, "{{steps.find.outputs}}");
     }
 }
