@@ -128,6 +128,7 @@ fn validate_source_path(value: &str) -> Result<(), WorkflowSourcePathError> {
     if value.is_empty()
         || bytes.len() > WORKFLOW_SOURCE_MAX_PATH_BYTES
         || value.contains('\0')
+        || value.chars().any(char::is_control)
         || value.contains('\\')
         || value.starts_with('/')
         || value.ends_with('/')
@@ -705,6 +706,9 @@ mod tests {
             "dir\\prompt.txt",
             "prompt.txt/",
             "nul\0prompt.txt",
+            "foo\nbar",
+            "prompts/foo\nbar.txt",
+            "foo\tbar",
             " ",
             "   ",
             "prompts/ /note.txt",
