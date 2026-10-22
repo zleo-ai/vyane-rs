@@ -9,6 +9,24 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Added
 
+- Dispatch stores a run's USD cost when `[cost.models]` gives that model an
+  explicit rate and the run has usage. Input and output rates are required
+  USD amounts per 1,000,000 tokens; optional reasoning and cache-read rates,
+  when set, bill those subsets at the special rate instead of the ordinary
+  output or input rate. Subsets are not extra tokens. A missing rate, an
+  unlisted model, or missing usage leaves `cost_usd` unset. Built-in prices
+  are not used, and an unknown price is never stored as zero. Non-finite,
+  negative, or unknown rate fields are rejected when the config is loaded
+  ([#227](https://github.com/zleo-ai/vyane-rs/pull/227)).
+
+- Tests cover Codex usage JSON shapes the harness parser already reads:
+  `token_count.info.last_token_usage`, `token_count.info.usage`, and a
+  top-level `usage` object on a non-turn event. `total_token_usage` still
+  takes precedence over `last_token_usage`. Reported USD and event
+  `duration_ms` stay unparsed, and outcome duration remains the measured run
+  time. Parsing behavior is unchanged
+  ([#228](https://github.com/zleo-ai/vyane-rs/pull/228)).
+
 - History statistics summarize saved USD costs across CLI, REST and MCP,
   with explicit unknown/invalid coverage and overflow instead of treating
   missing prices as free runs. No price lookup or ledger rewrite occurs.
@@ -50,6 +68,14 @@ This is a curated history, not a complete reconstruction of all development.
   ([#197](https://github.com/zleo-ai/vyane-rs/pull/197)).
 
 ### Fixed
+
+- MCP dispatch and broadcast reject oversized task, system, workdir, target,
+  and route inputs before the service runs, using the same per-field limits
+  as the workflow plan fields they stand in for. A value at the limit still
+  passes. Each broadcast selector is also capped at the workflow target
+  length, in addition to the existing list bounds. Session ids and free-form
+  labels are unchanged
+  ([#226](https://github.com/zleo-ai/vyane-rs/pull/226)).
 
 - Skip and count JSONL run-record lines containing invalid UTF-8 instead of
   silently replacing bad bytes inside JSON strings and accepting altered data.
