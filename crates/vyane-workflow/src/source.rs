@@ -132,9 +132,12 @@ fn validate_source_path(value: &str) -> Result<(), WorkflowSourcePathError> {
         || value.starts_with('/')
         || value.ends_with('/')
         || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
-        || value
-            .split('/')
-            .any(|component| component.is_empty() || component == "." || component == "..")
+        || value.split('/').any(|component| {
+            component.is_empty()
+                || component.trim().is_empty()
+                || component == "."
+                || component == ".."
+        })
     {
         return Err(WorkflowSourcePathError);
     }
@@ -702,6 +705,9 @@ mod tests {
             "dir\\prompt.txt",
             "prompt.txt/",
             "nul\0prompt.txt",
+            " ",
+            "   ",
+            "prompts/ /note.txt",
         ] {
             assert!(
                 invalid.parse::<WorkflowSourcePath>().is_err(),
@@ -715,6 +721,10 @@ mod tests {
                 .as_str(),
             "prompts/review.txt"
         );
+        match "my prompt.txt".parse::<WorkflowSourcePath>() {
+            Ok(path) => assert_eq!(path.as_str(), "my prompt.txt"),
+            Err(_) => panic!("an internal space in a path component must stay valid"),
+        }
     }
 
     #[cfg(unix)]
