@@ -16,6 +16,22 @@ use vyane_core::{
     AuthMaterial, AuthStyle, Endpoint, ErrorKind, ModelId, Protocol, Secret, VyaneError,
 };
 
+/// Classify one retryable provider HTTP status into the kernel error taxonomy.
+///
+/// `429` is [`ErrorKind::RateLimited`]. Other retryable server statuses stay
+/// the lumped [`ErrorKind::Protocol`] bucket, except `504` Gateway Timeout,
+/// which is [`ErrorKind::Timeout`]. Statuses outside that retryable set
+/// return [`None`] instead of a guessed kind.
+#[must_use]
+pub fn classify_retryable_provider_status(status: u16) -> Option<ErrorKind> {
+    match status {
+        429 => Some(ErrorKind::RateLimited),
+        504 => Some(ErrorKind::Timeout),
+        500..=599 => Some(ErrorKind::Protocol),
+        _ => None,
+    }
+}
+
 /// A source of an environment variable's value at env-injection time.
 ///
 /// Maps directly onto the string values used in `[providers.<id>.env_inject]`
@@ -565,5 +581,27 @@ mod tests {
         assert_eq!(EnvInjectSource::BaseUrl.as_str(), "base_url");
         assert_eq!(EnvInjectSource::ApiKey.to_string(), "api_key");
         assert_eq!(EnvInjectSource::Model.as_str(), "model");
+    }
+
+    #[test]
+    fn gateway_timeout_is_timeout_not_a_lumped_retryable_protocol_error() {
+        let timeout = classify_retryable_provider_status(504).expect("504 is classified");
+        let timeout_error = VyaneError::new(timeout, "HTTP status 504");
+        assert_eq!(timeout_error.kind, ErrorKind::Timeout);
+        assert!(timeout_error.failover_eligible());
+
+        let unavailable = classify_retryable_provider_status(503).expect("503 is classified");
+        assert_eq!(unavailable, ErrorKind::Protocol);
+        assert!(unavailable.failover_eligible());
+        assert_eq!(
+            classify_retryable_provider_status(500),
+            Some(ErrorKind::Protocol)
+        );
+        assert_eq!(
+            classify_retryable_provider_status(429),
+            Some(ErrorKind::RateLimited)
+        );
+        assert_eq!(classify_retryable_provider_status(400), None);
+        assert_eq!(classify_retryable_provider_status(401), None);
     }
 }
