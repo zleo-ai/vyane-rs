@@ -9,12 +9,15 @@ cargo test --locked -p vyane-cli --test cli_contract
 ```
 
 The initial fixture was captured from commit
-`4ac9ac7f273cabdccd1530b429610ea0463bc299`. Its 30 cases cover root short/long
-help, all 15 visible top-level command help pages, the static workflow-plan
-help page, nine argument errors, an empty zero-limit JSON history result and
+`4ac9ac7f273cabdccd1530b429610ea0463bc299`. The fixture now has 73 cases:
+root short/long help, all 15 visible top-level command help pages, help for
+every visible nested command (`session`, `workflow`, `task`, `daemon`, `a2a`,
+and `goal`), nine argument errors, an empty zero-limit JSON history result and
 two history validation errors. Successful help and the empty query exit with
 0 and write only stdout; argument errors exit with 2 and write only stderr;
-the two application validation errors exit with 1 and write only stderr.
+the two application validation errors exit with 1 and write only stderr. The
+test rejects a visible nested command that has no help snapshot. Hidden
+`__worker` is not a visible command.
 
 Each invocation has an isolated working directory, HOME, configuration and
 data paths, a cleared environment, disabled color and a ten-second timeout.
@@ -23,8 +26,10 @@ paths, and the fixture directory must remain unchanged. Coverage subprocesses
 inherit only the collector's `LLVM_PROFILE_FILE` in addition to the fixed test
 environment. No execution, model, daemon or remote endpoint is invoked.
 
-These are Rust CLI regression contracts. They do not establish equivalence
-with another implementation, freeze every nested command, or complete INT-01.
+These are Rust CLI regression contracts. They freeze help and exit codes for
+every visible nested command, but they do not establish equivalence with
+another implementation, freeze nested execution or argument-error paths beyond
+the cases in this fixture, or complete INT-01.
 No runtime behavior is changed by this test slice. Intentional command or
 wording changes require reviewing the corresponding fixture diff; the test
 never rewrites snapshots or accepts new output automatically. When updating a
