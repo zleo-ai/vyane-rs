@@ -179,6 +179,479 @@
     "stderr": ""
   },
   {
+    "name": "session-list-help",
+    "args": [
+      "session",
+      "list",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "List redacted, revision-aware continuity sessions\n\nUsage: vyane session list [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "session-inspect-help",
+    "args": [
+      "session",
+      "inspect",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Inspect one redacted continuity session\n\nUsage: vyane session inspect [OPTIONS] <ID>\n\nArguments:\n  <ID>  Logical continuity session id\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "session-reset-native-help",
+    "args": [
+      "session",
+      "reset-native",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Remove native harness continuity using revision-fenced compare-and-swap\n\nUsage: vyane session reset-native [OPTIONS] --expected-revision <REVISION> <ID>\n\nArguments:\n  <ID>  Logical continuity session id\n\nOptions:\n      --config <PATH>                 Config file to load instead of the default user + project files\n      --expected-revision <REVISION>  Exact revision returned by `session inspect` or `session list`\n      --json                          Emit machine-readable JSON\n  -h, --help                          Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "workflow-run-help",
+    "args": [
+      "workflow",
+      "run",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Run a workflow TOML file\n\nUsage: vyane workflow run [OPTIONS] <FILE>\n\nArguments:\n  <FILE>  Workflow TOML file to run\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --var <k=v>      Workflow variable; repeatable as key=value\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "workflow-submit-help",
+    "args": [
+      "workflow",
+      "submit",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Submit a workflow source bundle to the resident daemon\n\nUsage: vyane workflow submit [OPTIONS] <FILE>\n\nArguments:\n  <FILE>  Workflow TOML file whose bounded sources are sent to the daemon\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --id <UUIDV7>    Canonical lowercase UUIDv7 to reuse for an idempotent retry\n      --var <k=v>      Workflow variable; repeatable as key=value\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "workflow-status-help",
+    "args": [
+      "workflow",
+      "status",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Show one daemon-owned workflow task\n\nUsage: vyane workflow status [OPTIONS] <WF_RUN_ID>\n\nArguments:\n  <WF_RUN_ID>  Canonical lowercase UUIDv7 workflow id\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "workflow-cancel-help",
+    "args": [
+      "workflow",
+      "cancel",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Request cancellation of one daemon-owned workflow task\n\nUsage: vyane workflow cancel [OPTIONS] <WF_RUN_ID>\n\nArguments:\n  <WF_RUN_ID>  Canonical lowercase UUIDv7 workflow id\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "workflow-resume-help",
+    "args": [
+      "workflow",
+      "resume",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Resume a workflow run from its journal\n\nUsage: vyane workflow resume [OPTIONS] --file <FILE> <WF_RUN_ID>\n\nArguments:\n  <WF_RUN_ID>  Workflow run id to resume\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --file <FILE>    Workflow TOML file used by the original run\n      --var <k=v>      Workflow variables are loaded from the journal on resume; passing this is an error\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "workflow-replay-help",
+    "args": [
+      "workflow",
+      "replay",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Replay a journal-recorded all-success prefix into a new workflow run\n\nUsage: vyane workflow replay [OPTIONS] --file <FILE> <SOURCE_WF_RUN_ID>\n\nArguments:\n  <SOURCE_WF_RUN_ID>  Prior canonical UUIDv7 workflow run to replay\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --file <FILE>    Workflow TOML file used by the source run\n      --id <UUIDV7>    Canonical UUIDv7 for the new run; generated when omitted\n      --var <k=v>      Workflow variables are loaded from the source journal; passing this is an error\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "workflow-list-help",
+    "args": [
+      "workflow",
+      "list",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "List workflow journals\n\nUsage: vyane workflow list [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "task-list-help",
+    "args": [
+      "task",
+      "list",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "List detached runs, most recent first\n\nUsage: vyane task list [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "task-status-help",
+    "args": [
+      "task",
+      "status",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Show one detached run's status and recent log lines\n\nUsage: vyane task status [OPTIONS] <ID>\n\nArguments:\n  <ID>  The detached run id\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --output         Print the captured answer (output.txt) instead of the status view\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "task-cancel-help",
+    "args": [
+      "task",
+      "cancel",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Terminate a detached run's process group\n\nUsage: vyane task cancel [OPTIONS] <ID>\n\nArguments:\n  <ID>  The detached run id\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "daemon-run-help",
+    "args": [
+      "daemon",
+      "run",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Run the daemon in the foreground\n\nUsage: vyane daemon run [OPTIONS]\n\nOptions:\n      --addr <ADDR>\n          Loopback listen address. Port 0 selects an ephemeral port [default: 127.0.0.1:9722]\n      --config <PATH>\n          Config file to load instead of the default user + project files\n      --goal-auto-pursue\n          Opt in to bounded resident pursuit of local goals\n      --goal-target <TARGET>\n          Target used for each fresh automatic pursuit segment\n      --goal-workdir <PATH>\n          Canonical workdir shared by automatic verifier commands and segments\n      --goal-sandbox <GOAL_SANDBOX>\n          Workspace permission for each fresh automatic pursuit segment [default: read-only] [possible values: read-only, write, full]\n      --goal-overall-timeout-seconds <GOAL_OVERALL_TIMEOUT_SECONDS>\n          Overall budget for one automatic pursuit invocation, in seconds [default: 3600]\n      --goal-segment-timeout-seconds <GOAL_SEGMENT_TIMEOUT_SECONDS>\n          Runtime budget per fresh automatic segment, in seconds [default: 900]\n      --goal-verifier-timeout-seconds <GOAL_VERIFIER_TIMEOUT_SECONDS>\n          Runtime budget per automatic acceptance command, in seconds [default: 300]\n      --goal-max-segments <GOAL_MAX_SEGMENTS>\n          Maximum lifetime fresh segments for one goal [default: 6]\n      --goal-max-failures <GOAL_MAX_FAILURES>\n          Pause after this many consecutive verifier/runtime failures [default: 2]\n      --goal-poll-millis <GOAL_POLL_MILLIS>\n          Delay between idle scans for eligible goals, in milliseconds [default: 1000]\n  -h, --help\n          Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "daemon-start-help",
+    "args": [
+      "daemon",
+      "start",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Start the daemon in a detached session and wait for readiness\n\nUsage: vyane daemon start [OPTIONS]\n\nOptions:\n      --addr <ADDR>\n          Loopback listen address. Port 0 selects an ephemeral port [default: 127.0.0.1:9722]\n      --config <PATH>\n          Config file to load instead of the default user + project files\n      --goal-auto-pursue\n          Opt in to bounded resident pursuit of local goals\n      --goal-target <TARGET>\n          Target used for each fresh automatic pursuit segment\n      --goal-workdir <PATH>\n          Canonical workdir shared by automatic verifier commands and segments\n      --goal-sandbox <GOAL_SANDBOX>\n          Workspace permission for each fresh automatic pursuit segment [default: read-only] [possible values: read-only, write, full]\n      --goal-overall-timeout-seconds <GOAL_OVERALL_TIMEOUT_SECONDS>\n          Overall budget for one automatic pursuit invocation, in seconds [default: 3600]\n      --goal-segment-timeout-seconds <GOAL_SEGMENT_TIMEOUT_SECONDS>\n          Runtime budget per fresh automatic segment, in seconds [default: 900]\n      --goal-verifier-timeout-seconds <GOAL_VERIFIER_TIMEOUT_SECONDS>\n          Runtime budget per automatic acceptance command, in seconds [default: 300]\n      --goal-max-segments <GOAL_MAX_SEGMENTS>\n          Maximum lifetime fresh segments for one goal [default: 6]\n      --goal-max-failures <GOAL_MAX_FAILURES>\n          Pause after this many consecutive verifier/runtime failures [default: 2]\n      --goal-poll-millis <GOAL_POLL_MILLIS>\n          Delay between idle scans for eligible goals, in milliseconds [default: 1000]\n  -h, --help\n          Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "daemon-status-help",
+    "args": [
+      "daemon",
+      "status",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Verify the recorded daemon process and authenticated health endpoint\n\nUsage: vyane daemon status [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "daemon-stop-help",
+    "args": [
+      "daemon",
+      "stop",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Gracefully stop the exact recorded daemon process\n\nUsage: vyane daemon stop [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "a2a-send-help",
+    "args": [
+      "a2a",
+      "send",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Queue one local message for an agent mailbox\n\nUsage: vyane a2a send [OPTIONS] --from <AGENT> <TO> [BODY]...\n\nArguments:\n  <TO>       Recipient agent mailbox id\n  [BODY]...  Message body words; stdin is read when omitted\n\nOptions:\n      --config <PATH>            Config file to load instead of the default user + project files\n      --db <PATH>                SQLite message database; defaults to the standard Vyane data directory\n      --owner <OWNER>            Caller-selected local storage scope; not authenticated authority [default: local]\n      --json                     Emit machine-readable JSON\n      --from <AGENT>             Caller-supplied sender label; not an authenticated identity\n      --kind <KIND>              Message kind, such as message, handoff, or review [default: message]\n      --delay-seconds <SECONDS>  Delay delivery by this many whole seconds\n      --thread-id <ID>           Optional conversation/thread id\n      --trace-id <ID>            Optional trace id\n      --payload <ITEM>           Payload item as KEY=VALUE or a JSON object; repeatable\n  -h, --help                     Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "a2a-inbox-help",
+    "args": [
+      "a2a",
+      "inbox",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "List one local agent mailbox without changing delivery state\n\nUsage: vyane a2a inbox [OPTIONS] <TO>\n\nArguments:\n  <TO>  Recipient agent mailbox id\n\nOptions:\n      --config <PATH>   Config file to load instead of the default user + project files\n      --db <PATH>       SQLite message database; defaults to the standard Vyane data directory\n      --owner <OWNER>   Caller-selected local storage scope; not authenticated authority [default: local]\n      --json            Emit machine-readable JSON\n      --include-read    Include acknowledged messages\n      --include-future  Include messages whose availability time is still in the future\n      --limit <LIMIT>   Maximum number of rows to return [default: 100]\n  -h, --help            Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "a2a-read-help",
+    "args": [
+      "a2a",
+      "read",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Deliver one exact mailbox message, then acknowledge after stdout flushes\n\nUsage: vyane a2a read [OPTIONS] <TO> <MESSAGE_ID>\n\nArguments:\n  <TO>          Recipient agent mailbox id. Required to prevent cross-mailbox reads\n  <MESSAGE_ID>  Exact message id to acknowledge\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --db <PATH>      SQLite message database; defaults to the standard Vyane data directory\n      --owner <OWNER>  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-create-help",
+    "args": [
+      "goal",
+      "create",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Create a queued goal\n\nUsage: vyane goal create [OPTIONS] --title <TITLE>\n\nOptions:\n      --config <PATH>                  Config file to load instead of the default user + project files\n      --db <PATH>                      SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>                  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json                           Emit machine-readable JSON\n      --title <TITLE>                  Goal title\n      --description <DESCRIPTION>      Long-form goal description [default: \"\"]\n      --priority <PRIORITY>            Priority from 0 (urgent) through 4 (backlog) [default: 2]\n      --parent <PARENT>                Optional umbrella goal id\n      --acceptance <KIND:TARGET>       Acceptance descriptor in KIND:TARGET form; repeatable\n      --continuity-policy-json <JSON>  Typed quota-continuity policy as one JSON object; records intent only\n      --id <ID>                        Explicit goal id; generated when omitted\n  -h, --help                           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-get-help",
+    "args": [
+      "goal",
+      "get",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Show one goal and its append-only events\n\nUsage: vyane goal get [OPTIONS] <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --db <PATH>      SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-list-help",
+    "args": [
+      "goal",
+      "list",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "List goals by priority and recent activity\n\nUsage: vyane goal list [OPTIONS]\n\nOptions:\n      --config <PATH>    Config file to load instead of the default user + project files\n      --db <PATH>        SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>    Caller-selected local storage scope; not authenticated authority [default: local]\n      --json             Emit machine-readable JSON\n      --state <STATES>   Filter by lifecycle state; repeatable [possible values: queued, in_progress, paused, completed, failed, cancelled]\n      --parent <PARENT>  Filter by parent goal id\n      --limit <LIMIT>    Maximum rows; 0 means all, up to 1000 [default: 50]\n  -h, --help             Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-next-help",
+    "args": [
+      "goal",
+      "next",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Show the highest-priority queued goal\n\nUsage: vyane goal next [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --db <PATH>      SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json           Emit machine-readable JSON\n      --auto-start     Transition the selected goal to in_progress before returning it\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-start-help",
+    "args": [
+      "goal",
+      "start",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Move a queued or paused goal to in_progress\n\nUsage: vyane goal start [OPTIONS] <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --db <PATH>      SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-claim-help",
+    "args": [
+      "goal",
+      "claim",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Atomically claim a queued goal for a worker under a lease\n\nUsage: vyane goal claim [OPTIONS] --worker <WORKER> <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>                  Config file to load instead of the default user + project files\n      --db <PATH>                      SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>                  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json                           Emit machine-readable JSON\n      --worker <WORKER>                Caller-supplied worker identity; not authenticated authority\n      --lease-seconds <LEASE_SECONDS>  Lease duration in seconds before the claim can be reclaimed [default: 300]\n  -h, --help                           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-claim-next-help",
+    "args": [
+      "goal",
+      "claim-next",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Atomically select and claim the highest-priority queued goal\n\nUsage: vyane goal claim-next [OPTIONS] --worker <WORKER>\n\nOptions:\n      --config <PATH>                  Config file to load instead of the default user + project files\n      --db <PATH>                      SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>                  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json                           Emit machine-readable JSON\n      --worker <WORKER>                Caller-supplied worker identity; not authenticated authority\n      --lease-seconds <LEASE_SECONDS>  Lease duration in seconds before the claim can be reclaimed [default: 300]\n  -h, --help                           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-renew-help",
+    "args": [
+      "goal",
+      "renew",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Heartbeat: extend the lease currently held by a worker\n\nUsage: vyane goal renew [OPTIONS] --worker <WORKER> <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>                  Config file to load instead of the default user + project files\n      --db <PATH>                      SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>                  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json                           Emit machine-readable JSON\n      --worker <WORKER>                Caller-supplied worker identity; not authenticated authority\n      --lease-seconds <LEASE_SECONDS>  Lease duration in seconds before the claim can be reclaimed [default: 300]\n  -h, --help                           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-reclaim-help",
+    "args": [
+      "goal",
+      "reclaim",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Take over a goal whose lease has expired\n\nUsage: vyane goal reclaim [OPTIONS] --worker <WORKER> <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>                  Config file to load instead of the default user + project files\n      --db <PATH>                      SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>                  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json                           Emit machine-readable JSON\n      --worker <WORKER>                Caller-supplied worker identity; not authenticated authority\n      --lease-seconds <LEASE_SECONDS>  Lease duration in seconds before the claim can be reclaimed [default: 300]\n  -h, --help                           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-satisfy-help",
+    "args": [
+      "goal",
+      "satisfy",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Record that an acceptance criterion was actually verified\n\nUsage: vyane goal satisfy [OPTIONS] --index <INDEX> <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>    Config file to load instead of the default user + project files\n      --db <PATH>        SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>    Caller-selected local storage scope; not authenticated authority [default: local]\n      --json             Emit machine-readable JSON\n      --index <INDEX>    Zero-based acceptance criterion index\n      --worker <WORKER>  Caller-supplied worker identity; required while a lease is active\n  -h, --help             Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-verify-help",
+    "args": [
+      "goal",
+      "verify",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Run bounded local acceptance checks and persist successful criteria\n\nUsage: vyane goal verify [OPTIONS] <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n      --db <PATH>\n          SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>\n          Caller-selected local storage scope; not authenticated authority [default: local]\n      --json\n          Emit machine-readable JSON\n      --workdir <PATH>\n          Workdir for `cmd:` acceptance criteria; defaults to the current directory\n      --timeout-seconds <TIMEOUT_SECONDS>\n          Maximum runtime per command, in seconds (1 through 300) [default: 300]\n      --worker <WORKER>\n          Caller-supplied worker identity; required while a lease is active\n  -h, --help\n          Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-pursue-help",
+    "args": [
+      "goal",
+      "pursue",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Repeatedly verify and dispatch fresh bounded work segments until achieved or paused\n\nUsage: vyane goal pursue [OPTIONS] --target <TARGET> --worker <WORKER> <ID>\n\nArguments:\n  <ID>  Exact in-progress goal id\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n      --db <PATH>\n          SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>\n          Caller-selected local storage scope; not authenticated authority [default: local]\n      --json\n          Emit machine-readable JSON\n      --target <TARGET>\n          Profile, provider/model pair, or auto target for each fresh segment\n      --workdir <PATH>\n          Canonical workdir shared by verifier commands and runtime segments\n      --sandbox <SANDBOX>\n          Workspace permission for each fresh segment [default: write] [possible values: read-only, write, full]\n      --overall-timeout-seconds <OVERALL_TIMEOUT_SECONDS>\n          Overall pursuit budget in seconds (1 through 86400) [default: 3600]\n      --segment-timeout-seconds <SEGMENT_TIMEOUT_SECONDS>\n          Runtime budget per fresh segment in seconds (1 through 3600) [default: 900]\n      --verifier-timeout-seconds <VERIFIER_TIMEOUT_SECONDS>\n          Runtime budget per acceptance command in seconds (1 through 300) [default: 300]\n      --max-segments <MAX_SEGMENTS>\n          Maximum fresh runtime segments (1 through 64) [default: 6]\n      --max-failures <MAX_FAILURES>\n          Pause after this many consecutive verifier/runtime failures (1 through 16) [default: 2]\n      --worker <WORKER>\n          Exact active lease holder; pursuit never runs without a lease\n  -h, --help\n          Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-continuity-next-help",
+    "args": [
+      "goal",
+      "continuity-next",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Project the current continuity next action without mutating or dispatching\n\nUsage: vyane goal continuity-next [OPTIONS] <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --db <PATH>      SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-continuity-queue-help",
+    "args": [
+      "goal",
+      "continuity-queue",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Queue one approval bound to the current ready takeover or review step; never dispatches\n\nUsage: vyane goal continuity-queue [OPTIONS] --workdir <PATH> <ID>\n\nArguments:\n  <ID>  Goal whose current supported ready continuity step should be queued\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n      --db <PATH>\n          SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>\n          Caller-selected local storage scope; not authenticated authority [default: local]\n      --json\n          Emit machine-readable JSON\n      --workdir <PATH>\n          Existing worktree or workspace bound into the approval\n      --sandbox <SANDBOX>\n          Workspace permission bound into the approval [default: write] [possible values: read-only, write, full]\n      --timeout-seconds <TIMEOUT_SECONDS>\n          Hard one-shot execution timeout, in seconds [default: 300]\n  -h, --help\n          Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-continuity-decide-help",
+    "args": [
+      "goal",
+      "continuity-decide",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Explicitly approve or reject one pending continuity approval\n\nUsage: vyane goal continuity-decide [OPTIONS] --decision <DECISION> --decided-by <DECIDED_BY> <APPROVAL_ID>\n\nArguments:\n  <APPROVAL_ID>  Exact durable approval id\n\nOptions:\n      --config <PATH>            Config file to load instead of the default user + project files\n      --db <PATH>                SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>            Caller-selected local storage scope; not authenticated authority [default: local]\n      --json                     Emit machine-readable JSON\n      --decision <DECISION>      Explicit operator decision [possible values: approve, reject]\n      --decided-by <DECIDED_BY>  Auditable local operator identity\n      --reason <REASON>          Optional decision rationale\n  -h, --help                     Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-continuity-execute-help",
+    "args": [
+      "goal",
+      "continuity-execute",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Consume one approved continuity approval and execute exactly once\n\nUsage: vyane goal continuity-execute [OPTIONS] <APPROVAL_ID>\n\nArguments:\n  <APPROVAL_ID>  Exact approved, unconsumed approval id. No execution option may be overridden here\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --db <PATH>      SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>  Caller-selected local storage scope; not authenticated authority [default: local]\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-continuity-signal-help",
+    "args": [
+      "goal",
+      "continuity-signal",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Record one exact external continuity readiness signal; never dispatches\n\nUsage: vyane goal continuity-signal [OPTIONS] --quota-event-id <QUOTA_EVENT_ID> --provider <PROVIDER> --harness <HARNESS> --model <MODEL> --source <SOURCE> <ID> <SIGNAL>\n\nArguments:\n  <ID>      Goal whose current continuity plan receives the signal\n  <SIGNAL>  Closed signal kind [possible values: quota-reset, review-checks-passed, review-checks-failed]\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n      --db <PATH>\n          SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>\n          Caller-selected local storage scope; not authenticated authority [default: local]\n      --json\n          Emit machine-readable JSON\n      --quota-event-id <QUOTA_EVENT_ID>\n          Exact quota event currently visible on the goal\n      --provider <PROVIDER>\n          Exact primary provider observed available again\n      --harness <HARNESS>\n          Exact primary harness observed available again\n      --model <MODEL>\n          Exact primary model observed available again\n      --source <SOURCE>\n          Bounded non-secret observer identifier\n      --repository <REPOSITORY>\n          Public repository whose review checks were observed\n      --pull-request <PULL_REQUEST>\n          Pull request whose review checks were observed\n      --observation-id <OBSERVATION_ID>\n          Stable identifier for this distinct review-check observation\n      --observation-sequence <OBSERVATION_SEQUENCE>\n          Strictly increasing sequence for review-check observations on this PR\n  -h, --help\n          Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-progress-help",
+    "args": [
+      "goal",
+      "progress",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Append a progress event without changing lifecycle state\n\nUsage: vyane goal progress [OPTIONS] --stage <STAGE> --detail <DETAIL> <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>    Config file to load instead of the default user + project files\n      --db <PATH>        SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>    Caller-selected local storage scope; not authenticated authority [default: local]\n      --json             Emit machine-readable JSON\n      --stage <STAGE>    Stable progress stage label\n      --detail <DETAIL>  Human-readable progress detail\n      --worker <WORKER>  Caller-supplied worker identity; required while a lease is active\n  -h, --help             Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-pause-help",
+    "args": [
+      "goal",
+      "pause",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Pause an in-progress goal; releases any lease (holder-only while leased)\n\nUsage: vyane goal pause [OPTIONS] <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>    Config file to load instead of the default user + project files\n      --db <PATH>        SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>    Caller-selected local storage scope; not authenticated authority [default: local]\n      --json             Emit machine-readable JSON\n      --reason <REASON>  Optional pause or cancellation reason\n      --worker <WORKER>  Caller-supplied worker identity; required while a lease is active\n  -h, --help             Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-resume-help",
+    "args": [
+      "goal",
+      "resume",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Resume a paused goal; resumed goals are always unleased\n\nUsage: vyane goal resume [OPTIONS] <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>    Config file to load instead of the default user + project files\n      --db <PATH>        SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>    Caller-selected local storage scope; not authenticated authority [default: local]\n      --json             Emit machine-readable JSON\n      --worker <WORKER>  Caller-supplied worker identity; required while a lease is active\n  -h, --help             Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-done-help",
+    "args": [
+      "goal",
+      "done",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Mark an in-progress goal completed\n\nUsage: vyane goal done [OPTIONS] <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>      Config file to load instead of the default user + project files\n      --db <PATH>          SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>      Caller-selected local storage scope; not authenticated authority [default: local]\n      --json               Emit machine-readable JSON\n      --summary <SUMMARY>  Optional completion summary\n      --waive <REASON>     Explicitly waive unsatisfied acceptance criteria, recording an audit event\n      --worker <WORKER>    Caller-supplied worker identity; required while a lease is active\n  -h, --help               Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-fail-help",
+    "args": [
+      "goal",
+      "fail",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Mark an in-progress goal failed\n\nUsage: vyane goal fail [OPTIONS] --reason <REASON> <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>    Config file to load instead of the default user + project files\n      --db <PATH>        SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>    Caller-selected local storage scope; not authenticated authority [default: local]\n      --json             Emit machine-readable JSON\n      --reason <REASON>  Required failure reason\n      --worker <WORKER>  Caller-supplied worker identity; required while a lease is active\n  -h, --help             Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "goal-cancel-help",
+    "args": [
+      "goal",
+      "cancel",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Cancel a queued, in-progress, or paused goal\n\nUsage: vyane goal cancel [OPTIONS] <ID>\n\nArguments:\n  <ID>  Exact goal id\n\nOptions:\n      --config <PATH>    Config file to load instead of the default user + project files\n      --db <PATH>        SQLite goal database; defaults to the standard Vyane data directory\n      --owner <OWNER>    Caller-selected local storage scope; not authenticated authority [default: local]\n      --json             Emit machine-readable JSON\n      --reason <REASON>  Optional pause or cancellation reason\n      --worker <WORKER>  Caller-supplied worker identity; required while a lease is active\n  -h, --help             Print help\n",
+    "stderr": ""
+  },
+  {
     "name": "missing-command",
     "args": [],
     "exit_code": 2,
