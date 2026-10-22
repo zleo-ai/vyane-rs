@@ -4,10 +4,23 @@
 //! + preferences, produce a [`RouteDecision`] naming the target to dispatch to.
 
 use crate::decision::RouteDecision;
+use crate::feedback::{FeedbackNote, FeedbackScoring};
 use crate::intent::classify_intent;
 use crate::preference::{RoutePreferenceTable, normalize_key, parse_effort};
-use crate::score::{ComplexitySignals, complexity_score, effort_for_tier, tier_for_score};
+use crate::score::{
+    ComplexitySignals, complexity_score_with_feedback, effort_for_tier, tier_for_score,
+};
 use crate::tags::infer_route_tags_with_intent;
+
+/// A route decision plus the feedback notes scoring admitted.
+///
+/// `feedback_notes` is empty unless the caller passed
+/// [`FeedbackScoring::Enabled`]. Admitted notes do not change `decision`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutedTask {
+    pub decision: RouteDecision,
+    pub feedback_notes: Vec<FeedbackNote>,
+}
 
 /// Route a task to a target.
 ///
@@ -21,6 +34,10 @@ use crate::tags::infer_route_tags_with_intent;
 ///   `None`, the router falls back to the first available provider.
 /// - `default_provider` — the fallback provider when no preference matches and
 ///   no preference table is configured.
+///
+/// Feedback notes are not accepted here. Pass them to
+/// [`route_task_with_feedback`]; they stay out of the result unless that
+/// caller enables feedback scoring.
 pub fn route_task(
     task: &str,
     available_providers: &[String],
@@ -28,6 +45,32 @@ pub fn route_task(
     preferences: Option<&RoutePreferenceTable>,
     default_provider: &str,
 ) -> RouteDecision {
+    route_task_with_feedback(
+        task,
+        available_providers,
+        signals,
+        preferences,
+        default_provider,
+        &[],
+        FeedbackScoring::Disabled,
+    )
+    .decision
+}
+
+/// Route a task, optionally recording explicit feedback notes.
+///
+/// [`FeedbackScoring::Disabled`] ignores `feedback` and returns the same
+/// decision as [`route_task`]. [`FeedbackScoring::Enabled`] records those
+/// notes on [`RoutedTask::feedback_notes`] and does not change the decision.
+pub fn route_task_with_feedback(
+    task: &str,
+    available_providers: &[String],
+    signals: Option<&ComplexitySignals>,
+    preferences: Option<&RoutePreferenceTable>,
+    default_provider: &str,
+    feedback: &[FeedbackNote],
+    feedback_scoring: FeedbackScoring,
+) -> RoutedTask {
     let signals = signals.cloned().unwrap_or_else(ComplexitySignals::new);
     let intent = classify_intent(task);
 
@@ -39,12 +82,13 @@ pub fn route_task(
         }
     }
 
-    let score = complexity_score(task, &signals, &tags);
+    let scored = complexity_score_with_feedback(task, &signals, &tags, feedback, feedback_scoring);
+    let score = scored.score;
     let tier = tier_for_score(score, &signals);
     let mut effort = effort_for_tier(tier);
 
     // Resolve a preference (stage → tag → tier → default).
-    if let Some(table) = preferences
+    let matched = if let Some(table) = preferences
         && let Some(pref) = table.resolve(&signals.stage, &tags, tier)
     {
         // Check frontier guard: if the preference is frontier-tier but
@@ -67,7 +111,7 @@ pub fn route_task(
             if !pref.effort.is_empty() {
                 effort = parse_effort(&pref.effort);
             }
-            return RouteDecision {
+            Some(RouteDecision {
                 selection_key: pref.selection_key.clone(),
                 provider: pref.provider.clone(),
                 model: pref.model.clone(),
@@ -77,26 +121,36 @@ pub fn route_task(
                 intent: intent.primary.as_str().to_string(),
                 complexity_score: score,
                 reason: format!("preference matched (tag/stage/tier): {}", pref.provider),
-            };
+            })
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
-    // Fallback: use the default provider, or the first available one.
-    let provider = available_providers
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or(default_provider);
+    let decision = matched.unwrap_or_else(|| {
+        // Fallback: use the default provider, or the first available one.
+        let provider = available_providers
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or(default_provider);
+        RouteDecision {
+            selection_key: String::new(),
+            provider: provider.to_string(),
+            model: String::new(),
+            effort,
+            tier,
+            tag: String::new(),
+            intent: intent.primary.as_str().to_string(),
+            complexity_score: score,
+            reason: "default fallback".to_string(),
+        }
+    });
 
-    RouteDecision {
-        selection_key: String::new(),
-        provider: provider.to_string(),
-        model: String::new(),
-        effort,
-        tier,
-        tag: String::new(),
-        intent: intent.primary.as_str().to_string(),
-        complexity_score: score,
-        reason: "default fallback".to_string(),
+    RoutedTask {
+        decision,
+        feedback_notes: scored.feedback_notes,
     }
 }
 
@@ -118,6 +172,7 @@ fn first_matching_tag(tags: &[String], table: &RoutePreferenceTable) -> String {
 mod tests {
     use super::*;
     use crate::decision::{RouteEffort, RouteTier};
+    use crate::feedback::FeedbackOutcome;
     use crate::preference::RouteTargetPreference;
     use std::collections::BTreeMap;
 
@@ -461,5 +516,74 @@ mod tests {
         let decision = route_task("hello", &[], None, None, "fallback");
         assert_eq!(decision.provider, "fallback");
         assert_eq!(decision.reason, "default fallback");
+    }
+
+    #[test]
+    fn disabled_feedback_matches_current_route_and_enabled_only_records() {
+        // The note names a configured security target and words that would
+        // raise the score if scoring treated the note as task text. Neither
+        // setting may select that target.
+        let mut tag_prefs = BTreeMap::new();
+        tag_prefs.insert(
+            "security".into(),
+            RouteTargetPreference {
+                selection_key: "profile:security".into(),
+                provider: "anthropic".into(),
+                model: "claude-frontier".into(),
+                effort: "xhigh".into(),
+                tier: "frontier".into(),
+            },
+        );
+        let table = RoutePreferenceTable {
+            tag_preferences: tag_prefs,
+            ..Default::default()
+        };
+        let signals = ComplexitySignals {
+            changed_files: 5,
+            ..ComplexitySignals::new()
+        };
+        let providers = vec!["openai".into(), "anthropic".into()];
+        let notes = vec![FeedbackNote {
+            target_key: "security architecture review".into(),
+            outcome: FeedbackOutcome::Failed,
+        }];
+        let current = route_task(
+            "hello world",
+            &providers,
+            Some(&signals),
+            Some(&table),
+            "openai",
+        );
+        assert_eq!(current.provider, "openai");
+        assert_eq!(current.model, "");
+        assert_eq!(current.effort, RouteEffort::Low);
+        assert_eq!(current.tier, RouteTier::Economy);
+        assert_eq!(current.complexity_score, 0.15);
+        assert_eq!(current.selection_key, "");
+
+        let disabled = route_task_with_feedback(
+            "hello world",
+            &providers,
+            Some(&signals),
+            Some(&table),
+            "openai",
+            &notes,
+            FeedbackScoring::Disabled,
+        );
+        assert_eq!(disabled.decision, current);
+        assert!(disabled.feedback_notes.is_empty());
+
+        let enabled = route_task_with_feedback(
+            "hello world",
+            &providers,
+            Some(&signals),
+            Some(&table),
+            "openai",
+            &notes,
+            FeedbackScoring::Enabled,
+        );
+        assert_eq!(enabled.decision, current);
+        assert_eq!(enabled.decision.as_tuple(), current.as_tuple());
+        assert_eq!(enabled.feedback_notes, notes);
     }
 }

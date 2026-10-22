@@ -75,7 +75,7 @@ impl std::fmt::Display for RouteEffort {
 /// The result of a routing decision. The first four fields
 /// (`provider`, `model`, `effort`, `tier`) are the stable public contract;
 /// the rest are diagnostic metadata for logging and observability.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteDecision {
     /// Opaque caller-owned identity copied from the matched preference. Empty
     /// means the router used an unkeyed fallback. This is deliberately not part
