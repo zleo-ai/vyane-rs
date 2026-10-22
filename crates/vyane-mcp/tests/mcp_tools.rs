@@ -1314,3 +1314,312 @@ async fn history_usage_mcp_counts_all_owned_filtered_samples() -> anyhow::Result
     assert_eq!(std::fs::read_to_string(ledger)?, HISTORY);
     Ok(())
 }
+
+/// A caller-supplied owner is not an authority. The tool must reject it before
+/// any store read: the session read path chmods that owner's directory to
+/// `0o700` before listing, and a history read of a mode-`0o000` ledger fails
+/// as `internal` rather than as a schema error.
+#[tokio::test]
+async fn tool_call_with_wrong_owner_is_rejected_without_reading_other_owner_data()
+-> anyhow::Result<()> {
+    const FOREIGN_OWNER: &str = "another-owner";
+    const FOREIGN_RUN: &str = "foreign-run-canary";
+    const FOREIGN_PREVIEW: &str = "FOREIGN_OWNER_PREVIEW_CANARY";
+    const FOREIGN_SESSION: &str = "foreign-session-canary";
+    const FOREIGN_TRANSCRIPT: &str = "FOREIGN_OWNER_TRANSCRIPT_CANARY";
+    const LOCAL_RUN: &str = "local-run";
+    const LOCAL_SESSION: &str = "local-session";
+
+    let root = tempfile::Builder::new()
+        .prefix("vyane-mcp-owner-fence-")
+        .tempdir()?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let now = chrono::Utc::now();
+    let target = vyane_core::Target {
+        provider: vyane_core::ProviderId::new("p"),
+        protocol: vyane_core::Protocol::OpenaiChat,
+        harness: None,
+        model: vyane_core::ModelId::new("m"),
+    };
+    for (owner, run_id, preview) in [
+        ("local", LOCAL_RUN, None),
+        (
+            FOREIGN_OWNER,
+            FOREIGN_RUN,
+            Some(FOREIGN_PREVIEW.to_string()),
+        ),
+    ] {
+        service
+            .runtime()
+            .ledger
+            .append(&vyane_core::RunRecord {
+                run_id: run_id.into(),
+                owner: owner.into(),
+                started_at: now,
+                finished_at: now,
+                task_digest: "d".into(),
+                task_preview: preview,
+                workdir: None,
+                sandbox: Sandbox::ReadOnly,
+                target: target.clone(),
+                transport: vyane_core::AdapterTransport::DirectHttp,
+                attempts: Vec::new(),
+                status: RunStatus::Success,
+                usage: None,
+                cost_usd: None,
+                session_id: None,
+                output_chars: None,
+                error: None,
+                labels: std::collections::BTreeMap::new(),
+            })
+            .await?;
+    }
+    for (owner, session_id, transcript) in [
+        ("local", LOCAL_SESSION, "local transcript"),
+        (FOREIGN_OWNER, FOREIGN_SESSION, FOREIGN_TRANSCRIPT),
+    ] {
+        service
+            .runtime()
+            .sessions
+            .save(
+                owner,
+                &vyane_core::SessionRecord {
+                    session_id: session_id.into(),
+                    owner: owner.into(),
+                    target: target.clone(),
+                    native_session_id: None,
+                    transcript: vec![vyane_core::ChatMessage::user(transcript)],
+                    created_at: now,
+                    updated_at: now,
+                    run_count: 1,
+                },
+            )
+            .await?;
+    }
+
+    let ledger = service.storage_paths().ledger_path.clone();
+    let foreign_session_dir =
+        foreign_session_dir(&service.storage_paths().sessions_dir, FOREIGN_SESSION)?;
+    let stored = service
+        .runtime()
+        .sessions
+        .list_snapshots(FOREIGN_OWNER)
+        .await?;
+    assert!(
+        stored
+            .iter()
+            .any(|snapshot| snapshot.record.session_id == FOREIGN_SESSION)
+    );
+    let observer = service.clone();
+
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_handle = tokio::spawn(async move {
+        VyaneMcpServer::new(service)
+            .serve(server_transport)
+            .await?
+            .waiting()
+            .await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+
+    let owned = call_json(&client, "vyane_history", serde_json::json!({"limit": 20})).await?;
+    let ids: Vec<_> = owned["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["run_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![LOCAL_RUN]);
+    assert!(!owned.to_string().contains(FOREIGN_RUN));
+    assert!(!owned.to_string().contains(FOREIGN_PREVIEW));
+
+    let sessions = call_json(&client, "vyane_sessions", serde_json::json!({})).await?;
+    assert_eq!(sessions["items"].as_array().unwrap().len(), 1);
+    assert_eq!(sessions["items"][0]["session_id"], LOCAL_SESSION);
+    assert!(!sessions.to_string().contains(FOREIGN_SESSION));
+    assert!(!sessions.to_string().contains(FOREIGN_TRANSCRIPT));
+
+    let _restore_ledger = RestoreMode::new(&ledger, 0o600);
+    let _restore_sessions = RestoreMode::new(&foreign_session_dir, 0o700);
+    seal_private(&ledger)?;
+    seal_private(&foreign_session_dir)?;
+
+    for arguments in [
+        serde_json::json!({"owner": FOREIGN_OWNER}),
+        serde_json::json!({"owner": FOREIGN_OWNER, "limit": 20}),
+        serde_json::json!({"stats": true, "owner": FOREIGN_OWNER}),
+    ] {
+        let rejected = call_json(&client, "vyane_history", arguments).await?;
+        assert_eq!(
+            rejected,
+            serde_json::json!({
+                "status": "error",
+                "error": {
+                    "code": "invalid_argument",
+                    "message": "arguments do not match the tool schema",
+                }
+            })
+        );
+        let wire = rejected.to_string();
+        assert!(!wire.contains(FOREIGN_OWNER));
+        assert!(!wire.contains(FOREIGN_RUN));
+        assert!(!wire.contains(FOREIGN_PREVIEW));
+    }
+    let rejected_sessions = call_json(
+        &client,
+        "vyane_sessions",
+        serde_json::json!({"owner": FOREIGN_OWNER}),
+    )
+    .await?;
+    assert_eq!(
+        rejected_sessions,
+        serde_json::json!({
+            "status": "error",
+            "error": {
+                "code": "invalid_argument",
+                "message": "arguments do not match the tool schema",
+            }
+        })
+    );
+    let wire = rejected_sessions.to_string();
+    assert!(!wire.contains(FOREIGN_OWNER));
+    assert!(!wire.contains(FOREIGN_SESSION));
+    assert!(!wire.contains(FOREIGN_TRANSCRIPT));
+
+    assert!(
+        still_sealed(&ledger),
+        "wrong-owner history must not open the other owner's ledger"
+    );
+    assert!(
+        still_sealed(&foreign_session_dir),
+        "wrong-owner sessions must not enter the other owner's session directory"
+    );
+
+    let attempted = call_json(&client, "vyane_history", serde_json::json!({"limit": 1})).await?;
+    if sealed_reads_fail() {
+        assert_eq!(attempted["error"]["code"], "internal");
+        assert!(!attempted.to_string().contains(FOREIGN_RUN));
+        assert!(!attempted.to_string().contains(FOREIGN_PREVIEW));
+        assert!(still_sealed(&ledger));
+    }
+
+    let revealed = observer
+        .runtime()
+        .sessions
+        .list_snapshots(FOREIGN_OWNER)
+        .await?;
+    assert!(
+        revealed
+            .iter()
+            .any(|snapshot| snapshot.record.session_id == FOREIGN_SESSION),
+        "the other owner's session must still be readable by its own store path"
+    );
+    if sealed_reads_fail() {
+        assert!(
+            !still_sealed(&foreign_session_dir),
+            "the session read path is what unseals the owner directory"
+        );
+    }
+
+    client.cancel().await?;
+    server_handle.await??;
+    Ok(())
+}
+
+async fn call_json(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    name: &str,
+    arguments: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new(name.to_owned())
+                .with_arguments(arguments.as_object().unwrap().clone()),
+        )
+        .await?;
+    assert_eq!(result.is_error, Some(false));
+    Ok(result_payload(result))
+}
+
+fn foreign_session_dir(
+    root: &std::path::Path,
+    session_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(&path)? {
+            let file = file?.path();
+            if file.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            if std::fs::read_to_string(&file)?.contains(session_id) {
+                return Ok(path);
+            }
+        }
+    }
+    anyhow::bail!("foreign session directory was not created");
+}
+
+fn seal_private(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+fn still_sealed(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o777 == 0)
+            .unwrap_or(false)
+            && std::fs::read(path).is_err()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn sealed_reads_fail() -> bool {
+    cfg!(unix)
+}
+
+struct RestoreMode {
+    path: std::path::PathBuf,
+    mode: u32,
+}
+
+impl RestoreMode {
+    fn new(path: &std::path::Path, mode: u32) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            mode,
+        }
+    }
+}
+
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
+        }
+    }
+}
