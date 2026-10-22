@@ -1257,6 +1257,7 @@ mod tests {
                 )]),
                 native_permission_ceilings: Vec::new(),
                 harness_permission_ceilings: Vec::new(),
+                model_rates: Default::default(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),

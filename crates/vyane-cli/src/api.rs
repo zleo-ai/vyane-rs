@@ -2935,6 +2935,7 @@ mod tests {
                     )]),
                     native_permission_ceilings: Vec::new(),
                     harness_permission_ceilings: Vec::new(),
+                    model_rates: Default::default(),
                 },
                 files: Vec::new(),
                 secrets: std::collections::BTreeMap::new(),
@@ -2976,6 +2977,7 @@ mod tests {
                     harness_permission_ceilings: vec![vyane_config::HarnessPermissionCeiling {
                         max_sandbox: Sandbox::ReadOnly,
                     }],
+                    model_rates: Default::default(),
                 },
                 files: Vec::new(),
                 secrets: std::collections::BTreeMap::new(),

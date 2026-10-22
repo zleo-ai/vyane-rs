@@ -165,12 +165,14 @@ impl Runtime {
             .fold(Sandbox::Full, |current, ceiling| {
                 current.restrict_with(ceiling.max_sandbox)
             });
+        let model_rates = config.model_rates.clone();
         let factory = Arc::new(AssemblerFactory::new(config));
         let ledger: Arc<dyn Ledger> = Arc::new(JsonlLedger::new(paths.ledger_path));
         let sessions: Arc<dyn SessionStore> = Arc::new(FsSessionStore::new(paths.sessions_dir));
         let dispatcher =
             vyane_kernel::Dispatcher::new(factory, Arc::clone(&ledger), Arc::clone(&sessions))
-                .with_harness_sandbox_ceiling(harness_sandbox_ceiling);
+                .with_harness_sandbox_ceiling(harness_sandbox_ceiling)
+                .with_model_rates(model_rates);
 
         Ok(Self {
             dispatcher,

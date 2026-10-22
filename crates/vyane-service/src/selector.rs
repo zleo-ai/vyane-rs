@@ -94,6 +94,7 @@ fn provider_model_config(config: &ResolvedConfig, provider: &str, model: &str) -
     Ok(RawRoot {
         providers: BTreeMap::new(),
         profiles,
+        cost: Default::default(),
         native_permissions: None,
         harness_permissions: None,
     })
@@ -109,6 +110,7 @@ fn resolve_temp_profile(
         profiles: loaded.config.profiles.clone(),
         native_permission_ceilings: loaded.config.native_permission_ceilings.clone(),
         harness_permission_ceilings: loaded.config.harness_permission_ceilings.clone(),
+        model_rates: loaded.config.model_rates.clone(),
     };
     layers.merge(&root)?;
     let config: ResolvedConfig = layers.into();

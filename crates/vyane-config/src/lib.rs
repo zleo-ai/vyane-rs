@@ -20,7 +20,7 @@ pub use model::{
     NativeCommandRuleConfig, NativePathPolicyConfig, NativePermissionCeiling,
     NativeToolPermissionEffectConfig, NativeToolPermissionPolicyConfig,
     NativeToolPermissionRuleConfig, NativeWebFetchPolicyConfig, NativeWebSearchPolicyConfig,
-    ProfilePatch, RawFailoverElement, RawRoot,
+    ProfilePatch, RawCostTable, RawFailoverElement, RawModelRate, RawRoot,
 };
 pub use resolve::ResolvedConfig;
 pub use secrets::{env_lookup_with_secrets, load_secrets_file};
