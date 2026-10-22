@@ -21,8 +21,9 @@
 //!   the decision. Events remain rebuildable; they are not a second authority.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -40,23 +41,147 @@ use crate::kernel_store::{
 /// Frozen local boundary protocol version.
 pub const KERNEL_BOUNDARY_VERSION: u32 = 1;
 
-/// Collect candidate `kernel.sqlite` paths under a dogfood root for receipt rebuild.
-fn push_kernel_candidates(root: &Path, receipt_id: &str, out: &mut Vec<PathBuf>) {
-    out.push(root.join("kernel.sqlite"));
-    if let Some(suffix) = receipt_id.strip_prefix("rcpt-") {
-        out.push(root.join(format!("durable-{suffix}")).join("kernel.sqlite"));
+struct KernelCandidate {
+    root: PathBuf,
+    path: PathBuf,
+}
+
+/// `kernel.sqlite` candidates that stay inside the canonical dogfood root.
+///
+/// A receipt id must be one path component, so `..` or an extra separator never
+/// becomes a candidate. `DirEntry::file_type` does not follow symlinks, and a
+/// `durable-*` symlink is skipped. Leaf `SQLITE_OPEN_NOFOLLOW` does not cover
+/// an intermediate directory, so the canonical path is checked before any open.
+fn push_kernel_candidates(root: &Path, receipt_id: &str, out: &mut Vec<KernelCandidate>) {
+    if !is_single_normal_component(receipt_id) {
+        return;
     }
-    // Scan durable-* children (DriveDogfood layout).
-    if let Ok(entries) = fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.starts_with("durable-") {
-                    out.push(path.join("kernel.sqlite"));
-                }
-            }
+    let Some(canon_root) = canonical_directory(root) else {
+        return;
+    };
+    push_confined(&canon_root, &canon_root.join("kernel.sqlite"), out);
+    if let Some(suffix) = receipt_id.strip_prefix("rcpt-") {
+        let dir_name = format!("durable-{suffix}");
+        if is_single_normal_component(&dir_name) {
+            push_confined(
+                &canon_root,
+                &canon_root.join(dir_name).join("kernel.sqlite"),
+                out,
+            );
         }
+    }
+    let Ok(entries) = fs::read_dir(&canon_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("durable-") || !is_single_normal_component(name) {
+            continue;
+        }
+        push_confined(&canon_root, &entry.path().join("kernel.sqlite"), out);
+    }
+}
+
+fn push_confined(canon_root: &Path, candidate: &Path, out: &mut Vec<KernelCandidate>) {
+    let Some(path) = confined_kernel_sqlite(canon_root, candidate) else {
+        return;
+    };
+    out.push(KernelCandidate {
+        root: canon_root.to_path_buf(),
+        path,
+    });
+}
+
+fn is_single_normal_component(value: &str) -> bool {
+    if value.is_empty() || value.contains('/') || value.contains('\\') || value.contains('\0') {
+        return false;
+    }
+    let mut components = Path::new(value).components();
+    match components.next() {
+        Some(Component::Normal(part)) if components.next().is_none() => part == OsStr::new(value),
+        _ => false,
+    }
+}
+
+fn canonical_directory(path: &Path) -> Option<PathBuf> {
+    let canonical = fs::canonicalize(path).ok()?;
+    let metadata = fs::symlink_metadata(&canonical).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    Some(canonical)
+}
+
+/// Canonical `kernel.sqlite` inside `root`, or `None` when the walk would
+/// leave that root, follow a symlink, or accept a nested extra component.
+fn confined_kernel_sqlite(root: &Path, candidate: &Path) -> Option<PathBuf> {
+    let canon_root = canonical_directory(root)?;
+    let relative = candidate.strip_prefix(&canon_root).ok()?;
+    let mut names = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return None;
+        };
+        names.push(name.to_os_string());
+    }
+    if !kernel_candidate_layout(&names) {
+        return None;
+    }
+    let mut current = canon_root.clone();
+    for (index, name) in names.iter().enumerate() {
+        let text = name.to_str()?;
+        if !is_single_normal_component(text) {
+            return None;
+        }
+        current.push(name);
+        let metadata = fs::symlink_metadata(&current).ok()?;
+        if metadata.file_type().is_symlink() {
+            return None;
+        }
+        let last = index + 1 == names.len();
+        if last {
+            if !metadata.is_file() {
+                return None;
+            }
+        } else if !metadata.is_dir() {
+            return None;
+        }
+    }
+    let parent = current.parent()?;
+    let canon_parent = canonical_directory(parent)?;
+    if !canon_parent.starts_with(&canon_root) {
+        return None;
+    }
+    let canon_candidate = canon_parent.join("kernel.sqlite");
+    if !canon_candidate.starts_with(&canon_root) {
+        return None;
+    }
+    let leaf = fs::symlink_metadata(&canon_candidate).ok()?;
+    if leaf.file_type().is_symlink() || !leaf.is_file() {
+        return None;
+    }
+    Some(canon_candidate)
+}
+
+fn kernel_candidate_layout(names: &[OsString]) -> bool {
+    match names {
+        [leaf] => leaf == OsStr::new("kernel.sqlite"),
+        [dir, leaf] => {
+            leaf == OsStr::new("kernel.sqlite")
+                && dir.to_str().is_some_and(|name| {
+                    name.starts_with("durable-") && is_single_normal_component(name)
+                })
+        }
+        _ => false,
     }
 }
 
@@ -323,9 +448,15 @@ pub trait KernelStoreResolver: Send + Sync {
     ) -> Option<KernelStore>;
 }
 
+#[derive(Clone)]
+struct RememberedStore {
+    root: PathBuf,
+    path: PathBuf,
+}
+
 struct DurableStoreIndex {
     durable_roots: Mutex<Vec<PathBuf>>,
-    receipt_store_index: Mutex<HashMap<String, PathBuf>>,
+    receipt_store_index: Mutex<HashMap<String, RememberedStore>>,
 }
 
 impl DurableStoreIndex {
@@ -344,26 +475,28 @@ impl DurableStoreIndex {
         }
     }
 
-    fn remember_receipt_store(&self, receipt_id: &str, path: PathBuf) {
+    fn remember_receipt_store(&self, receipt_id: &str, root: PathBuf, path: PathBuf) {
         if let Ok(mut index) = self.receipt_store_index.lock() {
-            index.insert(receipt_id.to_string(), path);
+            index.insert(receipt_id.to_string(), RememberedStore { root, path });
         }
     }
 
-    fn store_for_existing_path(&self, path: &Path) -> Option<KernelStore> {
-        // Discovery cannot create, migrate, or change journal mode. Revalidate
-        // even remembered paths so a replaced candidate is not trusted by cache.
+    fn store_for_existing_path(&self, root: &Path, path: &Path) -> Option<KernelStore> {
+        // Re-check the canonical path immediately before open. Discovery cannot
+        // create, migrate, or change journal mode, and a remembered path is not
+        // trusted after it is replaced or moved outside its root.
+        let path = confined_kernel_sqlite(root, path)?;
         KernelStore::probe_existing(path).ok()
     }
 
     fn indexed_store(&self, receipt_id: &str) -> Option<KernelStore> {
-        let path = {
+        let remembered = {
             let Ok(index) = self.receipt_store_index.lock() else {
                 return None;
             };
             index.get(receipt_id).cloned()?
         };
-        self.store_for_existing_path(&path)
+        self.store_for_existing_path(&remembered.root, &remembered.path)
     }
 }
 
@@ -380,6 +513,9 @@ impl KernelStoreResolver for FilesystemKernelStoreResolver {
         receipt_id: &str,
         dogfood_root: Option<&str>,
     ) -> Option<KernelStore> {
+        if !is_single_normal_component(receipt_id) {
+            return None;
+        }
         // Named roots stay exclusive. The index only short-circuits the
         // unbounded registered-root scan so a later decoy cannot steal a
         // receipt this adapter already resolved.
@@ -390,7 +526,7 @@ impl KernelStoreResolver for FilesystemKernelStoreResolver {
             return Some(store);
         }
 
-        let mut candidates: Vec<PathBuf> = Vec::new();
+        let mut candidates: Vec<KernelCandidate> = Vec::new();
         if let Some(root) = dogfood_root.map(PathBuf::from) {
             // A named root is exclusive so a sibling registered sqlite cannot
             // steal the grant/deny write.
@@ -401,25 +537,31 @@ impl KernelStoreResolver for FilesystemKernelStoreResolver {
             }
         }
         let mut seen = HashSet::new();
-        candidates.retain(|path| seen.insert(path.clone()));
+        candidates.retain(|candidate| seen.insert(candidate.path.clone()));
         let mut receipt_hit = None;
-        for path in candidates {
-            let Some(store) = self.index.store_for_existing_path(&path) else {
+        for candidate in candidates {
+            let Some(store) = self
+                .index
+                .store_for_existing_path(&candidate.root, &candidate.path)
+            else {
                 continue;
             };
             if matches!(store.get_approval(owner, receipt_id), Ok(Some(_))) {
-                self.index
-                    .remember_receipt_store(receipt_id, store.path().to_path_buf());
+                self.index.remember_receipt_store(
+                    receipt_id,
+                    candidate.root,
+                    store.path().to_path_buf(),
+                );
                 return Some(store);
             }
             if receipt_hit.is_none() && matches!(store.get_receipt(owner, receipt_id), Ok(Some(_)))
             {
-                receipt_hit = Some(store);
+                receipt_hit = Some((candidate.root, store));
             }
         }
-        if let Some(store) = receipt_hit {
+        if let Some((root, store)) = receipt_hit {
             self.index
-                .remember_receipt_store(receipt_id, store.path().to_path_buf());
+                .remember_receipt_store(receipt_id, root, store.path().to_path_buf());
             return Some(store);
         }
         None
@@ -4000,5 +4142,124 @@ mod tests {
             );
         }
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    fn assert_approval_stays_pending(store: &KernelStore, receipt_id: &str) {
+        let row = store
+            .get_approval(&principal().owner, receipt_id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing approval for {receipt_id}"));
+        assert_eq!(
+            row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Pending,
+            "{receipt_id} was queried and decided"
+        );
+    }
+
+    #[test]
+    fn named_root_discovery_rejects_dotdot_separator_and_symlink() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let root_s = root.to_string_lossy().into_owned();
+        let adapter = LocalKernelAdapter::new(principal());
+
+        let outside_dotdot = parent.path().join("outside-dotdot");
+        fs::create_dir(&outside_dotdot).unwrap();
+        let dotdot_id = "rcpt-hop/../../outside-dotdot";
+        let (dotdot_store, dotdot_digest) =
+            seed_pending_ask(&outside_dotdot, dotdot_id, "run-dotdot", 1);
+        let dotdot = adapter.handle(
+            approval_cmd(
+                "ap-dotdot",
+                KernelCommandKind::DecideApproval,
+                Some(dotdot_id),
+                Some("run-dotdot"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&dotdot_digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(dotdot.kind, KernelEventKind::Error, "{dotdot:?}");
+        assert_eq!(dotdot.error, Some(KernelErrorCode::NotFound));
+        assert_ne!(dotdot.kind, KernelEventKind::Approved);
+        assert_approval_stays_pending(&dotdot_store, dotdot_id);
+        assert!(!root.join("durable-hop").exists());
+
+        let nested = root.join("durable-nested").join("extra");
+        fs::create_dir_all(&nested).unwrap();
+        let separator_id = "rcpt-nested/extra";
+        let (separator_store, separator_digest) =
+            seed_pending_ask(&nested, separator_id, "run-separator", 1);
+        let separator = adapter.handle(
+            approval_cmd(
+                "ap-separator",
+                KernelCommandKind::DecideApproval,
+                Some(separator_id),
+                Some("run-separator"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&separator_digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(separator.kind, KernelEventKind::Error, "{separator:?}");
+        assert_eq!(separator.error, Some(KernelErrorCode::NotFound));
+        assert_ne!(separator.kind, KernelEventKind::Approved);
+        assert_approval_stays_pending(&separator_store, separator_id);
+
+        let outside_link = parent.path().join("outside-link");
+        fs::create_dir(&outside_link).unwrap();
+        let link_id = "rcpt-link";
+        let (link_store, link_digest) = seed_pending_ask(&outside_link, link_id, "run-link", 1);
+        std::os::unix::fs::symlink(&outside_link, root.join("durable-link")).unwrap();
+        let linked = adapter.handle(
+            approval_cmd(
+                "ap-link",
+                KernelCommandKind::DecideApproval,
+                Some(link_id),
+                Some("run-link"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&link_digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(linked.kind, KernelEventKind::Error, "{linked:?}");
+        assert_eq!(linked.error, Some(KernelErrorCode::NotFound));
+        assert_ne!(linked.kind, KernelEventKind::Approved);
+        assert_approval_stays_pending(&link_store, link_id);
+        assert!(
+            fs::symlink_metadata(root.join("durable-link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        let ok_dir = root.join("durable-ok");
+        fs::create_dir(&ok_dir).unwrap();
+        let (ok_store, ok_digest) = seed_pending_ask(&ok_dir, "rcpt-ok", "run-ok", 1);
+        let granted = adapter.handle(
+            approval_cmd(
+                "ap-ok",
+                KernelCommandKind::DecideApproval,
+                Some("rcpt-ok"),
+                Some("run-ok"),
+                Some(true),
+                Some(&root_s),
+                Some(binding_for(&ok_digest, 1)),
+            ),
+            now(),
+        );
+        assert_eq!(granted.kind, KernelEventKind::Approved, "{granted:?}");
+        let ok_row = ok_store
+            .get_approval(&principal().owner, "rcpt-ok")
+            .unwrap()
+            .expect("in-root durable directory stays reachable");
+        assert_eq!(
+            ok_row.decision,
+            crate::kernel_store::ApprovalDecisionKind::Approved
+        );
     }
 }
