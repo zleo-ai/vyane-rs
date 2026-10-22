@@ -247,6 +247,12 @@ impl PermissionRule {
             return Err(PermissionRuleError::InvalidPolicyText);
         }
         let source = pattern.into();
+        if source.is_empty()
+            || source.len() > MAX_ARGUMENT_PATTERN_BYTES
+            || source.chars().any(char::is_control)
+        {
+            return Err(PermissionRuleError::InvalidPolicyText);
+        }
         let regex =
             Regex::new(&source).map_err(|source| PermissionRuleError::InvalidArgumentRegex {
                 argument: argument.clone(),
@@ -1077,6 +1083,34 @@ mod tests {
             Err(PermissionRuleError::EmptyArgumentName)
         ));
         assert!(allow.with_argument_pattern("path", "^ok$").is_ok());
+    }
+
+    #[test]
+    fn permission_rule_argument_pattern_rejects_empty_control_and_overlong() {
+        let allow = PermissionRule::new("write_file", PermissionEffect::Allow).unwrap();
+        for pattern in ["", "\n", "\0", &"a".repeat(MAX_ARGUMENT_PATTERN_BYTES + 1)] {
+            assert!(
+                matches!(
+                    allow.clone().with_argument_pattern("path", pattern),
+                    Err(PermissionRuleError::InvalidPolicyText)
+                ),
+                "{pattern:?}"
+            );
+        }
+        assert!(allow.clone().with_argument_pattern("path", "^ok$").is_ok());
+        assert!(allow.with_argument_pattern("path", " ".repeat(1)).is_ok());
+        let blank = NativeToolPermissionPolicy {
+            default: PermissionEffect::Allow,
+            rules: vec![NativeToolPermissionRule {
+                tool: "write_file".into(),
+                effect: PermissionEffect::Allow,
+                arguments: BTreeMap::from([("path".into(), String::new())]),
+            }],
+        };
+        assert!(matches!(
+            blank.validate(),
+            Err(PermissionRuleError::InvalidPolicyText)
+        ));
         let blank = NativeToolPermissionPolicy {
             default: PermissionEffect::Allow,
             rules: vec![NativeToolPermissionRule {
