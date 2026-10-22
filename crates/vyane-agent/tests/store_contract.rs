@@ -238,6 +238,120 @@ fn restart_preserves_run_topology_and_body_free_events() {
 }
 
 #[test]
+fn worker_message_body_is_not_stored_on_task_or_run_rows() {
+    const WORKER_MESSAGE_BODY: &str = "worker-message-body-must-not-land-on-task-or-run-row";
+
+    let (directory, clock, store) = store();
+    let path = directory.path().join("agent.sqlite");
+    let now = clock.now();
+    let mut rejected = run("run", "worker", now);
+    rejected.prompt_digest = WORKER_MESSAGE_BODY.into();
+    assert!(matches!(
+        store.create_root("alice", &worker("worker", None), &rejected),
+        Err(AgentStoreError::InvalidInput(_))
+    ));
+    rejected.prompt_digest = digest('a');
+    rejected.policy_digest = WORKER_MESSAGE_BODY.into();
+    assert!(matches!(
+        store.create_root("alice", &worker("worker", None), &rejected),
+        Err(AgentStoreError::InvalidInput(_))
+    ));
+    assert!(store.get_worker("alice", "worker").unwrap().is_none());
+    assert!(store.get_run("alice", "run").unwrap().is_none());
+
+    let (worker_record, run_record) = store
+        .create_root("alice", &worker("worker", None), &run("run", "worker", now))
+        .unwrap();
+    let task_id = run_record.task_id.clone().expect("run carries a task id");
+    assert_eq!(task_id, "task-run");
+    assert!(!task_id.contains(WORKER_MESSAGE_BODY));
+    assert!(!format!("{worker_record:?}").contains(WORKER_MESSAGE_BODY));
+    assert!(!format!("{run_record:?}").contains(WORKER_MESSAGE_BODY));
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    for table in ["workers", "agent_runs"] {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT name FROM pragma_table_info('{table}') ORDER BY cid"
+            ))
+            .unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for forbidden in [
+            "body",
+            "message",
+            "message_body",
+            "payload",
+            "prompt",
+            "content",
+            "output",
+            "system",
+            "raw_error",
+            "credential",
+        ] {
+            assert!(
+                !columns.iter().any(|column| column == forbidden),
+                "{table} has a {forbidden} column"
+            );
+        }
+        let projection = columns
+            .iter()
+            .map(|column| format!("CAST(\"{column}\" AS TEXT)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut rows = connection
+            .prepare(&format!("SELECT {projection} FROM {table}"))
+            .unwrap();
+        let stored = rows
+            .query_map([], |row| {
+                (0..columns.len())
+                    .map(|index| row.get::<_, Option<String>>(index))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            !stored.is_empty(),
+            "{table} did not persist the created row"
+        );
+        for row in stored {
+            for value in row.into_iter().flatten() {
+                assert!(
+                    !value.contains(WORKER_MESSAGE_BODY),
+                    "{table} stored the worker message body"
+                );
+            }
+        }
+    }
+    let stored_task_id: String = connection
+        .query_row(
+            "SELECT task_id FROM agent_runs WHERE owner = 'alice' AND id = 'run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_task_id, task_id);
+    assert!(!stored_task_id.contains(WORKER_MESSAGE_BODY));
+
+    for candidate in [path.clone(), path.with_extension("sqlite-wal")] {
+        if let Ok(bytes) = std::fs::read(&candidate) {
+            assert!(
+                !bytes
+                    .windows(WORKER_MESSAGE_BODY.len())
+                    .any(|window| window == WORKER_MESSAGE_BODY.as_bytes()),
+                "{} contains the worker message body",
+                candidate.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn concurrent_child_spawn_uses_parent_revision_as_single_winner() {
     let (_directory, clock, store) = store();
     let now = clock.now();
