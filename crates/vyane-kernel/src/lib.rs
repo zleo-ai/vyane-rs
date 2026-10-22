@@ -20,6 +20,7 @@
 
 mod broadcast;
 mod capability;
+mod collab;
 mod digest;
 mod dispatch;
 mod executor;
@@ -31,6 +32,7 @@ pub use capability::{
     CapabilityRejectionReason, CapabilityTargetSnapshot, ExecutionScope, FilesystemCapability,
     IsolationStrength,
 };
+pub use collab::{RoundOutcome, RoundRecord};
 pub use digest::task_digest;
 pub use dispatch::{
     DispatchOutcome, DispatchPersistence, Dispatcher, PersistenceStep, PreparedDispatch,
