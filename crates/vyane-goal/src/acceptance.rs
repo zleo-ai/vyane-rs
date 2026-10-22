@@ -667,6 +667,33 @@ mod tests {
     }
 
     #[test]
+    fn empty_or_whitespace_criteria_do_not_count_as_satisfied() {
+        let verifier = AcceptanceVerifier::new(".", Duration::from_secs(1)).expect("cwd");
+        let empty = verifier.verify(&record(Vec::new()));
+        assert!(!empty.all_satisfied);
+        assert!(empty.results.is_empty());
+
+        let blank = verifier.verify(&record(vec![
+            AcceptanceCriterion::new("", ""),
+            AcceptanceCriterion::new(" \n\t", "custom"),
+            AcceptanceCriterion::new("custom", " \u{00a0}\t"),
+        ]));
+        assert!(!blank.all_satisfied);
+        assert!(
+            blank
+                .results
+                .iter()
+                .all(|result| result.status == CriterionStatus::Error)
+        );
+        assert!(
+            blank
+                .results
+                .iter()
+                .all(|result| result.detail.contains("non-empty"))
+        );
+    }
+
+    #[test]
     fn unsupported_and_manual_criteria_do_not_auto_satisfy() {
         let verifier = AcceptanceVerifier::new(".", Duration::from_secs(1)).expect("cwd");
         let result = verifier.verify(&record(vec![
