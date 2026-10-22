@@ -35,6 +35,7 @@ mod agent_supervisor;
 mod approval_fsm;
 mod config;
 mod diagnostics;
+mod dispatch_event;
 mod dogfood;
 mod factory;
 mod goal;

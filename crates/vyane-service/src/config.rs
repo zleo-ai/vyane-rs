@@ -13,8 +13,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use vyane_config::{ConfigLayers, ResolvedConfig, load_secrets_file};
 use vyane_core::{Ledger, Sandbox, SessionStore};
-use vyane_ledger::{FsSessionStore, JsonlLedger};
+use vyane_ledger::{EventLog, FsSessionStore, JsonlLedger};
 
+use crate::dispatch_event::DispatchEventLedger;
 use crate::factory::AssemblerFactory;
 use crate::native_permissions::NativePermissionSet;
 
@@ -167,7 +168,14 @@ impl Runtime {
             });
         let model_rates = config.model_rates.clone();
         let factory = Arc::new(AssemblerFactory::new(config));
-        let ledger: Arc<dyn Ledger> = Arc::new(JsonlLedger::new(paths.ledger_path));
+        // The kernel appends one run record when a dispatch reaches a terminal
+        // state. Project that fact onto the existing EventLog here so local
+        // and owner-scoped dispatch share one producer and no second queue.
+        let event_log = EventLog::new(paths.event_log_dir());
+        let ledger: Arc<dyn Ledger> = Arc::new(DispatchEventLedger::new(
+            JsonlLedger::new(paths.ledger_path),
+            event_log,
+        ));
         let sessions: Arc<dyn SessionStore> = Arc::new(FsSessionStore::new(paths.sessions_dir));
         let dispatcher =
             vyane_kernel::Dispatcher::new(factory, Arc::clone(&ledger), Arc::clone(&sessions))
