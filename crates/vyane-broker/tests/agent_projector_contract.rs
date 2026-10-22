@@ -2,14 +2,17 @@
 
 mod common;
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, TimeZone as _, Utc};
 use vyane_agent::{
-    AgentStore, ExecutionBackend, NewAgentRun, NewWorker, RunMode, SqliteAgentStore,
+    AgentClock, AgentEventKind, AgentStore, ControllerKind, ControllerRef, ExecutionBackend,
+    NewAgentRun, NewWorker, ProjectionDeferReason, RunFailureCode, RunMode, RunSettlement,
+    RunState, SqliteAgentStore,
 };
 use vyane_broker::{AgentEventProjector, BrokerScope};
-use vyane_ledger::{EventCategory, EventLog, EventSource};
+use vyane_ledger::{EventCategory, EventLog, EventRecord, EventSource};
 
 fn digest(byte: char) -> String {
     std::iter::repeat_n(byte, 64).collect()
@@ -215,6 +218,228 @@ async fn failed_append_does_not_acknowledge_the_source_event() {
             .event_id,
         source_event_id
     );
+}
+
+struct ManualClock(Mutex<DateTime<Utc>>);
+
+impl AgentClock for ManualClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.0.lock().unwrap()
+    }
+}
+
+fn at(origin: DateTime<Utc>, seconds: i64) -> DateTime<Utc> {
+    origin + chrono::Duration::seconds(seconds)
+}
+
+fn queued_run(id: &str, worker_id: &str, available_at: DateTime<Utc>) -> NewAgentRun {
+    NewAgentRun {
+        id: id.into(),
+        worker_id: worker_id.into(),
+        task_id: None,
+        trace_id: None,
+        parent_run_id: None,
+        execution_backend: ExecutionBackend::NativeInProcess,
+        mode: RunMode::Autonomous,
+        target_key: "native/default".into(),
+        prompt_digest: digest('a'),
+        policy_digest: digest('b'),
+        available_at,
+        timeout_seconds: 60,
+        max_resume_attempts: 1,
+    }
+}
+
+fn settle_next(store: &dyn AgentStore, owner: &str) -> String {
+    let claimed = store
+        .claim_due(
+            owner,
+            ExecutionBackend::NativeInProcess,
+            "supervisor",
+            30,
+            1,
+        )
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    let claimed = claimed.into_iter().next().unwrap();
+    let run_id = claimed.run.id.clone();
+    let started = store
+        .start(
+            owner,
+            &claimed.receipt,
+            &ControllerRef {
+                kind: ControllerKind::InProcess,
+                id: "controller".into(),
+                fingerprint: None,
+            },
+        )
+        .unwrap();
+    store
+        .settle(
+            owner,
+            &started.receipt,
+            RunSettlement::Failed {
+                code: RunFailureCode::Internal,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.get_run(owner, &run_id).unwrap().unwrap().state,
+        RunState::Failed
+    );
+    run_id
+}
+
+fn payload_str<'a>(event: &'a EventRecord, key: &str) -> &'a str {
+    event
+        .payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap()
+}
+
+fn source_sequence(event: &EventRecord) -> u64 {
+    event
+        .payload
+        .get("agent_event_sequence")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn two_terminal_events_for_the_same_worker_project_in_append_order() {
+    let origin = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+    let clock = Arc::new(ManualClock(Mutex::new(origin)));
+    let directory = common::private_tempdir();
+    let concrete = Arc::new(
+        SqliteAgentStore::open_with_clock(
+            directory.path().join("agent.sqlite3"),
+            Arc::clone(&clock) as Arc<dyn AgentClock>,
+        )
+        .unwrap(),
+    );
+    concrete
+        .create_root(
+            "owner",
+            &NewWorker {
+                id: "worker-a".into(),
+                logical_session_id: None,
+            },
+            &queued_run("run-a1", "worker-a", at(origin, -30)),
+        )
+        .unwrap();
+    concrete
+        .enqueue_run("owner", &queued_run("run-a2", "worker-a", at(origin, -10)))
+        .unwrap();
+    concrete
+        .create_root(
+            "owner",
+            &NewWorker {
+                id: "worker-b".into(),
+                logical_session_id: None,
+            },
+            &queued_run("run-b1", "worker-b", at(origin, -20)),
+        )
+        .unwrap();
+    assert_eq!(settle_next(concrete.as_ref(), "owner"), "run-a1");
+    assert_eq!(settle_next(concrete.as_ref(), "owner"), "run-b1");
+    assert_eq!(settle_next(concrete.as_ref(), "owner"), "run-a2");
+
+    let store: Arc<dyn AgentStore> = concrete;
+    let mut settled = store
+        .unprojected_events("owner", "order-projector", 100)
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|event| event.kind == AgentEventKind::RunSettled)
+        .collect::<Vec<_>>();
+    settled.sort_by_key(|event| event.sequence);
+    assert_eq!(
+        settled
+            .iter()
+            .map(|event| event.run_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("run-a1"), Some("run-b1"), Some("run-a2")]
+    );
+    assert!(settled[0].sequence < settled[2].sequence);
+    assert_eq!(settled[0].worker_id, "worker-a");
+    assert_eq!(settled[2].worker_id, "worker-a");
+    assert!(settled[0].run_state.is_some_and(RunState::is_terminal));
+    assert!(settled[2].run_state.is_some_and(RunState::is_terminal));
+    store
+        .defer_projection(
+            "owner",
+            "order-projector",
+            &settled[0].event_id,
+            ProjectionDeferReason::SinkUnavailable,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+
+    let event_root = directory.path().join("events");
+    let projector = AgentEventProjector::with_identity(
+        BrokerScope::new("owner").unwrap(),
+        Arc::clone(&store),
+        EventLog::new(&event_root),
+        "order-projector",
+        "order-stream",
+    );
+    let mut blocked = None;
+    for _ in 0..100 {
+        let report = projector.project_once(1).await.unwrap();
+        if report.projected == 0 {
+            blocked = Some(report);
+            break;
+        }
+    }
+    let blocked = blocked.expect("projection should stop while the earlier event is hidden");
+    assert!(blocked.read >= 1);
+    assert!(!blocked.has_more);
+    let early = EventLog::new(&event_root)
+        .read_after("owner", "order-stream", 0, 100)
+        .await
+        .unwrap()
+        .events;
+    assert!(
+        early
+            .iter()
+            .all(|event| event.event_type != "agent.run_settled")
+    );
+
+    *clock.0.lock().unwrap() = at(origin, 120);
+    for _ in 0..100 {
+        let report = projector.project_once(1).await.unwrap();
+        if report.projected == 0 {
+            assert_eq!(report.read, 0);
+            break;
+        }
+    }
+    let events = EventLog::new(&event_root)
+        .read_after("owner", "order-stream", 0, 100)
+        .await
+        .unwrap()
+        .events;
+    let terminal: Vec<_> = events
+        .iter()
+        .filter(|event| event.event_type == "agent.run_settled")
+        .collect();
+    assert_eq!(
+        terminal
+            .iter()
+            .map(|event| payload_str(event, "run_id"))
+            .collect::<Vec<_>>(),
+        vec!["run-a1", "run-b1", "run-a2"]
+    );
+    let same_worker: Vec<_> = terminal
+        .iter()
+        .copied()
+        .filter(|event| payload_str(event, "worker_id") == "worker-a")
+        .collect();
+    assert_eq!(same_worker.len(), 2);
+    assert!(source_sequence(same_worker[0]) < source_sequence(same_worker[1]));
+    assert!(same_worker[0].sequence < same_worker[1].sequence);
+    assert_eq!(same_worker[0].event_id, settled[0].event_id);
+    assert_eq!(same_worker[1].event_id, settled[2].event_id);
 }
 
 fn walk_text(root: &std::path::Path) -> String {
