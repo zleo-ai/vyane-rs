@@ -705,9 +705,9 @@ fn validate_route(step_id: &str, route: &WorkflowPlanRouteHints, problems: &mut 
         ("stage", route.stage.as_deref()),
         ("tier", route.tier.as_deref()),
     ] {
-        if value
-            .is_some_and(|value| value.is_empty() || value.len() > WORKFLOW_PLAN_MAX_TARGET_BYTES)
-        {
+        if value.is_some_and(|value| {
+            value.trim().is_empty() || value.len() > WORKFLOW_PLAN_MAX_TARGET_BYTES
+        }) {
             problems.push(format!(
                 "workflow plan step `{step_id}` route {label} is empty or oversized"
             ));
@@ -721,7 +721,7 @@ fn validate_route(step_id: &str, route: &WorkflowPlanRouteHints, problems: &mut 
         ));
     }
     for value in route.tags.iter().chain(&route.candidates) {
-        if value.is_empty() || value.len() > WORKFLOW_PLAN_MAX_TARGET_BYTES {
+        if value.trim().is_empty() || value.len() > WORKFLOW_PLAN_MAX_TARGET_BYTES {
             problems.push(format!(
                 "workflow plan step `{step_id}` route value is empty or oversized"
             ));
@@ -1305,6 +1305,32 @@ effort = "high"
         let mut target = base.clone();
         target.steps[1].targets = WorkflowPlanTargets::Single { target: " ".into() };
         reject_existing(&rebind(target), "has an empty target");
+    }
+
+    #[test]
+    fn verify_rejects_whitespace_only_route_values() {
+        let base = workflow(&source("stable")).compile_plan().unwrap();
+        assert!(base.verify().is_ok());
+
+        let mut stage = base.clone();
+        stage.steps[1].route.stage = Some(" ".into());
+        reject_existing(&rebind(stage), "route stage is empty or oversized");
+
+        let mut tier = base.clone();
+        tier.steps[1].route.tier = Some("\t".into());
+        reject_existing(&rebind(tier), "route tier is empty or oversized");
+
+        let mut tag = base.clone();
+        tag.steps[1].route.tags = vec![" ".into()];
+        reject_existing(&rebind(tag), "route value is empty or oversized");
+
+        let mut candidate = base.clone();
+        candidate.steps[1].route.candidates = vec![" ".into()];
+        reject_existing(&rebind(candidate), "route value is empty or oversized");
+
+        let mut spaced = base.clone();
+        spaced.steps[1].route.stage = Some("code review".into());
+        assert!(rebind(spaced).verify().is_ok());
     }
 
     #[test]
