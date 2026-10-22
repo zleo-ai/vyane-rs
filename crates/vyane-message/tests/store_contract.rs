@@ -10,9 +10,9 @@ use serde_json::json;
 use tempfile::TempDir;
 use vyane_message::{
     ClaimQuery, DeliveryMailbox, DeliveryStatus, EndpointKind, EndpointRef, IdempotencyKey,
-    LeaseRequest, MailboxQuery, MessageClock, MessageDirection, MessagePublicationStatus,
-    MessageStore, MessageStoreError, NackDisposition, NewDelivery, NewMessage, NewTransportReceipt,
-    SqliteMessageStore,
+    LeaseRequest, MailboxQuery, MessageClock, MessageDirection, MessageEventKind,
+    MessagePublicationStatus, MessageStore, MessageStoreError, NackDisposition, NewDelivery,
+    NewMessage, NewTransportReceipt, SqliteMessageStore,
 };
 
 const CHILD_ENV: &str = "VYANE_MESSAGE_CONTRACT_CHILD";
@@ -776,6 +776,417 @@ fn ttl_expiry_is_store_clock_driven() {
         .unwrap()
         .unwrap();
     assert_eq!(loaded.deliveries[0].status, DeliveryStatus::Expired);
+}
+
+#[test]
+fn cancel_is_idempotent_owner_scoped_and_fences_live_receipts() {
+    let (directory, clock, store) = test_store();
+    let canary = "CANCEL-BODY-CANARY";
+    let pending = store
+        .enqueue(
+            "alice",
+            &message("pending-cancel", canary, "worker-pending"),
+        )
+        .unwrap();
+    let pending_id = pending.bundle.deliveries[0].id.clone();
+    let cancelled = store.cancel("alice", &pending_id).unwrap();
+    assert_eq!(cancelled.status, DeliveryStatus::Cancelled);
+    assert!(cancelled.status.is_terminal());
+    assert!(!cancelled.status.holds_lease());
+    assert!(cancelled.lease_owner.is_none());
+    assert!(cancelled.lease_expires_at.is_none());
+    assert!(cancelled.revision > pending.bundle.deliveries[0].revision);
+    assert_eq!(store.cancel("alice", &pending_id).unwrap(), cancelled);
+
+    let pending_events = store.events("alice", &pending.bundle.message.id).unwrap();
+    assert_eq!(pending_events.len(), 2);
+    assert_eq!(pending_events[1].kind, MessageEventKind::Cancelled);
+    assert_eq!(pending_events[1].from_status, Some(DeliveryStatus::Pending));
+    assert_eq!(pending_events[1].to_status, DeliveryStatus::Cancelled);
+    assert_eq!(pending_events[1].delivery_id, pending_id);
+    assert_eq!(pending_events[1].delivery_revision, cancelled.revision);
+    assert!(
+        !serde_json::to_string(&pending_events)
+            .unwrap()
+            .contains(canary)
+    );
+    assert_eq!(
+        store
+            .get("alice", &pending.bundle.message.id)
+            .unwrap()
+            .unwrap()
+            .message
+            .body,
+        canary
+    );
+    let historic = store
+        .list_conversation("alice", "conversation-1", None, 10)
+        .unwrap();
+    assert_eq!(historic.items.len(), 1);
+    assert_eq!(
+        historic.items[0].deliveries[0].status,
+        DeliveryStatus::Cancelled
+    );
+    assert!(
+        store
+            .list_mailbox(
+                "alice",
+                &mailbox("worker-pending"),
+                &MailboxQuery {
+                    include_acknowledged: true,
+                    ..MailboxQuery::default()
+                },
+            )
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        store
+            .claim(
+                "alice",
+                &ClaimQuery {
+                    mailboxes: vec![mailbox("worker-pending")],
+                    limit: 10,
+                },
+                &exact_lease("consumer-pending"),
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let outbox = store.unprojected_events("alice", "event-log", 10).unwrap();
+    assert!(outbox.items.iter().any(|event| {
+        event.event_id == pending_events[1].event_id && event.kind == MessageEventKind::Cancelled
+    }));
+    assert!(!serde_json::to_string(&outbox).unwrap().contains(canary));
+    assert!(matches!(
+        store.cancel("bob", &pending_id),
+        Err(MessageStoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.cancel("alice", "missing-delivery"),
+        Err(MessageStoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.cancel("alice", " "),
+        Err(MessageStoreError::InvalidInput(_))
+    ));
+
+    let mut fanout = message("fanout-cancel", "fanout", "worker-fan-a");
+    fanout.deliveries.push(NewDelivery {
+        route: "worker".into(),
+        target: endpoint(EndpointKind::Worker, "worker-fan-b"),
+        available_at: None,
+        expires_at: None,
+        max_attempts: 3,
+    });
+    let fanout = store.enqueue("alice", &fanout).unwrap();
+    let fan_a_id = fanout
+        .bundle
+        .deliveries
+        .iter()
+        .find(|delivery| delivery.target.id == "worker-fan-a")
+        .unwrap()
+        .id
+        .clone();
+    let fan_b_id = fanout
+        .bundle
+        .deliveries
+        .iter()
+        .find(|delivery| delivery.target.id == "worker-fan-b")
+        .unwrap()
+        .id
+        .clone();
+    store.cancel("alice", &fan_a_id).unwrap();
+    let fanout_loaded = store
+        .get("alice", &fanout.bundle.message.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fanout_loaded
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.id == fan_b_id)
+            .unwrap()
+            .status,
+        DeliveryStatus::Pending
+    );
+    assert!(
+        store
+            .claim(
+                "alice",
+                &ClaimQuery {
+                    mailboxes: vec![mailbox("worker-fan-a")],
+                    limit: 10,
+                },
+                &exact_lease("consumer-fan-a"),
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let sibling = claim_one(&store, "alice", "worker-fan-b", "consumer-fan-b", 30);
+    assert_eq!(sibling.delivery.id, fan_b_id);
+
+    store
+        .enqueue("alice", &message("leased-cancel", canary, "worker-leased"))
+        .unwrap();
+    let leased = claim_one(&store, "alice", "worker-leased", "consumer-leased", 30);
+    let fenced = store.cancel("alice", &leased.delivery.id).unwrap();
+    assert_eq!(fenced.status, DeliveryStatus::Cancelled);
+    assert!(fenced.lease_owner.is_none());
+    assert!(fenced.lease_expires_at.is_none());
+    assert_eq!(fenced.attempt_count, leased.delivery.attempt_count);
+    let leased_events = store.events("alice", &leased.message.id).unwrap();
+    assert_eq!(leased_events.len(), 3);
+    assert_eq!(leased_events[2].kind, MessageEventKind::Cancelled);
+    assert_eq!(leased_events[2].from_status, Some(DeliveryStatus::Leased));
+    assert_eq!(leased_events[2].to_status, DeliveryStatus::Cancelled);
+    assert!(
+        !serde_json::to_string(&leased_events)
+            .unwrap()
+            .contains(canary)
+    );
+    assert!(matches!(
+        store.mark_delivered("alice", &mailbox("worker-leased"), &leased.receipt),
+        Err(MessageStoreError::InvalidState {
+            operation: "mark delivered",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.acknowledge("alice", &mailbox("worker-leased"), &leased.receipt),
+        Err(MessageStoreError::InvalidState {
+            operation: "acknowledge",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.nack(
+            "alice",
+            &mailbox("worker-leased"),
+            &leased.receipt,
+            &NackDisposition::RetryAfter { delay_seconds: 0 },
+        ),
+        Err(MessageStoreError::InvalidState {
+            operation: "nack",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.renew(
+            "alice",
+            &mailbox("worker-leased"),
+            &leased.receipt,
+            "heartbeat-after-cancel",
+            30,
+        ),
+        Err(MessageStoreError::InvalidState {
+            operation: "renew",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    let mut reply = message("reply-after-cancel", "answer", "worker-leased");
+    reply.reply_to = Some(leased.message.id.clone());
+    let before_reply = store
+        .list_conversation("alice", "conversation-1", None, 20)
+        .unwrap()
+        .items
+        .len();
+    assert!(matches!(
+        store.reply_and_ack("alice", &mailbox("worker-leased"), &leased.receipt, &reply),
+        Err(MessageStoreError::InvalidState {
+            operation: "reply and acknowledge",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .list_conversation("alice", "conversation-1", None, 20)
+            .unwrap()
+            .items
+            .len(),
+        before_reply
+    );
+    assert_eq!(
+        store
+            .get("alice", &leased.message.id)
+            .unwrap()
+            .unwrap()
+            .deliveries[0],
+        fenced
+    );
+
+    let local = store
+        .enqueue(
+            "alice",
+            &message("local-delivered-cancel", "local", "worker-local"),
+        )
+        .unwrap();
+    let local_lease = claim_one(&store, "alice", "worker-local", "consumer-local", 30);
+    store
+        .mark_delivered("alice", &mailbox("worker-local"), &local_lease.receipt)
+        .unwrap();
+    let local_cancelled = store.cancel("alice", &local_lease.delivery.id).unwrap();
+    assert_eq!(local_cancelled.status, DeliveryStatus::Cancelled);
+    let local_events = store.events("alice", &local.bundle.message.id).unwrap();
+    assert_eq!(
+        local_events.last().unwrap().kind,
+        MessageEventKind::Cancelled
+    );
+    assert_eq!(
+        local_events.last().unwrap().from_status,
+        Some(DeliveryStatus::Delivered)
+    );
+    assert!(matches!(
+        store.acknowledge("alice", &mailbox("worker-local"), &local_lease.receipt),
+        Err(MessageStoreError::InvalidState {
+            operation: "acknowledge",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .get("alice", &local.bundle.message.id)
+            .unwrap()
+            .unwrap()
+            .deliveries[0]
+            .status,
+        DeliveryStatus::Cancelled
+    );
+
+    let acked = store
+        .enqueue("alice", &message("acked-cancel", "acked", "worker-acked"))
+        .unwrap();
+    let acked_lease = claim_one(&store, "alice", "worker-acked", "consumer-acked", 30);
+    store
+        .mark_delivered("alice", &mailbox("worker-acked"), &acked_lease.receipt)
+        .unwrap();
+    store
+        .acknowledge("alice", &mailbox("worker-acked"), &acked_lease.receipt)
+        .unwrap();
+    let acked_events = store
+        .events("alice", &acked.bundle.message.id)
+        .unwrap()
+        .len();
+    assert!(matches!(
+        store.cancel("alice", &acked_lease.delivery.id),
+        Err(MessageStoreError::InvalidState {
+            operation: "cancel",
+            state: DeliveryStatus::Acknowledged,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .events("alice", &acked.bundle.message.id)
+            .unwrap()
+            .len(),
+        acked_events
+    );
+
+    let dead = store
+        .enqueue("alice", &message("dead-cancel", "dead", "worker-dead"))
+        .unwrap();
+    let dead_lease = claim_one(&store, "alice", "worker-dead", "consumer-dead", 30);
+    store
+        .nack(
+            "alice",
+            &mailbox("worker-dead"),
+            &dead_lease.receipt,
+            &NackDisposition::Permanent {
+                failure_code: "rejected".into(),
+            },
+        )
+        .unwrap();
+    let dead_events = store
+        .events("alice", &dead.bundle.message.id)
+        .unwrap()
+        .len();
+    assert!(matches!(
+        store.cancel("alice", &dead_lease.delivery.id),
+        Err(MessageStoreError::InvalidState {
+            operation: "cancel",
+            state: DeliveryStatus::DeadLettered,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .events("alice", &dead.bundle.message.id)
+            .unwrap()
+            .len(),
+        dead_events
+    );
+
+    let mut expiring = message("expired-cancel", "expired", "worker-expired");
+    expiring.deliveries[0].expires_at = Some(timestamp(10));
+    let expiring = store.enqueue("alice", &expiring).unwrap();
+    clock.set(timestamp(10));
+    assert_eq!(store.expire_due("alice", 10).unwrap(), 1);
+    let expired_events = store
+        .events("alice", &expiring.bundle.message.id)
+        .unwrap()
+        .len();
+    assert!(matches!(
+        store.cancel("alice", &expiring.bundle.deliveries[0].id),
+        Err(MessageStoreError::InvalidState {
+            operation: "cancel",
+            state: DeliveryStatus::Expired,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .events("alice", &expiring.bundle.message.id)
+            .unwrap()
+            .len(),
+        expired_events
+    );
+
+    let bob = store
+        .enqueue(
+            "bob",
+            &message("pending-cancel", "bob-body", "worker-pending"),
+        )
+        .unwrap();
+    assert_ne!(bob.bundle.deliveries[0].id, pending_id);
+    assert_eq!(
+        store
+            .cancel("bob", &bob.bundle.deliveries[0].id)
+            .unwrap()
+            .status,
+        DeliveryStatus::Cancelled
+    );
+    assert_eq!(
+        store
+            .get("alice", &pending.bundle.message.id)
+            .unwrap()
+            .unwrap()
+            .deliveries[0],
+        cancelled
+    );
+
+    let reopened = SqliteMessageStore::open(directory.path().join("messages.sqlite3")).unwrap();
+    let restored = reopened
+        .get("alice", &pending.bundle.message.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.message.body, canary);
+    assert_eq!(restored.deliveries[0], cancelled);
+    assert_eq!(reopened.cancel("alice", &pending_id).unwrap(), cancelled);
+    assert_eq!(
+        reopened
+            .events("alice", &pending.bundle.message.id)
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]
