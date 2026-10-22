@@ -26,6 +26,9 @@ pub struct ResolvedConfig {
     pub profiles: BTreeMap<String, ProfilePatch>,
     pub native_permission_ceilings: Vec<NativePermissionCeiling>,
     pub harness_permission_ceilings: Vec<HarnessPermissionCeiling>,
+    /// Explicit USD-per-1,000,000-token rates. Models absent from this map
+    /// have no price; dispatch must not substitute a built-in or zero.
+    pub model_rates: BTreeMap<String, vyane_core::ModelTokenRate>,
 }
 
 impl From<ConfigLayers> for ResolvedConfig {
@@ -35,6 +38,7 @@ impl From<ConfigLayers> for ResolvedConfig {
             profiles: layers.profiles,
             native_permission_ceilings: layers.native_permission_ceilings,
             harness_permission_ceilings: layers.harness_permission_ceilings,
+            model_rates: layers.model_rates,
         }
     }
 }

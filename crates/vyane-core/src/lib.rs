@@ -23,6 +23,7 @@
 //! `vyane-harness`, `vyane-ledger`, …).
 
 pub mod chat;
+pub mod cost;
 pub mod env;
 pub mod error;
 pub mod native_authority;
@@ -38,6 +39,7 @@ pub mod web_search;
 pub mod workdir;
 
 pub use chat::{ChatMessage, ChatOutcome, ChatRequest, Role, StreamEvent};
+pub use cost::{ModelTokenRate, estimate_configured_cost};
 pub use env::{BASELINE_ENV, EnvPolicy, InheritMode};
 pub use error::{ErrorKind, Result, VyaneError};
 pub use native_authority::{NativeExecutionAuthority, NativeSideEffect};

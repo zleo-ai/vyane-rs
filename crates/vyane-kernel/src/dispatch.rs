@@ -7,6 +7,7 @@
 //! [`vyane_core::ErrorKind::failover_eligible`]; the kernel never re-implements
 //! that rule, it only calls it.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,9 +19,9 @@ use serde::Serialize;
 use vyane_core::{
     AdapterTransport, Attempt, AttemptOutcome, BoundTarget, CancellationToken, ChatClient,
     ChatMessage, ChatRequest, EnvPolicy, ErrorKind, Harness, HarnessExecutionContext, HarnessJob,
-    HarnessLifecycleReporter, HarnessSpawnAuthority, Ledger, NativeSessionState, PinnedWorkdir,
-    Result, RunRecord, RunStatus, SessionExecutionLease, SessionStore, SessionUpdate, Target,
-    TaskSpec, Usage, VyaneError,
+    HarnessLifecycleReporter, HarnessSpawnAuthority, Ledger, ModelId, ModelTokenRate,
+    NativeSessionState, PinnedWorkdir, Result, RunRecord, RunStatus, SessionExecutionLease,
+    SessionStore, SessionUpdate, Target, TaskSpec, Usage, VyaneError, estimate_configured_cost,
 };
 
 use crate::digest::task_digest;
@@ -58,6 +59,9 @@ pub struct Dispatcher {
     sessions: Arc<dyn SessionStore>,
     owner: String,
     harness_sandbox_ceiling: vyane_core::Sandbox,
+    /// Explicit model rates from configuration. Empty means every model is
+    /// unpriced; built-in list prices are never consulted.
+    model_rates: BTreeMap<String, ModelTokenRate>,
     /// Process-local authority shared only by clones of this dispatcher.
     ///
     /// This deliberately has no serializable representation.  A prepared
@@ -475,8 +479,28 @@ impl Dispatcher {
             sessions,
             owner: DEFAULT_OWNER.to_string(),
             harness_sandbox_ceiling: vyane_core::Sandbox::Full,
+            model_rates: BTreeMap::new(),
             identity: Arc::new(DispatcherIdentity { _marker: 0 }),
         }
+    }
+
+    /// Replace the explicit model rates used when a run record is assembled.
+    ///
+    /// Rates are USD per 1,000,000 tokens. A model that is absent, or a run
+    /// with no usage, keeps `cost_usd` unset. This does not fill unknown
+    /// models with zero or with any built-in price list.
+    #[must_use]
+    pub fn with_model_rates(mut self, rates: BTreeMap<String, ModelTokenRate>) -> Self {
+        self.model_rates = rates;
+        self
+    }
+
+    /// Price aggregated `usage` with the configured rate for `model`.
+    ///
+    /// Missing usage, or a model with no configured rate, stays `None`.
+    /// Reasoning and cached counts are subsets of output and input.
+    fn configured_cost_usd(&self, model: &ModelId, usage: Option<&Usage>) -> Option<f64> {
+        estimate_configured_cost(self.model_rates.get(model.as_str()), usage)
     }
 
     /// Override the owner scope written onto records (default `"local"`).
@@ -850,6 +874,7 @@ impl Dispatcher {
             .workdir
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned());
+        let cost_usd = self.configured_cost_usd(&target.model, usage_total.as_ref());
 
         let record = RunRecord {
             run_id: execution_scope.execution_id.clone(),
@@ -868,7 +893,7 @@ impl Dispatcher {
             attempts,
             status,
             usage: usage_total,
-            cost_usd: None,
+            cost_usd,
             session_id: session_id.clone(),
             output_chars,
             error: error_msg,
@@ -1419,7 +1444,7 @@ impl Dispatcher {
             }],
             status,
             usage,
-            cost_usd: None,
+            cost_usd: self.configured_cost_usd(&bound.target.model, usage.as_ref()),
             session_id: task.session.as_ref().map(|s| s.as_str().to_string()),
             output_chars,
             error: error_msg,
