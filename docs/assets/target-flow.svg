@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="360" viewBox="0 0 960 360" role="img" aria-labelledby="title desc">
+  <title id="title">Vyane target and execution flow</title>
+  <desc id="desc">CLI, REST and MCP enter a shared service which assembles adapters for the orchestration kernel. Each target binds provider, protocol, harness and model. Execution is direct HTTP or a coding CLI harness; a separate native resident lane has additional restrictions. Run records capture outcomes.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#25817d"/></marker></defs>
+  <rect width="960" height="360" rx="16" fill="#f4f7fa"/>
+  <g font-family="system-ui, sans-serif" fill="#183047" font-size="17" text-anchor="middle">
+    <g fill="white" stroke="#bdcbd5"><rect x="22" y="114" width="168" height="110" rx="9"/><rect x="244" y="100" width="212" height="140" rx="9"/><rect x="516" y="114" width="192" height="110" rx="9"/><rect x="768" y="114" width="170" height="110" rx="9"/></g>
+    <text x="106" y="147" font-weight="700">Entry points</text><text x="106" y="180">CLI · REST · MCP</text><text x="106" y="204" font-size="13">Different public subsets</text>
+    <text x="350" y="135" font-weight="700">Service → Kernel</text><text x="350" y="166">resolve · admit</text><text x="350" y="191">dispatch · failover</text><text x="350" y="216" font-size="13">Adapters injected via traits</text>
+    <text x="612" y="147" font-weight="700">Execution</text><text x="612" y="179">Direct HTTP</text><text x="612" y="205">or coding CLI</text>
+    <text x="853" y="149" font-weight="700">Run records</text><text x="853" y="181">attempts · outcome</text><text x="853" y="205">prompt digest</text>
+    <text x="480" y="40" font-size="22" font-weight="700">Each target binds four independent fields</text>
+    <text x="480" y="71" font-size="18">provider  ·  protocol  ·  harness  ·  model</text>
+    <text x="480" y="285" font-size="15">Broadcast repeats execution across targets; each failover leg is resolved independently.</text>
+    <text x="480" y="313" font-size="14">The Linux resident Native lane is a separate, explicitly authorized fresh/sessionless path.</text>
+    <text x="480" y="337" font-size="14">Direct HTTP alone has no workspace tools. See ARCHITECTURE.md for exact boundaries.</text>
+  </g>
+  <g fill="none" stroke="#25817d" stroke-width="3" marker-end="url(#arrow)"><path d="M190 169H238"/><path d="M456 169H510"/><path d="M708 169H762"/></g>
+</svg>

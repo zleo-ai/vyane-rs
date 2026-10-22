@@ -835,7 +835,8 @@ async fn anthropic_complete_success_parses_outcome_and_request() {
             "usage": {
                 "input_tokens": 9,
                 "output_tokens": 4,
-                "cache_read_input_tokens": 3
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 5
             }
         })))
         .mount(&server)
@@ -854,10 +855,10 @@ async fn anthropic_complete_success_parses_outcome_and_request() {
     assert_eq!(
         outcome.usage,
         Some(Usage {
-            input_tokens: 9,
+            input_tokens: 44,
             output_tokens: 4,
             reasoning_tokens: None,
-            cached_input_tokens: Some(3),
+            cached_input_tokens: Some(30),
         })
     );
 
@@ -1087,6 +1088,65 @@ async fn openai_chat_stream_normalizes_events() {
 // or concurrent wire paths stay schedulable under suite load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
+async fn openai_chat_stream_normalizes_reasoning_usage_and_text() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"check the file\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"reasoning\":\"and the alias\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":2},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+    assert_eq!(events.len(), 5);
+    assert!(matches!(
+        &events[0],
+        StreamEvent::ReasoningDelta(text) if text == "check the file"
+    ));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::ReasoningDelta(text) if text == "and the alias"
+    ));
+    assert!(matches!(&events[2], StreamEvent::Delta(text) if text == "answer"));
+    assert!(matches!(
+        &events[3],
+        StreamEvent::Usage(usage) if *usage == Usage {
+            input_tokens: 7,
+            output_tokens: 5,
+            reasoning_tokens: Some(1),
+            cached_input_tokens: Some(2),
+        }
+    ));
+    assert!(matches!(
+        &events[4],
+        StreamEvent::Done {
+            finish_reason: Some(reason)
+        } if reason == "stop"
+    ));
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
 async fn anthropic_stream_normalizes_events() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1135,6 +1195,56 @@ async fn anthropic_stream_normalizes_events() {
         StreamEvent::Done {
             finish_reason: Some(reason)
         } if reason == "end_turn"
+    ));
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
+async fn anthropic_stream_normalizes_cached_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+                "event: message_delta\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":4,\"output_tokens\":2,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":5}}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        AnthropicMessagesClient::with_options(x_api_key_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+    assert_eq!(events.len(), 3);
+    assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "hi"));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::Usage(usage) if *usage == Usage {
+            input_tokens: 39,
+            output_tokens: 2,
+            reasoning_tokens: None,
+            cached_input_tokens: Some(30),
+        }
+    ));
+    assert!(matches!(
+        &events[2],
+        StreamEvent::Done {
+            finish_reason: Some(reason)
+        } if reason == "tool_use"
     ));
 }
 
@@ -1293,6 +1403,56 @@ async fn responses_stream_has_no_reasoning_events_but_still_completes() {
             output_tokens: 6,
             ..
         })
+    ));
+    assert!(matches!(
+        &events[2],
+        StreamEvent::Done {
+            finish_reason: None
+        }
+    ));
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
+async fn responses_stream_normalizes_cached_and_reasoning_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":8,\"output_tokens\":6,\"input_tokens_details\":{\"cached_tokens\":1},\"output_tokens_details\":{\"reasoning_tokens\":2}}}}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiResponsesClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+    // Cache and reasoning stay on the detail fields. Input is not increased
+    // by cached tokens, unlike Anthropic `message_delta` usage.
+    assert_eq!(events.len(), 3);
+    assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "hi"));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::Usage(usage) if *usage == Usage {
+            input_tokens: 8,
+            output_tokens: 6,
+            reasoning_tokens: Some(2),
+            cached_input_tokens: Some(1),
+        }
     ));
     assert!(matches!(
         &events[2],

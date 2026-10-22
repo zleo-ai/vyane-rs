@@ -287,6 +287,339 @@ fn session_view_serializes_into_items_array_shape_without_continuity_authority()
 }
 
 #[tokio::test]
+async fn history_stats_mcp_success_rates_use_filtered_counts_and_unknown_empty_samples()
+-> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("fixtures/history_stats.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let server_handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, expected) in [
+        (serde_json::json!({"stats":true}), serde_json::json!(25.0)),
+        (
+            serde_json::json!({"stats":true,"until":"2026-01-01T11:00:00Z"}),
+            serde_json::json!(25.0),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"q","status":"success"}),
+            serde_json::json!(100.0),
+        ),
+        (
+            serde_json::json!({"stats":true,"status":"error"}),
+            serde_json::json!(0.0),
+        ),
+        (
+            serde_json::json!({"stats":true,"since":"2026-01-02T00:00:00Z"}),
+            serde_json::Value::Null,
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        let body = result_payload(result);
+        assert_eq!(
+            body.get("success_rate"),
+            Some(&expected),
+            "arguments: {arguments}"
+        );
+        if arguments == serde_json::json!({"stats":true}) {
+            assert_eq!(body["by_provider"]["p"]["success_rate"], 0.0);
+            assert_eq!(body["by_provider"]["q"]["success_rate"], 100.0);
+        }
+    }
+    client.cancel().await?;
+    server_handle.await??;
+    assert_eq!(std::fs::read_to_string(ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_stats_mcp_counts_all_filtered_runs_without_a_list_limit() -> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("fixtures/history_stats.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let server_handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, total) in [
+        (serde_json::json!({"stats":true}), 120),
+        (
+            serde_json::json!({"stats":true,"since":"2026-01-01T14:00:00+02:00"}),
+            80,
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"p","status":"error","since":"2026-01-01T12:00:00Z"}),
+            20,
+        ),
+        (
+            serde_json::json!({"stats":true,"since":"2026-01-02T00:00:00Z"}),
+            0,
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        let body = result_payload(result);
+        assert_eq!(body["total"], total, "arguments: {arguments}");
+        assert!(body["by_provider"].get("foreign-provider-canary").is_none());
+        assert!(!body.to_string().contains("STATS_PRIVATE_DATA_CANARY"));
+        if total == 120 {
+            assert_eq!(body["success"], 30);
+            assert_eq!(body["error"], 30);
+            assert_eq!(body["timeout"], 30);
+            assert_eq!(body["cancelled"], 30);
+        }
+    }
+    for arguments in [
+        serde_json::json!({"stats":true,"limit":1}),
+        serde_json::json!({"stats":true,"status":"unknown"}),
+        serde_json::json!({"stats":true,"since":"yesterday"}),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_eq!(result_payload(result)["error"]["code"], "invalid_argument");
+    }
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("vyane_history")
+                .with_arguments(serde_json::json!({}).as_object().unwrap().clone()),
+        )
+        .await?;
+    assert_eq!(
+        result_payload(result)["items"].as_array().unwrap().len(),
+        20
+    );
+    client.cancel().await?;
+    server_handle.await??;
+    assert_eq!(std::fs::read_to_string(ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_until_mcp_bounds_lists_and_statistics_and_rejects_invalid_windows()
+-> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("fixtures/history_since.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let server_handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, expected) in [
+        (
+            serde_json::json!({"until":"2026-01-01T12:00:00Z"}),
+            vec!["late-old", "boundary", "before"],
+        ),
+        (
+            serde_json::json!({"since":"2026-01-01T12:00:00Z","until":"2026-01-01T14:00:00+02:00"}),
+            vec!["boundary"],
+        ),
+        (
+            serde_json::json!({"until":"2026-01-01T14:00:00.001+02:00"}),
+            vec!["late-old", "after", "boundary", "before"],
+        ),
+        (
+            serde_json::json!({"since":"2026-01-01T11:00:00Z","until":"2026-01-01T12:00:00Z","limit":1}),
+            vec!["boundary"],
+        ),
+        (
+            serde_json::json!({"until":"2026-01-01T14:00:00Z","provider":"p","status":"error"}),
+            vec!["error"],
+        ),
+        (serde_json::json!({"until":"2026-01-01T09:00:00Z"}), vec![]),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        let body = result_payload(result);
+        assert!(
+            body["items"].is_array(),
+            "arguments: {arguments}, body: {body}"
+        );
+        let ids: Vec<_> = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["run_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, expected, "arguments: {arguments}");
+    }
+    for (arguments, total) in [
+        (
+            serde_json::json!({"stats":true,"until":"2026-01-01T12:00:00Z"}),
+            3,
+        ),
+        (
+            serde_json::json!({"stats":true,"since":"2026-01-01T12:00:00Z","until":"2026-01-01T12:00:00Z"}),
+            1,
+        ),
+        (
+            serde_json::json!({"stats":true,"until":"2026-01-01T14:00:00Z","provider":"p","status":"error"}),
+            1,
+        ),
+        (
+            serde_json::json!({"stats":true,"until":"2026-01-01T09:00:00Z"}),
+            0,
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(
+            result_payload(result)["total"],
+            total,
+            "arguments: {arguments}"
+        );
+    }
+    for arguments in [
+        serde_json::json!({"until":"yesterday"}),
+        serde_json::json!({"until":"2026-01-01"}),
+        serde_json::json!({"until":"2026-01-01T12:00:00"}),
+        serde_json::json!({"until":"2026-02-30T12:00:00Z"}),
+        serde_json::json!({"since":"2026-01-02T00:00:00Z","until":"2026-01-01T00:00:00Z"}),
+        serde_json::json!({"stats":true,"since":"2026-01-02T00:00:00Z","until":"2026-01-01T00:00:00Z"}),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_eq!(result_payload(result)["error"]["code"], "invalid_argument");
+    }
+    client.cancel().await?;
+    server_handle.await??;
+    assert_eq!(std::fs::read_to_string(ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_since_mcp_filters_before_limit_and_rejects_invalid_dates() -> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("fixtures/history_since.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let server_handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, expected) in [
+        (
+            serde_json::json!({}),
+            vec![
+                "late-old",
+                "error",
+                "other-provider",
+                "after",
+                "boundary",
+                "before",
+            ],
+        ),
+        (
+            serde_json::json!({"since": "2026-01-01T12:00:00Z"}),
+            vec!["error", "other-provider", "after", "boundary"],
+        ),
+        (
+            serde_json::json!({"since": "2026-01-01T14:00:00+02:00", "provider": "p", "status": "success"}),
+            vec!["after", "boundary"],
+        ),
+        (
+            serde_json::json!({"since": "2026-01-01T12:00:00Z", "provider": "p", "status": "success", "limit": 1}),
+            vec!["after"],
+        ),
+        (serde_json::json!({"since": "2026-01-02T00:00:00Z"}), vec![]),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        let body = result_payload(result);
+        let ids: Vec<_> = body["items"]
+            .as_array()
+            .expect("history items")
+            .iter()
+            .map(|record| record["run_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, expected, "arguments: {arguments}");
+    }
+    for since in [
+        "yesterday",
+        "2026-01-01",
+        "2026-01-01T12:00:00",
+        "2026-02-30T12:00:00Z",
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history").with_arguments(
+                    serde_json::json!({"since": since})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await?;
+        let body = result_payload(result);
+        assert_eq!(body["error"]["code"], "invalid_argument");
+        assert!(!body.to_string().contains(since));
+    }
+    client.cancel().await?;
+    server_handle.await??;
+    assert_eq!(std::fs::read_to_string(ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
 async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> anyhow::Result<()> {
     const PATH_CANARY: &str = "CANARY_WIRE_CONFIG.toml";
     const URL_CANARY: &str = "https://CANARY_WIRE_URL.invalid/v1";
@@ -460,6 +793,7 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
             "vyane_history",
             "vyane_route",
             "vyane_sessions",
+            "vyane_workflow_plan",
         ]
     );
 
@@ -723,4 +1057,569 @@ fn result_payload(result: CallToolResult) -> serde_json::Value {
     let wire = serde_json::to_value(result).unwrap();
     let text = wire["content"][0]["text"].as_str().unwrap();
     serde_json::from_str(text).unwrap()
+}
+
+#[tokio::test]
+async fn history_duration_mcp_projects_owned_filtered_record_timings() -> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("fixtures/history_duration.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let server_handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, total, expected) in [
+        (
+            serde_json::json!({"stats":true}),
+            35,
+            serde_json::json!({"samples":34,"invalid":1,"total_ms":7000,"mean_ms":205.9}),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"q"}),
+            2,
+            serde_json::json!({"samples":1,"invalid":1,"total_ms":2750,"mean_ms":2750.0}),
+        ),
+        (
+            serde_json::json!({"stats":true,"status":"cancelled"}),
+            1,
+            serde_json::json!({"samples":0,"invalid":1,"total_ms":null,"mean_ms":null}),
+        ),
+        (
+            serde_json::json!({"stats":true,"since":"2026-01-01T13:00:00+02:00","until":"2026-01-01T14:00:00Z","provider":"p"}),
+            2,
+            serde_json::json!({"samples":2,"invalid":0,"total_ms":0,"mean_ms":0.0}),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"absent"}),
+            0,
+            serde_json::json!({"samples":0,"invalid":0,"total_ms":null,"mean_ms":null}),
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        let body = result_payload(result);
+        assert_eq!(body["total"], total, "{arguments}");
+        assert_eq!(body["duration"], expected, "{arguments}");
+        assert!(!body.to_string().contains("DURATION_PRIVATE_CANARY"));
+        assert!(body.get("session_id").is_none() && body.get("labels").is_none());
+    }
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("vyane_history").with_arguments(
+                serde_json::json!({"stats":true,"session":"duration-session"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(result_payload(result)["error"]["code"], "invalid_argument");
+    client.cancel().await?;
+    server_handle.await??;
+    assert_eq!(std::fs::read_to_string(&ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_duration_mcp_projects_complete_owned_final_provider_groups() -> anyhow::Result<()>
+{
+    const HISTORY: &str = include_str!("fixtures/history_duration.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, expected) in [
+        (
+            serde_json::json!({"stats":true}),
+            serde_json::json!({"p":{"samples":33,"invalid":0,"total_ms":4250,"mean_ms":128.8},"q":{"samples":1,"invalid":1,"total_ms":2750,"mean_ms":2750.0}}),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"p"}),
+            serde_json::json!({"p":{"samples":33,"invalid":0,"total_ms":4250,"mean_ms":128.8}}),
+        ),
+        (
+            serde_json::json!({"stats":true,"status":"cancelled"}),
+            serde_json::json!({"q":{"samples":0,"invalid":1,"total_ms":null,"mean_ms":null}}),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"p","since":"2026-01-01T13:00:00+02:00","until":"2026-01-01T14:00:00Z"}),
+            serde_json::json!({"p":{"samples":2,"invalid":0,"total_ms":0,"mean_ms":0.0}}),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"absent"}),
+            serde_json::json!({}),
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        let body = result_payload(result);
+        assert_eq!(body["by_provider_duration"], expected, "{arguments}");
+        assert!(!body.to_string().contains("DURATION_PRIVATE_CANARY"));
+        assert_eq!(
+            body["by_provider"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            body["by_provider_duration"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>()
+        );
+    }
+    client.cancel().await?;
+    handle.await??;
+    assert_eq!(std::fs::read_to_string(&ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_cost_mcp_projects_owned_filtered_saved_values() -> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("../../vyane-service/tests/fixtures/history_cost.jsonl");
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let handle = tokio::spawn(async move {
+        VyaneMcpServer::new(service)
+            .serve(server_transport)
+            .await?
+            .waiting()
+            .await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, expected) in [
+        (
+            serde_json::json!({"stats":true}),
+            serde_json::json!({"known":123,"unknown":1,"invalid":1,"known_total_usd":62.0,"overflowed":false}),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"q"}),
+            serde_json::json!({"known":1,"unknown":1,"invalid":1,"known_total_usd":0.75,"overflowed":false}),
+        ),
+        (
+            serde_json::json!({"stats":true,"status":"timeout"}),
+            serde_json::json!({"known":0,"unknown":1,"invalid":0,"known_total_usd":null,"overflowed":false}),
+        ),
+        (
+            serde_json::json!({"stats":true,"since":"2026-01-01T13:00:00+02:00","until":"2026-01-01T13:00:00Z"}),
+            serde_json::json!({"known":1,"unknown":1,"invalid":1,"known_total_usd":1.25,"overflowed":false}),
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"absent"}),
+            serde_json::json!({"known":0,"unknown":0,"invalid":0,"known_total_usd":null,"overflowed":false}),
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        let body = result_payload(result);
+        assert_eq!(body["cost"], expected, "{arguments}");
+        assert!(!body.to_string().contains("COST_PRIVATE_CANARY"));
+    }
+    client.cancel().await?;
+    handle.await??;
+    assert_eq!(std::fs::read_to_string(&ledger)?, HISTORY);
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_usage_mcp_counts_all_owned_filtered_samples() -> anyhow::Result<()> {
+    const HISTORY: &str = include_str!("../../vyane-service/tests/fixtures/history_usage.jsonl");
+    const EXPECTED: &str =
+        include_str!("../../vyane-service/tests/fixtures/history_usage_expected.json");
+    let expected: serde_json::Value = serde_json::from_str(EXPECTED)?;
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(&ledger, HISTORY)?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server = VyaneMcpServer::new(service);
+    let handle = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+    for (arguments, case, total) in [
+        (serde_json::json!({"stats":true}), "all", 126),
+        (serde_json::json!({"stats":true,"provider":"q"}), "q", 2),
+        (
+            serde_json::json!({"stats":true,"status":"error"}),
+            "zero",
+            1,
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"p","since":"2026-01-01T13:00:00+02:00","until":"2026-01-01T14:00:00Z"}),
+            "window",
+            2,
+        ),
+        (
+            serde_json::json!({"stats":true,"provider":"absent"}),
+            "empty",
+            0,
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("vyane_history")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        let body = result_payload(result);
+        assert_eq!(body["total"], total);
+        assert_eq!(body["usage"], expected[case], "{arguments}");
+        assert!(!body.to_string().contains("USAGE_PRIVATE_CANARY"));
+        assert!(body.get("session_id").is_none() && body.get("labels").is_none());
+    }
+    client.cancel().await?;
+    handle.await??;
+    assert_eq!(std::fs::read_to_string(ledger)?, HISTORY);
+    Ok(())
+}
+
+/// A caller-supplied owner is not an authority. The tool must reject it before
+/// any store read: the session read path chmods that owner's directory to
+/// `0o700` before listing, and a history read of a mode-`0o000` ledger fails
+/// as `internal` rather than as a schema error.
+#[tokio::test]
+async fn tool_call_with_wrong_owner_is_rejected_without_reading_other_owner_data()
+-> anyhow::Result<()> {
+    const FOREIGN_OWNER: &str = "another-owner";
+    const FOREIGN_RUN: &str = "foreign-run-canary";
+    const FOREIGN_PREVIEW: &str = "FOREIGN_OWNER_PREVIEW_CANARY";
+    const FOREIGN_SESSION: &str = "foreign-session-canary";
+    const FOREIGN_TRANSCRIPT: &str = "FOREIGN_OWNER_TRANSCRIPT_CANARY";
+    const LOCAL_RUN: &str = "local-run";
+    const LOCAL_SESSION: &str = "local-session";
+
+    let root = tempfile::Builder::new()
+        .prefix("vyane-mcp-owner-fence-")
+        .tempdir()?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let now = chrono::Utc::now();
+    let target = vyane_core::Target {
+        provider: vyane_core::ProviderId::new("p"),
+        protocol: vyane_core::Protocol::OpenaiChat,
+        harness: None,
+        model: vyane_core::ModelId::new("m"),
+    };
+    for (owner, run_id, preview) in [
+        ("local", LOCAL_RUN, None),
+        (
+            FOREIGN_OWNER,
+            FOREIGN_RUN,
+            Some(FOREIGN_PREVIEW.to_string()),
+        ),
+    ] {
+        service
+            .runtime()
+            .ledger
+            .append(&vyane_core::RunRecord {
+                run_id: run_id.into(),
+                owner: owner.into(),
+                started_at: now,
+                finished_at: now,
+                task_digest: "d".into(),
+                task_preview: preview,
+                workdir: None,
+                sandbox: Sandbox::ReadOnly,
+                target: target.clone(),
+                transport: vyane_core::AdapterTransport::DirectHttp,
+                attempts: Vec::new(),
+                status: RunStatus::Success,
+                usage: None,
+                cost_usd: None,
+                session_id: None,
+                output_chars: None,
+                error: None,
+                labels: std::collections::BTreeMap::new(),
+            })
+            .await?;
+    }
+    for (owner, session_id, transcript) in [
+        ("local", LOCAL_SESSION, "local transcript"),
+        (FOREIGN_OWNER, FOREIGN_SESSION, FOREIGN_TRANSCRIPT),
+    ] {
+        service
+            .runtime()
+            .sessions
+            .save(
+                owner,
+                &vyane_core::SessionRecord {
+                    session_id: session_id.into(),
+                    owner: owner.into(),
+                    target: target.clone(),
+                    native_session_id: None,
+                    transcript: vec![vyane_core::ChatMessage::user(transcript)],
+                    created_at: now,
+                    updated_at: now,
+                    run_count: 1,
+                },
+            )
+            .await?;
+    }
+
+    let ledger = service.storage_paths().ledger_path.clone();
+    let foreign_session_dir =
+        foreign_session_dir(&service.storage_paths().sessions_dir, FOREIGN_SESSION)?;
+    let stored = service
+        .runtime()
+        .sessions
+        .list_snapshots(FOREIGN_OWNER)
+        .await?;
+    assert!(
+        stored
+            .iter()
+            .any(|snapshot| snapshot.record.session_id == FOREIGN_SESSION)
+    );
+    let observer = service.clone();
+
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_handle = tokio::spawn(async move {
+        VyaneMcpServer::new(service)
+            .serve(server_transport)
+            .await?
+            .waiting()
+            .await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+
+    let owned = call_json(&client, "vyane_history", serde_json::json!({"limit": 20})).await?;
+    let ids: Vec<_> = owned["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["run_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![LOCAL_RUN]);
+    assert!(!owned.to_string().contains(FOREIGN_RUN));
+    assert!(!owned.to_string().contains(FOREIGN_PREVIEW));
+
+    let sessions = call_json(&client, "vyane_sessions", serde_json::json!({})).await?;
+    assert_eq!(sessions["items"].as_array().unwrap().len(), 1);
+    assert_eq!(sessions["items"][0]["session_id"], LOCAL_SESSION);
+    assert!(!sessions.to_string().contains(FOREIGN_SESSION));
+    assert!(!sessions.to_string().contains(FOREIGN_TRANSCRIPT));
+
+    let _restore_ledger = RestoreMode::new(&ledger, 0o600);
+    let _restore_sessions = RestoreMode::new(&foreign_session_dir, 0o700);
+    seal_private(&ledger)?;
+    seal_private(&foreign_session_dir)?;
+
+    for arguments in [
+        serde_json::json!({"owner": FOREIGN_OWNER}),
+        serde_json::json!({"owner": FOREIGN_OWNER, "limit": 20}),
+        serde_json::json!({"stats": true, "owner": FOREIGN_OWNER}),
+    ] {
+        let rejected = call_json(&client, "vyane_history", arguments).await?;
+        assert_eq!(
+            rejected,
+            serde_json::json!({
+                "status": "error",
+                "error": {
+                    "code": "invalid_argument",
+                    "message": "arguments do not match the tool schema",
+                }
+            })
+        );
+        let wire = rejected.to_string();
+        assert!(!wire.contains(FOREIGN_OWNER));
+        assert!(!wire.contains(FOREIGN_RUN));
+        assert!(!wire.contains(FOREIGN_PREVIEW));
+    }
+    let rejected_sessions = call_json(
+        &client,
+        "vyane_sessions",
+        serde_json::json!({"owner": FOREIGN_OWNER}),
+    )
+    .await?;
+    assert_eq!(
+        rejected_sessions,
+        serde_json::json!({
+            "status": "error",
+            "error": {
+                "code": "invalid_argument",
+                "message": "arguments do not match the tool schema",
+            }
+        })
+    );
+    let wire = rejected_sessions.to_string();
+    assert!(!wire.contains(FOREIGN_OWNER));
+    assert!(!wire.contains(FOREIGN_SESSION));
+    assert!(!wire.contains(FOREIGN_TRANSCRIPT));
+
+    assert!(
+        still_sealed(&ledger),
+        "wrong-owner history must not open the other owner's ledger"
+    );
+    assert!(
+        still_sealed(&foreign_session_dir),
+        "wrong-owner sessions must not enter the other owner's session directory"
+    );
+
+    let attempted = call_json(&client, "vyane_history", serde_json::json!({"limit": 1})).await?;
+    if sealed_reads_fail() {
+        assert_eq!(attempted["error"]["code"], "internal");
+        assert!(!attempted.to_string().contains(FOREIGN_RUN));
+        assert!(!attempted.to_string().contains(FOREIGN_PREVIEW));
+        assert!(still_sealed(&ledger));
+    }
+
+    let revealed = observer
+        .runtime()
+        .sessions
+        .list_snapshots(FOREIGN_OWNER)
+        .await?;
+    assert!(
+        revealed
+            .iter()
+            .any(|snapshot| snapshot.record.session_id == FOREIGN_SESSION),
+        "the other owner's session must still be readable by its own store path"
+    );
+    if sealed_reads_fail() {
+        assert!(
+            !still_sealed(&foreign_session_dir),
+            "the session read path is what unseals the owner directory"
+        );
+    }
+
+    client.cancel().await?;
+    server_handle.await??;
+    Ok(())
+}
+
+async fn call_json(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    name: &str,
+    arguments: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new(name.to_owned())
+                .with_arguments(arguments.as_object().unwrap().clone()),
+        )
+        .await?;
+    assert_eq!(result.is_error, Some(false));
+    Ok(result_payload(result))
+}
+
+fn foreign_session_dir(
+    root: &std::path::Path,
+    session_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(&path)? {
+            let file = file?.path();
+            if file.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            if std::fs::read_to_string(&file)?.contains(session_id) {
+                return Ok(path);
+            }
+        }
+    }
+    anyhow::bail!("foreign session directory was not created");
+}
+
+fn seal_private(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+fn still_sealed(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o777 == 0)
+            .unwrap_or(false)
+            && std::fs::read(path).is_err()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn sealed_reads_fail() -> bool {
+    cfg!(unix)
+}
+
+struct RestoreMode {
+    path: std::path::PathBuf,
+    mode: u32,
+}
+
+impl RestoreMode {
+    fn new(path: &std::path::Path, mode: u32) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            mode,
+        }
+    }
+}
+
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
+        }
+    }
 }

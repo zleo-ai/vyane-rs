@@ -667,6 +667,33 @@ mod tests {
     }
 
     #[test]
+    fn empty_or_whitespace_criteria_do_not_count_as_satisfied() {
+        let verifier = AcceptanceVerifier::new(".", Duration::from_secs(1)).expect("cwd");
+        let empty = verifier.verify(&record(Vec::new()));
+        assert!(!empty.all_satisfied);
+        assert!(empty.results.is_empty());
+
+        let blank = verifier.verify(&record(vec![
+            AcceptanceCriterion::new("", ""),
+            AcceptanceCriterion::new(" \n\t", "custom"),
+            AcceptanceCriterion::new("custom", " \u{00a0}\t"),
+        ]));
+        assert!(!blank.all_satisfied);
+        assert!(
+            blank
+                .results
+                .iter()
+                .all(|result| result.status == CriterionStatus::Error)
+        );
+        assert!(
+            blank
+                .results
+                .iter()
+                .all(|result| result.detail.contains("non-empty"))
+        );
+    }
+
+    #[test]
     fn unsupported_and_manual_criteria_do_not_auto_satisfy() {
         let verifier = AcceptanceVerifier::new(".", Duration::from_secs(1)).expect("cwd");
         let result = verifier.verify(&record(vec![
@@ -709,7 +736,7 @@ mod tests {
     fn successful_command_does_not_leave_background_descendants() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().expect("command tempdir");
+        let directory = crate::test_support::private_tempdir();
         let script = directory.path().join("spawn-background");
         let escaped_marker = directory.path().join("escaped");
         std::fs::write(
@@ -747,7 +774,7 @@ mod tests {
     fn cancellation_stops_command_and_background_descendants() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().expect("command tempdir");
+        let directory = crate::test_support::private_tempdir();
         let script = directory.path().join("cancel-background");
         let started = directory.path().join("started");
         let escaped = directory.path().join("escaped");
@@ -792,7 +819,7 @@ mod tests {
     fn command_spawn_retries_transient_executable_busy() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().expect("command tempdir");
+        let directory = crate::test_support::private_tempdir();
         let script = directory.path().join("busy-script");
         std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write command");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))

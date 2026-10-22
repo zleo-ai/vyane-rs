@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::time::Duration;
 
 use chrono::{TimeZone as _, Utc};
@@ -145,8 +146,8 @@ fn approve_and_finish(
 
 #[test]
 fn projection_moves_from_queue_to_decide_to_execute_without_mutation() {
-    let directory = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
     let goal = create_goal(&store, "approval-flow", true);
 
@@ -221,9 +222,9 @@ fn projection_moves_from_queue_to_decide_to_execute_without_mutation() {
 
 #[test]
 fn projection_follows_a_requeued_approval_after_rejection() {
-    let directory = TempDir::new().unwrap();
-    let first_workdir = TempDir::new().unwrap();
-    let replacement_workdir = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
+    let first_workdir = common::private_tempdir();
+    let replacement_workdir = common::private_tempdir();
     let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
     let goal = create_goal(&store, "reject-requeue", true);
     let rejected = queue_current(&store, &goal, &first_workdir);
@@ -283,8 +284,8 @@ fn projection_follows_a_requeued_approval_after_rejection() {
 
 #[test]
 fn projection_reports_in_flight_and_blocked_execution_from_durable_evidence() {
-    let directory = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
     let goal = create_goal(&store, "execution-flow", true);
     let queued = queue_current(&store, &goal, &workdir);
@@ -353,7 +354,7 @@ fn projection_reports_in_flight_and_blocked_execution_from_durable_evidence() {
 
 #[test]
 fn projection_exposes_manual_decision_without_inventing_a_command() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
     let goal = create_goal(&store, "manual", false);
 
@@ -365,8 +366,8 @@ fn projection_exposes_manual_decision_without_inventing_a_command() {
 
 #[test]
 fn projection_lists_only_signals_accepted_by_the_current_boundary() {
-    let directory = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
     let goal = create_goal(&store, "signal-flow", true);
     let takeover = queue_current(&store, &goal, &workdir);
@@ -506,8 +507,8 @@ fn projection_lists_only_signals_accepted_by_the_current_boundary() {
 
 #[test]
 fn projection_rejects_approvals_from_another_goal() {
-    let directory = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
     let first = create_goal(&store, "first", true);
     let second = create_goal(&store, "second", true);
@@ -519,8 +520,8 @@ fn projection_rejects_approvals_from_another_goal() {
 
 #[test]
 fn projection_rejects_approval_evidence_newer_than_the_goal_snapshot() {
-    let directory = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
     let goal = create_goal(&store, "stale-goal-snapshot", true);
     let mut approval = queue_current(&store, &goal, &workdir);

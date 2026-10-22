@@ -13,6 +13,7 @@ mod plan;
 mod source;
 mod template;
 mod validate;
+pub mod worktree;
 
 pub use engine::{StepEvent, WorkflowEngine, WorkflowObserver};
 pub use error::{ValidationReport, WorkflowError, WorkflowResult};

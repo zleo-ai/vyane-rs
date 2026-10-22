@@ -59,7 +59,7 @@ mod tests {
 
     #[tokio::test]
     async fn construction_is_explicit_owner_bound_and_projects_body_free_events() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = StoragePaths::from_data_dir(directory.path().join("data"));
 
         assert!(AgentProjectionComponents::open(&paths, "   ").is_err());

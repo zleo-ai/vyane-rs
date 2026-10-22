@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -289,6 +289,36 @@ impl SqliteMessageStore {
             idempotency,
             expected_digest,
             target,
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
+    /// Enqueue `message` with one caller-owned delivery id per delivery, in order.
+    ///
+    /// Reusing a delivery id does not create another visible message. An exact
+    /// replay of the same published request returns that message. Any other
+    /// reuse fails closed.
+    pub fn enqueue_with_delivery_ids(
+        &self,
+        owner: &str,
+        message: &NewMessage,
+        delivery_ids: &[String],
+    ) -> Result<EnqueueOutcome> {
+        let now = self.now()?;
+        validate_owner(owner)?;
+        message.validate_structure()?;
+        validate_assigned_delivery_ids(delivery_ids, message.deliveries.len())?;
+        let digest = message.canonical_digest()?;
+        let mut connection = self.connection()?;
+        let transaction = self.write_transaction(&mut connection)?;
+        let outcome = enqueue_assigned_in_transaction(
+            &transaction,
+            owner,
+            message,
+            digest.as_str(),
+            delivery_ids,
             now,
         )?;
         transaction.commit()?;
@@ -1554,11 +1584,100 @@ fn enqueue_in_transaction(
         now,
         "ordinary",
         MessagePublicationStatus::Published,
+        None,
     )?;
     Ok(EnqueueOutcome {
         bundle,
         existing: false,
     })
+}
+
+fn enqueue_assigned_in_transaction(
+    connection: &Connection,
+    owner: &str,
+    request: &NewMessage,
+    request_digest: &str,
+    delivery_ids: &[String],
+    now: DateTime<Utc>,
+) -> Result<EnqueueOutcome> {
+    if let Some(existing) = publication_by_key(connection, owner, &request.idempotency)? {
+        if existing.request_digest.as_str() != request_digest || existing.origin != "ordinary" {
+            return Err(MessageStoreError::IdempotencyConflict);
+        }
+        if existing.status != MessagePublicationStatus::Published {
+            return Err(MessageStoreError::CorruptData(
+                "ordinary publication is not published".into(),
+            ));
+        }
+        let bundle = get_bundle(connection, owner, &existing.message_id)?
+            .ok_or_else(|| MessageStoreError::CorruptData("idempotent message is absent".into()))?;
+        if !same_delivery_ids(&bundle, delivery_ids) {
+            return Err(MessageStoreError::IdempotencyConflict);
+        }
+        return Ok(EnqueueOutcome {
+            bundle,
+            existing: true,
+        });
+    }
+
+    for delivery_id in delivery_ids {
+        if get_delivery(connection, owner, delivery_id)?.is_some() {
+            return Err(MessageStoreError::IdempotencyConflict);
+        }
+    }
+
+    let bundle = insert_message_in_transaction(
+        connection,
+        owner,
+        request,
+        request_digest,
+        now,
+        "ordinary",
+        MessagePublicationStatus::Published,
+        Some(delivery_ids),
+    )?;
+    Ok(EnqueueOutcome {
+        bundle,
+        existing: false,
+    })
+}
+
+fn validate_assigned_delivery_ids(delivery_ids: &[String], delivery_count: usize) -> Result<()> {
+    if delivery_ids.len() != delivery_count {
+        return Err(MessageStoreError::InvalidInput(
+            "delivery ids must match the message deliveries".into(),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for delivery_id in delivery_ids {
+        let parsed = Uuid::parse_str(delivery_id).ok();
+        let canonical = parsed.as_ref().is_some_and(|parsed| {
+            parsed.get_version_num() == 7 && parsed.to_string() == *delivery_id
+        });
+        if !canonical {
+            return Err(MessageStoreError::InvalidInput(
+                "delivery id must be a canonical UUIDv7".into(),
+            ));
+        }
+        if !seen.insert(delivery_id.as_str()) {
+            return Err(MessageStoreError::InvalidInput(
+                "message contains a duplicate delivery id".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn same_delivery_ids(bundle: &MessageBundle, delivery_ids: &[String]) -> bool {
+    let mut stored = bundle
+        .deliveries
+        .iter()
+        .map(|delivery| delivery.id.as_str())
+        .collect::<Vec<_>>();
+    let mut supplied = delivery_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    stored.sort_unstable();
+    supplied.sort_unstable();
+    stored == supplied
 }
 
 fn stage_in_transaction(
@@ -1586,6 +1705,7 @@ fn stage_in_transaction(
         now,
         "staged",
         MessagePublicationStatus::Staged,
+        None,
     )?;
     Ok(MessagePublicationOutcome {
         resolution: MessageIdempotencyResolution {
@@ -1625,6 +1745,7 @@ fn insert_message_in_transaction(
     now: DateTime<Utc>,
     origin: &str,
     publication_status: MessagePublicationStatus,
+    assigned_delivery_ids: Option<&[String]>,
 ) -> Result<MessageBundle> {
     if !matches!(
         (origin, publication_status),
@@ -1721,8 +1842,11 @@ fn insert_message_in_transaction(
     let message = get_message(connection, owner, &message_id)?
         .ok_or_else(|| MessageStoreError::CorruptData("new message is absent".into()))?;
     let mut deliveries = Vec::with_capacity(request.deliveries.len());
-    for requested in &request.deliveries {
-        let delivery_id = Uuid::now_v7().to_string();
+    for (index, requested) in request.deliveries.iter().enumerate() {
+        let delivery_id = match assigned_delivery_ids {
+            Some(ids) => ids[index].clone(),
+            None => Uuid::now_v7().to_string(),
+        };
         let available_at = requested.available_at.unwrap_or(now);
         connection.execute(
             "INSERT INTO deliveries (id, record_schema, owner, message_id, route, target_kind, \
@@ -4366,7 +4490,7 @@ mod tests {
     fn first_creation_closes_candidates_before_atomic_publication() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("first-create.sqlite");
         let candidates = (0..8)
             .map(|_| create_closed_database_candidate(directory.path()).unwrap())
@@ -4428,7 +4552,7 @@ mod tests {
 
     #[test]
     fn metadata_validation_does_not_release_a_wal_writer_lock() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("lock-probe.sqlite");
         prepare_database_path(&path).unwrap();
 
@@ -4463,7 +4587,7 @@ mod tests {
 
     #[test]
     fn aliased_paths_share_the_process_connection_lock() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let direct = directory.path().join("x.sqlite3");
         let dotted = directory.path().join(".").join("x.sqlite3");
         let via_parent = directory.path().join("nested").join("..").join("x.sqlite3");
@@ -4492,7 +4616,7 @@ mod tests {
 
     #[test]
     fn process_connection_lock_is_reclaimed_after_last_store_drops() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("reclaim.sqlite3");
         let other = directory.path().join("other.sqlite3");
 

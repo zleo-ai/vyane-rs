@@ -727,6 +727,7 @@ mod tests {
             profiles,
             native_permission_ceilings: Vec::new(),
             harness_permission_ceilings: Vec::new(),
+            model_rates: Default::default(),
         }
     }
 
@@ -841,6 +842,7 @@ mod tests {
             profiles,
             native_permission_ceilings: Vec::new(),
             harness_permission_ceilings: Vec::new(),
+            model_rates: Default::default(),
         };
         let params = RouteParams {
             task: "check the code".into(),
@@ -939,6 +941,7 @@ mod tests {
             profiles,
             native_permission_ceilings: Vec::new(),
             harness_permission_ceilings: Vec::new(),
+            model_rates: Default::default(),
         };
 
         let result = route_task(
@@ -984,6 +987,7 @@ mod tests {
             profiles,
             native_permission_ceilings: Vec::new(),
             harness_permission_ceilings: Vec::new(),
+            model_rates: Default::default(),
         };
 
         let result = route_task(
@@ -1030,6 +1034,7 @@ mod tests {
                 profiles,
                 native_permission_ceilings: Vec::new(),
                 harness_permission_ceilings: Vec::new(),
+                model_rates: Default::default(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
@@ -1066,6 +1071,7 @@ mod tests {
                 profiles,
                 native_permission_ceilings: Vec::new(),
                 harness_permission_ceilings: Vec::new(),
+                model_rates: Default::default(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
@@ -1110,6 +1116,7 @@ mod tests {
                 profiles,
                 native_permission_ceilings: Vec::new(),
                 harness_permission_ceilings: Vec::new(),
+                model_rates: Default::default(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
@@ -1183,7 +1190,7 @@ mod tests {
 
     #[test]
     fn recorded_auto_replay_uses_frozen_effective_effort_for_every_leg() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let config_path = directory.path().join("config.toml");
         std::fs::write(
             &config_path,

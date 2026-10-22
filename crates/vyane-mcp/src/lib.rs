@@ -4,11 +4,12 @@
 //! history, session, and static diagnostic operations as callable tools.
 //!
 //! The server is transport-agnostic: it wraps a [`vyane_service::VyaneService`]
-//! and registers six base tools (`vyane_dispatch`, `vyane_broadcast`,
-//! `vyane_history`, `vyane_sessions`, `vyane_route`, and `vyane_check`). An
+//! and registers seven base tools (`vyane_dispatch`, `vyane_broadcast`,
+//! `vyane_history`, `vyane_sessions`, `vyane_route`, `vyane_check`, and
+//! `vyane_workflow_plan`). An
 //! embedding process may inject an authenticated [`WorkflowControl`] port to
 //! add workflow submit/status/cancel without giving this crate daemon discovery
-//! or credentials. The `vyane mcp` CLI injects that port and exposes nine tools.
+//! or credentials. The `vyane mcp` CLI injects that port and exposes ten tools.
 //!
 //! ## Tool result contract
 //!
@@ -51,7 +52,9 @@ use vyane_service::{
     DispatchParams, HistoryFilter, RoutePreviewParams, RunView, VyaneService,
 };
 use vyane_workflow::{
-    WORKFLOW_SOURCE_MAX_ENTRIES, WORKFLOW_SOURCE_MAX_PATH_BYTES, WORKFLOW_SOURCE_MAX_PROMPT_BYTES,
+    WORKFLOW_PLAN_MAX_PROMPT_BYTES, WORKFLOW_PLAN_MAX_ROUTE_VALUES, WORKFLOW_PLAN_MAX_SYSTEM_BYTES,
+    WORKFLOW_PLAN_MAX_TARGET_BYTES, WORKFLOW_PLAN_MAX_WORKDIR_BYTES, WORKFLOW_SOURCE_MAX_ENTRIES,
+    WORKFLOW_SOURCE_MAX_PATH_BYTES, WORKFLOW_SOURCE_MAX_PROMPT_BYTES,
     WORKFLOW_SOURCE_MAX_TOML_BYTES, WORKFLOW_SOURCE_MAX_TOTAL_BYTES, WorkflowRunId,
     WorkflowSourceBundle, WorkflowSourceEntry,
 };
@@ -61,10 +64,12 @@ const BASE_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch server. \
     vyane_broadcast to fan one task out to several targets concurrently, \
     vyane_history to query the run ledger, vyane_sessions to list saved sessions, \
     vyane_route to preview deterministic routing, and vyane_check for a static-only redacted config check. \
+    Use vyane_workflow_plan to compile caller-supplied workflow sources without execution; its payload includes the supplied prompts, system text, and workdirs. \
     A result with operation_status=completed is final even when detail_omitted=true; use its run receipt and never retry it as an execution failure.";
 
 const WORKFLOW_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch and durable workflow server. \
     The execution, history, session, route, and check tools retain their base contracts. \
+    Use vyane_workflow_plan for static compilation without execution; it returns supplied prompts, system text, and workdirs. \
     Use vyane_workflow_submit with a caller-owned canonical UUIDv7 and bounded source bundle; \
     use workflow status before retrying an outcome_unknown submission, and workflow cancel for idempotent cancellation. \
     A result with operation_status=completed is final even when detail_omitted=true; never retry it as an execution failure.";
@@ -256,12 +261,16 @@ impl std::error::Error for WorkflowControlError {}
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DispatchArgs {
-    /// Task / prompt text to submit.
+    /// Task / prompt text to submit (at most 4 MiB of UTF-8 bytes).
+    #[schemars(length(max = 4194304))]
     pub task: String,
-    /// Target selector: a profile name, `provider/model`, or `auto`.
+    /// Target selector: a profile name, `provider/model`, or `auto` (at most 4096 bytes).
+    #[schemars(length(max = 4096))]
     pub target: String,
     /// Working directory for harness runs. Ignored by direct-chat targets.
+    /// At most 4096 UTF-8 bytes when set.
     #[serde(default)]
+    #[schemars(length(max = 4096))]
     pub workdir: Option<String>,
     /// Sandbox level for harness runs: `read_only` (default), `write`, or `full`.
     #[serde(default)]
@@ -270,7 +279,9 @@ pub struct DispatchArgs {
     #[serde(default)]
     pub session: Option<String>,
     /// System prompt for direct HTTP, appended instructions for harnesses.
+    /// At most 1 MiB of UTF-8 bytes when set.
     #[serde(default)]
+    #[schemars(length(max = 1048576))]
     pub system: Option<String>,
     /// Per-attempt timeout in seconds. Absent = no timeout.
     #[serde(default)]
@@ -279,16 +290,22 @@ pub struct DispatchArgs {
     #[serde(default)]
     pub labels: Vec<String>,
     /// Auto-routing stage hint (for example `implementation` or `review`).
+    /// At most 4096 UTF-8 bytes when set.
     #[serde(default)]
+    #[schemars(length(max = 4096))]
     pub route_stage: Option<String>,
     /// Auto-routing tier override: `economy`, `mainline`, or `frontier`.
+    /// At most 4096 UTF-8 bytes when set.
     #[serde(default)]
+    #[schemars(length(max = 4096))]
     pub route_tier: Option<String>,
-    /// Auto-routing tags, in priority order.
+    /// Auto-routing tags, in priority order. At most 256 tags, each at most 4096 bytes.
     #[serde(default)]
+    #[schemars(length(max = 256), inner(length(max = 4096)))]
     pub route_tags: Vec<String>,
-    /// Restrict auto-routing to these profile names.
+    /// Restrict auto-routing to these profile names. At most 256 names, each at most 4096 bytes.
     #[serde(default)]
+    #[schemars(length(max = 256), inner(length(max = 4096)))]
     pub route_candidates: Vec<String>,
     /// Hard guard for auto-routing. Set false to forbid frontier profiles and
     /// frontier failover legs.
@@ -300,18 +317,24 @@ pub struct DispatchArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BroadcastArgs {
-    /// Task / prompt text submitted to every target.
+    /// Task / prompt text submitted to every target (at most 4 MiB of UTF-8 bytes).
+    #[schemars(length(max = 4194304))]
     pub task: String,
     /// Comma-separated target list; each is a profile or `provider/model`.
+    /// The whole string is at most 64 KiB, and each selector is at most 4096 bytes.
+    #[schemars(length(max = 65536))]
     pub targets: String,
-    /// Working directory for harness runs.
+    /// Working directory for harness runs. At most 4096 UTF-8 bytes when set.
     #[serde(default)]
+    #[schemars(length(max = 4096))]
     pub workdir: Option<String>,
     /// Sandbox level: `read_only` (default), `write`, or `full`.
     #[serde(default)]
     pub sandbox: Option<String>,
     /// System prompt for direct HTTP, appended instructions for harnesses.
+    /// At most 1 MiB of UTF-8 bytes when set.
     #[serde(default)]
+    #[schemars(length(max = 1048576))]
     pub system: Option<String>,
     /// Per-attempt timeout in seconds. Absent = no timeout.
     #[serde(default)]
@@ -322,6 +345,9 @@ pub struct BroadcastArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryArgs {
+    /// Return counts for all matching runs. Cannot be combined with an explicit limit.
+    #[serde(default)]
+    pub stats: bool,
     /// Maximum records to return. Defaults to 20; valid range is 1..=1000.
     #[serde(default = "default_history_limit")]
     pub limit: usize,
@@ -331,6 +357,14 @@ pub struct HistoryArgs {
     /// Filter by provider id.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Include runs started at or after this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Include runs started at or before this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One bounded route tag or candidate profile name.
@@ -395,6 +429,19 @@ pub struct WorkflowPromptSourceArgs {
     pub content: String,
 }
 
+/// Arguments for static compilation; no filesystem lookup or execution.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowPlanArgs {
+    /// Declarative workflow TOML source (1 to 1 MiB of UTF-8 bytes).
+    #[schemars(length(min = 1, max = 1048576))]
+    pub workflow_toml: String,
+    /// All referenced prompt files, supplied in memory; no host files are read.
+    #[serde(default)]
+    #[schemars(length(max = 128))]
+    pub prompt_files: Vec<WorkflowPromptSourceArgs>,
+}
+
 /// Arguments for `vyane_workflow_submit`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -434,6 +481,9 @@ impl Default for HistoryArgs {
             limit: default_history_limit(),
             status: None,
             provider: None,
+            since: None,
+            until: None,
+            stats: false,
         }
     }
 }
@@ -450,6 +500,14 @@ const MAX_WORKFLOW_VARS: usize = 128;
 const MAX_WORKFLOW_VAR_KEY_BYTES: usize = 256;
 const MAX_WORKFLOW_VAR_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_WORKFLOW_VARS_BYTES: usize = 4 * 1024 * 1024;
+/// Dispatch and broadcast string caps. Each one matches the workflow plan
+/// field a direct execution argument stands in for: task for prompt, system,
+/// workdir, target, and route hints. Route values use the workflow target cap.
+const MAX_EXECUTION_TASK_BYTES: usize = WORKFLOW_PLAN_MAX_PROMPT_BYTES;
+const MAX_EXECUTION_SYSTEM_BYTES: usize = WORKFLOW_PLAN_MAX_SYSTEM_BYTES;
+const MAX_EXECUTION_WORKDIR_BYTES: usize = WORKFLOW_PLAN_MAX_WORKDIR_BYTES;
+const MAX_EXECUTION_TARGET_BYTES: usize = WORKFLOW_PLAN_MAX_TARGET_BYTES;
+const MAX_EXECUTION_ROUTE_VALUES: usize = WORKFLOW_PLAN_MAX_ROUTE_VALUES;
 /// Hard cap for every non-diagnostic MCP success payload. Diagnostics keep a
 /// smaller dedicated budget below. Oversized content is replaced by a stable
 /// limit error rather than being copied into one tool result.
@@ -710,6 +768,9 @@ impl VyaneMcpServer {
             Ok(args) => args,
             Err(error) => return Ok(error_json(error)),
         };
+        if let Err(error) = validate_dispatch_inputs(&args) {
+            return Ok(error_json(error));
+        }
         let sandbox = match parse_sandbox(args.sandbox.as_deref()) {
             Ok(sandbox) => sandbox,
             Err(message) => {
@@ -764,7 +825,7 @@ impl VyaneMcpServer {
             Ok(args) => args,
             Err(error) => return Ok(error_json(error)),
         };
-        if let Err(error) = validate_broadcast_targets(&args.targets) {
+        if let Err(error) = validate_broadcast_inputs(&args) {
             return Ok(error_json(error));
         }
         let sandbox = match parse_sandbox(args.sandbox.as_deref()) {
@@ -825,18 +886,31 @@ impl VyaneMcpServer {
 
     /// Query the run ledger (most-recent-first).
     #[tool(
-        description = "Query recent run records from the ledger. Returns { items: [...] }, most recent first.",
+        description = "Query recent run records from the ledger. Returns { items: [...] }, most recent first. With stats=true, returns counts by status and provider for all matches, including percentage success rates; omit limit.",
         input_schema = rmcp::handler::server::tool::schema_for_type::<HistoryArgs>()
     )]
     async fn vyane_history(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        let explicit_limit = arguments.contains_key("limit");
         let args: HistoryArgs = match parse_arguments(arguments) {
             Ok(args) => args,
             Err(error) => return Ok(error_json(error)),
         };
+        let stats = args.stats;
+        if stats && explicit_limit {
+            return Ok(error_json(SafeToolError::invalid_argument(
+                "stats cannot be combined with limit",
+            )));
+        }
         let filter = match history_filter(args) {
             Ok(filter) => filter,
             Err(error) => return Ok(error_json(error)),
         };
+        if stats {
+            return match self.service.history_stats(filter).await {
+                Ok(counts) => Ok(success_json(&counts)),
+                Err(error) => Ok(error_json(classify_service_error(&error))),
+            };
+        }
         match self.service.history_views(filter).await {
             Ok(records) => Ok(success_json(&ToolItems { items: records })),
             Err(error) => Ok(error_json(classify_service_error(&error))),
@@ -901,6 +975,29 @@ impl VyaneMcpServer {
         match self.service.check_config() {
             Ok(report) => Ok(diagnostic_success_json(&report)),
             Err(error) => Ok(error_json(classify_service_error(&error))),
+        }
+    }
+
+    /// Compile caller-owned sources without target resolution, template
+    /// rendering, filesystem lookup, or workflow control-plane access.
+    #[tool(
+        description = "Compile caller-supplied workflow TOML and in-memory prompt_files into a static schema-v1 plan. Does not run, resolve targets, render templates, read host prompt files, or contact the daemon. The result includes supplied prompts, system text, and workdirs; it is not a redacted view or execution authorization. The digest is a drift checksum. Plans larger than 1 MiB return limit_exceeded.",
+        input_schema = rmcp::handler::server::tool::schema_for_type::<WorkflowPlanArgs>()
+    )]
+    async fn vyane_workflow_plan(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        let args: WorkflowPlanArgs = match parse_arguments(arguments) {
+            Ok(args) => args,
+            Err(error) => return Ok(error_json(error)),
+        };
+        let bundle = match workflow_source_bundle(args.workflow_toml, args.prompt_files) {
+            Ok(bundle) => bundle,
+            Err(error) => return Ok(error_json(error)),
+        };
+        match bundle.parse().and_then(|workflow| workflow.compile_plan()) {
+            Ok(plan) => Ok(success_json(&plan)),
+            Err(_) => Ok(error_json(SafeToolError::invalid_argument(
+                "workflow sources cannot be compiled into a static plan",
+            ))),
         }
     }
 
@@ -1051,20 +1148,33 @@ fn workflow_submit_request(
     let caller_id = WorkflowRunId::from_str(&args.caller_id).map_err(|_| {
         SafeToolError::invalid_argument("caller_id must be a canonical lowercase UUIDv7")
     })?;
-    if args.workflow_toml.is_empty() || args.workflow_toml.len() > MAX_WORKFLOW_TOML_BYTES {
+    let bundle = workflow_source_bundle(args.workflow_toml, args.prompt_files)?;
+    validate_workflow_vars(&args.vars)?;
+    Ok(WorkflowSubmitRequest {
+        caller_id,
+        bundle,
+        vars: args.vars,
+    })
+}
+
+fn workflow_source_bundle(
+    workflow_toml: String,
+    sources: Vec<WorkflowPromptSourceArgs>,
+) -> std::result::Result<WorkflowSourceBundle, SafeToolError> {
+    if workflow_toml.is_empty() || workflow_toml.len() > MAX_WORKFLOW_TOML_BYTES {
         return Err(SafeToolError::invalid_argument(
             "workflow_toml exceeds the workflow safety limit",
         ));
     }
-    if args.prompt_files.len() > MAX_WORKFLOW_SOURCES {
+    if sources.len() > MAX_WORKFLOW_SOURCES {
         return Err(SafeToolError::invalid_argument(
             "prompt_files exceed the workflow safety limit",
         ));
     }
 
-    let mut source_bytes = args.workflow_toml.len();
-    let mut prompt_files = Vec::with_capacity(args.prompt_files.len());
-    for source in args.prompt_files {
+    let mut source_bytes = workflow_toml.len();
+    let mut prompt_files = Vec::with_capacity(sources.len());
+    for source in sources {
         if source.path.is_empty()
             || source.path.len() > MAX_WORKFLOW_SOURCE_PATH_BYTES
             || source.content.len() > MAX_WORKFLOW_PROMPT_BYTES
@@ -1093,14 +1203,9 @@ fn workflow_submit_request(
         });
     }
 
-    validate_workflow_vars(&args.vars)?;
-    Ok(WorkflowSubmitRequest {
-        caller_id,
-        bundle: WorkflowSourceBundle {
-            workflow_toml: args.workflow_toml,
-            prompt_files,
-        },
-        vars: args.vars,
+    Ok(WorkflowSourceBundle {
+        workflow_toml,
+        prompt_files,
     })
 }
 
@@ -1166,6 +1271,15 @@ pub fn parse_status(s: &str) -> Result<RunStatus, &'static str> {
 }
 
 fn history_filter(args: HistoryArgs) -> std::result::Result<HistoryFilter, SafeToolError> {
+    if args
+        .since
+        .zip(args.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(SafeToolError::invalid_argument(
+            "since must not be later than until",
+        ));
+    }
     if !(1..=MAX_HISTORY_LIMIT).contains(&args.limit) {
         return Err(SafeToolError::invalid_argument(
             "limit must be between 1 and 1000",
@@ -1176,10 +1290,76 @@ fn history_filter(args: HistoryArgs) -> std::result::Result<HistoryFilter, SafeT
         Some(status) => Some(parse_status(status).map_err(SafeToolError::invalid_argument)?),
     };
     Ok(HistoryFilter {
-        limit: Some(args.limit),
+        limit: (!args.stats).then_some(args.limit),
         status,
         provider: args.provider,
+        since: args.since,
+        until: args.until,
     })
+}
+
+fn execution_input_limit() -> SafeToolError {
+    SafeToolError::invalid_argument("execution input exceeds the safety limit")
+}
+
+fn validate_execution_text(
+    value: &str,
+    max_bytes: usize,
+) -> std::result::Result<(), SafeToolError> {
+    if value.len() > max_bytes {
+        Err(execution_input_limit())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_optional_execution_text(
+    value: Option<&str>,
+    max_bytes: usize,
+) -> std::result::Result<(), SafeToolError> {
+    value.map_or(Ok(()), |value| validate_execution_text(value, max_bytes))
+}
+
+fn validate_execution_list(
+    values: &[String],
+    max_items: usize,
+    max_bytes: usize,
+) -> std::result::Result<(), SafeToolError> {
+    if values.len() > max_items || values.iter().any(|value| value.len() > max_bytes) {
+        Err(execution_input_limit())
+    } else {
+        Ok(())
+    }
+}
+
+/// Reject dispatch strings that exceed the workflow plan budget of the field
+/// they stand in for. Closed values such as sandbox are checked separately.
+fn validate_dispatch_inputs(args: &DispatchArgs) -> std::result::Result<(), SafeToolError> {
+    validate_execution_text(&args.task, MAX_EXECUTION_TASK_BYTES)?;
+    validate_execution_text(&args.target, MAX_EXECUTION_TARGET_BYTES)?;
+    validate_optional_execution_text(args.workdir.as_deref(), MAX_EXECUTION_WORKDIR_BYTES)?;
+    validate_optional_execution_text(args.system.as_deref(), MAX_EXECUTION_SYSTEM_BYTES)?;
+    validate_optional_execution_text(args.route_stage.as_deref(), MAX_EXECUTION_TARGET_BYTES)?;
+    validate_optional_execution_text(args.route_tier.as_deref(), MAX_EXECUTION_TARGET_BYTES)?;
+    validate_execution_list(
+        &args.route_tags,
+        MAX_EXECUTION_ROUTE_VALUES,
+        MAX_EXECUTION_TARGET_BYTES,
+    )?;
+    validate_execution_list(
+        &args.route_candidates,
+        MAX_EXECUTION_ROUTE_VALUES,
+        MAX_EXECUTION_TARGET_BYTES,
+    )?;
+    Ok(())
+}
+
+fn validate_broadcast_inputs(args: &BroadcastArgs) -> std::result::Result<(), SafeToolError> {
+    validate_execution_text(&args.task, MAX_EXECUTION_TASK_BYTES)?;
+    validate_broadcast_targets(&args.targets)?;
+    validate_optional_execution_text(args.workdir.as_deref(), MAX_EXECUTION_WORKDIR_BYTES)?;
+    validate_optional_execution_text(args.system.as_deref(), MAX_EXECUTION_SYSTEM_BYTES)?;
+    Ok(())
 }
 
 fn validate_broadcast_targets(raw: &str) -> std::result::Result<(), SafeToolError> {
@@ -1188,12 +1368,24 @@ fn validate_broadcast_targets(raw: &str) -> std::result::Result<(), SafeToolErro
             "targets exceed the MCP safety limit",
         ));
     }
-    let count = raw
-        .split(',')
-        .filter(|selector| !selector.trim().is_empty())
-        .take(MAX_BROADCAST_TARGETS + 1)
-        .count();
-    if count == 0 || count > MAX_BROADCAST_TARGETS {
+    let mut count = 0usize;
+    for selector in raw.split(',') {
+        if selector.len() > MAX_EXECUTION_TARGET_BYTES {
+            return Err(SafeToolError::invalid_argument(
+                "targets exceed the MCP safety limit",
+            ));
+        }
+        if selector.trim().is_empty() {
+            continue;
+        }
+        count += 1;
+        if count > MAX_BROADCAST_TARGETS {
+            return Err(SafeToolError::invalid_argument(
+                "targets must contain between 1 and 64 selectors",
+            ));
+        }
+    }
+    if count == 0 {
         return Err(SafeToolError::invalid_argument(
             "targets must contain between 1 and 64 selectors",
         ));
@@ -1736,6 +1928,7 @@ mod tests {
             limit: 1_000,
             status: Some("success".into()),
             provider: Some("openai".into()),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(filter.limit, Some(1_000));
@@ -1750,6 +1943,168 @@ mod tests {
         assert!(validate_broadcast_targets("").is_err());
         assert!(validate_broadcast_targets(&vec!["x"; 65].join(",")).is_err());
         assert!(validate_broadcast_targets(&"x".repeat(MAX_BROADCAST_TARGETS_BYTES + 1)).is_err());
+        assert!(validate_broadcast_targets(&"x".repeat(MAX_EXECUTION_TARGET_BYTES)).is_ok());
+        assert!(validate_broadcast_targets(&"x".repeat(MAX_EXECUTION_TARGET_BYTES + 1)).is_err());
+    }
+
+    fn dispatch_base() -> DispatchArgs {
+        DispatchArgs {
+            task: "hello".into(),
+            target: "default".into(),
+            workdir: None,
+            sandbox: None,
+            session: None,
+            system: None,
+            timeout_secs: None,
+            labels: Vec::new(),
+            route_stage: None,
+            route_tier: None,
+            route_tags: Vec::new(),
+            route_candidates: Vec::new(),
+            allow_frontier: None,
+        }
+    }
+
+    fn broadcast_base() -> BroadcastArgs {
+        BroadcastArgs {
+            task: "hello".into(),
+            targets: "a,b".into(),
+            workdir: None,
+            sandbox: None,
+            system: None,
+            timeout_secs: None,
+        }
+    }
+
+    fn assert_execution_limit(result: std::result::Result<(), SafeToolError>) {
+        let error = result.unwrap_err();
+        assert_eq!(error.code, PublicErrorCode::InvalidArgument);
+        assert_eq!(error.message, "execution input exceeds the safety limit");
+    }
+
+    #[test]
+    fn execution_inputs_use_workflow_field_budgets() {
+        assert!(validate_dispatch_inputs(&dispatch_base()).is_ok());
+        let mut at_limit = dispatch_base();
+        at_limit.task = "x".repeat(MAX_EXECUTION_TASK_BYTES);
+        at_limit.target = "t".repeat(MAX_EXECUTION_TARGET_BYTES);
+        at_limit.workdir = Some("w".repeat(MAX_EXECUTION_WORKDIR_BYTES));
+        at_limit.system = Some("s".repeat(MAX_EXECUTION_SYSTEM_BYTES));
+        at_limit.route_stage = Some("g".repeat(MAX_EXECUTION_TARGET_BYTES));
+        at_limit.route_tier = Some("economy".into());
+        at_limit.route_tags = vec!["tag".into(); MAX_EXECUTION_ROUTE_VALUES];
+        at_limit.route_candidates = vec!["profile".into(); MAX_EXECUTION_ROUTE_VALUES];
+        assert!(validate_dispatch_inputs(&at_limit).is_ok());
+
+        let mut oversize_task = dispatch_base();
+        oversize_task.task = "x".repeat(MAX_EXECUTION_TASK_BYTES + 1);
+        assert_execution_limit(validate_dispatch_inputs(&oversize_task));
+        let mut oversize_target = dispatch_base();
+        oversize_target.target = "t".repeat(MAX_EXECUTION_TARGET_BYTES + 1);
+        assert_execution_limit(validate_dispatch_inputs(&oversize_target));
+        let mut oversize_workdir = dispatch_base();
+        oversize_workdir.workdir = Some("w".repeat(MAX_EXECUTION_WORKDIR_BYTES + 1));
+        assert_execution_limit(validate_dispatch_inputs(&oversize_workdir));
+        let mut oversize_system = dispatch_base();
+        oversize_system.system = Some("s".repeat(MAX_EXECUTION_SYSTEM_BYTES + 1));
+        assert_execution_limit(validate_dispatch_inputs(&oversize_system));
+        let mut oversize_stage = dispatch_base();
+        oversize_stage.route_stage = Some("g".repeat(MAX_EXECUTION_TARGET_BYTES + 1));
+        assert_execution_limit(validate_dispatch_inputs(&oversize_stage));
+        let mut oversize_tier = dispatch_base();
+        oversize_tier.route_tier = Some("r".repeat(MAX_EXECUTION_TARGET_BYTES + 1));
+        assert_execution_limit(validate_dispatch_inputs(&oversize_tier));
+        let mut oversize_tags = dispatch_base();
+        oversize_tags.route_tags = vec!["tag".into(); MAX_EXECUTION_ROUTE_VALUES + 1];
+        assert_execution_limit(validate_dispatch_inputs(&oversize_tags));
+        let mut oversize_tag = dispatch_base();
+        oversize_tag.route_tags = vec!["t".repeat(MAX_EXECUTION_TARGET_BYTES + 1)];
+        assert_execution_limit(validate_dispatch_inputs(&oversize_tag));
+        let mut oversize_candidates = dispatch_base();
+        oversize_candidates.route_candidates =
+            vec!["profile".into(); MAX_EXECUTION_ROUTE_VALUES + 1];
+        assert_execution_limit(validate_dispatch_inputs(&oversize_candidates));
+
+        let mut normal_broadcast = broadcast_base();
+        normal_broadcast.workdir = Some("/tmp".into());
+        normal_broadcast.system = Some("be terse".into());
+        assert!(validate_broadcast_inputs(&normal_broadcast).is_ok());
+        let mut broadcast_at_limit = broadcast_base();
+        broadcast_at_limit.task = "x".repeat(MAX_EXECUTION_TASK_BYTES);
+        broadcast_at_limit.targets = "t".repeat(MAX_EXECUTION_TARGET_BYTES);
+        broadcast_at_limit.workdir = Some("w".repeat(MAX_EXECUTION_WORKDIR_BYTES));
+        broadcast_at_limit.system = Some("s".repeat(MAX_EXECUTION_SYSTEM_BYTES));
+        assert!(validate_broadcast_inputs(&broadcast_at_limit).is_ok());
+        let mut oversize_broadcast_task = broadcast_base();
+        oversize_broadcast_task.task = "x".repeat(MAX_EXECUTION_TASK_BYTES + 1);
+        assert_execution_limit(validate_broadcast_inputs(&oversize_broadcast_task));
+        let mut oversize_broadcast_system = broadcast_base();
+        oversize_broadcast_system.system = Some("s".repeat(MAX_EXECUTION_SYSTEM_BYTES + 1));
+        assert_execution_limit(validate_broadcast_inputs(&oversize_broadcast_system));
+        let mut oversize_broadcast_workdir = broadcast_base();
+        oversize_broadcast_workdir.workdir = Some("w".repeat(MAX_EXECUTION_WORKDIR_BYTES + 1));
+        assert_execution_limit(validate_broadcast_inputs(&oversize_broadcast_workdir));
+
+        let dispatch_schema = rmcp::handler::server::tool::schema_for_type::<DispatchArgs>();
+        let dispatch_properties = dispatch_schema["properties"].as_object().unwrap();
+        assert_eq!(
+            dispatch_properties["task"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_TASK_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["target"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_TARGET_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["workdir"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_WORKDIR_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["system"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_SYSTEM_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["route_stage"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_TARGET_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["route_tier"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_TARGET_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["route_tags"]["maxItems"],
+            serde_json::json!(MAX_EXECUTION_ROUTE_VALUES)
+        );
+        assert_eq!(
+            dispatch_properties["route_tags"]["items"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_TARGET_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["route_candidates"]["maxItems"],
+            serde_json::json!(MAX_EXECUTION_ROUTE_VALUES)
+        );
+        assert_eq!(
+            dispatch_properties["route_candidates"]["items"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_TARGET_BYTES)
+        );
+        let broadcast_schema = rmcp::handler::server::tool::schema_for_type::<BroadcastArgs>();
+        let broadcast_properties = broadcast_schema["properties"].as_object().unwrap();
+        assert_eq!(
+            broadcast_properties["task"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_TASK_BYTES)
+        );
+        assert_eq!(
+            broadcast_properties["targets"]["maxLength"],
+            serde_json::json!(MAX_BROADCAST_TARGETS_BYTES)
+        );
+        assert_eq!(
+            broadcast_properties["workdir"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_WORKDIR_BYTES)
+        );
+        assert_eq!(
+            broadcast_properties["system"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_SYSTEM_BYTES)
+        );
     }
 
     #[test]
@@ -2139,7 +2494,7 @@ mod tests {
             <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
 
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
         for tool in &tools {
             let expected = match tool.name.as_ref() {
                 "vyane_dispatch" => rmcp::handler::server::tool::schema_for_type::<
@@ -2159,6 +2514,9 @@ mod tests {
                 >(),
                 "vyane_check" => rmcp::handler::server::tool::schema_for_type::<
                     rmcp::handler::server::wrapper::Parameters<CheckArgs>,
+                >(),
+                "vyane_workflow_plan" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<WorkflowPlanArgs>,
                 >(),
                 other => panic!("unexpected tool {other}"),
             };

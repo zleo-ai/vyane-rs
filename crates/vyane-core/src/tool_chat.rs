@@ -867,6 +867,79 @@ mod tests {
         ));
     }
 
+    fn assistant_calls(ids: &[&str]) -> ToolChatMessage {
+        ToolChatMessage::Assistant(AssistantToolTurn {
+            text: String::new(),
+            content_parts: Vec::new(),
+            reasoning: None,
+            refusal: None,
+            tool_calls: ids.iter().copied().map(call).collect(),
+        })
+    }
+
+    fn tool_result(id: &str, content: &str) -> ToolChatMessage {
+        ToolChatMessage::ToolResult(ToolResultMessage {
+            tool_call_id: id.into(),
+            content: content.into(),
+            is_error: false,
+        })
+    }
+
+    #[test]
+    fn message_while_tool_calls_are_pending_is_rejected_before_text_fallback() {
+        // The result follows the interrupting message. Accepting that order
+        // would hide a non-result message inside an otherwise settled turn.
+        let user_while_pending = request(vec![
+            ToolChatMessage::user("inspect"),
+            assistant_calls(&["call-1"]),
+            ToolChatMessage::user("continue"),
+            tool_result("call-1", "one"),
+        ]);
+        let error = user_while_pending.validate().unwrap_err();
+        assert_eq!(error, ToolChatValidationError::MessageWhileToolsPending);
+        assert!(!error.to_string().contains("call-1"));
+        assert!(!error.to_string().contains("continue"));
+
+        let client = TextOnlyClient {
+            calls: AtomicUsize::new(0),
+        };
+        let error =
+            futures::executor::block_on(client.complete_turn(user_while_pending)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Config);
+        assert!(!error.failover_eligible());
+        assert_eq!(
+            error.message,
+            "invalid typed tool-chat request: conversation contains a non-result message before pending tool calls were settled"
+        );
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+
+        let assistant_while_pending = request(vec![
+            ToolChatMessage::user("inspect"),
+            assistant_calls(&["call-1"]),
+            ToolChatMessage::Assistant(AssistantToolTurn {
+                text: "too soon".into(),
+                content_parts: Vec::new(),
+                reasoning: None,
+                refusal: None,
+                tool_calls: Vec::new(),
+            }),
+            tool_result("call-1", "one"),
+        ]);
+        assert_eq!(
+            assistant_while_pending.validate().unwrap_err(),
+            ToolChatValidationError::MessageWhileToolsPending
+        );
+
+        let settled = request(vec![
+            ToolChatMessage::user("inspect"),
+            assistant_calls(&["call-1", "call-2"]),
+            tool_result("call-2", "two"),
+            tool_result("call-1", "one"),
+            ToolChatMessage::user("continue"),
+        ]);
+        settled.validate().unwrap();
+    }
+
     #[test]
     fn missing_or_oversized_call_ids_are_rejected() {
         for id in [String::new(), "x".repeat(ToolChatLimits::CALL_ID_BYTES + 1)] {

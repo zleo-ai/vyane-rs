@@ -1,3 +1,4 @@
+mod common;
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::Connection;
 use sha2::{Digest as _, Sha256};
@@ -18,7 +19,7 @@ fn timestamp(seconds: i64) -> DateTime<Utc> {
 }
 
 fn fixture() -> (TempDir, SqliteGoalStore) {
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     let store =
         SqliteGoalStore::open(directory.path().join("goals.sqlite3")).expect("open goal store");
     (directory, store)
@@ -69,7 +70,7 @@ fn wal_sidecars_are_private_with_umask_022_in_a_public_directory() {
         return;
     }
 
-    let directory = TempDir::new().expect("tempdir");
+    let directory = common::private_tempdir();
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755))
         .expect("make database directory publicly readable");
     let path = directory.path().join("goals.sqlite3");
@@ -879,6 +880,286 @@ fn verification_artifact_size_and_digest_guards_fail_closed() {
 }
 
 #[test]
+fn corrupt_verification_json_blocks_completion_even_with_waiver() {
+    let (directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    let mut goal = new_goal("corrupt-json", "Corrupt JSON", 2, at);
+    goal.acceptance_criteria = vec![AcceptanceCriterion::new("custom", "cmd:true")];
+    store.create(OWNER_A, goal).expect("create");
+    store.start(OWNER_A, "corrupt-json", at).expect("start");
+    let before = store
+        .get(OWNER_A, "corrupt-json")
+        .expect("get before")
+        .expect("goal before");
+
+    // Matching digest selects the JSON fail-closed branch, not the digest check.
+    let payload = "{not-json";
+    let digest = Sha256::digest(payload.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let connection =
+        Connection::open(directory.path().join("goals.sqlite3")).expect("open raw database");
+    connection
+        .execute(
+            "INSERT INTO goal_verifications (verification_id, owner, goal_id, recorded_at_ms, \
+             worker_id, payload_json, payload_sha256) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+            rusqlite::params![
+                "verification-corrupt-json",
+                OWNER_A,
+                "corrupt-json",
+                at.timestamp_millis(),
+                payload,
+                digest,
+            ],
+        )
+        .expect("inject corrupt artifact");
+
+    let error = store
+        .done(
+            OWNER_A,
+            "corrupt-json",
+            None,
+            Some("should not complete"),
+            Some("waiver must not skip a corrupt artifact"),
+            at + TimeDelta::seconds(1),
+        )
+        .expect_err("corrupt artifact must fail closed before waiver");
+    assert!(
+        matches!(
+            &error,
+            GoalStoreError::CorruptData(message)
+                if message.contains("verification artifact payload is not valid JSON")
+        ),
+        "{error}"
+    );
+
+    let after = store
+        .get(OWNER_A, "corrupt-json")
+        .expect("get after")
+        .expect("goal after");
+    assert_eq!(after, before);
+    let events = store.events(OWNER_A, "corrupt-json").expect("events");
+    assert!(
+        events.iter().all(|event| {
+            event.kind != GoalEventKind::Completed && event.kind != GoalEventKind::CriteriaWaived
+        }),
+        "corrupt artifact must not emit completion or waiver events"
+    );
+    assert!(matches!(
+        store.verifications(OWNER_A, "corrupt-json"),
+        Err(GoalStoreError::Sqlite(_))
+    ));
+    let remaining: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM goal_verifications WHERE owner = ?1 AND goal_id = ?2",
+            rusqlite::params![OWNER_A, "corrupt-json"],
+            |row| row.get(0),
+        )
+        .expect("count artifacts");
+    assert_eq!(remaining, 1);
+}
+
+fn forged_satisfied_verification(goal_id: &str) -> (String, String) {
+    let verification = AcceptanceVerification {
+        goal_id: goal_id.into(),
+        all_satisfied: true,
+        summary: "forged".into(),
+        results: vec![CriterionResult {
+            criterion_index: 0,
+            criterion_key: "forged".into(),
+            kind: "custom".into(),
+            target: "cmd:true".into(),
+            status: CriterionStatus::Satisfied,
+            command: vec!["true".into()],
+            cwd: "/tmp".into(),
+            exit_code: Some(0),
+            duration_ms: 1,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            detail: "forged".into(),
+        }],
+    };
+    let payload = serde_json::to_string(&verification).expect("serialize forged verification");
+    let digest = Sha256::digest(payload.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    (payload, digest)
+}
+
+fn inject_acceptance_and_forged_verification(
+    connection: &Connection,
+    goal_id: &str,
+    acceptance_json: &str,
+    at: DateTime<Utc>,
+) {
+    connection
+        .execute(
+            "UPDATE goals SET acceptance_json = ?1 WHERE owner = ?2 AND id = ?3",
+            rusqlite::params![acceptance_json, OWNER_A, goal_id],
+        )
+        .expect("replace acceptance criteria");
+    let (payload, digest) = forged_satisfied_verification(goal_id);
+    connection
+        .execute(
+            "INSERT INTO goal_verifications (verification_id, owner, goal_id, recorded_at_ms, \
+             worker_id, payload_json, payload_sha256) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+            rusqlite::params![
+                format!("verification-{goal_id}"),
+                OWNER_A,
+                goal_id,
+                at.timestamp_millis(),
+                payload,
+                digest,
+            ],
+        )
+        .expect("inject forged verification");
+}
+
+#[test]
+fn empty_or_whitespace_acceptance_criteria_fail_closed() {
+    let (directory, store) = fixture();
+    let at = timestamp(1_700_000_000);
+    for (kind, target) in [
+        ("", "cmd:true"),
+        ("custom", ""),
+        ("   ", "cmd:true"),
+        ("custom", " \n\t"),
+        ("\u{00a0}", "\u{00a0}"),
+    ] {
+        let mut goal = new_goal("blank-create", "Blank", 2, at);
+        goal.acceptance_criteria = vec![AcceptanceCriterion::new(kind, target)];
+        match store.create(OWNER_A, goal) {
+            Err(GoalStoreError::InvalidInput(message)) => {
+                assert!(
+                    message.contains("must not be empty"),
+                    "kind={kind:?} target={target:?} message={message}"
+                );
+            }
+            other => panic!(
+                "blank criteria must be rejected, kind={kind:?} target={target:?} got {other:?}"
+            ),
+        }
+    }
+
+    let connection =
+        Connection::open(directory.path().join("goals.sqlite3")).expect("open raw database");
+    for (goal_id, acceptance_json) in [
+        (
+            "blank-empty",
+            r#"[{"kind":"","target":"","satisfied_at":null}]"#,
+        ),
+        (
+            "blank-whitespace",
+            "[{\"kind\":\" \",\"target\":\"\\t\\n\",\"satisfied_at\":null}]",
+        ),
+    ] {
+        let mut goal = new_goal(goal_id, "Stored blank", 2, at);
+        goal.acceptance_criteria = vec![AcceptanceCriterion::new("custom", "cmd:true")];
+        store.create(OWNER_A, goal).expect("create");
+        let started = store.start(OWNER_A, goal_id, at).expect("start");
+        inject_acceptance_and_forged_verification(&connection, goal_id, acceptance_json, at);
+        let error = store
+            .done(
+                OWNER_A,
+                goal_id,
+                None,
+                Some("should not complete"),
+                Some("waiver must not accept blank criteria"),
+                at + TimeDelta::seconds(1),
+            )
+            .expect_err("blank criteria must fail closed before waiver");
+        assert!(
+            matches!(
+                &error,
+                GoalStoreError::CorruptData(message)
+                    if message.contains("empty or whitespace")
+            ),
+            "{goal_id}: {error}"
+        );
+        let after = store
+            .get(OWNER_A, goal_id)
+            .expect("get after")
+            .expect("goal after");
+        assert_eq!(after.status, GoalStatus::InProgress);
+        assert_eq!(after.revision, started.revision);
+        assert!(
+            store
+                .events(OWNER_A, goal_id)
+                .expect("events")
+                .iter()
+                .all(|event| {
+                    event.kind != GoalEventKind::Completed
+                        && event.kind != GoalEventKind::CriteriaWaived
+                }),
+            "{goal_id} must not emit completion or waiver events"
+        );
+    }
+
+    let mut goal = new_goal("blank-achieved", "Blank achieved", 2, at);
+    goal.acceptance_criteria = vec![AcceptanceCriterion::new("custom", "cmd:true")];
+    store.create(OWNER_A, goal).expect("create achieved goal");
+    let claimed = store
+        .claim(OWNER_A, "blank-achieved", "worker-a", 60, at)
+        .expect("claim");
+    inject_acceptance_and_forged_verification(
+        &connection,
+        "blank-achieved",
+        r#"[{"kind":"   ","target":"  ","satisfied_at":null}]"#,
+        at,
+    );
+    let checkpoint = GoalPursuitCheckpoint {
+        owner: OWNER_A.into(),
+        goal_id: "blank-achieved".into(),
+        checkpoint_revision: 0,
+        goal_revision: claimed.revision,
+        claim_generation: claimed.claim_generation,
+        worker_id: "worker-a".into(),
+        runtime: "builder".into(),
+        workdir: directory.path().canonicalize().expect("canonical workdir"),
+        started_at: at,
+        updated_at: at,
+        segments_started: 0,
+        segments_completed: 0,
+        consecutive_failures: 0,
+        status: PursuitCheckpointStatus::Achieved,
+        last_run_id: None,
+        last_verification_id: Some("verification-blank-achieved".into()),
+    };
+    let error = store
+        .record_pursuit_checkpoint(
+            OWNER_A,
+            "blank-achieved",
+            "worker-a",
+            &checkpoint,
+            "pursuit.achieved",
+            "acceptance satisfied",
+            at + TimeDelta::seconds(1),
+        )
+        .expect_err("achieved checkpoint must not complete blank criteria");
+    assert!(
+        matches!(
+            &error,
+            GoalStoreError::CorruptData(message) if message.contains("empty or whitespace")
+        ),
+        "{error}"
+    );
+    let after = store
+        .get(OWNER_A, "blank-achieved")
+        .expect("get achieved")
+        .expect("achieved goal");
+    assert_eq!(after.status, GoalStatus::InProgress);
+    assert_eq!(after.revision, claimed.revision);
+    assert!(
+        store
+            .pursuit_checkpoint(OWNER_A, "blank-achieved")
+            .expect("checkpoint")
+            .is_none()
+    );
+}
+
+#[test]
 fn verification_history_returns_latest_hundred_in_insert_order() {
     let (_directory, store) = fixture();
     let at = timestamp(1_700_000_000);
@@ -1539,4 +1820,35 @@ fn invalid_metadata_is_rejected_before_persistence() {
             )
             .is_err()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = common::private_tempdir();
+    let group_writable = directory.path().join("group-writable");
+    std::fs::create_dir(&group_writable).expect("create group-writable parent");
+    // 0775 is the mode a 0777 directory creation receives under umask 002.
+    std::fs::set_permissions(&group_writable, std::fs::Permissions::from_mode(0o775))
+        .expect("make parent group-writable");
+    match SqliteGoalStore::open(group_writable.join("goals.sqlite3")) {
+        Err(GoalStoreError::InvalidInput(message)) => {
+            assert!(message.contains("group- or world-writable"), "{message}");
+        }
+        other => panic!("group-writable parent must still be rejected, got {other:?}"),
+    }
+
+    let fixture = common::private_tempdir();
+    assert_eq!(
+        std::fs::metadata(fixture.path())
+            .expect("read fixture parent mode")
+            .permissions()
+            .mode()
+            & 0o022,
+        0,
+        "fixture parent must not be group- or world-writable"
+    );
+    SqliteGoalStore::open(fixture.path().join("goals.sqlite3")).expect("open private fixture");
 }

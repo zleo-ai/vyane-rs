@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn config_from_args_rejects_unknown_target_and_missing_workdir() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let runtime = service(&directory);
         let unknown = cli_args("missing", directory.path());
         assert!(DaemonGoalConfig::from_args(&runtime, &unknown).is_err());
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn config_from_args_rejects_invalid_pursuit_bounds() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let runtime = service(&directory);
         let mut args = cli_args("builder", directory.path());
         args.goal_overall_timeout_seconds = 0;
@@ -631,9 +631,9 @@ mod tests {
 
     #[tokio::test]
     async fn unavailable_workdir_does_not_claim_or_terminate_the_supervisor() {
-        let fixture = TempDir::new().unwrap();
-        let data = TempDir::new().unwrap();
-        let workdir = TempDir::new().unwrap();
+        let fixture = crate::test_support::private_tempdir();
+        let data = crate::test_support::private_tempdir();
+        let workdir = crate::test_support::private_tempdir();
         let config = config(&workdir);
         let store = SqliteGoalStore::open(data.path().join("goals.sqlite3")).unwrap();
         create(&store, "waiting", 1);
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn queued_goal_is_atomically_claimed_by_the_stable_worker() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         create(&store, "queued", 1);
 
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn unleased_and_expired_in_progress_goals_are_recovered() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         create(&store, "unleased", 0);
         store
@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn live_stable_lease_is_adopted_without_generation_churn() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         create(&store, "restart", 1);
         let claimed = store
@@ -775,7 +775,7 @@ mod tests {
 
     #[test]
     fn live_stable_lease_precedes_earlier_reclaimable_work() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         let past = Utc::now() - TimeDelta::seconds(10);
         create(&store, "reclaimable", 0);
@@ -803,7 +803,7 @@ mod tests {
 
     #[test]
     fn recovery_scans_beyond_one_thousand_in_progress_goals() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         let now = Utc::now();
         for index in 0..1_000 {
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn queued_claim_requires_a_fresh_recovery_confirmation() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         let past = Utc::now() - TimeDelta::seconds(10);
         let mut expiring = NewGoal::new("expired-during-scan", past);
@@ -864,7 +864,7 @@ mod tests {
 
     #[test]
     fn paused_and_live_foreign_work_are_not_auto_resumed_or_stolen() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         create(&store, "paused", 0);
         store.start(LOCAL_TASK_OWNER, "paused", Utc::now()).unwrap();
@@ -898,7 +898,7 @@ mod tests {
 
     #[test]
     fn cooldown_skips_failed_goal_then_expiry_makes_it_eligible() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         create(&store, "cooling", 0);
         store
@@ -953,7 +953,7 @@ mod tests {
 
     #[test]
     fn due_retry_is_checked_before_a_persisted_recovery_cursor() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         create(&store, "due-before-cursor", 0);
         let due = store
@@ -1005,7 +1005,7 @@ mod tests {
     fn pursuit_error_retry_is_exponential_and_bounded_per_generation() {
         let now = Instant::now();
         let mut retries = HashMap::new();
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, _config) = supervisor_store(&directory);
         create(&store, "failing", 0);
         let failing = store
@@ -1045,9 +1045,9 @@ mod tests {
 
     #[test]
     fn quarantine_is_persisted_and_removed_from_resident_memory() {
-        let fixture = TempDir::new().unwrap();
-        let data = TempDir::new().unwrap();
-        let workdir = TempDir::new().unwrap();
+        let fixture = crate::test_support::private_tempdir();
+        let data = crate::test_support::private_tempdir();
+        let workdir = crate::test_support::private_tempdir();
         let config = config(&workdir);
         let store = SqliteGoalStore::open(data.path().join("goals.sqlite3")).unwrap();
         create(&store, "quarantine", 0);
@@ -1085,9 +1085,9 @@ mod tests {
 
     #[test]
     fn retry_capacity_overflow_fails_closed_when_quarantine_cannot_persist() {
-        let fixture = TempDir::new().unwrap();
-        let data = TempDir::new().unwrap();
-        let workdir = TempDir::new().unwrap();
+        let fixture = crate::test_support::private_tempdir();
+        let data = crate::test_support::private_tempdir();
+        let workdir = crate::test_support::private_tempdir();
         let config = config(&workdir);
         let store = SqliteGoalStore::open(data.path().join("goals.sqlite3")).unwrap();
         create(&store, "overflow", 0);
@@ -1141,7 +1141,7 @@ mod tests {
 
     #[test]
     fn terminal_retry_entries_are_pruned_during_acquisition() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         create(&store, "externally-paused", 0);
         let claimed = store
@@ -1178,7 +1178,7 @@ mod tests {
 
     #[test]
     fn quarantined_goal_stays_skipped() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let (store, config) = supervisor_store(&directory);
         create(&store, "quarantined", 0);
         store
@@ -1209,7 +1209,7 @@ mod tests {
 
     #[test]
     fn lease_duration_clamps_at_maximum_pursuit_timeout() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let mut config = config(&directory);
         config.pursuit.overall_timeout = vyane_goal::MAX_PURSUIT_TIMEOUT;
         assert_eq!(config.lease_seconds(), MAX_LEASE_SECONDS);

@@ -5511,11 +5511,22 @@ mod tests {
 
     const LOCK_PROBE_DATABASE: &str = "VYANE_AGENT_LOCK_PROBE_DATABASE";
 
+    fn private_tempdir() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().expect("tempdir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("restrict tempdir permissions");
+        }
+        directory
+    }
+
     #[test]
     fn first_creation_closes_candidates_before_atomic_publication() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let path = directory.path().join("first-create.sqlite");
         let candidates = (0..8)
             .map(|_| create_closed_database_candidate(directory.path()).unwrap())
@@ -5577,7 +5588,7 @@ mod tests {
 
     #[test]
     fn metadata_validation_does_not_release_a_wal_writer_lock() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let path = directory.path().join("lock-probe.sqlite");
         prepare_database_path(&path).unwrap();
 
@@ -5612,7 +5623,7 @@ mod tests {
 
     #[test]
     fn aliased_paths_share_the_process_connection_lock() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let direct = directory.path().join("x.sqlite3");
         let dotted = directory.path().join(".").join("x.sqlite3");
         let via_parent = directory.path().join("nested").join("..").join("x.sqlite3");
@@ -5641,7 +5652,7 @@ mod tests {
 
     #[test]
     fn process_connection_lock_is_reclaimed_after_last_store_drops() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let path = directory.path().join("reclaim.sqlite3");
         let other = directory.path().join("other.sqlite3");
 

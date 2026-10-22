@@ -1580,7 +1580,7 @@ mod tests {
 
     #[test]
     fn open_existing_does_not_create_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("kernel.sqlite");
         let err = KernelStore::open_existing(&path).unwrap_err();
         assert!(matches!(err, KernelStoreError::Io(_)), "{err:?}");
@@ -1589,7 +1589,7 @@ mod tests {
 
     #[test]
     fn open_existing_reopens_existing_store() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("kernel.sqlite");
         let store = KernelStore::open(&path).unwrap();
         let dig = "c".repeat(64);
@@ -1608,7 +1608,7 @@ mod tests {
 
     #[test]
     fn open_existing_does_not_recreate_unlinked_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("kernel.sqlite");
         KernelStore::open(&path).unwrap();
         let store = KernelStore::open_existing(&path).unwrap();
@@ -1626,7 +1626,7 @@ mod tests {
 
     #[test]
     fn effect_once_and_reopen_no_duplicate() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("kernel.sqlite");
         let store = KernelStore::open(&path).unwrap();
         let dig = "c".repeat(64);
@@ -1652,7 +1652,7 @@ mod tests {
 
     #[test]
     fn stale_lease_generation_cannot_overwrite_fence() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let high = LeaseFence {
             owner: "o".into(),
@@ -1690,7 +1690,7 @@ mod tests {
 
     #[test]
     fn concurrent_schema_init_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("k.sqlite");
         let barrier = Arc::new(Barrier::new(4));
         let mut handles = Vec::new();
@@ -1718,7 +1718,7 @@ mod tests {
 
     #[test]
     fn multi_process_effect_race_only_one_first() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("kernel.sqlite");
         // Initialize schema once.
         let _ = KernelStore::open(&path).unwrap();
@@ -1746,7 +1746,7 @@ mod tests {
 
     #[test]
     fn receipt_cas_and_owner_isolation() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let r = sample_receipt("rcpt-1", "alice");
         store.insert_open_receipt(&r).unwrap();
@@ -1766,7 +1766,7 @@ mod tests {
 
     #[test]
     fn unknown_schema_version_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("k.sqlite");
         {
             let _ = KernelStore::open(&path).unwrap();
@@ -1785,7 +1785,7 @@ mod tests {
 
     #[test]
     fn approval_grant_binding_and_deny_final() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "a".repeat(64);
         store
@@ -1892,7 +1892,7 @@ mod tests {
 
     #[test]
     fn delivery_phase_ask_grant_resume() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let (p, rev) = store
             .ensure_delivery_running("o", "rcpt", "run", now())
@@ -1938,7 +1938,7 @@ mod tests {
 
     #[test]
     fn grant_and_transition_rolls_back_decision_without_delivery() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "a".repeat(64);
         store
@@ -1968,7 +1968,7 @@ mod tests {
 
     #[test]
     fn grant_and_transition_rolls_back_when_delivery_is_still_running() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "9".repeat(64);
         store
@@ -2006,7 +2006,7 @@ mod tests {
 
     #[test]
     fn deny_and_transition_rolls_back_decision_without_delivery() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "b".repeat(64);
         store
@@ -2035,7 +2035,7 @@ mod tests {
 
     #[test]
     fn grant_and_transition_commits_decision_and_delivery_together() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "c".repeat(64);
         store
@@ -2086,7 +2086,7 @@ mod tests {
         // Standalone grant_approval persists Approved while delivery stays at
         // ApprovalRequired. grant_approval_and_transition must advance phase
         // exactly once, then retry is idempotent.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "e".repeat(64);
         store
@@ -2149,7 +2149,7 @@ mod tests {
         // the Denied analog (`deny_other_gen` in
         // approval_grant_binding_and_deny_final) for revision/lease/generation;
         // grant also fences run_id because ApprovalGrantBinding carries it.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [
             (
@@ -2250,7 +2250,7 @@ mod tests {
 
     #[test]
     fn grant_and_transition_after_resume_is_already_applied() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "e".repeat(64);
         store
@@ -2316,7 +2316,7 @@ mod tests {
 
     #[test]
     fn grant_and_transition_after_verified_is_already_applied() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "f".repeat(64);
         store
@@ -2382,7 +2382,7 @@ mod tests {
 
     #[test]
     fn grant_and_transition_after_completed_is_already_applied() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "c".repeat(64);
         store
@@ -2479,7 +2479,7 @@ mod tests {
         // pins the negative: a public delivery row at Verified with a different
         // run_id or approval_id must not count as already applied, must not
         // persist the grant, and must leave delivery identity unchanged.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [
             (
@@ -2565,7 +2565,7 @@ mod tests {
         // as already applied, must not persist the grant, and must leave
         // delivery identity unchanged. Approved self-loop identity is pinned
         // in grant_and_transition_approved_fast_path_requires_same_run.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [
             (
@@ -2715,7 +2715,7 @@ mod tests {
         // success for a new-run grant; the new ask stays Pending and delivery
         // identity is unchanged. Without this fence the Approved self-loop
         // would commit the new approval while leaving delivery on old-run.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let receipt = "rcpt-g-fp-run";
         let (_, rev) = store
@@ -2792,7 +2792,7 @@ mod tests {
 
     #[test]
     fn deny_and_transition_commits_decision_and_delivery_together() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "d".repeat(64);
         store
@@ -2842,7 +2842,7 @@ mod tests {
         // Standalone deny_approval persists Denied while delivery stays at
         // ApprovalRequired. deny_approval_and_transition must advance phase
         // exactly once, then retry is idempotent.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "f".repeat(64);
         store
@@ -2902,7 +2902,7 @@ mod tests {
         // UPDATE would rewrite another run's delivery to the current approval
         // run and persist Denied. The combined transaction must fail closed:
         // delivery stays on old-run / original phase, approval stays Pending.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let dig = "a".repeat(64);
         let receipt = "rcpt-dn-mm-run";
@@ -2952,7 +2952,7 @@ mod tests {
         // Already-applied DenyAccepted at Denied must compare run_id. A Denied
         // delivery owned by old-run must not count as success for a new-run
         // deny; the new ask stays Pending and delivery identity is unchanged.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let receipt = "rcpt-dn-fp-run";
         let (_, rev) = store
@@ -3016,7 +3016,7 @@ mod tests {
         // above; deny_other_gen only covers generation via deny_approval.
         // This pins the atomic negative for all three fields. Denied fast-path
         // now also requires the same delivery run_id.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [
             (
@@ -3114,7 +3114,7 @@ mod tests {
         // rollback. It is not the HIGH-003 claim that Running deny must
         // fail — FSM (Running, DenyAccepted) → Denied is legal and not
         // 753.2 current fail-closed.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [
             (
@@ -3196,7 +3196,7 @@ mod tests {
         // delivery. This is the grant counterpart of deny-on-terminal rollback.
         // It is not Failed same-identity retry after Approved, and not
         // Completed (already_applied still holds).
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [
             (
@@ -3271,7 +3271,7 @@ mod tests {
         // Approved. Seeding Running→DenyAccepted is legal FSM and is not
         // 753.2 current fail-closed. Same-identity Failed retry after
         // Approved is also not this slice.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let receipt = "rcpt-g-denied";
         let approval_id = "ap-g-denied";
@@ -3341,7 +3341,7 @@ mod tests {
         // Approved/Resuming/Verified would keep existing tests green.
         // Running+DenyAccepted remains legal FSM and is not 753.2 current
         // fail-closed.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let cases = [
             (
@@ -3445,7 +3445,7 @@ mod tests {
 
     #[test]
     fn grant_and_deny_lease_owner_mismatch_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
 
         let grant_dig = "1".repeat(64);
@@ -3581,7 +3581,7 @@ mod tests {
     #[test]
     fn unknown_cost_not_zero_on_receipt_attempt_path() {
         // CostEvidence default keeps actual_micro_units = None (not 0).
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let mut r = sample_receipt("rcpt-cost", "o");
         store.insert_open_receipt(&r).unwrap();

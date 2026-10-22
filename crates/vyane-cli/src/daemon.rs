@@ -1242,7 +1242,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_requires_the_exact_bearer_token() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let workflows = test_workflow_supervisor(directory.path(), INSTANCE_A).await;
         let app = daemon_router(
             INSTANCE_A,
@@ -1278,7 +1278,7 @@ mod tests {
 
     #[tokio::test]
     async fn workflow_routes_are_authenticated_cors_closed_and_body_bounded() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let workflows = test_workflow_supervisor(directory.path(), INSTANCE_A).await;
         let token = "a".repeat(64);
         let app = daemon_router_with_body_limit(
@@ -1355,7 +1355,7 @@ mod tests {
     fn control_files_and_directory_are_owner_only() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let data_dir = directory.path().join("data");
         let path = data_dir.join("control");
         write_private_atomic(&path, b"private").unwrap();
@@ -1371,7 +1371,7 @@ mod tests {
 
     #[test]
     fn old_generation_cleanup_cannot_remove_new_descriptor_or_token() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let storage = StoragePaths::from_data_dir(directory.path());
         let paths = DaemonPaths::from_storage(&storage);
         let descriptor = |instance_id: &str, pid: i32| DaemonDescriptor {
@@ -1399,7 +1399,7 @@ mod tests {
 
     #[test]
     fn descriptor_only_read_is_not_blocked_by_a_malformed_token() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let storage = StoragePaths::from_data_dir(directory.path());
         let paths = DaemonPaths::from_storage(&storage);
         let descriptor = DaemonDescriptor {
@@ -1421,7 +1421,7 @@ mod tests {
 
     #[test]
     fn startup_read_retries_only_typed_control_lock_contention() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let storage = StoragePaths::from_data_dir(directory.path());
         let paths = DaemonPaths::from_storage(&storage);
         let held = acquire_control_lock(&paths).unwrap();
@@ -1447,7 +1447,7 @@ mod tests {
 
     #[test]
     fn stale_generation_cleanup_does_not_parse_its_malformed_token() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let storage = StoragePaths::from_data_dir(directory.path());
         let paths = DaemonPaths::from_storage(&storage);
         let descriptor = DaemonDescriptor {
@@ -1471,7 +1471,7 @@ mod tests {
     fn failed_control_publication_does_not_start_goal_work() {
         use vyane_goal::{GoalStatus, GoalStore as _, NewGoal, SqliteGoalStore};
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store = SqliteGoalStore::open(directory.path().join("goals.sqlite3")).unwrap();
         let mut goal = NewGoal::new("publication-gate", Utc::now());
         goal.id = Some("publication-gate".into());

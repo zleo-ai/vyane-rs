@@ -1072,7 +1072,7 @@ mod tests {
         }
 
         fn at(now: DateTime<Utc>) -> Self {
-            let directory = tempfile::tempdir().unwrap();
+            let directory = crate::test_support::private_tempdir();
             let clock = Arc::new(TestClock::at(now));
             let store = Arc::new(
                 SqliteAgentStore::open_with_clock(
@@ -1461,7 +1461,7 @@ mod tests {
         Arc<BlockingSettlementClock>,
         Arc<SqliteAgentStore>,
     ) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let clock = Arc::new(BlockingSettlementClock::new(Utc::now()));
         let store = Arc::new(
             SqliteAgentStore::open_with_clock(directory.path().join("agent.sqlite"), clock.clone())

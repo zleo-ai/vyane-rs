@@ -35,11 +35,13 @@ mod agent_supervisor;
 mod approval_fsm;
 mod config;
 mod diagnostics;
+mod dispatch_event;
 mod dogfood;
 mod factory;
 mod goal;
 mod goal_continuity_runner;
 mod goal_observation;
+mod history_stats;
 mod inprocess_agent;
 mod kernel_boundary;
 mod kernel_store;
@@ -51,6 +53,8 @@ mod routing;
 mod selector;
 mod service;
 mod task;
+#[cfg(test)]
+mod test_support;
 
 pub use agent::AgentProjectionComponents;
 pub use agent_completion::{
@@ -121,6 +125,9 @@ pub use goal_observation::{
     GoalObservationWatchStatus, GoalObservationWatcher, GoalObservationWatcherError,
     GoalObservationWatcherErrorCode, MAX_GOAL_OBSERVATION_CONCURRENCY,
     MAX_GOAL_OBSERVATION_WATCHERS, MAX_GOAL_OBSERVATIONS_PER_WATCHER,
+};
+pub use history_stats::{
+    HistoryCosts, HistoryDurations, HistoryStats, HistoryTokenTotal, HistoryUsage, RunCounts,
 };
 pub use inprocess_agent::{
     InProcessAgentComponents, InProcessAgentEffect, InProcessAgentOperation,

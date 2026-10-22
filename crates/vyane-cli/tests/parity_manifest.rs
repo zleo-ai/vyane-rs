@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
+#[path = "parity_manifest/target_failover.rs"]
+mod target_failover;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -396,6 +399,14 @@ fn assert_sha256(value: &str) {
 fn expected_public_fixtures() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
         (
+            "dispatch_trail",
+            "ef60d18eb9bec4616a08d6af35375a45e0eecd24aa716fef71f3967bfe202f89",
+        ),
+        (
+            "target_resolution",
+            "7b351bbdbd4b4a7ea4270f21908a5afcbb0ba372958d3492235c1d107c872ae4",
+        ),
+        (
             "routing",
             "e7e026785b0fc9637a936ef8e08f008fa881cd69a5911b5073aba15763e9d572",
         ),
@@ -412,6 +423,12 @@ fn expected_public_fixtures() -> BTreeMap<&'static str, &'static str> {
 
 fn expected_scope(suite: &str) -> &'static str {
     match suite {
+        "dispatch_trail" => {
+            "fresh sessionless production dispatch and persisted attempt trails under scripted adapter outcomes with one attempt per supplied target; candidate selection, retries, timing, live protocols and session behavior remain outside this suite; timeout, auth and taxonomy differences remain explicit"
+        }
+        "target_resolution" => {
+            "explicit synthetic provider/protocol/harness/model configuration and ordered independently resolved targets; provider inference, disabled targets, model catalogs and candidate selection remain outside this suite"
+        }
         "routing" => {
             "classify_intent primary, confidence and secondary plus vyane-service primary-intent exposure; stateful history, benchmark and feedback routing are excluded"
         }
@@ -427,6 +444,86 @@ fn expected_scope(suite: &str) -> &'static str {
 
 fn expected_case_digests(suite: &str) -> BTreeMap<&'static str, &'static str> {
     let cases = match suite {
+        "dispatch_trail" => vec![
+            (
+                "dispatch-trail.primary-success",
+                "c6d8fd3f19cf78d4e919c0f508875c7a886412104052baa064a0b4416a12d783",
+            ),
+            (
+                "dispatch-trail.error-then-success",
+                "f42dda9595cd94e8e0b59c06d222340934e38c036d575975488b321fff6dc3e9",
+            ),
+            (
+                "dispatch-trail.two-errors-then-success",
+                "b824040626152782a41fc14dab5f65f15b6ed011bb5c73adcb6a5a398558aade",
+            ),
+            (
+                "dispatch-trail.mixed-errors-then-success",
+                "d18376b634d3a86b4fbc8c4a8684c3dac7029d15eb0d9145d3c5516da4c35756",
+            ),
+            (
+                "dispatch-trail.exhausted",
+                "7ddd6097842cbd0ba91d3b0a7f3368234f78bc977d04e0227e84bd65f1d58641",
+            ),
+            (
+                "dispatch-trail.single-error",
+                "2fb76e427fa1416c364b7930a527fee5435201cf1129ce405c5667c37d1e2085",
+            ),
+            (
+                "dispatch-trail.timeout",
+                "bfde1399351bdb0c5014ae2a84847492b04f0dae0097eb1ec4167d6e66492fd9",
+            ),
+            (
+                "dispatch-trail.rate-limit",
+                "77754b52083ec21544f26961aaeead4f77c4a8b7dec504a71af49825dd43457f",
+            ),
+            (
+                "dispatch-trail.quota",
+                "f3e2a1ce7071fdb68ecaa404f5dd201cf84c53dc8ec1f37a25a76180c1ab7f00",
+            ),
+            (
+                "dispatch-trail.auth",
+                "560d47ce1de65048469748153817f14ca129d03bf0a92c520d2e4e21ea5c74fc",
+            ),
+            (
+                "dispatch-trail.policy-blocked",
+                "6a88a7e15685a86c639c61812cc32c974eb11d8d86b012e0ea48fc7c84935598",
+            ),
+        ],
+        "target_resolution" => vec![
+            (
+                "target-resolution.direct-chat",
+                "a19923f5a62bb9d298869bb78dd3f5295e00caa18c4bfb0e3201466133df332f",
+            ),
+            (
+                "target-resolution.responses",
+                "8133ab1e324947b8d0a03e3594f2e9ff7d14a866db638f5caca609133a0ae01b",
+            ),
+            (
+                "target-resolution.messages",
+                "db4e1b52a9155229cb7c0a31a51a9bee922f482a5559ca68454b985c37b70290",
+            ),
+            (
+                "target-resolution.codex-provider-separation",
+                "c56606a17c12d27a626777095d3eef7c650a618a4be6e79140707af66d7991f1",
+            ),
+            (
+                "target-resolution.claude-provider-separation",
+                "b979a1b264487499d774ce1cc56b9c80aee929efd94eda212c9a3d4614806ce7",
+            ),
+            (
+                "target-resolution.provider-default-model",
+                "7907c09319fcc780e5ee76da1530e0f88f43b3ae84ff5adce3882d61d0e323d8",
+            ),
+            (
+                "target-resolution.profile-protocol-override",
+                "532317091fbcc9f197c79433f65aefd60e7347dc3fe90567a30dab1fa5ef97ea",
+            ),
+            (
+                "target-resolution.ordered-distinct-models",
+                "76500b032a89cc3612255112e611d0bbbf36aa4f7b0960cacfaee7d3bd34054a",
+            ),
+        ],
         "routing" => vec![
             (
                 "routing.classify_intent.implement",
@@ -632,6 +729,14 @@ fn manifest_schema_public_fixture_integrity_and_dispositions_are_closed() {
         );
 
         match suite.id.as_str() {
+            "dispatch_trail" => validate_fixture(
+                suite,
+                load_suite::<target_failover::Case<target_failover::TrailInput>>(suite),
+            ),
+            "target_resolution" => validate_fixture(
+                suite,
+                load_suite::<target_failover::Case<target_failover::ResolutionInput>>(suite),
+            ),
             "routing" => validate_fixture(suite, load_suite::<RoutingCase>(suite)),
             "failover" => validate_fixture(suite, load_suite::<FailoverCase>(suite)),
             "automatic_routing" => {
@@ -660,6 +765,7 @@ fn hermetic_routing_config() -> ResolvedConfig {
         )]),
         native_permission_ceilings: Vec::new(),
         harness_permission_ceilings: Vec::new(),
+        model_rates: Default::default(),
     }
 }
 
@@ -734,7 +840,7 @@ fn routing_cases_recompute_current_rust_output() {
 fn automatic_routing_config(
     candidates: &[AutomaticRoutingCandidate],
 ) -> (tempfile::TempDir, LoadedConfig) {
-    let directory = tempfile::tempdir().expect("automatic routing tempdir");
+    let directory = common::private_tempdir();
     let path = directory.path().join("config.toml");
     let mut config = String::new();
     let providers = candidates

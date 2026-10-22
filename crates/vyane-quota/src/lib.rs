@@ -4,6 +4,8 @@
 //! background task, or automatic routing action. Optional adapters implement
 //! [`QuotaConnector`]; [`QuotaSnapshotRunner`] reads a finite connector set
 //! with stable ordering, bounded concurrency and per-connector timeouts.
+//! Connector error detail kept for a caller is truncated to 1024 bytes and
+//! omits lines that assign a token or password.
 
 mod http;
 mod model;
@@ -15,7 +17,7 @@ pub use model::{
     QuotaStatus, QuotaUnit, QuotaValidationError, QuotaWindow,
 };
 pub use runner::{
-    MAX_CONNECTORS, MAX_QUOTA_CONCURRENCY, QuotaConnector, QuotaConnectorError,
-    QuotaConnectorErrorCode, QuotaReadPolicy, QuotaRunnerError, QuotaSnapshot, QuotaSnapshotRunner,
-    QuotaSnapshotStatus,
+    MAX_CONNECTOR_ERROR_BYTES, MAX_CONNECTORS, MAX_QUOTA_CONCURRENCY, QuotaConnector,
+    QuotaConnectorError, QuotaConnectorErrorCode, QuotaReadPolicy, QuotaRunnerError, QuotaSnapshot,
+    QuotaSnapshotRunner, QuotaSnapshotStatus,
 };

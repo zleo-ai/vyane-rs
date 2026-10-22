@@ -1164,12 +1164,16 @@ pub(crate) mod anthropic {
     }
 
     pub(crate) fn usage_from_response(usage: UsageResponse) -> Usage {
-        let cached = usage
-            .cache_read_input_tokens
+        let cached = usage.cache_read_input_tokens.unwrap_or(0);
+        // Anthropic 分别报告普通输入、缓存创建和缓存读取。
+        // 归一化后，输入总量包含三者，缓存子计数仅表示读取。
+        let input_tokens = usage
+            .input_tokens
             .unwrap_or(0)
-            .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0));
+            .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
+            .saturating_add(cached);
         Usage {
-            input_tokens: usage.input_tokens.unwrap_or(0),
+            input_tokens,
             output_tokens: usage.output_tokens.unwrap_or(0),
             reasoning_tokens: None,
             cached_input_tokens: (cached > 0).then_some(cached),

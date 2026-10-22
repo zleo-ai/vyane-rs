@@ -6,6 +6,7 @@
 //! worker → SQLite task ledger → `task` lifecycle end to end, plus read-only
 //! compatibility for pre-SQLite status files.
 
+mod common;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -435,8 +436,8 @@ async fn detach_returns_fast_then_completes_success() {
     const TARGET_DELAY: Duration = Duration::from_secs(10);
     mock_openai_delayed(&server, "detached answer", TARGET_DELAY).await;
 
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     const TASK_CANARY: &str = "WP39-TASK-PRIVACY-CANARY";
     const SYSTEM_CANARY: &str = "WP39-SYSTEM-PRIVACY-CANARY";
     const LABEL_CANARY: &str = "WP39-LABEL-PRIVACY-CANARY";
@@ -554,8 +555,8 @@ async fn detach_returns_fast_then_completes_success() {
 async fn detached_auto_route_freezes_profile_effort_and_labels() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "auto detached", Duration::ZERO).await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &auto_config_for(&server));
 
     let output = vyane()
@@ -603,8 +604,8 @@ async fn detached_auto_route_freezes_profile_effort_and_labels() {
 async fn detached_no_frontier_replays_parent_failover_filter() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "guarded detached", Duration::ZERO).await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &guarded_auto_config_for(&server));
 
     let output = vyane()
@@ -658,8 +659,8 @@ async fn detached_no_frontier_replays_parent_failover_filter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detach_config_error_exits_two_and_creates_no_task_dir() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
 
     vyane()
@@ -691,8 +692,8 @@ async fn detach_config_error_exits_two_and_creates_no_task_dir() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detach_bad_label_exits_two_and_creates_no_task_dir() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
 
     vyane()
@@ -722,9 +723,9 @@ async fn detach_bad_label_exits_two_and_creates_no_task_dir() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detached_direct_http_write_is_rejected_before_task_or_process() {
     let server = MockServer::start().await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
-    let workdir = TempDir::new().expect("workdir tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
     let expected_reason = if cfg!(target_os = "linux") {
         "local_editing_unavailable"
@@ -767,8 +768,8 @@ async fn detached_direct_http_write_is_rejected_before_task_or_process() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn detached_legacy_native_resume_is_rejected_before_task_or_process() {
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &harness_config());
     let now = chrono::Utc::now();
     let record = SessionRecord {
@@ -814,10 +815,10 @@ async fn detached_legacy_native_resume_is_rejected_before_task_or_process() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn detached_write_transfers_parent_pin_through_worker_to_harness() {
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
-    let bin_dir = TempDir::new().expect("bin tempdir");
-    let workdir = TempDir::new().expect("workdir tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
+    let workdir = common::private_tempdir();
     write_success_fake_claude(&bin_dir);
     let config = write_config(&config_dir, &harness_config());
     let path = format!(
@@ -866,7 +867,7 @@ async fn detached_write_transfers_parent_pin_through_worker_to_harness() {
 /// leaving a `running`, `died`, or status-less task behind.
 #[tokio::test]
 async fn corrupt_stdin_envelope_finalizes_error_not_running() {
-    let data_dir = TempDir::new().expect("data tempdir");
+    let data_dir = common::private_tempdir();
     let id = "0198c0de-0000-7000-8000-0000000badj0";
     let task_dir = data_dir.path().join("tasks").join(id);
     fs::create_dir_all(&task_dir).expect("create task dir");
@@ -917,8 +918,8 @@ async fn corrupt_stdin_envelope_finalizes_error_not_running() {
 async fn legacy_job_reader_preserves_target_snapshot_drift_check() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "must not execute", Duration::ZERO).await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
     let id = "0198c0de-0000-7000-8000-0000000dr1f7";
     let task_dir = data_dir.path().join("tasks").join(id);
@@ -990,8 +991,8 @@ async fn legacy_job_reader_preserves_target_snapshot_drift_check() {
 async fn legacy_job_json_still_executes_with_empty_stdin() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "legacy answer", Duration::ZERO).await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
     let id = "0198c0de-0000-7000-8000-00000001e9ac";
     let task_dir = data_dir.path().join("tasks").join(id);
@@ -1040,7 +1041,7 @@ async fn legacy_job_json_still_executes_with_empty_stdin() {
 /// the worker never wrote status.
 #[tokio::test]
 async fn job_without_status_shows_stale_and_explains() {
-    let data_dir = TempDir::new().expect("data tempdir");
+    let data_dir = common::private_tempdir();
     let id = "0198c0de-0000-7000-8000-00000000513e";
     let task_dir = data_dir.path().join("tasks").join(id);
     fs::create_dir_all(&task_dir).expect("create task dir");
@@ -1101,7 +1102,7 @@ async fn job_without_status_shows_stale_and_explains() {
 /// though the private request was never written as job.json.
 #[tokio::test]
 async fn new_scaffold_without_status_or_job_shows_stale_and_explains() {
-    let data_dir = TempDir::new().expect("data tempdir");
+    let data_dir = common::private_tempdir();
     let id = "0198c0de-0000-7000-8000-00000000571d";
     let task_dir = data_dir.path().join("tasks").join(id);
     fs::create_dir_all(&task_dir).expect("create task dir");
@@ -1137,8 +1138,8 @@ async fn cancel_finalizes_cancelled_and_kills_group() {
     // Long delay so the run is comfortably still in-flight when we cancel.
     mock_openai_delayed(&server, "never delivered", Duration::from_secs(30)).await;
 
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
 
     let out = vyane()
@@ -1226,9 +1227,9 @@ async fn cancel_finalizes_cancelled_and_kills_group() {
 async fn fingerprint_cancel_does_not_depend_on_ps_or_path() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "never delivered", Duration::from_secs(30)).await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
-    let empty_path = TempDir::new().expect("empty PATH tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let empty_path = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
 
     let out = vyane()
@@ -1276,9 +1277,9 @@ async fn fingerprint_cancel_does_not_depend_on_ps_or_path() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn graceful_nested_harness_cancel_is_classified_cancelled() {
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
-    let bin_dir = TempDir::new().expect("fake bin tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     write_cancellable_fake_claude(&bin_dir);
     let config = write_config(&config_dir, &harness_config());
     let path = format!(
@@ -1339,9 +1340,9 @@ async fn graceful_nested_harness_cancel_is_classified_cancelled() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn forced_cancel_kills_stubborn_nested_harness_when_worker_is_stopped() {
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
-    let bin_dir = TempDir::new().expect("fake bin tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let processes =
         spawn_stubborn_detached_harness(&config_dir, &data_dir, &bin_dir, "run stubborn harness")
             .await;
@@ -1388,9 +1389,9 @@ async fn forced_cancel_kills_stubborn_nested_harness_when_worker_is_stopped() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn cancel_after_worker_sigkill_cleans_orphaned_nested_harness() {
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
-    let bin_dir = TempDir::new().expect("fake bin tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let processes =
         spawn_stubborn_detached_harness(&config_dir, &data_dir, &bin_dir, "crash outer worker")
             .await;
@@ -1441,9 +1442,9 @@ async fn cancel_after_worker_sigkill_cleans_orphaned_nested_harness() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn status_after_worker_sigkill_preserves_nested_cleanup_entrypoint() {
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
-    let bin_dir = TempDir::new().expect("fake bin tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let processes = spawn_stubborn_detached_harness(
         &config_dir,
         &data_dir,
@@ -1481,9 +1482,9 @@ async fn status_after_worker_sigkill_preserves_nested_cleanup_entrypoint() {
 async fn terminal_metadata_cancel_still_cleans_orphaned_nested_harness() {
     use vyane_task::{FailureCode, SqliteTaskStore, TaskStore as _};
 
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
-    let bin_dir = TempDir::new().expect("fake bin tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let processes = spawn_stubborn_detached_harness(
         &config_dir,
         &data_dir,
@@ -1534,9 +1535,9 @@ async fn terminal_metadata_cancel_still_cleans_orphaned_nested_harness() {
 async fn terminal_metadata_cancel_kills_stopped_outer_and_nested_groups() {
     use vyane_task::{FailureCode, SqliteTaskStore, TaskStore as _};
 
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
-    let bin_dir = TempDir::new().expect("fake bin tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
     let processes = spawn_stubborn_detached_harness(
         &config_dir,
         &data_dir,
@@ -1588,7 +1589,7 @@ async fn terminal_metadata_cancel_kills_stopped_outer_and_nested_groups() {
 /// message.
 #[tokio::test]
 async fn orphan_running_with_dead_pid_shows_died() {
-    let data_dir = TempDir::new().expect("data tempdir");
+    let data_dir = common::private_tempdir();
     let id = "0198c0de-0000-7000-8000-00000000dead";
     let task_dir = data_dir.path().join("tasks").join(id);
     fs::create_dir_all(&task_dir).expect("create task dir");
@@ -1663,8 +1664,8 @@ async fn orphan_running_with_dead_pid_shows_died() {
 async fn task_list_orders_recent_first_and_json_parses() {
     let server = MockServer::start().await;
     mock_openai_delayed(&server, "quick", Duration::from_millis(50)).await;
-    let config_dir = TempDir::new().expect("config tempdir");
-    let data_dir = TempDir::new().expect("data tempdir");
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
     let config = write_config(&config_dir, &config_for(&server));
 
     // Run three detached dispatches in sequence; uuidv7 ids are time-ordered,
@@ -1810,4 +1811,157 @@ fn unix_signal_pid(pid: i32, signal: i32) {
 #[cfg(not(unix))]
 fn unix_pid_alive(_pid: i32) -> bool {
     true
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_detached_task_without_persistence_exits_zero_and_omits_the_field() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let data = common::private_tempdir();
+    let path = data.path().join("tasks.sqlite3");
+    let connection = rusqlite::Connection::open(&path).expect("open legacy task database");
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .expect("enable foreign keys");
+    connection
+        .pragma_update(None, "journal_mode", "DELETE")
+        .expect("delete journal");
+    connection
+        .execute_batch(include_str!("../../vyane-task/migrations/0001_tasks.sql"))
+        .expect("apply v1 schema");
+    connection
+        .execute_batch(include_str!(
+            "../../vyane-task/migrations/0002_owner_scope.sql"
+        ))
+        .expect("apply v2 schema");
+    connection
+        .execute(
+            "INSERT INTO tasks (
+                owner, id, record_schema, kind, origin, state, task_digest, target_key,
+                created_at_ms, started_at_ms, updated_at_ms, finished_at_ms, revision,
+                executor_epoch, controller_kind, controller_instance_id, ledger_run_id
+             ) VALUES (
+                'local', 'old-task', 1, 'dispatch', 'cli_detached', 'succeeded',
+                '0123456789abcdef', 'review',
+                0, 1000, 2000, 2000, 2, 1,
+                'in_process', 'server-a', 'run-old'
+             )",
+            [],
+        )
+        .expect("insert legacy task");
+    connection
+        .pragma_update(None, "user_version", 2)
+        .expect("mark schema v2");
+    drop(connection);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("restrict database");
+
+    let output = vyane()
+        .env("VYANE_DATA_DIR", data.path())
+        .args(["task", "status", "old-task", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("persistence failed").not())
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&output).expect("status json");
+    assert_eq!(status["state"], "succeeded");
+    assert_eq!(status["ledger_run_id"], "run-old");
+    assert!(status.get("persistence").is_none());
+}
+
+#[cfg(target_os = "linux")]
+fn write_counting_fake_claude(dir: &TempDir, calls: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let bin = dir.path().join("claude");
+    let script = format!(
+        "#!/bin/sh\nset -eu\nprintf x >> '{}'\nprintf '%s\\n' '{{\"result\":\"once\",\"session_id\":\"native-new\"}}'\n",
+        calls.display()
+    );
+    fs::write(&bin, script).expect("write counting fake claude");
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))
+        .expect("make counting fake claude executable");
+    bin
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_counting_detached(
+    data_dir: &Path,
+    block_ledger: bool,
+) -> (String, std::path::PathBuf, TempDir, TempDir) {
+    let config_dir = common::private_tempdir();
+    let bin_dir = common::private_tempdir();
+    let calls = bin_dir.path().join("calls");
+    write_counting_fake_claude(&bin_dir, &calls);
+    let config = write_config(&config_dir, &harness_config());
+    if block_ledger {
+        fs::create_dir(data_dir.join("ledger.jsonl")).expect("block ledger path");
+    }
+    let path = format!(
+        "{}:{}",
+        bin_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = vyane()
+        .env("PATH", &path)
+        .env("VYANE_DATA_DIR", data_dir)
+        .arg("--config")
+        .arg(&config)
+        .args(["dispatch", "count me", "--target", "builder", "--detach"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id = String::from_utf8(out).expect("utf8 id").trim().to_string();
+    (id, calls, config_dir, bin_dir)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn detached_task_status_exits_three_when_ledger_persistence_fails() {
+    let data_dir = common::private_tempdir();
+    let (id, calls, _config_dir, _bin_dir) = spawn_counting_detached(data_dir.path(), true);
+    let status = poll_until_terminal(data_dir.path(), &id, Duration::from_secs(15));
+    assert_eq!(status["state"], "succeeded");
+    assert!(
+        status["ledger_run_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_eq!(status["persistence"]["ledger"]["state"], "failed");
+    assert_eq!(status["persistence"]["ledger"]["kind"], "io");
+    assert_eq!(status["persistence"]["session"]["state"], "not_requested");
+    assert_eq!(fs::read(&calls).expect("call count"), b"x");
+
+    vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["task", "status", &id, "--json"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains(
+            "ledger (io) persistence failed after the run finished",
+        ))
+        .stderr(predicate::str::contains("must not be repeated"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn detached_task_status_exits_zero_when_persistence_succeeds() {
+    let data_dir = common::private_tempdir();
+    let (id, calls, _config_dir, _bin_dir) = spawn_counting_detached(data_dir.path(), false);
+    let status = poll_until_terminal(data_dir.path(), &id, Duration::from_secs(15));
+    assert_eq!(status["state"], "succeeded");
+    assert_eq!(status["persistence"]["ledger"]["state"], "saved");
+    assert_eq!(status["persistence"]["session"]["state"], "not_requested");
+    assert_eq!(fs::read(&calls).expect("call count"), b"x");
+
+    vyane()
+        .env("VYANE_DATA_DIR", data_dir.path())
+        .args(["task", "status", &id])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("persistence failed").not());
 }

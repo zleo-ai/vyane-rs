@@ -4,6 +4,8 @@ This document expands on the design encoded in `vyane-core`. Where it describes
 types, it mirrors the frozen source in `crates/vyane-core/src/`; that source is
 the authority if the two ever disagree.
 
+![CLI, REST and MCP call the service and kernel; each target binds provider, protocol, harness and model; executions produce run records.](assets/target-flow.svg)
+
 ## The four-layer target model
 
 Everything in Vyane is built on four independent layers. None can be derived
@@ -406,8 +408,8 @@ assemble RunRecord
   target = last attempted target
               │
               ▼
-ledger.append(record)                 (best effort after completion)
-session_store update when applicable  (best effort after completion)
+ledger.append(record)                 (DispatchOutcome.persistence; run status unchanged)
+session_store update when applicable  (DispatchOutcome.persistence; run status unchanged)
 ```
 
 The failover gate is a single conjunction over the **admitted** chain: advance
@@ -425,6 +427,43 @@ same dispatch machine, bounded by a concurrency semaphore, and returns results
 **in input order** (index-preserving) even though they complete out of order. A
 partial failure is just some chains ending in `Error` while others succeed —
 each still produces its own `RunRecord`.
+
+### Caller contract for post-run persistence
+
+A finished model call and the later ledger or session write are different
+outcomes. The run status follows only the model call. `DispatchOutcome.persistence`
+reports each step as `saved`, `not_requested`, or `failed` with a stable
+`ErrorKind` token. A failed step does not include the store's free-text error.
+`not_requested` means that step did not apply; it is complete. Callers must not
+repeat the model call because a step failed.
+
+Foreground CLI exit status uses that split:
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | The run succeeded and every applicable persistence step is `saved` or `not_requested`. `task status` also exits 0 when a succeeded task has no recorded persistence. |
+| 1 | The model call did not succeed. This wins even when persistence also failed. |
+| 3 | The model call succeeded and a recorded ledger or session step failed. |
+
+`broadcast` uses the same priority across its targets: exit 1 when any model
+failed or a target returned an error; otherwise exit 3 when any finished target
+has incomplete persistence; otherwise 0.
+
+Synchronous HTTP dispatch stays **200** when the model call finished, including
+when persistence is incomplete, and returns `persistence` on the body. A 5xx
+for a persistence failure would invite a retry that runs the model again.
+
+`GET /v1/tasks/{id}` and `vyane task status` return the same persistence value
+when the settler recorded it with the terminal task. The task state stays
+`succeeded`. `ledger_run_id` is still present; `persistence.ledger = failed`
+means that id may not name a stored ledger row. `task status` prints the same
+warning as a foreground dispatch and exits 3 when the task succeeded and the
+recorded persistence is incomplete. A task with no persistence field is
+**unrecorded**: the query succeeds, the field is omitted, and the command does
+not exit 3 and does not claim the writes landed.
+
+Workflow and goal settlements do not record this field yet. Those completions
+stay unrecorded.
 
 **Cancellation** propagates through a `CancellationToken` (re-exported from
 `vyane-core`). After successful preflight, an already-cancelled token produces a
@@ -539,8 +578,10 @@ where F: FnMut(StreamDispatchEvent) + Send;
   own the child process group and must honour the forwarded token plus
   `HarnessJob.timeout`; the kernel awaits their cleanup instead of dropping the
   process-owning future.
-- Record assembly (digest, attempt shape, status mapping, best-effort ledger
-  append) is kernel-owned and front-ends must not duplicate it.
+- Record assembly (digest, attempt shape, status mapping, ledger append) is
+  kernel-owned and front-ends must not duplicate it. A ledger failure after
+  the stream finishes is reported on `DispatchOutcome.persistence` and does
+  not change the run status.
 
 The additive `prepare` → `dispatch_stream_prepared` seam is for callers that
 own both probe and fallback. An unsupported prepared probe moves its one-shot
@@ -757,9 +798,11 @@ actual execution.
 This is a strong single-host `FsSessionStore` fence, not a distributed lease:
 there is no durable generation/token, TTL renewal, heartbeat or stale-holder
 recovery protocol for remote/custom stores. Session persistence after an
-already-completed model call also remains best-effort, so a commit failure is
-warned and returned as a successful run rather than pretending the external
-side effect did not happen. Regular dispatch may start fresh from `Absent`, but
+already-completed model call does not rewrite that call into a failure: the
+run status stays the model outcome, and `DispatchOutcome.persistence` reports
+whether the ledger append and session update landed. A failed step means
+history or the next transcript may be missing, and callers must not repeat
+the call solely because of it. Regular dispatch may start fresh from `Absent`, but
 still rejects `LegacyUnbound` or `Bound` native state before `make` whenever the
 admitted chain contains a harness. Streaming dispatch does not acquire a lease
 or load a snapshot; it rejects any session before session-store load,
@@ -1158,6 +1201,9 @@ under the immediate writer transaction, validates the exact source/target
 manifests, preserves task/event counts and event-sequence high-water, checks
 orphans and foreign keys, and rolls back on mismatch. Identical ids across
 owners therefore remain isolated for reads, events, pagination, leases and CAS.
+Schema v3 adds `task_dispatch_persistence` beside the v2 task snapshot. A
+missing row is unrecorded persistence, not a successful write and not a failed
+write. Old databases open and migrate without inventing rows for old tasks.
 
 For a **new CLI `--detach` submission**, the parent completes capability and
 session admission before creating the durable task row or spawning a worker. It

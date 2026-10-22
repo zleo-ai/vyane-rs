@@ -255,8 +255,6 @@ fn open_private_log(path: &Path) -> Result<File> {
 mod tests {
     use std::fs;
 
-    use tempfile::TempDir;
-
     use super::*;
     use crate::task::store::{JobSpec, SandboxSpec};
 
@@ -278,7 +276,7 @@ mod tests {
     fn broken_stdin_handoff_kills_worker_without_writing_legacy_status() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(dir.path(), "handoff-broken");
         let executable = dir.path().join("close-stdin-worker.sh");
         fs::write(
@@ -369,7 +367,7 @@ mod tests {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         use std::time::{Duration, Instant};
 
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let requested = dir.path().join("work");
         fs::create_dir(&requested).unwrap();
         let pinned = PinnedWorkdir::open(&requested).unwrap();
@@ -428,7 +426,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn worker_pin_mapping_owns_and_closes_its_exact_duplicate() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let workdir = dir.path().join("work");
         fs::create_dir(&workdir).unwrap();
         let pinned = PinnedWorkdir::open(&workdir).unwrap();
@@ -442,7 +440,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn spawn_failure_returns_before_creating_a_worker() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let workdir = dir.path().join("work");
         fs::create_dir(&workdir).unwrap();
         let pinned = PinnedWorkdir::open(&workdir).unwrap();

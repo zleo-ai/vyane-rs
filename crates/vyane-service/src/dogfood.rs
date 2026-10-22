@@ -1815,11 +1815,23 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 8, 4, 12, 0, 0).single().unwrap()
     }
 
+    fn run_private_dogfood(
+        root: &std::path::Path,
+        owner: &str,
+        suffix: &str,
+    ) -> Result<(CompletionReceipt, std::sync::Arc<ExternalEffectLog>), DogfoodError> {
+        // `run_successful_dogfood` creates `durable-{suffix}` before the store
+        // checks its parent. Pre-create that directory as mode 0700 so an
+        // umask of 002 cannot leave it group-writable.
+        crate::test_support::create_private_dir_all(root, &root.join(format!("durable-{suffix}")))
+            .expect("create private directory");
+        run_successful_dogfood(root, owner, suffix, now())
+    }
+
     #[test]
     fn dogfood_truth_probe_fails_then_succeeds_with_receipt() {
-        let root = tempfile::tempdir().unwrap();
-        let (receipt, effects) =
-            run_successful_dogfood(root.path(), "local", "aa01", now()).unwrap();
+        let root = crate::test_support::private_tempdir();
+        let (receipt, effects) = run_private_dogfood(root.path(), "local", "aa01").unwrap();
         assert_eq!(receipt.final_status, ReceiptFinalStatus::Completed);
         assert!(receipt.final_status.is_success());
         assert!(receipt.output_artifact_digest.is_some());
@@ -1835,8 +1847,7 @@ mod tests {
         assert_eq!(receipt.gates.truth_probe.outcome, GateOutcome::Passed);
         assert_eq!(effects.len(), 1);
         // Dual-run consistency: second full path also completes.
-        let (receipt2, effects2) =
-            run_successful_dogfood(root.path(), "local", "aa02", now()).unwrap();
+        let (receipt2, effects2) = run_private_dogfood(root.path(), "local", "aa02").unwrap();
         assert_eq!(receipt2.final_status, ReceiptFinalStatus::Completed);
         assert_eq!(effects2.len(), 1);
         assert_eq!(
@@ -1876,10 +1887,11 @@ mod tests {
 
     #[test]
     fn approval_required_blocks_effect() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         let mut config = sample_config(root.path(), "ask", workdir);
         config.require_approval = true;
         config.permission = PermissionDecision::Ask;
@@ -1894,10 +1906,11 @@ mod tests {
 
     #[test]
     fn approval_deny_then_grant_fails_closed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         let mut config = sample_config(root.path(), "deny", workdir);
         config.require_approval = true;
         config.permission = PermissionDecision::Ask;
@@ -1923,10 +1936,11 @@ mod tests {
     }
 
     fn open_ask_path(id: &str) -> (tempfile::TempDir, PathBuf, DogfoodPath) {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         let mut config = sample_config(root.path(), id, workdir);
         config.require_approval = true;
         config.permission = PermissionDecision::Ask;
@@ -2052,10 +2066,11 @@ mod tests {
 
     #[test]
     fn approval_grant_then_crash_before_effect_no_duplicate_on_resume() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let mut config = sample_config(root.path(), "gcrash", workdir);
         config.require_approval = true;
@@ -2129,10 +2144,11 @@ mod tests {
 
     #[test]
     fn approval_grant_allows_effect_and_completion() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let mut config = sample_config(root.path(), "grant", workdir);
         config.require_approval = true;
@@ -2167,10 +2183,11 @@ mod tests {
 
     #[test]
     fn cancel_before_effect_leaves_zero_effects() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         let mut config = sample_config(root.path(), "cancel", workdir);
         config.risk_class = RiskClass::ReadOnly;
         let mut path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
@@ -2185,10 +2202,11 @@ mod tests {
 
     #[test]
     fn crash_after_effect_true_process_restart_does_not_duplicate() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let config = sample_config(root.path(), "crash", workdir.clone());
         let config_reopen = config.clone();
@@ -2228,10 +2246,11 @@ mod tests {
 
     #[test]
     fn crash_after_agent_run_commit_leaves_succeeded_run_and_open_receipt() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let config = sample_config(root.path(), "succr", workdir);
         let mut path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
@@ -2272,10 +2291,11 @@ mod tests {
 
     #[test]
     fn crash_after_agent_run_commit_true_restart_finalizes_open_receipt() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let config = sample_config(root.path(), "sucop", workdir);
         let config_reopen = config.clone();
@@ -2323,7 +2343,7 @@ mod tests {
 
     #[test]
     fn durable_effect_log_survives_reopen_without_agent() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let log_path = root.path().join("effects.json");
         {
             let log = ExternalEffectLog::open(&log_path).unwrap();
@@ -2340,11 +2360,11 @@ mod tests {
 
     #[test]
     fn owner_isolation_on_dogfood_receipts() {
-        let root = tempfile::tempdir().unwrap();
-        let (r1, _) = run_successful_dogfood(root.path(), "alice", "b001", now()).unwrap();
+        let root = crate::test_support::private_tempdir();
+        let (r1, _) = run_private_dogfood(root.path(), "alice", "b001").unwrap();
         assert!(r1.final_status.is_success());
         // separate owner path
-        let (r2, _) = run_successful_dogfood(root.path(), "bob", "b002", now()).unwrap();
+        let (r2, _) = run_private_dogfood(root.path(), "bob", "b002").unwrap();
         assert_eq!(r2.owner, "bob");
         assert_ne!(r1.owner, r2.owner);
     }
@@ -2352,7 +2372,7 @@ mod tests {
     #[test]
     fn stale_lease_generation_cannot_complete_foreign_mutation() {
         // Cross-owner complete is fenced by KernelStore (foreign-as-absent).
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
         let task = TaskCase {
             task_case_id: "tc".into(),
@@ -2382,10 +2402,11 @@ mod tests {
 
     #[test]
     fn hostile_crash_after_artifact_true_restart() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let config = sample_config(root.path(), "art", workdir);
         let config2 = config.clone();
@@ -2412,10 +2433,11 @@ mod tests {
 
     #[test]
     fn hostile_cancel_race_after_claim() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         let mut config = sample_config(root.path(), "race", workdir);
         config.risk_class = RiskClass::ReadOnly;
         let mut path = DogfoodPath::open_durable(&durable, config, now()).unwrap();
@@ -2431,7 +2453,7 @@ mod tests {
 
     #[test]
     fn hostile_duplicate_command_replay_is_idempotent_or_detected() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let log = ExternalEffectLog::open(root.path().join("e.json")).unwrap();
         assert!(log.apply_once("cmd-1", "digest-a").unwrap());
         assert!(!log.apply_once("cmd-1", "digest-a").unwrap());
@@ -2444,8 +2466,8 @@ mod tests {
     #[test]
     fn hostile_corrupted_or_newer_schema_fails_closed() {
         let mut receipt = {
-            let root = tempfile::tempdir().unwrap();
-            let (r, _) = run_successful_dogfood(root.path(), "local", "schema", now()).unwrap();
+            let root = crate::test_support::private_tempdir();
+            let (r, _) = run_private_dogfood(root.path(), "local", "schema").unwrap();
             r
         };
         receipt.schema_version = 99;
@@ -2460,10 +2482,11 @@ mod tests {
 
     #[test]
     fn hostile_partial_process_tree_cleanup_is_visible() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let durable = root.path().join("d");
         let workdir = durable.join("wd");
-        fs::create_dir_all(&workdir).unwrap();
+        crate::test_support::create_private_dir_all(root.path(), &workdir)
+            .expect("create private directory");
         fs::write(workdir.join("MARKER"), "PASS").unwrap();
         let mut config = sample_config(root.path(), "tree", workdir);
         config.risk_class = RiskClass::ReadOnly;
@@ -2509,7 +2532,7 @@ mod tests {
             }
         }
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let clock = Arc::new(TestClock::new());
         let store =
             SqliteAgentStore::open_with_clock(root.path().join("agent.sqlite"), clock.clone())

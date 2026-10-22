@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::json;
+use tokio::sync::Mutex;
 use vyane_agent::{AgentEvent, AgentStore};
 use vyane_ledger::{EventCategory, EventDurability, EventLog, EventSource, NewEvent};
 
@@ -24,6 +25,13 @@ pub struct AgentEventProjector {
     event_log: EventLog,
     projector_id: String,
     stream_id: String,
+    /// Shared by clones so overlapping projections cannot pass one another.
+    order: Arc<Mutex<ProjectionOrder>>,
+}
+
+struct ProjectionOrder {
+    floor_known: bool,
+    floor: u64,
 }
 
 impl AgentEventProjector {
@@ -52,6 +60,10 @@ impl AgentEventProjector {
             event_log,
             projector_id: projector_id.into(),
             stream_id: stream_id.into(),
+            order: Arc::new(Mutex::new(ProjectionOrder {
+                floor_known: false,
+                floor: 0,
+            })),
         }
     }
 
@@ -71,8 +83,16 @@ impl AgentEventProjector {
     }
 
     /// Project at most `limit` source events and return without starting a
-    /// resident loop. A failed append leaves the event unacknowledged.
+    /// resident loop. A failed append leaves the event unacknowledged. A hole
+    /// in source sequence stops the page, so a later event cannot pass an
+    /// earlier one that is not yet visible.
     pub async fn project_once(&self, limit: usize) -> Result<ProjectionReport> {
+        let order = Arc::clone(&self.order);
+        let mut guard = order.lock().await;
+        if !guard.floor_known {
+            guard.floor = self.scan_source_floor().await?;
+            guard.floor_known = true;
+        }
         let store = Arc::clone(&self.store);
         let owner = self.scope.owner().to_string();
         let projector = self.projector_id.clone();
@@ -81,8 +101,25 @@ impl AgentEventProjector {
         })
         .await??;
         let read = page.items.len();
+        let has_more = page.has_more;
+        let mut items = page.items;
+        // Source sequence is append order. The store may omit a deferred row.
+        items.sort_by_key(|event| event.sequence);
+        let mut floor = guard.floor;
         let mut projected = 0;
-        for item in page.items {
+        let mut blocked = false;
+        for item in items {
+            if item.sequence > floor.saturating_add(1) {
+                let refreshed = self.scan_source_floor().await?;
+                if refreshed > floor {
+                    floor = refreshed;
+                    guard.floor = floor;
+                }
+                if item.sequence > floor.saturating_add(1) {
+                    blocked = true;
+                    break;
+                }
+            }
             self.event_log
                 .append(&self.stream_id, map_event(&item), EventDurability::Durable)
                 .await?;
@@ -94,13 +131,50 @@ impl AgentEventProjector {
                 store.mark_projected(&owner, &projector, &event_id)
             })
             .await??;
+            if item.sequence > floor {
+                floor = item.sequence;
+                guard.floor = floor;
+            }
             projected += 1;
         }
         Ok(ProjectionReport {
             read,
             projected,
-            has_more: page.has_more,
+            has_more: !blocked && has_more,
         })
+    }
+
+    /// Highest source sequence already durable in this projector's stream.
+    async fn scan_source_floor(&self) -> Result<u64> {
+        let mut after = 0_u64;
+        let mut floor = 0_u64;
+        loop {
+            let page = self
+                .event_log
+                .read_after(self.scope.owner(), &self.stream_id, after, 1_000)
+                .await?;
+            let Some(last) = page.events.last() else {
+                break;
+            };
+            let next_after = last.sequence;
+            if next_after <= after {
+                break;
+            }
+            for event in &page.events {
+                if let Some(sequence) = event
+                    .payload
+                    .get("agent_event_sequence")
+                    .and_then(serde_json::Value::as_u64)
+                {
+                    floor = floor.max(sequence);
+                }
+            }
+            after = next_after;
+            if !page.has_more {
+                break;
+            }
+        }
+        Ok(floor)
     }
 }
 
@@ -143,7 +217,6 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use chrono::Utc;
-    use tempfile::TempDir;
     use vyane_agent::{ExecutionBackend, NewAgentRun, NewWorker, RunMode, SqliteAgentStore};
 
     use super::*;
@@ -181,7 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_after_append_retries_the_same_stable_identity() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let concrete =
             Arc::new(SqliteAgentStore::open(directory.path().join("agent.sqlite3")).unwrap());
         add_root(concrete.as_ref(), "owner");

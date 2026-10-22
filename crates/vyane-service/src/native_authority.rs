@@ -370,7 +370,7 @@ mod tests {
         ActiveExecutionPermit,
         NativeExecutionScope,
     ) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let clock = Arc::new(TestClock::new());
         let store = Arc::new(
             SqliteAgentStore::open_with_clock(directory.path().join("agent.sqlite"), clock.clone())

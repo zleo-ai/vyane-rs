@@ -14,6 +14,8 @@ mod projection;
 mod pursuit;
 mod sqlite;
 mod store;
+#[cfg(test)]
+mod test_support;
 
 pub use acceptance::{
     AcceptanceVerifier, MAX_OUTPUT_TAIL_BYTES, MAX_VERIFIER_TIMEOUT, criterion_key, parse_command,

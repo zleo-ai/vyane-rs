@@ -12,11 +12,14 @@ mod error;
 mod model;
 mod sqlite;
 mod store;
+#[cfg(test)]
+mod test_support;
 
 pub use error::{Result, TaskStoreError};
 pub use model::{
-    ControllerRef, FailureCode, Lease, NewTask, TaskCursor, TaskEvent, TaskEventKind, TaskKind,
-    TaskOrigin, TaskPage, TaskQuery, TaskRecord, TaskSettlement, TaskState,
+    ControllerRef, FailureCode, Lease, NewTask, TaskCursor, TaskDispatchPersistence, TaskEvent,
+    TaskEventKind, TaskKind, TaskOrigin, TaskPage, TaskPersistenceStep, TaskQuery, TaskRecord,
+    TaskSettlement, TaskState,
 };
 pub use sqlite::{SCHEMA_VERSION, SqliteTaskStore};
 pub use store::TaskStore;

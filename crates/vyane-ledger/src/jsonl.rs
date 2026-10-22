@@ -19,11 +19,11 @@
 //! may be lost with the page cache. Crash-durable accounting is a deliberate
 //! non-goal for the plain-files v0.1 backend.
 //!
-//! `query` reads the file and walks it **most-recent-first**, skipping any line
-//! that fails to parse (counted, never fatal). Reading takes no lock; if a
-//! read ever races an in-flight append it will simply treat the still-incomplete
-//! trailing line as corrupt and skip it, which is exactly the graceful path the
-//! corrupt-line tolerance is designed for.
+//! `query` reads the file and walks it **most-recent-first**. A line that fails
+//! to parse is counted and skipped, never fatal. A complete JSON value followed
+//! by a corrupt tail on that same line is kept; only the tail is counted, so
+//! the tail cannot hide the value or any earlier line. Reading takes no lock;
+//! a race with an in-flight append uses that same path.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -74,6 +74,19 @@ impl JsonlLedger {
     /// corrupt lines that were skipped. A missing file is an empty ledger, not
     /// an error.
     fn query_blocking(path: &Path, query: RunQuery) -> Result<(Vec<RunRecord>, u64)> {
+        if query
+            .since
+            .zip(query.until)
+            .is_some_and(|(since, until)| since > until)
+        {
+            return Err(VyaneError::new(
+                ErrorKind::Config,
+                "since must not be later than until",
+            ));
+        }
+        if query.limit == Some(0) {
+            return Ok((Vec::new(), 0));
+        }
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -82,11 +95,6 @@ impl JsonlLedger {
             Err(e) => return Err(e.into()),
         };
 
-        // from_utf8_lossy: a record line is UTF-8 JSON; bytes that aren't UTF-8
-        // (true corruption) become replacement chars and fail to parse, which
-        // is the correct "skip and count" outcome.
-        let text = String::from_utf8_lossy(&bytes);
-
         // Most-recent records are appended last, so walk the file backwards.
         // `limit` caps how many *matching* records we collect, not how many we
         // scan; `None` means return every match.
@@ -94,27 +102,29 @@ impl JsonlLedger {
         let mut out: Vec<RunRecord> = Vec::new();
         let mut skipped = 0u64;
 
-        for line in text.rsplit('\n') {
-            let trimmed = line.trim_end();
-            if trimmed.is_empty() {
-                // A blank line (e.g. the slot after a trailing newline) is not
-                // a corrupt record — just an empty separator. Skip silently.
+        for line in bytes.rsplit(|&byte| byte == b'\n') {
+            let Some(line) = query_line(line) else {
                 continue;
+            };
+            let (records, corrupt) = records_on_line(line);
+            if corrupt {
+                // Unparseable bytes: count them so a caller can detect
+                // corruption. Never panic, and never discard a value already
+                // parsed ahead of the tail.
+                skipped += 1;
             }
-            match serde_json::from_str::<RunRecord>(trimmed) {
-                Ok(record) => {
-                    if matches_query(&record, &query) {
-                        out.push(record);
-                        if out.len() >= limit {
-                            break;
-                        }
+            let mut stop = false;
+            for record in records.into_iter().rev() {
+                if matches_query(&record, &query) {
+                    out.push(record);
+                    if out.len() >= limit {
+                        stop = true;
+                        break;
                     }
                 }
-                Err(_) => {
-                    // Unparseable non-empty line: skip it, but count it so a
-                    // caller can detect corruption. Never panic.
-                    skipped += 1;
-                }
+            }
+            if stop {
+                break;
             }
         }
 
@@ -168,9 +178,52 @@ impl Ledger for JsonlLedger {
     }
 }
 
+/// Bytes to parse for one physical line.
+///
+/// Blank separators are not corruption. Invalid UTF-8 stays intact so a bad
+/// byte inside a value cannot be lossily repaired into a different record;
+/// a complete value before that tail is recovered by [`records_on_line`].
+fn query_line(line: &[u8]) -> Option<&[u8]> {
+    match std::str::from_utf8(line) {
+        Ok(text) => {
+            let trimmed = text.trim_end();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.as_bytes())
+            }
+        }
+        Err(_) => Some(line),
+    }
+}
+
+/// Complete records on one line, plus whether a corrupt tail (or a wholly
+/// unparseable line) was present.
+///
+/// Values are in file order. Callers walk them newest-first. Parsing stops at
+/// the first bad value, so invalid UTF-8 inside a record still rejects that
+/// record instead of repairing it.
+fn records_on_line(line: &[u8]) -> (Vec<RunRecord>, bool) {
+    let mut records = Vec::new();
+    let mut corrupt = false;
+    for item in serde_json::Deserializer::from_slice(line).into_iter::<RunRecord>() {
+        match item {
+            Ok(record) => records.push(record),
+            Err(_) => {
+                corrupt = true;
+                break;
+            }
+        }
+    }
+    if records.is_empty() {
+        corrupt = true;
+    }
+    (records, corrupt)
+}
+
 /// Whether `record` passes every filter set on `query`. Unset fields match
 /// anything. `owner` is matched exactly (owner is a scope, not a search term);
-/// `since` is compared against `started_at` (inclusive).
+/// `since` and `until` are compared against `started_at` (both inclusive).
 fn matches_query(record: &RunRecord, query: &RunQuery) -> bool {
     if let Some(owner) = &query.owner
         && record.owner != *owner
@@ -189,6 +242,11 @@ fn matches_query(record: &RunRecord, query: &RunQuery) -> bool {
     }
     if let Some(since) = query.since
         && record.started_at < since
+    {
+        return false;
+    }
+    if let Some(until) = query.until
+        && record.started_at > until
     {
         return false;
     }

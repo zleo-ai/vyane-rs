@@ -3,6 +3,7 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -262,9 +263,9 @@ fn wait_for_running_checkpoint(data_dir: &Path, workdir: &Path, budget: Duration
 
 #[test]
 fn detached_daemon_forwards_opt_in_and_pursues_a_queued_goal() {
-    let fixture = TempDir::new().unwrap();
-    let data = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let fixture = common::private_tempdir();
+    let data = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let config = write_config(&fixture);
     let bin = write_fake_harness(&fixture);
     create_goal(data.path(), workdir.path());
@@ -288,9 +289,9 @@ fn detached_daemon_forwards_opt_in_and_pursues_a_queued_goal() {
 
 #[test]
 fn daemon_restart_adopts_running_checkpoint_without_implicit_pause() {
-    let fixture = TempDir::new().unwrap();
-    let data = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let fixture = common::private_tempdir();
+    let data = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let config = write_config(&fixture);
     let bin = write_fake_harness(&fixture);
     write_blocking_harness(&bin);
@@ -320,9 +321,9 @@ fn daemon_restart_adopts_running_checkpoint_without_implicit_pause() {
 
 #[test]
 fn enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first() {
-    let fixture = TempDir::new().unwrap();
-    let data = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let fixture = common::private_tempdir();
+    let data = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let config = write_config(&fixture);
     let bin = write_fake_harness(&fixture);
     let mut daemon = DaemonGuard::start_plain(data.path(), &config);
@@ -355,9 +356,9 @@ fn enabling_auto_pursuit_requires_stopping_a_plain_existing_daemon_first() {
 
 #[test]
 fn resident_daemon_settles_queued_goals_sequentially_by_priority() {
-    let fixture = TempDir::new().unwrap();
-    let data = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let fixture = common::private_tempdir();
+    let data = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let config = write_config(&fixture);
     let bin = write_fake_harness(&fixture);
     create_goal_named(data.path(), workdir.path(), "resident-low", "3");
@@ -376,9 +377,9 @@ fn resident_daemon_settles_queued_goals_sequentially_by_priority() {
 
 #[test]
 fn pursuit_transaction_error_allows_next_goal_during_cooldown() {
-    let fixture = TempDir::new().unwrap();
-    let data = TempDir::new().unwrap();
-    let workdir = TempDir::new().unwrap();
+    let fixture = common::private_tempdir();
+    let data = common::private_tempdir();
+    let workdir = common::private_tempdir();
     let config = write_config(&fixture);
     let bin = write_fake_harness(&fixture);
     create_goal_named(data.path(), workdir.path(), "resident-failing", "0");

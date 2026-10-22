@@ -54,8 +54,23 @@ pub fn infer_route_tags_with_intent(task: &str, intent: &IntentResult) -> Vec<St
             "oauth2",
             "permissions",
         ],
-    ) || contains_word_prefix(&text, "auth", &["entication", "orization"])
-    {
+    ) || contains_word_prefix(
+        &text,
+        "auth",
+        // 只接受完整词尾并检查末端边界；orize 家族保留 z，避免 author / authority 误报。
+        &[
+            "entication",
+            "enticate",
+            "enticated",
+            "enticates",
+            "enticating",
+            "orization",
+            "orize",
+            "orized",
+            "orizes",
+            "orizing",
+        ],
+    ) {
         add!("security");
     }
     // Architecture
@@ -222,6 +237,66 @@ mod tests {
     fn security_matches_authentication() {
         let tags = infer_route_tags("add authentication to the endpoint");
         assert!(tags.contains(&"security".to_string()));
+    }
+
+    #[test]
+    fn security_matches_auth_verb_inflections() {
+        for task in [
+            "authenticate the user",
+            "add authenticated endpoints to the app",
+            "authenticates every request",
+            "authenticating the session",
+            "authorize this action",
+            "the request was authorized",
+            "authorizes admin users",
+            "authorizing the transaction",
+            "(AUTHENTICATED), Authorizing!",
+            "重新 authenticating 会话",
+            "reauthenticate first; authorize next",
+        ] {
+            let tags = infer_route_tags(task);
+            assert!(tags.iter().any(|tag| tag == "security"), "{task}: {tags:?}");
+        }
+    }
+
+    #[test]
+    fn security_excludes_auth_lookalikes_and_embedded_words() {
+        for word in [
+            "author",
+            "authors",
+            "authority",
+            "authoritative",
+            "authentic",
+            "authenticity",
+            "authenticator",
+            "reauthenticate",
+            "unauthorized",
+        ] {
+            let tags = infer_route_tags(word);
+            assert!(
+                !tags.iter().any(|tag| tag == "security"),
+                "{word}: {tags:?}"
+            );
+        }
+        // 每个白名单词尾的两侧都必须保留词边界。
+        for word in [
+            "authenticate",
+            "authenticated",
+            "authenticates",
+            "authenticating",
+            "authorize",
+            "authorized",
+            "authorizes",
+            "authorizing",
+        ] {
+            for task in [format!("x{word}"), format!("{word}x")] {
+                let tags = infer_route_tags(&task);
+                assert!(
+                    !tags.iter().any(|tag| tag == "security"),
+                    "{task}: {tags:?}"
+                );
+            }
+        }
     }
 
     #[test]

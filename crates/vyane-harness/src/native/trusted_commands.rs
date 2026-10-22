@@ -308,6 +308,16 @@ impl NativeCommandPolicyError {
 pub enum NativeCommandHostError {
     #[error("native command tools require x86_64 or aarch64 Linux bubblewrap confinement")]
     Unsupported,
+    /// The host's current thread count plus the fixed admission headroom is
+    /// above the fixed process limit. The limit and headroom are unchanged.
+    #[error(
+        "host thread count {observed_threads} plus admission headroom {headroom} exceeds the command admission limit {limit}"
+    )]
+    ProcessCeilingExceeded {
+        observed_threads: u64,
+        limit: u64,
+        headroom: u64,
+    },
 }
 
 impl NativeCommandHostError {
@@ -316,8 +326,41 @@ impl NativeCommandHostError {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Unsupported => "unsupported",
+            Self::ProcessCeilingExceeded { .. } => "process_ceiling_exceeded",
         }
     }
+}
+
+/// Decide whether `observed_threads` can be admitted under the fixed ceiling.
+///
+/// The returned count is the limit passed to the sandbox (`observed` plus
+/// headroom). Overflow and any sum above [`COMMAND_PROCESS_LIMIT_MAX`] are
+/// [`NativeCommandHostError::ProcessCeilingExceeded`].
+fn admit_process_count(observed_threads: u64) -> Result<u64, NativeCommandHostError> {
+    let headroom = COMMAND_PROCESS_HEADROOM;
+    let limit = COMMAND_PROCESS_LIMIT_MAX;
+    match observed_threads.checked_add(headroom) {
+        Some(admitted) if admitted <= limit => Ok(admitted),
+        Some(_) | None => Err(NativeCommandHostError::ProcessCeilingExceeded {
+            observed_threads,
+            limit,
+            headroom,
+        }),
+    }
+}
+
+/// Observed thread count when this process can admit a sandboxed command.
+///
+/// [`NativeCommandHostError::ProcessCeilingExceeded`] is distinct from
+/// [`NativeCommandHostError::Unsupported`]: the request can be well formed
+/// and still be refused because the host is already too busy.
+pub fn command_process_ceiling() -> Result<u64, NativeCommandHostError> {
+    if !command_arch_supported() {
+        return Err(NativeCommandHostError::Unsupported);
+    }
+    let observed = current_uid_thread_count().map_err(|_| NativeCommandHostError::Unsupported)?;
+    admit_process_count(observed)?;
+    Ok(observed)
 }
 
 #[cfg(target_os = "linux")]
@@ -352,8 +395,7 @@ pub async fn validate_command_network_host_with_mounts(
         5,
         true,
         &command_policy.writable_roots,
-    )
-    .map_err(|_| NativeCommandHostError::Unsupported)?;
+    )?;
     let probe_authority = ProbeAuthority;
     let result = run_networked_command(
         &args,
@@ -540,8 +582,7 @@ pub async fn validate_command_host_with_mounts(
         5,
         false,
         &policy.writable_roots,
-    )
-    .map_err(|_| NativeCommandHostError::Unsupported)?;
+    )?;
     let probe_authority = ProbeAuthority;
     let result = run_capture_with_pinned_limit_authorized_mounts(
         PRLIMIT,
@@ -704,11 +745,7 @@ impl NativeTool for RunCommandTool {
             &self.policy.writable_roots,
         ) {
             Ok(args) => args,
-            Err(()) => {
-                return Ok(Err(ToolError::new(
-                    "run_command could not establish the process ceiling",
-                )));
-            }
+            Err(error) => return Ok(Err(ToolError::new(error.to_string()))),
         };
         let control = || {
             RunControl::new(
@@ -1385,14 +1422,13 @@ fn launcher_args(
     cpu_seconds: u64,
     network: bool,
     writable_roots: &[String],
-) -> Result<Vec<String>, ()> {
+) -> Result<Vec<String>, NativeCommandHostError> {
     if !command_arch_supported() {
-        return Err(());
+        return Err(NativeCommandHostError::Unsupported);
     }
-    let process_count = current_uid_thread_count()?
-        .checked_add(COMMAND_PROCESS_HEADROOM)
-        .filter(|count| *count <= COMMAND_PROCESS_LIMIT_MAX)
-        .ok_or(())?;
+    let process_count = admit_process_count(
+        current_uid_thread_count().map_err(|_| NativeCommandHostError::Unsupported)?,
+    )?;
     let mut launcher = vec![
         format!("--as={COMMAND_ADDRESS_SPACE_BYTES}"),
         format!("--nproc={process_count}"),
@@ -1606,8 +1642,53 @@ mod tests {
     }
 
     #[test]
+    fn process_ceiling_names_the_observed_count_and_the_limit() {
+        let admitted = COMMAND_PROCESS_LIMIT_MAX - COMMAND_PROCESS_HEADROOM;
+        assert_eq!(
+            admit_process_count(admitted).expect("count at the ceiling"),
+            COMMAND_PROCESS_LIMIT_MAX
+        );
+        let error = admit_process_count(admitted + 1).expect_err("one past the ceiling");
+        assert_eq!(error.as_str(), "process_ceiling_exceeded");
+        assert_ne!(error.as_str(), NativeCommandHostError::Unsupported.as_str());
+        match error {
+            NativeCommandHostError::ProcessCeilingExceeded {
+                observed_threads,
+                limit,
+                headroom,
+            } => {
+                assert_eq!(observed_threads, admitted + 1);
+                assert_eq!(limit, COMMAND_PROCESS_LIMIT_MAX);
+                assert_eq!(headroom, COMMAND_PROCESS_HEADROOM);
+            }
+            NativeCommandHostError::Unsupported => {
+                panic!("ceiling must not collapse to unsupported")
+            }
+        }
+        let message = error.to_string();
+        assert!(message.contains(&(admitted + 1).to_string()), "{message}");
+        assert!(
+            message.contains(&COMMAND_PROCESS_LIMIT_MAX.to_string()),
+            "{message}"
+        );
+        assert!(matches!(
+            admit_process_count(u64::MAX),
+            Err(NativeCommandHostError::ProcessCeilingExceeded { .. })
+        ));
+    }
+
+    #[test]
     fn native_command_host_and_register_error_kind_tokens_are_snake_case() {
         assert_eq!(NativeCommandHostError::Unsupported.as_str(), "unsupported");
+        assert_eq!(
+            NativeCommandHostError::ProcessCeilingExceeded {
+                observed_threads: 1,
+                limit: COMMAND_PROCESS_LIMIT_MAX,
+                headroom: COMMAND_PROCESS_HEADROOM,
+            }
+            .as_str(),
+            "process_ceiling_exceeded"
+        );
         assert_eq!(
             RegisterCommandToolError::Command(NativeCommandPolicyError::EmptyAllowlist).as_str(),
             "command_policy"

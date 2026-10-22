@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::sync::Arc;
 
 use tempfile::TempDir;
@@ -18,7 +19,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = common::private_tempdir();
         let concrete =
             Arc::new(SqliteMessageStore::open(directory.path().join("messages.sqlite3")).unwrap());
         let store: Arc<dyn MessageStore> = concrete.clone();

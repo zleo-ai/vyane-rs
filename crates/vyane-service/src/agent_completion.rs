@@ -279,7 +279,7 @@ mod tests {
         Arc<SqliteMessageStore>,
         MessageAgentCompletionSink,
     ) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store =
             Arc::new(SqliteMessageStore::open(directory.path().join("messages.sqlite3")).unwrap());
         let erased: Arc<dyn MessageStore> = store.clone();
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn constructor_rejects_invalid_owner_without_store_access() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store: Arc<dyn MessageStore> =
             Arc::new(SqliteMessageStore::open(directory.path().join("messages.sqlite3")).unwrap());
         assert!(MessageAgentCompletionSink::new(" bad", store).is_err());

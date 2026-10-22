@@ -47,7 +47,7 @@ use crate::native_agent_spool::{
 use crate::task::LOCAL_TASK_OWNER;
 use crate::task::store::TargetSnapshot;
 use vyane_harness::native::{
-    prepare_command_mounts_async, validate_command_host_with_mounts,
+    NativeCommandHostError, prepare_command_mounts_async, validate_command_host_with_mounts,
     validate_command_network_host_with_mounts,
 };
 
@@ -626,11 +626,11 @@ impl DaemonAgentHost {
             if let Some(network) = &input.policy.command_network {
                 validate_command_network_host_with_mounts(&workdir, policy, network, &mounts)
                     .await
-                    .map_err(|_| AgentApiError::bad_request())?;
+                    .map_err(AgentApiError::from_command_host)?;
             } else {
                 validate_command_host_with_mounts(&workdir, policy, &mounts)
                     .await
-                    .map_err(|_| AgentApiError::bad_request())?;
+                    .map_err(AgentApiError::from_command_host)?;
             }
             Some(mounts)
         } else {
@@ -1110,38 +1110,61 @@ async fn cancel_agent_run(
     ))
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct AgentApiError {
     status: StatusCode,
-    message: &'static str,
+    code: &'static str,
+    message: String,
 }
 
 impl AgentApiError {
     fn bad_request() -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            message: "invalid AgentRun request",
-        }
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "invalid AgentRun request",
+        )
     }
 
     fn not_found() -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            message: "AgentRun not found",
-        }
+        Self::new(StatusCode::NOT_FOUND, "not_found", "AgentRun not found")
     }
 
     fn conflict() -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            message: "AgentRun request conflicts with durable state",
-        }
+        Self::new(
+            StatusCode::CONFLICT,
+            "conflict",
+            "AgentRun request conflicts with durable state",
+        )
     }
 
     fn unavailable() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "AgentRun service unavailable",
+        )
+    }
+
+    /// A thread-ceiling refusal is a current host condition, not a malformed
+    /// request. 503 matches the other "cannot admit this right now" responses.
+    /// 409 stays reserved for a conflict with durable AgentRun state.
+    fn from_command_host(error: NativeCommandHostError) -> Self {
+        match error {
+            NativeCommandHostError::ProcessCeilingExceeded { .. } => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                error.as_str(),
+                error.to_string(),
+            ),
+            NativeCommandHostError::Unsupported => Self::bad_request(),
+        }
+    }
+
+    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            message: "AgentRun service unavailable",
+            status,
+            code,
+            message: message.into(),
         }
     }
 }
@@ -1150,7 +1173,10 @@ impl IntoResponse for AgentApiError {
     fn into_response(self) -> Response {
         (
             self.status,
-            Json(serde_json::json!({"error": self.message})),
+            Json(serde_json::json!({
+                "error": self.message,
+                "code": self.code,
+            })),
         )
             .into_response()
     }
@@ -1252,6 +1278,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use axum::response::IntoResponse;
+
     use super::{
         AgentRunSubmitRequest, SubmissionGate, apply_native_permission_ceilings,
         cancel_operation_id, exact_retry_backend, freeze_requested_workdir,
@@ -1260,6 +1288,30 @@ mod tests {
     use crate::native_agent_spool::{NativeAgentSpoolCreate, NativeWorkdirInstall};
     use vyane_agent::ExecutionBackend;
     use vyane_core::Sandbox;
+
+    #[tokio::test]
+    async fn process_ceiling_is_service_unavailable_not_invalid_request() {
+        let error = vyane_harness::native::NativeCommandHostError::ProcessCeilingExceeded {
+            observed_threads: 5_000,
+            limit: 4_096,
+            headroom: 64,
+        };
+        let response = super::AgentApiError::from_command_host(error).into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_ne!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("error body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+        assert_eq!(json["code"], "process_ceiling_exceeded");
+        assert_ne!(json["error"], "invalid AgentRun request");
+        let message = json["error"].as_str().expect("error message");
+        assert!(message.contains("5000"), "{message}");
+        assert!(message.contains("4096"), "{message}");
+    }
 
     #[test]
     fn native_read_exclusions_are_explicit_and_default_to_workspace_read() {
@@ -1586,7 +1638,7 @@ mod tests {
 
     #[test]
     fn read_only_workdir_is_frozen_to_its_canonical_path() {
-        let directory = tempfile::tempdir().expect("create workdir fixture");
+        let directory = crate::test_support::private_tempdir();
         let actual = directory.path().join("actual");
         let alias = directory.path().join("alias");
         std::fs::create_dir(&actual).expect("create canonical workdir");

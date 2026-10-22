@@ -13,6 +13,8 @@ mod error;
 mod model;
 mod sqlite;
 mod store;
+#[cfg(test)]
+mod test_support;
 
 pub use error::{MessageStoreError, Result};
 pub use model::{

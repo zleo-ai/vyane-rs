@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use vyane_broker::ResidentBrokerSupervisor;
@@ -22,12 +22,15 @@ use vyane_core::{
     TaskSpec, Usage,
 };
 use vyane_kernel::{DispatchOutcome, PreparedDispatch, StreamDispatchEvent};
+use vyane_ledger::{EventLog, EventRecord};
 
+use crate::HistoryStats;
 use crate::agent::AgentProjectionComponents;
 use crate::config::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::diagnostics::{
     ConfigCheckReport, RoutePreview, RoutePreviewParams, check_config, route_preview,
 };
+use crate::dispatch_event::read_terminal_dispatch_events;
 use crate::message::MessageComponents;
 use crate::owner::OwnerContext;
 use crate::routing::{DispatchPlan, plan_dispatch};
@@ -102,6 +105,10 @@ pub struct HistoryFilter {
     pub limit: Option<usize>,
     pub status: Option<RunStatus>,
     pub provider: Option<String>,
+    /// Inclusive lower bound on run start time; applied before the limit.
+    pub since: Option<DateTime<Utc>>,
+    /// Inclusive upper bound on run start time; applied before the limit.
+    pub until: Option<DateTime<Utc>>,
 }
 
 /// One resolved target + its raw selector, returned by [`VyaneService::resolve`].
@@ -795,13 +802,21 @@ impl VyaneService {
     }
 
     async fn history_with(&self, owner: &str, filter: HistoryFilter) -> Result<Vec<RunRecord>> {
+        if filter
+            .since
+            .zip(filter.until)
+            .is_some_and(|(since, until)| since > until)
+        {
+            bail!("since must not be later than until");
+        }
         self.runtime
             .ledger
             .query(RunQuery {
                 owner: Some(owner.to_string()),
                 provider: filter.provider.map(ProviderId::new),
                 status: filter.status,
-                since: None,
+                since: filter.since,
+                until: filter.until,
                 limit: filter.limit,
             })
             .await
@@ -813,6 +828,24 @@ impl VyaneService {
     pub async fn history_views(&self, filter: HistoryFilter) -> Result<Vec<RunView>> {
         self.scope(OwnerContext::single_user_local())
             .history_views(filter)
+            .await
+    }
+
+    /// Count records matching the filter under the local owner scope.
+    /// Protocol statistics queries use no list limit so every match is counted.
+    pub async fn history_stats(&self, filter: HistoryFilter) -> Result<HistoryStats> {
+        self.scope(OwnerContext::single_user_local())
+            .history_stats(filter)
+            .await
+    }
+
+    /// Replay terminal dispatch events already stored for one local run.
+    ///
+    /// This reads the existing owner-scoped dispatch stream. It does not
+    /// subscribe over the network or open a second queue.
+    pub async fn terminal_dispatch_events(&self, run_id: &str) -> Result<Vec<EventRecord>> {
+        self.scope(OwnerContext::single_user_local())
+            .terminal_dispatch_events(run_id)
             .await
     }
 
@@ -1059,6 +1092,22 @@ impl OwnerScopedService {
         self.service.history_with(&self.owner, filter).await
     }
 
+    /// Replay terminal dispatch events already stored for one run under the
+    /// owner frozen into this facade.
+    ///
+    /// The read uses the existing dispatch stream. It does not subscribe over
+    /// the network or open a second queue. A run stored for another owner
+    /// yields no events.
+    pub async fn terminal_dispatch_events(&self, run_id: &str) -> Result<Vec<EventRecord>> {
+        read_terminal_dispatch_events(
+            &EventLog::new(self.service.storage_paths().event_log_dir()),
+            &self.owner,
+            run_id,
+        )
+        .await
+        .context("read dispatch terminal events")
+    }
+
     /// Query only this owner's allowlisted run views.
     pub async fn history_views(&self, filter: HistoryFilter) -> Result<Vec<RunView>> {
         Ok(self
@@ -1067,6 +1116,13 @@ impl OwnerScopedService {
             .into_iter()
             .map(RunView::from)
             .collect())
+    }
+
+    /// Count only this owner's matching records, including any explicit filter limit.
+    pub async fn history_stats(&self, mut filter: HistoryFilter) -> Result<HistoryStats> {
+        // RunQuery::None permits a backend default. Request every match explicitly.
+        filter.limit = Some(filter.limit.unwrap_or(usize::MAX));
+        Ok(HistoryStats::from_records(&self.history(filter).await?))
     }
 
     /// List only this owner's legacy session records.
@@ -1229,6 +1285,7 @@ mod tests {
                 )]),
                 native_permission_ceilings: Vec::new(),
                 harness_permission_ceilings: Vec::new(),
+                model_rates: Default::default(),
             },
             files: Vec::new(),
             secrets: BTreeMap::new(),
@@ -1397,7 +1454,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_lists_inspects_and_resets_only_the_local_owner() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         service
             .runtime()
@@ -1483,7 +1540,7 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_dispatch_and_broadcast_persist_only_the_frozen_owner() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = executable_service(&directory);
         let owner_a = service.scope(owner_context("a"));
         let owner_b = service.scope(owner_context("b"));
@@ -1565,8 +1622,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_terminal_dispatch_read_hides_another_owners_run() {
+        let directory = crate::test_support::private_tempdir();
+        let service = service(&directory);
+        let now = Utc::now();
+        let mut record = RunRecord {
+            run_id: "run-a".into(),
+            owner: "tenant-alice".into(),
+            started_at: now,
+            finished_at: now,
+            task_digest: "CANARY_DIGEST".into(),
+            task_preview: Some("CANARY_PROMPT".into()),
+            workdir: Some("/CANARY_WORKDIR".into()),
+            sandbox: Sandbox::ReadOnly,
+            target: target(),
+            transport: AdapterTransport::DirectHttp,
+            attempts: Vec::new(),
+            status: RunStatus::Success,
+            usage: None,
+            cost_usd: None,
+            session_id: Some("CANARY_SESSION".into()),
+            output_chars: None,
+            error: Some("CANARY_ERROR".into()),
+            labels: BTreeMap::from([("CANARY_LABEL".into(), "CANARY_VALUE".into())]),
+        };
+        service.runtime().ledger.append(&record).await.unwrap();
+        record.run_id = "run-other".into();
+        record.status = RunStatus::Cancelled;
+        service.runtime().ledger.append(&record).await.unwrap();
+        record.run_id = "run-b".into();
+        record.owner = "tenant-bob".into();
+        record.status = RunStatus::Error;
+        service.runtime().ledger.append(&record).await.unwrap();
+
+        let alice = service.scope(owner_context("alice"));
+        let bob = service.scope(owner_context("bob"));
+        let alice_run = alice.terminal_dispatch_events("run-a").await.unwrap();
+        let bob_reads_alice = bob.terminal_dispatch_events("run-a").await.unwrap();
+        let alice_reads_bob = alice.terminal_dispatch_events("run-b").await.unwrap();
+        let bob_run = bob.terminal_dispatch_events("run-b").await.unwrap();
+
+        assert_eq!(alice_run.len(), 1);
+        assert_eq!(alice_run[0].owner, "tenant-alice");
+        assert_eq!(
+            alice_run[0]
+                .payload
+                .get("run_id")
+                .and_then(|value| value.as_str()),
+            Some("run-a")
+        );
+        assert!(bob_reads_alice.is_empty());
+        assert!(alice_reads_bob.is_empty());
+        assert_eq!(bob_run.len(), 1);
+        assert_eq!(bob_run[0].owner, "tenant-bob");
+        let wire = serde_json::to_string(&alice_run[0]).unwrap();
+        for canary in [
+            "CANARY_DIGEST",
+            "CANARY_PROMPT",
+            "CANARY_WORKDIR",
+            "CANARY_SESSION",
+            "CANARY_ERROR",
+            "CANARY_LABEL",
+            "CANARY_VALUE",
+        ] {
+            assert!(!wire.contains(canary), "leaked {canary}");
+        }
+    }
+
+    #[tokio::test]
     async fn authorized_service_dispatch_rejects_http_and_sessions_without_a_run() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = executable_service(&directory);
         let scoped = service.scope(owner_context("authorized"));
         let authority = || HarnessSpawnAuthority::new(|| true);
@@ -1604,7 +1729,7 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_sessions_isolate_same_id_and_reset_cannot_cross_owner() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let owner_a = service.scope(owner_context("a"));
         let owner_b = service.scope(owner_context("b"));

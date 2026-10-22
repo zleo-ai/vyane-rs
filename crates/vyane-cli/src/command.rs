@@ -10,8 +10,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use vyane_config::ResolvedConfig;
 use vyane_core::{
     AdapterTransport, BoundTarget, CancellationToken, ErrorKind, Harness, HarnessKind,
-    HarnessLifecycleEvent, HarnessLifecycleReporter, ProviderId, RunQuery, RunStatus, Sandbox,
-    SessionRef, TaskSpec, VyaneError,
+    HarnessLifecycleEvent, HarnessLifecycleReporter, ProviderId, RunQuery, RunRecord, RunStatus,
+    Sandbox, SessionRef, TaskSpec, VyaneError,
 };
 use vyane_harness::{ClaudeCodeHarness, CodexCliHarness};
 use vyane_service::{SessionView, VyaneService, resolve_target_chain, split_targets};
@@ -26,11 +26,11 @@ use vyane_workflow::{
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{
-    BroadcastArgs, Cli, Command, DaemonCommand, DispatchArgs, HistoryArgs, ReviewArgs, RouteArgs,
-    ServeArgs, SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs,
+    BroadcastArgs, CheckArgs, Cli, Command, DaemonCommand, DispatchArgs, HistoryArgs, ReviewArgs,
+    RouteArgs, ServeArgs, SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs,
     TaskCancelArgs, TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCancelArgs,
-    WorkflowCommand, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs, WorkflowStatusArgs,
-    WorkflowSubmitArgs,
+    WorkflowCommand, WorkflowPlanArgs, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs,
+    WorkflowStatusArgs, WorkflowSubmitArgs,
 };
 use crate::daemon_client::DaemonWorkflowClient;
 use crate::output::{BroadcastJson, BroadcastRow, DurableTaskStatusJson, RunJson, TaskRow};
@@ -67,13 +67,14 @@ fn is_local_detached_dispatch(record: &TaskRecord) -> bool {
 
 pub async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::Check => run_check(cli.config).await,
+        Command::Check(args) => run_check(cli.config, args).await,
         Command::Dispatch(args) => run_dispatch(cli.config, args).await,
         Command::Broadcast(args) => run_broadcast(cli.config, args).await,
         Command::History(args) => run_history(args).await,
         Command::Sessions(args) => run_sessions(args).await,
         Command::Session(command) => run_session(command).await,
         Command::Workflow(command) => match command {
+            WorkflowCommand::Plan(args) => plan_workflow(args),
             WorkflowCommand::Run(args) => run_workflow(cli.config, args).await,
             WorkflowCommand::Submit(args) => submit_daemon_workflow(args).await,
             WorkflowCommand::Status(args) => status_daemon_workflow(args).await,
@@ -132,10 +133,15 @@ async fn run_mcp(config_path: Option<PathBuf>) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
+async fn run_check(config_path: Option<PathBuf>, args: CheckArgs) -> Result<ExitCode> {
     let loaded = match load_config(config_path.as_deref()) {
         Ok(loaded) => loaded,
         Err(error) => {
+            if args.json {
+                return Ok(print_check_json_error(
+                    vyane_service::DiagnosticErrorKind::ConfigInvalid,
+                ));
+            }
             eprintln!(
                 "{}",
                 crate::output::format_config_error_line(&format!("{error:#}"))
@@ -143,6 +149,10 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
             return Ok(ExitCode::from(2));
         }
     };
+
+    if args.json {
+        return Ok(print_check_json(&loaded));
+    }
 
     let file_entries = loaded
         .files
@@ -265,6 +275,42 @@ async fn run_check(config_path: Option<PathBuf>) -> Result<ExitCode> {
     crate::output::print_permission_check(&permissions);
 
     Ok(ExitCode::SUCCESS)
+}
+
+// Keep JSON on the existing bounded, allowlisted static path. In particular,
+// never serialize LoadedConfig or forward a config loader's source error.
+fn print_check_json(loaded: &LoadedConfig) -> ExitCode {
+    use vyane_service::{DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError, DiagnosticErrorKind};
+    let report = match vyane_service::check_config(loaded) {
+        Ok(report) => report,
+        Err(error) => {
+            let kind = error
+                .downcast_ref::<DiagnosticError>()
+                .map_or(DiagnosticErrorKind::ConfigInvalid, |error| error.kind);
+            return print_check_json_error(kind);
+        }
+    };
+    match serde_json::to_string(&report) {
+        Ok(json) if json.len() <= DIAGNOSTIC_MAX_OUTPUT_BYTES => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        _ => print_check_json_error(DiagnosticErrorKind::BudgetExceeded),
+    }
+}
+
+fn print_check_json_error(kind: vyane_service::DiagnosticErrorKind) -> ExitCode {
+    use vyane_service::DiagnosticErrorKind;
+    let message = match kind {
+        DiagnosticErrorKind::InvalidInput => "request contains an invalid argument",
+        DiagnosticErrorKind::ConfigInvalid => "vyane configuration is invalid",
+        DiagnosticErrorKind::BudgetExceeded => "diagnostic safety limit exceeded",
+    };
+    println!(
+        "{}",
+        serde_json::json!({"error": {"code": kind.as_str(), "message": message}})
+    );
+    ExitCode::from(2)
 }
 
 async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Result<ExitCode> {
@@ -398,23 +444,19 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
         }
         None => runtime.dispatcher.dispatch(&task, chain, cancel).await?,
     };
-    let record = outcome.record;
+    let status = outcome.record.status;
+    let persistence = outcome.persistence;
     let output = outcome.output;
-    let success = record.status == RunStatus::Success;
 
     if json {
-        print_run_json(record, output)?;
+        print_run_json(outcome.record, output, persistence)?;
     } else if let Some(text) = output.as_deref() {
         println!("{text}");
-    } else if let Some(error) = &record.error {
+    } else if let Some(error) = &outcome.record.error {
         eprintln!("{}", crate::output::format_run_failure_line(error));
     }
 
-    Ok(if success {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    })
+    Ok(exit_for_completed_dispatch(status, &persistence))
 }
 
 /// The chain qualifies for `--stream` when it is one direct-HTTP or CLI-harness
@@ -499,21 +541,19 @@ async fn run_dispatch_streaming(
                     println!();
                 }
             }
-            let record = outcome.record;
+            let status = outcome.record.status;
+            let persistence = outcome.persistence;
             let output = outcome.output;
-            let success = record.status == RunStatus::Success;
 
             if json {
-                print_run_json(record, output)?;
-            } else if !success && let Some(error) = &record.error {
+                print_run_json(outcome.record, output, persistence)?;
+            } else if status != RunStatus::Success
+                && let Some(error) = &outcome.record.error
+            {
                 eprintln!("{}", crate::output::format_run_failure_line(error));
             }
 
-            Ok(Some(if success {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }))
+            Ok(Some(exit_for_completed_dispatch(status, &persistence)))
         }
     }
 }
@@ -636,6 +676,7 @@ fn settle_spawn_failure(
             TaskSettlement::Failed {
                 code: FailureCode::SpawnFailed,
                 ledger_run_id: None,
+                persistence: None,
             },
             chrono::Utc::now(),
         ) {
@@ -739,6 +780,7 @@ async fn run_worker(config_path: Option<PathBuf>, args: WorkerArgs) -> Result<Ex
                             TaskSettlement::Failed {
                                 code: FailureCode::Configuration,
                                 ledger_run_id: None,
+                                persistence: None,
                             },
                         )
                     });
@@ -883,6 +925,7 @@ async fn worker_body(
         .await?;
     let record = outcome.record;
     let output = outcome.output;
+    let persistence = outcome.persistence;
 
     // Persist the answer (if any) beside the status, then finalize status.
     if let Some(text) = output.as_deref()
@@ -906,7 +949,7 @@ async fn worker_body(
             store,
             &args.id,
             worker_epoch,
-            settlement_from_run(record.status, record.run_id.clone()),
+            settlement_from_run(record.status, record.run_id.clone(), &persistence),
         )?;
     } else if let Some(mut final_status) = running {
         final_status.state = run_status_to_task_state(record.status);
@@ -916,11 +959,12 @@ async fn worker_body(
         paths.write_status(&final_status)?;
     }
 
-    Ok(if record.status == RunStatus::Success {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    })
+    // Settlement follows the model outcome and stores the persistence result in
+    // the same transaction. The parent does not wait on this process, so this
+    // exit code is not what `task status` observes. `task status` reads the
+    // stored result and returns 3 when the run succeeded and persistence is
+    // incomplete, without classifying the model call as failed.
+    Ok(exit_for_completed_dispatch(record.status, &persistence))
 }
 
 fn detached_harness_reporter(paths: TaskPaths) -> HarnessLifecycleReporter {
@@ -1091,16 +1135,31 @@ fn attach_detached_controller(
     }
 }
 
-fn settlement_from_run(status: RunStatus, ledger_run_id: String) -> TaskSettlement {
+fn settlement_from_run(
+    status: RunStatus,
+    ledger_run_id: String,
+    persistence: &vyane_kernel::DispatchPersistence,
+) -> TaskSettlement {
     let ledger_run_id = Some(ledger_run_id);
+    let persistence = Some(crate::output::task_persistence_from_dispatch(persistence));
     match status {
-        RunStatus::Success => TaskSettlement::Succeeded { ledger_run_id },
+        RunStatus::Success => TaskSettlement::Succeeded {
+            ledger_run_id,
+            persistence,
+        },
         RunStatus::Error => TaskSettlement::Failed {
             code: FailureCode::DispatchFailed,
             ledger_run_id,
+            persistence,
         },
-        RunStatus::Timeout => TaskSettlement::TimedOut { ledger_run_id },
-        RunStatus::Cancelled => TaskSettlement::Cancelled { ledger_run_id },
+        RunStatus::Timeout => TaskSettlement::TimedOut {
+            ledger_run_id,
+            persistence,
+        },
+        RunStatus::Cancelled => TaskSettlement::Cancelled {
+            ledger_run_id,
+            persistence,
+        },
     }
 }
 
@@ -1358,18 +1417,7 @@ async fn run_task_status(args: TaskStatusArgs) -> Result<ExitCode> {
         } else {
             crate::output::print_durable_task_status(&record, &log_tail);
         }
-        let ok = matches!(
-            record.state,
-            DurableTaskState::Queued
-                | DurableTaskState::Running
-                | DurableTaskState::Cancelling
-                | DurableTaskState::Succeeded
-        );
-        return Ok(if ok {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(1)
-        });
+        return Ok(exit_for_observed_task(&record));
     }
 
     let status = match paths.read_status() {
@@ -2428,19 +2476,32 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
 
     let mut rows = Vec::with_capacity(results.len());
     let mut json_rows = Vec::with_capacity(results.len());
-    let mut all_success = true;
+    let mut run_failed = false;
+    let mut persistence_incomplete = false;
 
     for (target, result) in targets.into_iter().zip(results) {
         match result {
             Ok(outcome) => {
+                if outcome.record.status != RunStatus::Success {
+                    run_failed = true;
+                }
+                if !outcome.persistence.is_complete() {
+                    persistence_incomplete = true;
+                    eprintln!(
+                        "{}",
+                        crate::output::format_dispatch_persistence_warning_line(
+                            &outcome.persistence
+                        )
+                    );
+                }
                 let record = outcome.record;
                 let output = outcome.output;
-                all_success &= record.status == RunStatus::Success;
                 json_rows.push(BroadcastJson {
                     target: target.clone(),
                     record: Some(record.clone()),
                     output: output.clone(),
                     error: None,
+                    persistence: Some(outcome.persistence),
                 });
                 rows.push(BroadcastRow {
                     target,
@@ -2450,13 +2511,14 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
                 });
             }
             Err(error) => {
-                all_success = false;
+                run_failed = true;
                 let message = error.to_string();
                 json_rows.push(BroadcastJson {
                     target: target.clone(),
                     record: None,
                     output: None,
                     error: Some(message.clone()),
+                    persistence: None,
                 });
                 rows.push(BroadcastRow {
                     target,
@@ -2474,10 +2536,15 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
         crate::output::print_broadcast_table(&rows);
     }
 
-    Ok(if all_success {
-        ExitCode::SUCCESS
-    } else {
+    // Exit 1 means at least one model call failed. Exit 3 means every call
+    // finished and at least one post-run write did not. Callers must not
+    // treat 3 as "run the task again".
+    Ok(if run_failed {
         ExitCode::from(1)
+    } else if persistence_incomplete {
+        ExitCode::from(3)
+    } else {
+        ExitCode::SUCCESS
     })
 }
 
@@ -2490,17 +2557,154 @@ async fn harness_available(kind: HarnessKind) -> bool {
 }
 
 async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
+    if args
+        .since
+        .zip(args.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        bail!("since must not be later than until");
+    }
+    let labels = args
+        .labels
+        .iter()
+        .map(|label| {
+            label
+                .split_once('=')
+                .filter(|(key, _)| !key.is_empty())
+                .ok_or_else(|| {
+                    anyhow!("history label filter must be KEY=VALUE with a nonempty key")
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !args.stats && args.limit == 0 {
+        if args.json {
+            println!("[]");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let has_local_filters = args.session.is_some() || !labels.is_empty();
+    // These predicates inspect only the already owner-scoped local records.
+    // They are not fields of the generic HTTP/MCP history filters or views.
+    let matches_local = |record: &RunRecord| {
+        args.session
+            .as_deref()
+            .is_none_or(|session| record.session_id.as_deref() == Some(session))
+            && labels
+                .iter()
+                .all(|&(key, value)| record.labels.get(key).is_some_and(|actual| actual == value))
+    };
+    if args.stats {
+        let service = vyane_service::VyaneService::from_local_storage(StoragePaths::resolve()?)?;
+        let mut records = service
+            .history(vyane_service::HistoryFilter {
+                limit: Some(usize::MAX),
+                provider: args.provider,
+                status: args.status.map(Into::into),
+                since: args.since,
+                until: args.until,
+            })
+            .await?;
+        records.retain(matches_local);
+        let stats = vyane_service::HistoryStats::from_records(&records);
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&stats)?);
+        } else {
+            let rate = stats
+                .counts
+                .success_rate()
+                .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}%"));
+            println!(
+                "Total: {} (success: {}, error: {}, timeout: {}, cancelled: {}, success rate: {rate})",
+                stats.counts.total,
+                stats.counts.success,
+                stats.counts.error,
+                stats.counts.timeout,
+                stats.counts.cancelled
+            );
+            let total_duration = stats
+                .duration
+                .total_ms()
+                .map_or_else(|| "n/a".to_string(), |value| format!("{value} ms"));
+            let mean_duration = stats
+                .duration
+                .mean_ms()
+                .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"));
+            println!(
+                "Duration: total {total_duration}, mean {mean_duration} (samples: {}, invalid: {})",
+                stats.duration.samples, stats.duration.invalid
+            );
+            let known_cost = stats
+                .cost
+                .known_total_usd()
+                .map_or_else(|| "n/a".to_string(), |value| value.to_string());
+            println!(
+                "Known saved cost: {known_cost} USD (known: {}, unknown: {}, invalid: {}, overflowed: {})",
+                stats.cost.known, stats.cost.unknown, stats.cost.invalid, stats.cost.overflowed
+            );
+            for (label, tokens) in [
+                ("Input tokens", &stats.usage.input_tokens),
+                ("Output tokens", &stats.usage.output_tokens),
+                ("Reasoning tokens", &stats.usage.reasoning_tokens),
+                ("Cached input tokens", &stats.usage.cached_input_tokens),
+            ] {
+                let total = tokens
+                    .total_tokens()
+                    .map_or_else(|| "n/a".to_owned(), |v| v.to_string());
+                println!(
+                    "{label}: {total} (known: {}, unknown: {}, overflowed: {})",
+                    tokens.known,
+                    tokens.unknown,
+                    tokens.overflowed()
+                );
+            }
+            println!(
+                "PROVIDER\tTOTAL\tSUCCESS\tERROR\tTIMEOUT\tCANCELLED\tSUCCESS RATE\tDURATION TOTAL\tDURATION MEAN\tDURATION SAMPLES\tDURATION INVALID"
+            );
+            for (provider, counts) in &stats.by_provider {
+                let rate = counts
+                    .success_rate()
+                    .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}%"));
+                let duration = &stats.by_provider_duration[provider];
+                let total_duration = duration
+                    .total_ms()
+                    .map_or_else(|| "n/a".to_string(), |value| format!("{value} ms"));
+                let mean_duration = duration
+                    .mean_ms()
+                    .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"));
+                println!(
+                    "{provider}\t{}\t{}\t{}\t{}\t{}\t{rate}\t{total_duration}\t{mean_duration}\t{}\t{}",
+                    counts.total,
+                    counts.success,
+                    counts.error,
+                    counts.timeout,
+                    counts.cancelled,
+                    duration.samples,
+                    duration.invalid
+                );
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let runtime = Runtime::new(ResolvedConfig::default(), StoragePaths::resolve()?)?;
-    let records = runtime
+    let mut records = runtime
         .ledger
         .query(RunQuery {
             owner: Some("local".to_string()),
             provider: args.provider.map(ProviderId::new),
             status: args.status.map(Into::into),
-            since: None,
-            limit: Some(args.limit),
+            since: args.since,
+            until: args.until,
+            limit: Some(if has_local_filters {
+                usize::MAX
+            } else {
+                args.limit
+            }),
         })
         .await?;
+    if has_local_filters {
+        records.retain(matches_local);
+        records.truncate(args.limit);
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&records)?);
@@ -2779,6 +2983,39 @@ async fn cancel_daemon_workflow(args: WorkflowCancelArgs) -> Result<ExitCode> {
             "{}",
             crate::output::format_workflow_cancel_line(&task.id, task.state)
         );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn plan_workflow(args: WorkflowPlanArgs) -> Result<ExitCode> {
+    let plan = match Workflow::from_path(&args.file).and_then(|workflow| workflow.compile_plan()) {
+        Ok(plan) => plan,
+        Err(error) => {
+            print_workflow_error(&error);
+            return Ok(workflow_error_exit(&error));
+        }
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        println!("Workflow: {}", plan.name);
+        println!("Static plan: targets are unresolved; templates are not rendered.");
+        println!(
+            "Steps: {}; max concurrency: {}; requested maximum sandbox: {}",
+            plan.steps.len(),
+            plan.max_concurrency,
+            plan.capability_manifest.maximum_sandbox.as_str()
+        );
+        for step in &plan.steps {
+            println!(
+                "  {} | needs: [{}] | targets: [{}] | requested sandbox: {}",
+                step.id,
+                step.needs.join(", "),
+                step.targets.target_names().join(", "),
+                step.sandbox.as_str()
+            );
+        }
+        println!("Plan digest: {}", plan.plan_sha256);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -3213,12 +3450,88 @@ fn cancellation_token() -> CancellationToken {
     token
 }
 
-fn print_run_json(record: vyane_core::RunRecord, output: Option<String>) -> Result<()> {
+fn print_run_json(
+    record: vyane_core::RunRecord,
+    output: Option<String>,
+    persistence: vyane_kernel::DispatchPersistence,
+) -> Result<()> {
     println!(
         "{}",
-        serde_json::to_string_pretty(&RunJson { record, output })?
+        serde_json::to_string_pretty(&RunJson {
+            record,
+            output,
+            persistence
+        })?
     );
     Ok(())
+}
+
+/// Process status for a finished dispatch.
+///
+/// Exit 1 is a failed model call. Exit 3 is a finished call whose ledger or
+/// session write failed. Those are different: retrying exit 3 would repeat a
+/// side effect that already happened. The stderr warning says so as well.
+fn exit_for_completed_dispatch(
+    status: RunStatus,
+    persistence: &vyane_kernel::DispatchPersistence,
+) -> ExitCode {
+    if !persistence.is_complete() {
+        eprintln!(
+            "{}",
+            crate::output::format_dispatch_persistence_warning_line(persistence)
+        );
+    }
+    ExitCode::from(completed_dispatch_status_code(status, persistence))
+}
+
+/// Exit status for a durable task a caller is observing.
+///
+/// A succeeded task with incomplete persistence exits 3, matching a foreground
+/// dispatch. A missing persistence record is unknown, so it does not exit 3 and
+/// does not claim the writes landed. Any other unhappy terminal state exits 1,
+/// including when persistence is also incomplete.
+fn exit_for_observed_task(record: &TaskRecord) -> ExitCode {
+    let persistence = record
+        .persistence
+        .as_ref()
+        .map(crate::output::dispatch_persistence_from_task);
+    if let Some(persistence) = persistence.as_ref().filter(|value| !value.is_complete()) {
+        eprintln!(
+            "{}",
+            crate::output::format_dispatch_persistence_warning_line(persistence)
+        );
+    }
+    let running_or_succeeded = matches!(
+        record.state,
+        DurableTaskState::Queued
+            | DurableTaskState::Running
+            | DurableTaskState::Cancelling
+            | DurableTaskState::Succeeded
+    );
+    if !running_or_succeeded {
+        return ExitCode::from(1);
+    }
+    if record.state == DurableTaskState::Succeeded
+        && persistence
+            .as_ref()
+            .is_some_and(|value| !value.is_complete())
+    {
+        return ExitCode::from(3);
+    }
+    ExitCode::SUCCESS
+}
+
+fn completed_dispatch_status_code(
+    status: RunStatus,
+    persistence: &vyane_kernel::DispatchPersistence,
+) -> u8 {
+    if status != RunStatus::Success {
+        1
+    } else if !persistence.is_complete() {
+        3
+    } else {
+        0
+    }
 }
 
 fn print_workflow_error(error: &WorkflowError) {
@@ -3433,9 +3746,41 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn completed_dispatch_exit_distinguishes_persistence_from_run_failure() {
+        use vyane_core::ErrorKind;
+        use vyane_kernel::{DispatchPersistence, PersistenceStep};
+
+        let failed_ledger = DispatchPersistence {
+            ledger: PersistenceStep::Failed {
+                kind: ErrorKind::Io,
+            },
+            session: PersistenceStep::NotRequested,
+        };
+        assert_eq!(
+            completed_dispatch_status_code(RunStatus::Success, &failed_ledger),
+            3
+        );
+        assert_eq!(
+            completed_dispatch_status_code(RunStatus::Error, &failed_ledger),
+            1
+        );
+        let saved = DispatchPersistence {
+            ledger: PersistenceStep::Saved,
+            session: PersistenceStep::Saved,
+        };
+        assert_eq!(
+            completed_dispatch_status_code(RunStatus::Success, &saved),
+            0
+        );
+        let warning = crate::output::format_dispatch_persistence_warning_line(&failed_ledger);
+        assert!(warning.contains("ledger (io)"), "{warning}");
+        assert!(warning.contains("must not be repeated"), "{warning}");
+    }
+
     #[tokio::test]
     async fn session_reset_cli_is_exact_revision_only_and_never_retries_conflict() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = session_test_service(&directory);
         let now = chrono::Utc::now();
         service
@@ -3512,7 +3857,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_control_initialization_failure_uses_bounded_exit_contract() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let blocked_root = directory.path().join("not-a-directory");
         std::fs::write(&blocked_root, "block directory creation").unwrap();
         let code = run_session_with_paths(
@@ -3545,7 +3890,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_rejects_non_loopback_before_loading_config() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let missing_config = directory.path().join("missing-config.toml");
         let code = run_serve(
             Some(missing_config),
@@ -3623,7 +3968,7 @@ mod tests {
 
     #[tokio::test]
     async fn detached_scope_rejects_same_origin_workflows_and_foreign_owners() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
         let created_at = chrono::Utc::now();
 
@@ -3693,7 +4038,7 @@ mod tests {
 
     #[test]
     fn old_queued_task_is_not_interrupted_by_a_read() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
         let created = create_detached(
             &store,
@@ -3717,7 +4062,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn temporarily_unverifiable_controller_is_not_interrupted_by_a_read() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
         let created = create_detached(&store, "unverifiable-worker", chrono::Utc::now());
         let pid = std::process::id() as i32;
@@ -3768,7 +4113,7 @@ mod tests {
 
     #[test]
     fn stopped_matching_harness_is_unlinked_but_a_replacement_stays_pending() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(&directory.path().join("tasks"), "nested-observation");
         paths.ensure_dir().unwrap();
         let old = HarnessControllerFile {
@@ -3810,7 +4155,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn dead_sentinel_never_authorizes_a_live_numeric_pgid() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(&directory.path().join("tasks"), "reused-group");
         paths.ensure_dir().unwrap();
         let grandchild_pid = directory.path().join("released-grandchild.pid");
@@ -3865,7 +4210,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn terminal_race_after_running_snapshot_cleans_stopped_outer_and_nested() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let tasks_root = directory.path().join("tasks");
         let paths = TaskPaths::new(&tasks_root, "terminal-request-race");
         paths.ensure_dir().unwrap();
@@ -3963,7 +4308,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn unverifiable_reread_of_terminal_still_cleans_exact_outer() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let paths = TaskPaths::new(&directory.path().join("tasks"), "terminal-refusal-race");
         paths.ensure_dir().unwrap();
         let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
@@ -4023,7 +4368,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn spawn_failure_settles_only_the_exact_attached_controller() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
         let pid = std::process::id() as i32;
         let pgid = pgid_of(pid).unwrap();
@@ -4086,5 +4431,35 @@ mod tests {
                 .state,
             DurableTaskState::Running
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = crate::test_support::private_tempdir();
+        let group_writable = directory.path().join("group-writable");
+        std::fs::create_dir(&group_writable).unwrap();
+        // 0775 is the mode a 0777 directory creation receives under umask 002.
+        std::fs::set_permissions(&group_writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+        match SqliteTaskStore::open(group_writable.join("tasks.sqlite3")) {
+            Err(TaskStoreError::InvalidInput(message)) => {
+                assert!(message.contains("group- or world-writable"), "{message}");
+            }
+            other => panic!("group-writable parent must still be rejected, got {other:?}"),
+        }
+
+        let fixture = crate::test_support::private_tempdir();
+        assert_eq!(
+            std::fs::metadata(fixture.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o022,
+            0,
+            "fixture parent must not be group- or world-writable"
+        );
+        SqliteTaskStore::open(fixture.path().join("tasks.sqlite3")).unwrap();
     }
 }

@@ -180,6 +180,8 @@ impl DaemonWorkflowSupervisor {
         }
     }
 
+    // fetch_update 在新 stable 上改名 try_update；MSRV 1.88 还没有 try_update，先保留旧名。
+    #[allow(deprecated)]
     async fn call<T, F>(&self, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -334,6 +336,8 @@ impl DaemonWorkflowSupervisor {
             .context("join daemon workflow initializer")?
     }
 
+    // fetch_update 在新 stable 上改名 try_update；MSRV 1.88 还没有 try_update，先保留旧名。
+    #[allow(deprecated)]
     fn begin_initialization(&self) -> Result<InitializationPermit> {
         if !self.accepting.load(Ordering::Acquire) {
             bail!("daemon workflow admission is closed");
@@ -465,6 +469,7 @@ impl DaemonWorkflowSupervisor {
                         TaskSettlement::Failed {
                             code: FailureCode::Internal,
                             ledger_run_id: None,
+                            persistence: None,
                         },
                     )
                     .await;
@@ -515,6 +520,7 @@ impl DaemonWorkflowSupervisor {
                                     TaskSettlement::Failed {
                                         code: FailureCode::Internal,
                                         ledger_run_id: None,
+                                        persistence: None,
                                     },
                                 )
                                 .await
@@ -549,6 +555,7 @@ impl DaemonWorkflowSupervisor {
                     TaskSettlement::Failed {
                         code: FailureCode::Internal,
                         ledger_run_id: None,
+                        persistence: None,
                     },
                 )
                 .await;
@@ -784,6 +791,7 @@ impl DaemonWorkflowSupervisor {
             let settlement = TaskSettlement::Failed {
                 code,
                 ledger_run_id: None,
+                persistence: None,
             };
             tracing::error!(
                 task_id = %id,
@@ -855,19 +863,23 @@ impl DaemonWorkflowSupervisor {
                 let settlement = match outcome.status {
                     WorkflowRunStatus::Completed => TaskSettlement::Succeeded {
                         ledger_run_id: None,
+                        persistence: None,
                     },
                     WorkflowRunStatus::Cancelled => TaskSettlement::Cancelled {
                         ledger_run_id: None,
+                        persistence: None,
                     },
                     WorkflowRunStatus::CompletedWithFailures | WorkflowRunStatus::Failed => {
                         TaskSettlement::Failed {
                             code: FailureCode::DispatchFailed,
                             ledger_run_id: None,
+                            persistence: None,
                         }
                     }
                     WorkflowRunStatus::Running => TaskSettlement::Failed {
                         code: FailureCode::Internal,
                         ledger_run_id: None,
+                        persistence: None,
                     },
                 };
                 // Kind-only pure lines; ledger/journal paths stay out (WP-383/389).
@@ -915,6 +927,7 @@ impl DaemonWorkflowSupervisor {
                 let settlement = TaskSettlement::Failed {
                     code,
                     ledger_run_id: None,
+                    persistence: None,
                 };
                 tracing::error!(
                     task_id = %id,
@@ -943,6 +956,7 @@ impl DaemonWorkflowSupervisor {
                     let settlement = TaskSettlement::Failed {
                         code,
                         ledger_run_id: None,
+                        persistence: None,
                     };
                     tracing::error!(
                         task_id = %id,
@@ -2195,7 +2209,7 @@ prompt = "run"
 
     #[test]
     fn execution_cwd_rebases_missing_and_relative_workdirs_but_preserves_absolute() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let daemon_cwd = directory.path().join("daemon-start");
         let submit_cwd = directory.path().join("client-submit");
         let absolute = directory.path().join("absolute-workdir");
@@ -2249,7 +2263,7 @@ prompt = "run"
 
     #[test]
     fn submission_digest_covers_source_ordered_vars_and_execution_cwd() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let first_cwd = directory.path().join("first");
         let second_cwd = directory.path().join("second");
         std::fs::create_dir(&first_cwd).unwrap();
@@ -2304,7 +2318,7 @@ prompt = "run"
 
     #[tokio::test]
     async fn excessive_concurrency_is_rejected_before_durable_creation() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let supervisor = test_supervisor(directory.path()).await;
         let run_id = WorkflowRunId::generate();
         let request = WorkflowSubmitRequest {
@@ -2340,7 +2354,7 @@ prompt = "run"
 
     #[tokio::test]
     async fn invalid_route_effort_is_rejected_before_durable_creation_without_echo() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let supervisor = test_supervisor(directory.path()).await;
         let run_id = WorkflowRunId::generate();
         let canary = "EFFORT_VALUE_MUST_NOT_BE_ECHOED";
@@ -2379,7 +2393,7 @@ effort = "{canary}"
 
     #[tokio::test]
     async fn harness_ceiling_is_rejected_before_task_or_journal_creation() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let supervisor = harness_ceiling_test_supervisor(directory.path()).await;
         let run_id = WorkflowRunId::generate();
         let mut source = configured_bundle("harness-ceiling");
@@ -2411,7 +2425,7 @@ effort = "{canary}"
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_identical_creates_have_one_creator_and_one_idempotent_reader() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let supervisor = test_supervisor(directory.path()).await;
         let run_id = WorkflowRunId::generate();
         let digest = "b".repeat(64);
@@ -2440,7 +2454,7 @@ effort = "{canary}"
     #[tokio::test]
     async fn idempotency_rejects_digest_or_scope_mismatch_as_generic_already_exists() {
         for mismatch in ["digest", "scope"] {
-            let directory = tempfile::tempdir().unwrap();
+            let directory = crate::test_support::private_tempdir();
             let supervisor = test_supervisor(directory.path()).await;
             let run_id = WorkflowRunId::generate();
             let stored_digest = "c".repeat(64);
@@ -2477,7 +2491,7 @@ effort = "{canary}"
 
     #[tokio::test]
     async fn exact_retry_returns_before_current_target_configuration_validation() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let supervisor = test_supervisor(directory.path()).await;
         let run_id = WorkflowRunId::generate();
         let execution_cwd = std::fs::canonicalize(directory.path()).unwrap();
@@ -2505,7 +2519,7 @@ effort = "{canary}"
 
     #[tokio::test]
     async fn corrupt_controller_entry_does_not_block_recovery_interruption() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let supervisor = test_supervisor(directory.path()).await;
         let run_id = WorkflowRunId::generate();
         let task = new_task(&run_id, LOCAL_TASK_OWNER, &"e".repeat(64));
@@ -2534,7 +2548,7 @@ effort = "{canary}"
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_cancel_signals_the_registered_initializer_generation() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let supervisor = test_supervisor(directory.path()).await;
         let run_id = WorkflowRunId::generate();
         let id = run_id.to_string();
@@ -2563,7 +2577,7 @@ effort = "{canary}"
 
     #[tokio::test]
     async fn begin_shutdown_is_idempotent_closes_admission_and_cancels_initializers() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let supervisor = test_supervisor(directory.path()).await;
         let token = CancellationToken::new();
         supervisor
@@ -2590,7 +2604,7 @@ effort = "{canary}"
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn aborting_initializer_after_live_publication_rolls_back_before_drain() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let supervisor = configured_test_supervisor(directory.path()).await;
         let reached = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -2655,7 +2669,7 @@ effort = "{canary}"
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_drops_the_live_generation_and_stops_its_worker_and_watcher() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let supervisor = test_supervisor(directory.path()).await;
         let run_id = WorkflowRunId::generate();
         let id = run_id.to_string();

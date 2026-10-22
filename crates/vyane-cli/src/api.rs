@@ -119,6 +119,11 @@ pub struct TaskEntry {
     pub ledger_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<FailureCode>,
+    /// Post-run ledger and session result. Absent when the completion did not
+    /// record one. A failed ledger step means `ledger_run_id` may not name a
+    /// stored ledger row; the id is still returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistence: Option<vyane_kernel::DispatchPersistence>,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +145,10 @@ impl From<TaskRecord> for TaskEntry {
             revision: record.revision,
             ledger_run_id: record.ledger_run_id,
             failure_code: record.failure_code,
+            persistence: record
+                .persistence
+                .as_ref()
+                .map(crate::output::dispatch_persistence_from_task),
         }
     }
 }
@@ -713,6 +722,7 @@ impl TaskSupervisor {
                         TaskSettlement::Failed {
                             code: FailureCode::Internal,
                             ledger_run_id: None,
+                            persistence: None,
                         },
                         None,
                     )
@@ -1298,17 +1308,34 @@ fn settlement_from_dispatch_result(result: anyhow::Result<DispatchOutcome>) -> T
         return TaskSettlement::Failed {
             code: FailureCode::DispatchFailed,
             ledger_run_id: None,
+            persistence: None,
         };
     };
     let ledger_run_id = (!outcome.record.run_id.is_empty()).then_some(outcome.record.run_id);
+    // Follow the model call's status. The persistence result is stored with
+    // that settlement. A persistence failure must not settle the task as
+    // failed, which would invite a retry of work that already ran.
+    let persistence = Some(crate::output::task_persistence_from_dispatch(
+        &outcome.persistence,
+    ));
     match outcome.record.status {
-        RunStatus::Success => TaskSettlement::Succeeded { ledger_run_id },
+        RunStatus::Success => TaskSettlement::Succeeded {
+            ledger_run_id,
+            persistence,
+        },
         RunStatus::Error => TaskSettlement::Failed {
             code: FailureCode::DispatchFailed,
             ledger_run_id,
+            persistence,
         },
-        RunStatus::Timeout => TaskSettlement::TimedOut { ledger_run_id },
-        RunStatus::Cancelled => TaskSettlement::Cancelled { ledger_run_id },
+        RunStatus::Timeout => TaskSettlement::TimedOut {
+            ledger_run_id,
+            persistence,
+        },
+        RunStatus::Cancelled => TaskSettlement::Cancelled {
+            ledger_run_id,
+            persistence,
+        },
     }
 }
 
@@ -1422,6 +1449,9 @@ pub struct BroadcastRequest {
 /// Query params for `GET /v1/runs`.
 #[derive(Debug, Default, Deserialize)]
 pub struct RunsQuery {
+    /// Count all matching runs. An explicit list limit is incompatible with this mode.
+    #[serde(default)]
+    pub stats: bool,
     /// Max records to return. `None` defaults to 100. `0` is rejected as 400.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -1430,6 +1460,12 @@ pub struct RunsQuery {
     pub status: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Include runs started at or after this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Include runs started at or before this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Default and max record limits for `GET /v1/runs`.
@@ -1448,12 +1484,20 @@ pub struct BroadcastItem {
     pub output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Present when this target produced a finished run. A failed step does
+    /// not change the HTTP status: the model call already happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistence: Option<vyane_kernel::DispatchPersistence>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DispatchResponse {
     pub record: RunView,
     pub output: Option<String>,
+    /// Post-run ledger and session result. HTTP stays successful when the
+    /// model call finished; this field is how a persistence failure is visible
+    /// without a status that clients retry as a failed run.
+    pub persistence: vyane_kernel::DispatchPersistence,
 }
 
 impl From<DispatchOutcome> for DispatchResponse {
@@ -1461,6 +1505,7 @@ impl From<DispatchOutcome> for DispatchResponse {
         Self {
             record: RunView::from(outcome.record),
             output: outcome.output,
+            persistence: outcome.persistence,
         }
     }
 }
@@ -1468,6 +1513,13 @@ impl From<DispatchOutcome> for DispatchResponse {
 #[derive(Debug, Serialize)]
 struct ItemsEnvelope<T: Serialize> {
     items: Vec<T>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum RunsResponse {
+    Records(ItemsEnvelope<RunView>),
+    Stats(Box<vyane_service::HistoryStats>),
 }
 
 #[derive(Debug, Serialize)]
@@ -2012,6 +2064,7 @@ enum SsePayload {
     Finished {
         record: Box<RunView>,
         output: Option<String>,
+        persistence: vyane_kernel::DispatchPersistence,
     },
     Unsupported,
 }
@@ -2122,6 +2175,7 @@ async fn dispatch_stream(
             Ok(Some(outcome)) => SsePayload::Finished {
                 record: Box::new(RunView::from(outcome.record)),
                 output: outcome.output,
+                persistence: outcome.persistence,
             },
             Err(e) => {
                 eprintln!(
@@ -2129,6 +2183,10 @@ async fn dispatch_stream(
                     crate::output::format_dispatch_stream_error_line(&format!("{e:#}"))
                 );
                 SsePayload::Finished {
+                    persistence: vyane_kernel::DispatchPersistence {
+                        ledger: vyane_kernel::PersistenceStep::NotRequested,
+                        session: vyane_kernel::PersistenceStep::NotRequested,
+                    },
                     record: Box::new(RunView::from(vyane_core::RunRecord {
                         run_id: String::new(),
                         owner: "local".into(),
@@ -2253,6 +2311,7 @@ async fn broadcast(
                 record: Some(RunView::from(outcome.record)),
                 output: outcome.output,
                 error: None,
+                persistence: Some(outcome.persistence),
             },
             Err(e) => {
                 // Per-target error: log the full chain server-side, surface a
@@ -2266,6 +2325,7 @@ async fn broadcast(
                     record: None,
                     output: None,
                     error: Some("target execution failed".into()),
+                    persistence: None,
                 }
             }
         })
@@ -2277,12 +2337,22 @@ async fn broadcast(
 async fn runs(
     State(state): State<ApiState>,
     Query(query): Query<RunsQuery>,
-) -> Result<Json<ItemsEnvelope<RunView>>, ApiError> {
+) -> Result<Json<RunsResponse>, ApiError> {
+    if query
+        .since
+        .zip(query.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(ApiError::bad_request("since must not be later than until"));
+    }
     let status = match query.status.as_deref() {
         Some(s) => Some(parse_run_status(s)?),
         None => None,
     };
 
+    if query.stats && query.limit.is_some() {
+        return Err(ApiError::bad_request("stats cannot be combined with limit"));
+    }
     let limit = match query.limit {
         Some(0) => {
             return Err(ApiError::bad_request(
@@ -2295,6 +2365,7 @@ async fn runs(
             )));
         }
         Some(n) => Some(n),
+        None if query.stats => None,
         None => Some(DEFAULT_RUN_LIMIT),
     };
 
@@ -2302,7 +2373,20 @@ async fn runs(
         limit,
         status,
         provider: query.provider,
+        since: query.since,
+        until: query.until,
     };
+
+    if query.stats {
+        let stats = state.service.history_stats(filter).await.map_err(|error| {
+            eprintln!(
+                "{}",
+                crate::output::format_run_ledger_query_error_line(&format!("{error:#}"))
+            );
+            ApiError::internal("run ledger unavailable")
+        })?;
+        return Ok(Json(RunsResponse::Stats(Box::new(stats))));
+    }
 
     let records = state.service.history_views(filter).await.map_err(|error| {
         eprintln!(
@@ -2311,7 +2395,9 @@ async fn runs(
         );
         ApiError::internal("run ledger unavailable")
     })?;
-    Ok(Json(ItemsEnvelope { items: records }))
+    Ok(Json(RunsResponse::Records(ItemsEnvelope {
+        items: records,
+    })))
 }
 
 async fn sessions(
@@ -2615,6 +2701,8 @@ mod tests {
                 .request_cancel(owner, id, expected_revision, expected_executor_epoch, at)
         }
 
+        // fetch_update 在新 stable 上改名 try_update；MSRV 1.88 还没有 try_update，先保留旧名。
+        #[allow(deprecated)]
         fn settle(
             &self,
             owner: &str,
@@ -2731,7 +2819,7 @@ mod tests {
     }
 
     async fn temp_supervisor() -> (tempfile::TempDir, TaskSupervisor) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("rest-task-metadata.sqlite3");
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
         (directory, supervisor)
@@ -2847,6 +2935,7 @@ mod tests {
                     )]),
                     native_permission_ceilings: Vec::new(),
                     harness_permission_ceilings: Vec::new(),
+                    model_rates: Default::default(),
                 },
                 files: Vec::new(),
                 secrets: std::collections::BTreeMap::new(),
@@ -2888,6 +2977,7 @@ mod tests {
                     harness_permission_ceilings: vec![vyane_config::HarnessPermissionCeiling {
                         max_sandbox: Sandbox::ReadOnly,
                     }],
+                    model_rates: Default::default(),
                 },
                 files: Vec::new(),
                 secrets: std::collections::BTreeMap::new(),
@@ -2979,6 +3069,10 @@ mod tests {
                 labels: Default::default(),
             },
             output: (status == RunStatus::Success).then(|| "done".into()),
+            persistence: vyane_kernel::DispatchPersistence {
+                ledger: vyane_kernel::PersistenceStep::Saved,
+                session: vyane_kernel::PersistenceStep::NotRequested,
+            },
         }
     }
 
@@ -3085,7 +3179,7 @@ mod tests {
     #[tokio::test]
     async fn full_rest_router_requires_bearer_and_loopback_browser_authority() {
         let (_directory, supervisor) = temp_supervisor().await;
-        let service_directory = tempfile::tempdir().unwrap();
+        let service_directory = crate::test_support::private_tempdir();
         let app = router_from_parts(
             test_service(service_directory.path()),
             supervisor,
@@ -3143,7 +3237,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_continuity_next_requires_exact_bearer_and_rejects_query_or_write_routes() {
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let (_task_directory, tasks) = temp_supervisor().await;
         let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
         let route = "/v1/goals/missing/continuity-next";
@@ -3391,7 +3485,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_continuity_next_is_stable_no_store_and_has_no_side_effects() {
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let store = create_continuity_goal(data.path(), LOCAL_TASK_OWNER, "rest-projection");
         let before = store
             .get(LOCAL_TASK_OWNER, "rest-projection")
@@ -3456,7 +3550,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_continuity_next_maps_absent_and_unavailable_without_internal_details() {
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let store = SqliteGoalStore::open(data.path().join("goals.sqlite3")).unwrap();
         let mut goal = NewGoal::new("No continuity", chrono::Utc::now());
         goal.id = Some("plain".into());
@@ -3518,6 +3612,482 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_cost_rest_projects_owned_filtered_saved_values() {
+        const HISTORY: &str = include_str!("../../vyane-service/tests/fixtures/history_cost.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "?stats=true",
+                serde_json::json!({"known":123,"unknown":1,"invalid":1,"known_total_usd":62.0,"overflowed":false}),
+            ),
+            (
+                "?stats=true&provider=q",
+                serde_json::json!({"known":1,"unknown":1,"invalid":1,"known_total_usd":0.75,"overflowed":false}),
+            ),
+            (
+                "?stats=true&status=timeout",
+                serde_json::json!({"known":0,"unknown":1,"invalid":0,"known_total_usd":null,"overflowed":false}),
+            ),
+            (
+                "?stats=true&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T13:00:00Z",
+                serde_json::json!({"known":1,"unknown":1,"invalid":1,"known_total_usd":1.25,"overflowed":false}),
+            ),
+            (
+                "?stats=true&provider=absent",
+                serde_json::json!({"known":0,"unknown":0,"invalid":0,"known_total_usd":null,"overflowed":false}),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["cost"], expected, "{query}");
+            assert!(!body.to_string().contains("COST_PRIVATE_CANARY"));
+        }
+        let denied = app
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_usage_rest_counts_owned_filtered_samples_and_preserves_auth() {
+        const HISTORY: &str =
+            include_str!("../../vyane-service/tests/fixtures/history_usage.jsonl");
+        const EXPECTED: &str =
+            include_str!("../../vyane-service/tests/fixtures/history_usage_expected.json");
+        let expected: serde_json::Value = serde_json::from_str(EXPECTED).unwrap();
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, case, total) in [
+            ("?stats=true", "all", 126),
+            ("?stats=true&provider=q", "q", 2),
+            ("?stats=true&status=error", "zero", 1),
+            (
+                "?stats=true&provider=p&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T14:00:00Z",
+                "window",
+                2,
+            ),
+            ("?stats=true&provider=absent", "empty", 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["total"], total);
+            assert_eq!(body["usage"], expected[case], "{query}");
+            assert!(!body.to_string().contains("USAGE_PRIVATE_CANARY"));
+            assert!(body.get("session_id").is_none() && body.get("labels").is_none());
+        }
+        let response = app
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn provider_duration_rest_projects_complete_owned_final_provider_groups() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_duration.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "?stats=true",
+                serde_json::json!({"p":{"samples":33,"invalid":0,"total_ms":4250,"mean_ms":128.8},"q":{"samples":1,"invalid":1,"total_ms":2750,"mean_ms":2750.0}}),
+            ),
+            (
+                "?stats=true&provider=p",
+                serde_json::json!({"p":{"samples":33,"invalid":0,"total_ms":4250,"mean_ms":128.8}}),
+            ),
+            (
+                "?stats=true&status=cancelled",
+                serde_json::json!({"q":{"samples":0,"invalid":1,"total_ms":null,"mean_ms":null}}),
+            ),
+            (
+                "?stats=true&provider=p&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T14:00:00Z",
+                serde_json::json!({"p":{"samples":2,"invalid":0,"total_ms":0,"mean_ms":0.0}}),
+            ),
+            ("?stats=true&provider=absent", serde_json::json!({})),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["by_provider_duration"], expected, "{query}");
+            assert!(!body.to_string().contains("DURATION_PRIVATE_CANARY"));
+            assert_eq!(
+                body["by_provider"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .collect::<Vec<_>>(),
+                body["by_provider_duration"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .collect::<Vec<_>>()
+            );
+        }
+        let response = app
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_duration_rest_projects_owned_filtered_record_timings() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_duration.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, total, expected) in [
+            (
+                "?stats=true",
+                35,
+                serde_json::json!({"samples":34,"invalid":1,"total_ms":7000,"mean_ms":205.9}),
+            ),
+            (
+                "?stats=true&provider=q",
+                2,
+                serde_json::json!({"samples":1,"invalid":1,"total_ms":2750,"mean_ms":2750.0}),
+            ),
+            (
+                "?stats=true&status=cancelled",
+                1,
+                serde_json::json!({"samples":0,"invalid":1,"total_ms":null,"mean_ms":null}),
+            ),
+            (
+                "?stats=true&since=2026-01-01T13:00:00%2B02:00&until=2026-01-01T14:00:00Z&provider=p",
+                2,
+                serde_json::json!({"samples":2,"invalid":0,"total_ms":0,"mean_ms":0.0}),
+            ),
+            (
+                "?stats=true&provider=absent",
+                0,
+                serde_json::json!({"samples":0,"invalid":0,"total_ms":null,"mean_ms":null}),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["total"], total, "{query}");
+            assert_eq!(body["duration"], expected, "{query}");
+            assert!(!body.to_string().contains("DURATION_PRIVATE_CANARY"));
+            assert!(body.get("session_id").is_none() && body.get("labels").is_none());
+        }
+        let response = app
+            .clone()
+            .oneshot(goal_request("/v1/runs?stats=true", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(goal_request("/v1/runs", Some(API_TOKEN)))
+            .await
+            .unwrap();
+        let body = response_json(response).await;
+        assert_eq!(body["items"].as_array().unwrap().len(), 35);
+        assert!(
+            body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r.get("duration").is_none()
+                    && r.get("labels").is_none()
+                    && r.get("session_id").is_none())
+        );
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_stats_rest_success_rates_use_filtered_counts_and_unknown_empty_samples() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_stats.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            ("?stats=true", serde_json::json!(25.0)),
+            (
+                "?stats=true&until=2026-01-01T11:00:00Z",
+                serde_json::json!(25.0),
+            ),
+            (
+                "?stats=true&provider=q&status=success",
+                serde_json::json!(100.0),
+            ),
+            ("?stats=true&status=error", serde_json::json!(0.0)),
+            (
+                "?stats=true&since=2026-01-02T00:00:00Z",
+                serde_json::Value::Null,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body.get("success_rate"), Some(&expected), "query: {query}");
+            if query == "?stats=true" {
+                assert_eq!(body["by_provider"]["p"]["success_rate"], 0.0);
+                assert_eq!(body["by_provider"]["q"]["success_rate"], 100.0);
+            }
+        }
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_stats_rest_counts_all_filtered_runs_without_a_list_limit() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_stats.jsonl");
+        let root = crate::test_support::private_tempdir();
+        let ledger = root.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(root.path()), tasks, API_TOKEN).unwrap();
+        for (query, total) in [
+            ("?stats=true", 120),
+            ("?stats=true&since=2026-01-01T14:00:00%2B02:00", 80),
+            (
+                "?stats=true&provider=p&status=error&since=2026-01-01T12:00:00Z",
+                20,
+            ),
+            ("?stats=true&since=2026-01-02T00:00:00Z", 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["total"], total, "query: {query}");
+            assert!(body["by_provider"].get("foreign-provider-canary").is_none());
+            assert!(!body.to_string().contains("STATS_PRIVATE_DATA_CANARY"));
+            if total == 120 {
+                assert_eq!(
+                    body["by_provider"]["p"],
+                    serde_json::json!({"total":90,"success":0,"error":30,"timeout":30,"cancelled":30,"success_rate":0.0})
+                );
+            }
+        }
+        for query in [
+            "?stats=true&limit=1",
+            "?stats=true&status=unknown",
+            "?stats=true&since=yesterday",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "query: {query}");
+        }
+        let response = app
+            .oneshot(goal_request("/v1/runs", Some(API_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(
+            response_json(response).await["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            100
+        );
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_until_rest_bounds_lists_and_statistics_and_rejects_invalid_windows() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_since.jsonl");
+        let data = crate::test_support::private_tempdir();
+        let ledger = data.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "?until=2026-01-01T12:00:00Z",
+                vec!["late-old", "boundary", "before"],
+            ),
+            (
+                "?since=2026-01-01T12:00:00Z&until=2026-01-01T14:00:00%2B02:00",
+                vec!["boundary"],
+            ),
+            (
+                "?until=2026-01-01T14:00:00.001%2B02:00",
+                vec!["late-old", "after", "boundary", "before"],
+            ),
+            (
+                "?since=2026-01-01T11:00:00Z&until=2026-01-01T12:00:00Z&limit=1",
+                vec!["boundary"],
+            ),
+            (
+                "?until=2026-01-01T14:00:00Z&provider=p&status=error",
+                vec!["error"],
+            ),
+            ("?until=2026-01-01T09:00:00Z", vec![]),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            let ids: Vec<_> = body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["run_id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, expected, "query: {query}");
+        }
+        for (query, total) in [
+            ("?stats=true&until=2026-01-01T12:00:00Z", 3),
+            (
+                "?stats=true&since=2026-01-01T12:00:00Z&until=2026-01-01T12:00:00Z",
+                1,
+            ),
+            (
+                "?stats=true&until=2026-01-01T14:00:00Z&provider=p&status=error",
+                1,
+            ),
+            ("?stats=true&until=2026-01-01T09:00:00Z", 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(response).await["total"],
+                total,
+                "query: {query}"
+            );
+        }
+        for query in [
+            "?until=yesterday",
+            "?until=2026-01-01",
+            "?until=2026-01-01T12:00:00",
+            "?until=2026-02-30T12:00:00Z",
+            "?since=2026-01-02T00:00:00Z&until=2026-01-01T00:00:00Z",
+            "?stats=true&until=yesterday",
+            "?stats=true&since=2026-01-02T00:00:00Z&until=2026-01-01T00:00:00Z",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "query: {query}");
+        }
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
+    async fn history_since_rest_filters_before_limit_and_rejects_invalid_dates() {
+        const HISTORY: &str = include_str!("../tests/fixtures/history_since.jsonl");
+        let data = crate::test_support::private_tempdir();
+        let ledger = data.path().join("ledger.jsonl");
+        std::fs::write(&ledger, HISTORY).unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let app = router_from_parts(test_service(data.path()), tasks, API_TOKEN).unwrap();
+        for (query, expected) in [
+            (
+                "",
+                vec![
+                    "late-old",
+                    "error",
+                    "other-provider",
+                    "after",
+                    "boundary",
+                    "before",
+                ],
+            ),
+            (
+                "?since=2026-01-01T12:00:00Z",
+                vec!["error", "other-provider", "after", "boundary"],
+            ),
+            (
+                "?since=2026-01-01T14:00:00%2B02:00&provider=p&status=success",
+                vec!["after", "boundary"],
+            ),
+            (
+                "?since=2026-01-01T12:00:00Z&provider=p&status=success&limit=1",
+                vec!["after"],
+            ),
+            ("?since=2026-01-02T00:00:00Z", vec![]),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(&format!("/v1/runs{query}"), Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            let ids: Vec<_> = body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|record| record["run_id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, expected, "query: {query}");
+        }
+        for since in [
+            "yesterday",
+            "2026-01-01",
+            "2026-01-01T12:00:00",
+            "2026-02-30T12:00:00Z",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(
+                    &format!("/v1/runs?since={since}"),
+                    Some(API_TOKEN),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "since: {since}");
+        }
+        assert_eq!(std::fs::read_to_string(ledger).unwrap(), HISTORY);
+    }
+
+    #[tokio::test]
     async fn rest_dispatch_broadcast_history_and_sessions_share_the_frozen_local_scope() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3533,7 +4103,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let service_directory = tempfile::tempdir().unwrap();
+        let service_directory = crate::test_support::private_tempdir();
         let service = direct_http_test_service(service_directory.path(), server.uri());
         let (_task_directory, tasks) = temp_supervisor().await;
         let state = test_state(service.clone(), tasks);
@@ -3564,6 +4134,9 @@ mod tests {
         let Json(run_views) = runs(State(state.clone()), Query(RunsQuery::default()))
             .await
             .unwrap();
+        let RunsResponse::Records(run_views) = run_views else {
+            panic!("default history request must return record views");
+        };
         assert_eq!(run_views.items.len(), 3);
         let Json(session_views) = sessions(State(state)).await.unwrap();
         assert_eq!(session_views.items.len(), 1);
@@ -3607,7 +4180,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let service_directory = tempfile::tempdir().unwrap();
+        let service_directory = crate::test_support::private_tempdir();
         let service = direct_http_test_service(service_directory.path(), server.uri());
         let (_task_directory, tasks) = temp_supervisor().await;
         let state = test_state(service.clone(), tasks);
@@ -3813,23 +4386,24 @@ mod tests {
         ] {
             let settlement = settlement_from_dispatch_result(Ok(outcome_with_status(run_status)));
             let actual = match settlement {
-                TaskSettlement::Succeeded { ledger_run_id } => {
+                TaskSettlement::Succeeded { ledger_run_id, .. } => {
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::Succeeded
                 }
                 TaskSettlement::Failed {
                     code,
                     ledger_run_id,
+                    ..
                 } => {
                     assert_eq!(code, FailureCode::DispatchFailed);
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::Failed
                 }
-                TaskSettlement::TimedOut { ledger_run_id } => {
+                TaskSettlement::TimedOut { ledger_run_id, .. } => {
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::TimedOut
                 }
-                TaskSettlement::Cancelled { ledger_run_id } => {
+                TaskSettlement::Cancelled { ledger_run_id, .. } => {
                     assert_eq!(ledger_run_id.as_deref(), Some("run-1"));
                     TaskState::Cancelled
                 }
@@ -3875,6 +4449,7 @@ mod tests {
                 attached.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-done".into()),
+                    persistence: None,
                 },
             )
             .await
@@ -3938,7 +4513,7 @@ mod tests {
 
     #[tokio::test]
     async fn another_supervisor_cannot_cancel_a_running_task_it_does_not_own() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("shared-rest-tasks.sqlite3");
         let owner = TaskSupervisor::open(&database).await.unwrap();
         let foreign = TaskSupervisor::open(&database).await.unwrap();
@@ -4014,7 +4589,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_initialization_cleanup_never_interrupts_a_foreign_controller() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("initialization-cleanup.sqlite3");
         let initializer = TaskSupervisor::open(&database).await.unwrap();
         let foreign = TaskSupervisor::open(&database).await.unwrap();
@@ -4146,7 +4721,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_store_error_still_aborts_and_drops_pending_dispatch_before_return() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("shutdown-corrupt.sqlite3");
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
         let lock_path = directory.path().join("task-supervisor.lock");
@@ -4252,7 +4827,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_is_terminal_noop_and_does_not_touch_foreign_or_cli_tasks() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("shutdown-scope.sqlite3");
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
         let foreign = TaskSupervisor::open(&database).await.unwrap();
@@ -4264,6 +4839,7 @@ mod tests {
                 terminal.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-shutdown-terminal".into()),
+                    persistence: None,
                 },
             )
             .await
@@ -4318,7 +4894,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_target_is_rejected_before_task_metadata_is_created() {
         let (_directory, supervisor) = temp_supervisor().await;
-        let service_directory = tempfile::tempdir().unwrap();
+        let service_directory = crate::test_support::private_tempdir();
         let app = router_from_parts(
             test_service(service_directory.path()),
             supervisor.clone(),
@@ -4346,7 +4922,7 @@ mod tests {
     #[tokio::test]
     async fn harness_ceiling_is_a_400_and_async_submission_leaves_no_metadata() {
         let (_directory, supervisor) = temp_supervisor().await;
-        let service_directory = tempfile::tempdir().unwrap();
+        let service_directory = crate::test_support::private_tempdir();
         let app = router_from_parts(
             cli_harness_ceiling_test_service(service_directory.path()),
             supervisor.clone(),
@@ -4398,6 +4974,7 @@ mod tests {
                 attached.executor_epoch,
                 TaskSettlement::Succeeded {
                     ledger_run_id: Some("run-output-route".into()),
+                    persistence: None,
                 },
             )
             .await
@@ -4486,7 +5063,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_dispatch_keeps_runtime_control_until_exact_settlement_retry_succeeds() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let inner = SqliteTaskStore::open(directory.path().join("flaky-settle.sqlite3")).unwrap();
         let store = Arc::new(FlakySettleStore::new(inner, 2));
         let supervisor = TaskSupervisor::from_store(store.clone());
@@ -4538,7 +5115,7 @@ mod tests {
     #[tokio::test]
     async fn supervised_dispatch_persists_output_only_as_separate_artifact() {
         const OUTPUT: &str = "REST-OUTPUT-CANARY-outside-task-database";
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("tasks.sqlite3");
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
         let attached = create_attached(&supervisor, "output-artifact").await;
@@ -4698,7 +5275,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_construction_does_not_recover_existing_tasks() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let database = directory.path().join("explicit-rest.sqlite3");
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
         let queued = new_task("embedded-queued", TaskOrigin::RestAsync);
@@ -4726,7 +5303,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_failure_happens_before_task_database_recovery() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = test_service(directory.path());
         let database = service.storage_paths().task_metadata_db_path();
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
@@ -4747,7 +5324,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_loopback_listen_is_rejected_before_task_database_recovery() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = test_service(directory.path());
         let database = service.storage_paths().task_metadata_db_path();
         let supervisor = TaskSupervisor::open(&database).await.unwrap();
@@ -4773,7 +5350,7 @@ mod tests {
 
     #[test]
     fn api_token_publication_removes_only_its_exact_generation() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("serve.token");
         crate::daemon::write_private_atomic(&path, API_TOKEN.as_bytes()).unwrap();
         drop(ApiTokenPublication {
@@ -4795,7 +5372,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_and_session_routes_return_only_allowlisted_views() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = test_service(directory.path());
         let mut run = outcome_with_status(RunStatus::Error).record;
         run.owner = "local".into();
@@ -4881,7 +5458,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_output_artifact_roundtrips_with_private_permissions() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("tasks/task-1/output.txt");
         write_private_task_output(path.clone(), "private result".into())
             .await
@@ -4911,7 +5488,7 @@ mod tests {
 
     #[test]
     fn task_output_artifacts_are_owner_and_task_qualified() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let store: Arc<dyn TaskStore> =
             Arc::new(SqliteTaskStore::open(directory.path().join("tasks.sqlite")).unwrap());
         let root = directory.path().join("artifacts");
@@ -5149,6 +5726,120 @@ mod tests {
             assert!(json.get(forbidden).is_none(), "leaked field {forbidden}");
         }
         assert!(!json.to_string().contains("secret prompt"));
+    }
+
+    #[tokio::test]
+    async fn async_task_reports_ledger_persistence_failure_without_repeating_the_model() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-persist",
+                "model": "test-model",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "persisted-answer" },
+                    "finish_reason": "stop"
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let data = crate::test_support::private_tempdir();
+        let service = direct_http_test_service(data.path(), server.uri());
+        std::fs::create_dir(data.path().join("ledger.jsonl")).unwrap();
+        let (_task_directory, supervisor) = temp_supervisor().await;
+        let app = router_from_parts(service, supervisor, API_TOKEN).unwrap();
+        let created = app
+            .clone()
+            .oneshot(
+                axum::http::Request::post("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:9721")
+                    .header("authorization", format!("Bearer {API_TOKEN}"))
+                    .body(axum::body::Body::from(
+                        r#"{"task":"say hi once","target":"test"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::ACCEPTED);
+        let created = response_json(created).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert!(created.get("persistence").is_none());
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let body = loop {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(format!("/v1/tasks/{id}"))
+                        .header("host", "127.0.0.1:9721")
+                        .header("authorization", format!("Bearer {API_TOKEN}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            let state = body["state"].as_str().unwrap_or("");
+            if !matches!(state, "queued" | "running" | "cancelling") {
+                break body;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "task {id} did not finish: {body}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        assert_eq!(body["state"], "succeeded");
+        assert!(
+            body["ledger_run_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(body["persistence"]["ledger"]["state"], "failed");
+        assert_eq!(body["persistence"]["ledger"]["kind"], "io");
+        assert_eq!(body["persistence"]["session"]["state"], "not_requested");
+        assert!(body["persistence"]["ledger"].get("message").is_none());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert!(data.path().join("ledger.jsonl").is_dir());
+    }
+
+    #[tokio::test]
+    async fn task_without_recorded_persistence_does_not_report_success_or_failure() {
+        let (_directory, supervisor) = temp_supervisor().await;
+        let attached = create_attached(&supervisor, "unrecorded-persistence").await;
+        supervisor
+            .settle_current(
+                &attached.id,
+                attached.executor_epoch,
+                TaskSettlement::Succeeded {
+                    ledger_run_id: Some("run-unrecorded".into()),
+                    persistence: None,
+                },
+            )
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/v1/tasks/{id}", get(get_task))
+            .with_state(supervisor);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/v1/tasks/unrecorded-persistence")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["state"], "succeeded");
+        assert_eq!(body["ledger_run_id"], "run-unrecorded");
+        assert!(body.get("persistence").is_none());
     }
 
     // --- SSE payload serialization ----------------------------------------

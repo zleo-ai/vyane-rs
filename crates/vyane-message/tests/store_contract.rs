@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
 use std::process::Command;
 use std::sync::{Arc, Barrier, Mutex};
 
@@ -9,9 +10,9 @@ use serde_json::json;
 use tempfile::TempDir;
 use vyane_message::{
     ClaimQuery, DeliveryMailbox, DeliveryStatus, EndpointKind, EndpointRef, IdempotencyKey,
-    LeaseRequest, MailboxQuery, MessageClock, MessageDirection, MessagePublicationStatus,
-    MessageStore, MessageStoreError, NackDisposition, NewDelivery, NewMessage, NewTransportReceipt,
-    SqliteMessageStore,
+    LeaseRequest, MailboxQuery, MessageClock, MessageDirection, MessageEventKind,
+    MessagePublicationStatus, MessageStore, MessageStoreError, NackDisposition, NewDelivery,
+    NewMessage, NewTransportReceipt, SqliteMessageStore,
 };
 
 const CHILD_ENV: &str = "VYANE_MESSAGE_CONTRACT_CHILD";
@@ -93,7 +94,7 @@ fn transport_receipt(external_id: &str) -> NewTransportReceipt {
 }
 
 fn test_store() -> (TempDir, TestClock, SqliteMessageStore) {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let clock = TestClock::new(timestamp(0));
     let store = SqliteMessageStore::open_with_clock(
         directory.path().join("messages.sqlite3"),
@@ -168,6 +169,138 @@ fn enqueue_restart_dedupe_and_body_free_events() {
     assert!(!serde_json::to_string(&events).unwrap().contains(canary));
     let raw = std::fs::read(directory.path().join("messages.sqlite3")).unwrap();
     assert!(String::from_utf8_lossy(&raw).contains(canary));
+}
+
+#[test]
+fn duplicate_delivery_id_does_not_create_a_second_visible_message() {
+    let (directory, _clock, store) = test_store();
+    let delivery_id = uuid::Uuid::now_v7().to_string();
+    let first = store
+        .enqueue_with_delivery_ids(
+            "alice",
+            &message("same-delivery", "body", "worker-a"),
+            std::slice::from_ref(&delivery_id),
+        )
+        .unwrap();
+    assert!(!first.existing);
+    assert_eq!(first.bundle.deliveries.len(), 1);
+    assert_eq!(first.bundle.deliveries[0].id, delivery_id);
+
+    let replay = store
+        .enqueue_with_delivery_ids(
+            "alice",
+            &message("same-delivery", "body", "worker-a"),
+            std::slice::from_ref(&delivery_id),
+        )
+        .unwrap();
+    assert!(replay.existing);
+    assert_eq!(replay.bundle.message.id, first.bundle.message.id);
+    assert_eq!(replay.bundle.deliveries[0].id, delivery_id);
+
+    let other_id = uuid::Uuid::now_v7().to_string();
+    assert!(matches!(
+        store.enqueue_with_delivery_ids(
+            "alice",
+            &message("same-delivery", "body", "worker-a"),
+            &[other_id],
+        ),
+        Err(MessageStoreError::IdempotencyConflict)
+    ));
+    assert!(matches!(
+        store.enqueue_with_delivery_ids(
+            "alice",
+            &message("other-delivery", "body", "worker-a"),
+            std::slice::from_ref(&delivery_id),
+        ),
+        Err(MessageStoreError::IdempotencyConflict)
+    ));
+    let mut duplicated = message("duplicate-ids", "body", "worker-a");
+    duplicated.deliveries.push(NewDelivery {
+        route: "worker".into(),
+        target: endpoint(EndpointKind::Worker, "worker-b"),
+        available_at: None,
+        expires_at: None,
+        max_attempts: 3,
+    });
+    assert!(matches!(
+        store.enqueue_with_delivery_ids(
+            "alice",
+            &duplicated,
+            &[delivery_id.clone(), delivery_id.clone()],
+        ),
+        Err(MessageStoreError::InvalidInput(_))
+    ));
+
+    let visible = |store: &SqliteMessageStore| {
+        let conversation = store
+            .list_conversation("alice", "conversation-1", None, 10)
+            .unwrap();
+        let mailbox = store
+            .list_mailbox("alice", &mailbox("worker-a"), &MailboxQuery::default())
+            .unwrap();
+        (conversation, mailbox)
+    };
+    let (conversation, mailbox) = visible(&store);
+    assert_eq!(conversation.items.len(), 1);
+    assert_eq!(conversation.items[0].message.id, first.bundle.message.id);
+    assert_eq!(conversation.items[0].deliveries.len(), 1);
+    assert_eq!(conversation.items[0].deliveries[0].id, delivery_id);
+    assert_eq!(mailbox.items.len(), 1);
+    assert_eq!(mailbox.items[0].message.id, first.bundle.message.id);
+    assert_eq!(mailbox.items[0].delivery.id, delivery_id);
+
+    let bob = store
+        .enqueue_with_delivery_ids(
+            "bob",
+            &message("bob-delivery", "body", "worker-a"),
+            std::slice::from_ref(&delivery_id),
+        )
+        .unwrap();
+    assert!(!bob.existing);
+    assert_eq!(bob.bundle.deliveries[0].id, delivery_id);
+    let (conversation, mailbox) = visible(&store);
+    assert_eq!(conversation.items.len(), 1);
+    assert_eq!(mailbox.items.len(), 1);
+
+    let second_id = uuid::Uuid::now_v7().to_string();
+    let second = store
+        .enqueue_with_delivery_ids(
+            "alice",
+            &message("second-delivery", "other", "worker-a"),
+            std::slice::from_ref(&second_id),
+        )
+        .unwrap();
+    assert!(!second.existing);
+    let (conversation, mailbox) = visible(&store);
+    assert_eq!(conversation.items.len(), 2);
+    assert_eq!(
+        mailbox
+            .items
+            .iter()
+            .filter(|item| item.delivery.id == delivery_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        mailbox
+            .items
+            .iter()
+            .filter(|item| item.delivery.id == second_id)
+            .count(),
+        1
+    );
+
+    let reopened = SqliteMessageStore::open(directory.path().join("messages.sqlite3")).unwrap();
+    let (conversation, mailbox) = visible(&reopened);
+    assert_eq!(conversation.items.len(), 2);
+    assert_eq!(
+        mailbox
+            .items
+            .iter()
+            .filter(|item| item.delivery.id == delivery_id)
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -775,6 +908,417 @@ fn ttl_expiry_is_store_clock_driven() {
         .unwrap()
         .unwrap();
     assert_eq!(loaded.deliveries[0].status, DeliveryStatus::Expired);
+}
+
+#[test]
+fn cancel_is_idempotent_owner_scoped_and_fences_live_receipts() {
+    let (directory, clock, store) = test_store();
+    let canary = "CANCEL-BODY-CANARY";
+    let pending = store
+        .enqueue(
+            "alice",
+            &message("pending-cancel", canary, "worker-pending"),
+        )
+        .unwrap();
+    let pending_id = pending.bundle.deliveries[0].id.clone();
+    let cancelled = store.cancel("alice", &pending_id).unwrap();
+    assert_eq!(cancelled.status, DeliveryStatus::Cancelled);
+    assert!(cancelled.status.is_terminal());
+    assert!(!cancelled.status.holds_lease());
+    assert!(cancelled.lease_owner.is_none());
+    assert!(cancelled.lease_expires_at.is_none());
+    assert!(cancelled.revision > pending.bundle.deliveries[0].revision);
+    assert_eq!(store.cancel("alice", &pending_id).unwrap(), cancelled);
+
+    let pending_events = store.events("alice", &pending.bundle.message.id).unwrap();
+    assert_eq!(pending_events.len(), 2);
+    assert_eq!(pending_events[1].kind, MessageEventKind::Cancelled);
+    assert_eq!(pending_events[1].from_status, Some(DeliveryStatus::Pending));
+    assert_eq!(pending_events[1].to_status, DeliveryStatus::Cancelled);
+    assert_eq!(pending_events[1].delivery_id, pending_id);
+    assert_eq!(pending_events[1].delivery_revision, cancelled.revision);
+    assert!(
+        !serde_json::to_string(&pending_events)
+            .unwrap()
+            .contains(canary)
+    );
+    assert_eq!(
+        store
+            .get("alice", &pending.bundle.message.id)
+            .unwrap()
+            .unwrap()
+            .message
+            .body,
+        canary
+    );
+    let historic = store
+        .list_conversation("alice", "conversation-1", None, 10)
+        .unwrap();
+    assert_eq!(historic.items.len(), 1);
+    assert_eq!(
+        historic.items[0].deliveries[0].status,
+        DeliveryStatus::Cancelled
+    );
+    assert!(
+        store
+            .list_mailbox(
+                "alice",
+                &mailbox("worker-pending"),
+                &MailboxQuery {
+                    include_acknowledged: true,
+                    ..MailboxQuery::default()
+                },
+            )
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        store
+            .claim(
+                "alice",
+                &ClaimQuery {
+                    mailboxes: vec![mailbox("worker-pending")],
+                    limit: 10,
+                },
+                &exact_lease("consumer-pending"),
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let outbox = store.unprojected_events("alice", "event-log", 10).unwrap();
+    assert!(outbox.items.iter().any(|event| {
+        event.event_id == pending_events[1].event_id && event.kind == MessageEventKind::Cancelled
+    }));
+    assert!(!serde_json::to_string(&outbox).unwrap().contains(canary));
+    assert!(matches!(
+        store.cancel("bob", &pending_id),
+        Err(MessageStoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.cancel("alice", "missing-delivery"),
+        Err(MessageStoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.cancel("alice", " "),
+        Err(MessageStoreError::InvalidInput(_))
+    ));
+
+    let mut fanout = message("fanout-cancel", "fanout", "worker-fan-a");
+    fanout.deliveries.push(NewDelivery {
+        route: "worker".into(),
+        target: endpoint(EndpointKind::Worker, "worker-fan-b"),
+        available_at: None,
+        expires_at: None,
+        max_attempts: 3,
+    });
+    let fanout = store.enqueue("alice", &fanout).unwrap();
+    let fan_a_id = fanout
+        .bundle
+        .deliveries
+        .iter()
+        .find(|delivery| delivery.target.id == "worker-fan-a")
+        .unwrap()
+        .id
+        .clone();
+    let fan_b_id = fanout
+        .bundle
+        .deliveries
+        .iter()
+        .find(|delivery| delivery.target.id == "worker-fan-b")
+        .unwrap()
+        .id
+        .clone();
+    store.cancel("alice", &fan_a_id).unwrap();
+    let fanout_loaded = store
+        .get("alice", &fanout.bundle.message.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fanout_loaded
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.id == fan_b_id)
+            .unwrap()
+            .status,
+        DeliveryStatus::Pending
+    );
+    assert!(
+        store
+            .claim(
+                "alice",
+                &ClaimQuery {
+                    mailboxes: vec![mailbox("worker-fan-a")],
+                    limit: 10,
+                },
+                &exact_lease("consumer-fan-a"),
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let sibling = claim_one(&store, "alice", "worker-fan-b", "consumer-fan-b", 30);
+    assert_eq!(sibling.delivery.id, fan_b_id);
+
+    store
+        .enqueue("alice", &message("leased-cancel", canary, "worker-leased"))
+        .unwrap();
+    let leased = claim_one(&store, "alice", "worker-leased", "consumer-leased", 30);
+    let fenced = store.cancel("alice", &leased.delivery.id).unwrap();
+    assert_eq!(fenced.status, DeliveryStatus::Cancelled);
+    assert!(fenced.lease_owner.is_none());
+    assert!(fenced.lease_expires_at.is_none());
+    assert_eq!(fenced.attempt_count, leased.delivery.attempt_count);
+    let leased_events = store.events("alice", &leased.message.id).unwrap();
+    assert_eq!(leased_events.len(), 3);
+    assert_eq!(leased_events[2].kind, MessageEventKind::Cancelled);
+    assert_eq!(leased_events[2].from_status, Some(DeliveryStatus::Leased));
+    assert_eq!(leased_events[2].to_status, DeliveryStatus::Cancelled);
+    assert!(
+        !serde_json::to_string(&leased_events)
+            .unwrap()
+            .contains(canary)
+    );
+    assert!(matches!(
+        store.mark_delivered("alice", &mailbox("worker-leased"), &leased.receipt),
+        Err(MessageStoreError::InvalidState {
+            operation: "mark delivered",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.acknowledge("alice", &mailbox("worker-leased"), &leased.receipt),
+        Err(MessageStoreError::InvalidState {
+            operation: "acknowledge",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.nack(
+            "alice",
+            &mailbox("worker-leased"),
+            &leased.receipt,
+            &NackDisposition::RetryAfter { delay_seconds: 0 },
+        ),
+        Err(MessageStoreError::InvalidState {
+            operation: "nack",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.renew(
+            "alice",
+            &mailbox("worker-leased"),
+            &leased.receipt,
+            "heartbeat-after-cancel",
+            30,
+        ),
+        Err(MessageStoreError::InvalidState {
+            operation: "renew",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    let mut reply = message("reply-after-cancel", "answer", "worker-leased");
+    reply.reply_to = Some(leased.message.id.clone());
+    let before_reply = store
+        .list_conversation("alice", "conversation-1", None, 20)
+        .unwrap()
+        .items
+        .len();
+    assert!(matches!(
+        store.reply_and_ack("alice", &mailbox("worker-leased"), &leased.receipt, &reply),
+        Err(MessageStoreError::InvalidState {
+            operation: "reply and acknowledge",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .list_conversation("alice", "conversation-1", None, 20)
+            .unwrap()
+            .items
+            .len(),
+        before_reply
+    );
+    assert_eq!(
+        store
+            .get("alice", &leased.message.id)
+            .unwrap()
+            .unwrap()
+            .deliveries[0],
+        fenced
+    );
+
+    let local = store
+        .enqueue(
+            "alice",
+            &message("local-delivered-cancel", "local", "worker-local"),
+        )
+        .unwrap();
+    let local_lease = claim_one(&store, "alice", "worker-local", "consumer-local", 30);
+    store
+        .mark_delivered("alice", &mailbox("worker-local"), &local_lease.receipt)
+        .unwrap();
+    let local_cancelled = store.cancel("alice", &local_lease.delivery.id).unwrap();
+    assert_eq!(local_cancelled.status, DeliveryStatus::Cancelled);
+    let local_events = store.events("alice", &local.bundle.message.id).unwrap();
+    assert_eq!(
+        local_events.last().unwrap().kind,
+        MessageEventKind::Cancelled
+    );
+    assert_eq!(
+        local_events.last().unwrap().from_status,
+        Some(DeliveryStatus::Delivered)
+    );
+    assert!(matches!(
+        store.acknowledge("alice", &mailbox("worker-local"), &local_lease.receipt),
+        Err(MessageStoreError::InvalidState {
+            operation: "acknowledge",
+            state: DeliveryStatus::Cancelled,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .get("alice", &local.bundle.message.id)
+            .unwrap()
+            .unwrap()
+            .deliveries[0]
+            .status,
+        DeliveryStatus::Cancelled
+    );
+
+    let acked = store
+        .enqueue("alice", &message("acked-cancel", "acked", "worker-acked"))
+        .unwrap();
+    let acked_lease = claim_one(&store, "alice", "worker-acked", "consumer-acked", 30);
+    store
+        .mark_delivered("alice", &mailbox("worker-acked"), &acked_lease.receipt)
+        .unwrap();
+    store
+        .acknowledge("alice", &mailbox("worker-acked"), &acked_lease.receipt)
+        .unwrap();
+    let acked_events = store
+        .events("alice", &acked.bundle.message.id)
+        .unwrap()
+        .len();
+    assert!(matches!(
+        store.cancel("alice", &acked_lease.delivery.id),
+        Err(MessageStoreError::InvalidState {
+            operation: "cancel",
+            state: DeliveryStatus::Acknowledged,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .events("alice", &acked.bundle.message.id)
+            .unwrap()
+            .len(),
+        acked_events
+    );
+
+    let dead = store
+        .enqueue("alice", &message("dead-cancel", "dead", "worker-dead"))
+        .unwrap();
+    let dead_lease = claim_one(&store, "alice", "worker-dead", "consumer-dead", 30);
+    store
+        .nack(
+            "alice",
+            &mailbox("worker-dead"),
+            &dead_lease.receipt,
+            &NackDisposition::Permanent {
+                failure_code: "rejected".into(),
+            },
+        )
+        .unwrap();
+    let dead_events = store
+        .events("alice", &dead.bundle.message.id)
+        .unwrap()
+        .len();
+    assert!(matches!(
+        store.cancel("alice", &dead_lease.delivery.id),
+        Err(MessageStoreError::InvalidState {
+            operation: "cancel",
+            state: DeliveryStatus::DeadLettered,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .events("alice", &dead.bundle.message.id)
+            .unwrap()
+            .len(),
+        dead_events
+    );
+
+    let mut expiring = message("expired-cancel", "expired", "worker-expired");
+    expiring.deliveries[0].expires_at = Some(timestamp(10));
+    let expiring = store.enqueue("alice", &expiring).unwrap();
+    clock.set(timestamp(10));
+    assert_eq!(store.expire_due("alice", 10).unwrap(), 1);
+    let expired_events = store
+        .events("alice", &expiring.bundle.message.id)
+        .unwrap()
+        .len();
+    assert!(matches!(
+        store.cancel("alice", &expiring.bundle.deliveries[0].id),
+        Err(MessageStoreError::InvalidState {
+            operation: "cancel",
+            state: DeliveryStatus::Expired,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .events("alice", &expiring.bundle.message.id)
+            .unwrap()
+            .len(),
+        expired_events
+    );
+
+    let bob = store
+        .enqueue(
+            "bob",
+            &message("pending-cancel", "bob-body", "worker-pending"),
+        )
+        .unwrap();
+    assert_ne!(bob.bundle.deliveries[0].id, pending_id);
+    assert_eq!(
+        store
+            .cancel("bob", &bob.bundle.deliveries[0].id)
+            .unwrap()
+            .status,
+        DeliveryStatus::Cancelled
+    );
+    assert_eq!(
+        store
+            .get("alice", &pending.bundle.message.id)
+            .unwrap()
+            .unwrap()
+            .deliveries[0],
+        cancelled
+    );
+
+    let reopened = SqliteMessageStore::open(directory.path().join("messages.sqlite3")).unwrap();
+    let restored = reopened
+        .get("alice", &pending.bundle.message.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.message.body, canary);
+    assert_eq!(restored.deliveries[0], cancelled);
+    assert_eq!(reopened.cancel("alice", &pending_id).unwrap(), cancelled);
+    assert_eq!(
+        reopened
+            .events("alice", &pending.bundle.message.id)
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -1418,7 +1962,7 @@ fn newer_schema_and_corrupt_rows_fail_closed() {
 
 #[test]
 fn altered_or_extended_schema_fails_closed() {
-    let trigger_directory = TempDir::new().unwrap();
+    let trigger_directory = common::private_tempdir();
     let trigger_path = trigger_directory.path().join("messages.sqlite3");
     drop(SqliteMessageStore::open(&trigger_path).unwrap());
     let connection = Connection::open(&trigger_path).unwrap();
@@ -1435,7 +1979,7 @@ fn altered_or_extended_schema_fails_closed() {
         Err(MessageStoreError::CorruptData(_))
     ));
 
-    let extra_directory = TempDir::new().unwrap();
+    let extra_directory = common::private_tempdir();
     let extra_path = extra_directory.path().join("messages.sqlite3");
     drop(SqliteMessageStore::open(&extra_path).unwrap());
     let connection = Connection::open(&extra_path).unwrap();
@@ -1451,7 +1995,7 @@ fn altered_or_extended_schema_fails_closed() {
 
 #[test]
 fn relational_corruption_fails_the_explicit_and_open_audits() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
     store
@@ -1479,7 +2023,7 @@ fn relational_corruption_fails_the_explicit_and_open_audits() {
 
 #[test]
 fn publication_audit_binds_release_time_to_each_initial_enqueue_event() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
     let request = message("publication-time-corruption", "body", "worker-a");
@@ -1523,7 +2067,7 @@ fn publication_audit_binds_release_time_to_each_initial_enqueue_event() {
 
 #[test]
 fn publication_audit_rejects_initial_enqueue_time_drift() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
     store
@@ -1556,7 +2100,7 @@ fn publication_audit_rejects_initial_enqueue_time_drift() {
 fn database_files_are_private_without_mutating_existing_parent() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
     let path = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
@@ -1595,7 +2139,7 @@ fn database_files_are_private_without_mutating_existing_parent() {
 fn database_and_live_wal_files_with_broad_permissions_fail_closed() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     let store = SqliteMessageStore::open(&path).unwrap();
     let message_id = store
@@ -1645,7 +2189,7 @@ fn database_and_live_wal_files_with_broad_permissions_fail_closed() {
 fn database_and_sidecar_symlinks_fail_closed() {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let victim = directory.path().join("victim");
     std::fs::write(&victim, b"unchanged").unwrap();
     let database_link = directory.path().join("linked.sqlite3");
@@ -2228,7 +2772,7 @@ fn create_v1_database(path: &std::path::Path, with_message: bool) -> Option<(New
 #[cfg(unix)]
 #[test]
 fn schema_v1_migrates_existing_messages_to_ordinary_published_truth() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     let (request, message_id) = create_v1_database(&path, true).unwrap();
     let digest = request.request_digest().unwrap();
@@ -2273,7 +2817,7 @@ fn schema_v1_migrates_existing_messages_to_ordinary_published_truth() {
 #[cfg(unix)]
 #[test]
 fn schema_v1_upgrade_rolls_back_atomically_when_final_manifest_is_invalid() {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let path = directory.path().join("messages.sqlite3");
     create_v1_database(&path, false);
     let connection = Connection::open(&path).unwrap();
@@ -2300,4 +2844,34 @@ fn schema_v1_upgrade_rolls_back_atomically_when_final_manifest_is_invalid() {
         )
         .unwrap();
     assert_eq!(migrated_table_count, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_parent_is_private_and_group_writable_parent_is_still_rejected() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = common::private_tempdir();
+    let group_writable = directory.path().join("group-writable");
+    std::fs::create_dir(&group_writable).unwrap();
+    // 0775 is the mode a 0777 directory creation receives under umask 002.
+    std::fs::set_permissions(&group_writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+    match SqliteMessageStore::open(group_writable.join("messages.sqlite3")) {
+        Err(MessageStoreError::InvalidInput(message)) => {
+            assert!(message.contains("group- or world-writable"), "{message}");
+        }
+        other => panic!("group-writable parent must still be rejected, got {other:?}"),
+    }
+
+    let fixture = common::private_tempdir();
+    assert_eq!(
+        std::fs::metadata(fixture.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o022,
+        0,
+        "fixture parent must not be group- or world-writable"
+    );
+    SqliteMessageStore::open(fixture.path().join("messages.sqlite3")).unwrap();
 }

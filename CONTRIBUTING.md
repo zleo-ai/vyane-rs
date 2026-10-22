@@ -3,11 +3,22 @@
 Vyane is early-bootstrap and its APIs are unstable, but the bar for merged code
 is already firm. Thanks for helping build it.
 
+## Start here
+
+Use the [README quickstart](README.md#quickstart) for source installation.
+For a bug or support request, search existing issues/PRs and include a public
+source revision, platform, minimal reproduction and sanitized output. Follow
+[SECURITY.md](SECURITY.md) for vulnerabilities.
+
+Documentation maintenance: [translations](docs/TRANSLATING.md),
+[changelog and versions](docs/RELEASING.md), and
+[public project operations](docs/MAINTAINING.md).
+
 ## Toolchain
 
 - **Stable Rust**, **edition 2024** (see `rust-toolchain.toml`; MSRV is pinned
   in the workspace `Cargo.toml`).
-- Install the pinned toolchain with `rustup` — it will pick up
+- Install the configured stable channel with `rustup` — it will pick up
   `rust-toolchain.toml` and the `rustfmt` + `clippy` components automatically.
 
 ## Checks that must pass
@@ -36,6 +47,9 @@ in non-test code.
 
 ```
 vyane-core        types, traits, errors, env policy — no runtime
+vyane-agent       owner-scoped AgentRun queue, workers, leases and recovery
+vyane-quota       bounded upstream quota snapshots through optional connectors
+vyane-broker      bounded delivery pumps and lifecycle projections
 vyane-message     owner-safe transactional messages, deliveries, leases, outbox
 vyane-goal        owner-scoped goal snapshots and immutable lifecycle/progress events
 vyane-task        secret-free durable task lifecycle metadata
@@ -119,6 +133,13 @@ Test placement:
   process group on cancel`, `docs(architecture): clarify failover gate`.
 - **Keep the docs in sync.** If you change a public type or config shape, update
   the affected docs and `profiles.example.toml` in the same PR.
+- **Public text only.** This repository is public. Titles, descriptions,
+  commit messages and files must not carry private tracker IDs, host paths,
+  device or account names, or agent hand-off notes. The `Public boundary`
+  workflow runs `.github/scripts/public-boundary.py` on every push and on
+  every PR title or body edit, docs-only changes included. It checks tracked
+  files, the PR title and body, and the message and emails of every commit
+  in the PR; a branch name that trips it is only a warning.
 
 ## Independent review (three tiers)
 
@@ -139,7 +160,7 @@ touches.
   adversarial multi-round review; do not merge until review is clean — CI
   green alone is not sufficient. Implementer, reviewer, and merger must be
   three separate agent runs. Strict-tier review depends on the
-  maintainer-side vyane pipeline (`VYANE_PROJECT`, overridable); external
+  maintainer-side vyane pipeline (set `VYANE_PROJECT`); external
   contributors cannot run it themselves — a maintainer runs that round on
   their behalf.
 
@@ -195,6 +216,10 @@ configuration). You can still request Copilot manually, but that does
 **not** count as independent review for any of the three tiers.
 
 ## Releases
+
+See [RELEASING.md](docs/RELEASING.md) for version selection, changelog upkeep,
+release notes and the current package-preflight blocker. The authorization
+requirements below still apply.
 
 Crates.io publication is manual and requires authority distinct from merging,
 creating a tag, or possessing a registry credential:

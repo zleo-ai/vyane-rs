@@ -430,6 +430,57 @@ async fn page_byte_cap_advertises_more_and_cursor_reads_every_event() {
 }
 
 #[tokio::test]
+async fn event_type_tokens_are_bounded_ascii_and_do_not_append_when_rejected() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("events");
+    let log = EventLog::new(&root);
+    let kept = log
+        .append(
+            "task-1",
+            event("alice", "worker.started"),
+            EventDurability::Durable,
+        )
+        .await
+        .unwrap();
+    let path = owner_root(&root, "alice").join("task-1.jsonl");
+    let before = std::fs::read(&path).unwrap();
+
+    // Letters, digits, dot, dash, and underscore only, at most 128 bytes.
+    let too_long = "t".repeat(129);
+    for event_type in ["", "worker/started", "has space", "café", too_long.as_str()] {
+        let error = log
+            .append(
+                "task-1",
+                event("alice", event_type),
+                EventDurability::Durable,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.as_str(), "invalid_input");
+        assert!(
+            error.to_string().contains("event_type"),
+            "rejected {event_type:?} as {error}"
+        );
+    }
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let page = log.read_after("alice", "task-1", 0, 10).await.unwrap();
+    assert_eq!(page.events, [kept]);
+
+    let max_type = "a".repeat(128);
+    let stored = log
+        .append(
+            "task-1",
+            event("alice", &max_type),
+            EventDurability::Buffered,
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.sequence, 2);
+    assert_eq!(stored.event_type, max_type);
+}
+
+#[tokio::test]
 async fn input_bounds_and_path_identity_fail_closed() {
     let directory = TempDir::new().unwrap();
     let log = EventLog::new(directory.path().join("events"));

@@ -11,6 +11,7 @@
 //! probabilistic. Default runtime is a few seconds for CI; raise
 //! `VYANE_STORE_HAMMER_MS` for longer probes.
 
+mod common;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs;
@@ -20,7 +21,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeDelta, TimeZone as _, Utc};
-use tempfile::TempDir;
 use vyane_task::{
     ControllerRef, Lease, NewTask, SqliteTaskStore, TaskKind, TaskOrigin, TaskSettlement, TaskStore,
 };
@@ -216,6 +216,7 @@ fn worker_loop(store: SqliteTaskStore, shared: Arc<Shared>, probe: Arc<Probe>, w
                                         running.executor_epoch,
                                         TaskSettlement::Succeeded {
                                             ledger_run_id: Some(format!("run-{seq}")),
+                                            persistence: None,
                                         },
                                         timestamp(2),
                                     )
@@ -279,7 +280,7 @@ fn check_stall(shared: &Shared, probes: &[Arc<Probe>]) -> bool {
 }
 
 fn hammer(threads: usize, duration: Duration, stall: Duration) {
-    let directory = TempDir::new().unwrap();
+    let directory = common::private_tempdir();
     let store = SqliteTaskStore::open(directory.path().join("tasks.sqlite3")).unwrap();
     let seeded = store.create(OWNER, new_task("seed", 0)).unwrap();
     let shared = Arc::new(Shared {

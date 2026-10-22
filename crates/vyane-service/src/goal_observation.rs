@@ -775,7 +775,7 @@ mod tests {
 
     #[test]
     fn goal_database_is_opened_only_after_explicit_ingress_construction() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         assert!(!service.storage_paths().goal_db_path().exists());
 
@@ -788,7 +788,7 @@ mod tests {
 
     #[test]
     fn owner_and_source_are_frozen_and_replay_is_idempotent() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
         create_goal(&store, "local", "shared");
@@ -822,7 +822,7 @@ mod tests {
 
     #[test]
     fn absent_and_invalid_facts_use_closed_receipts_without_writes() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
         create_goal(&store, "local", "goal");
@@ -857,7 +857,7 @@ mod tests {
 
     #[test]
     fn typed_review_observation_preserves_sequence_evidence_but_receipt_redacts_it() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
         create_review_goal(&store, "local", "review-goal");
@@ -962,7 +962,7 @@ mod tests {
 
     #[tokio::test]
     async fn runner_is_bounded_sorted_and_failure_isolated() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
         create_goal(&store, "local", "goal");
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_batch_is_rejected_before_any_mutation() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
         create_goal(&store, "local", "goal");
@@ -1033,7 +1033,7 @@ mod tests {
 
     #[tokio::test]
     async fn watcher_identity_is_frozen_for_source_ordering_and_reports() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
         create_goal(&store, "local", "goal");
@@ -1068,7 +1068,7 @@ mod tests {
 
     #[test]
     fn runner_rejects_duplicate_or_invalid_watcher_identity() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let ingress = service
             .goal_observation_ingress(OwnerContext::single_user_local())

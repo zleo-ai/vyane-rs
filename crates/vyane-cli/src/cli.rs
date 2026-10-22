@@ -25,7 +25,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Validate configuration and show local readiness.
-    Check,
+    Check(CheckArgs),
     /// Run one task against a profile, provider/model, or auto-routed target.
     Dispatch(DispatchArgs),
     /// Run one task against several targets concurrently.
@@ -63,6 +63,13 @@ pub enum Command {
     /// Internal: execute a detached run. Not for direct use.
     #[command(name = "__worker", hide = true)]
     Worker(WorkerArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CheckArgs {
+    /// Emit static configuration diagnostics as JSON without probing harnesses.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -585,6 +592,11 @@ pub struct A2aReadArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkflowCommand {
+    /// Inspect a static workflow plan without executing any steps.
+    #[command(
+        long_about = "Compile a workflow TOML file and its prompt files into the existing static plan. This does not resolve targets, render templates, load runtime configuration, call models, or create a run journal. The plan describes requested capabilities, not execution authorization."
+    )]
+    Plan(WorkflowPlanArgs),
     /// Run a workflow TOML file.
     Run(WorkflowRunArgs),
     /// Submit a workflow source bundle to the resident daemon.
@@ -810,7 +822,10 @@ pub struct BroadcastArgs {
 
 #[derive(Debug, Args)]
 pub struct HistoryArgs {
-    /// Maximum number of records to show.
+    /// Count all matching runs by provider and status, instead of listing them.
+    #[arg(long, conflicts_with = "limit")]
+    pub stats: bool,
+    /// Maximum number of records to show; zero returns no records.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
     /// Filter by run status.
@@ -819,6 +834,18 @@ pub struct HistoryArgs {
     /// Filter by provider id.
     #[arg(long, value_name = "PROVIDER")]
     pub provider: Option<String>,
+    /// Include runs started at or after this RFC 3339 timestamp (with timezone).
+    #[arg(long, value_name = "TIMESTAMP")]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Include runs started at or before this RFC 3339 timestamp (with timezone).
+    #[arg(long, value_name = "TIMESTAMP")]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Exact session id in the existing local owner's records (local CLI only).
+    #[arg(long, value_name = "SESSION", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub session: Option<String>,
+    /// Exact label KEY=VALUE; repeat for AND matching (local CLI only).
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
@@ -848,6 +875,15 @@ pub struct SessionResetNativeArgs {
     #[arg(long, value_name = "REVISION")]
     pub expected_revision: u64,
     /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowPlanArgs {
+    /// Workflow TOML file to inspect; prompt files are relative to this file.
+    pub file: PathBuf,
+    /// Emit the full plan payload, including prompts, system text, and workdirs.
     #[arg(long)]
     pub json: bool,
 }

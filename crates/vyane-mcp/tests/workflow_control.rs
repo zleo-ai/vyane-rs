@@ -132,12 +132,21 @@ impl WorkflowControl for SucceededWorkflowControl {
 }
 
 #[tokio::test]
-async fn optional_workflow_port_preserves_six_tool_default_and_enables_strict_control_tools()
+async fn optional_workflow_port_preserves_seven_tool_default_and_enables_strict_control_tools()
 -> anyhow::Result<()> {
     let (service, _root) = test_service()?;
     let default_tools = list_tools(VyaneMcpServer::new(service.clone())).await?;
-    assert_eq!(default_tools.len(), 6);
-    assert!(!default_tools.iter().any(|name| name.contains("workflow")));
+    assert_eq!(default_tools.len(), 7);
+    assert!(
+        default_tools
+            .iter()
+            .any(|name| name == "vyane_workflow_plan")
+    );
+    assert!(
+        !default_tools
+            .iter()
+            .any(|name| name == "vyane_workflow_submit")
+    );
 
     let fake = Arc::new(FakeWorkflowControl::default());
     let server = VyaneMcpServer::with_workflow_control(service, fake.clone());
@@ -154,7 +163,7 @@ async fn optional_workflow_port_preserves_six_tool_default_and_enables_strict_co
         .into_iter()
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 9);
+    assert_eq!(names.len(), 10);
     for name in [
         "vyane_workflow_submit",
         "vyane_workflow_status",
@@ -349,4 +358,40 @@ fn test_service() -> anyhow::Result<(VyaneService, tempfile::TempDir)> {
         StoragePaths::from_data_dir(root.path().join("data")),
     )?;
     Ok((service, root))
+}
+
+#[tokio::test]
+async fn static_plan_is_available_without_control_and_never_calls_an_injected_port()
+-> anyhow::Result<()> {
+    let (service, _root) = test_service()?;
+    let fake = Arc::new(FakeWorkflowControl::default());
+    let mut expected = None;
+    for server in [
+        VyaneMcpServer::new(service.clone()),
+        VyaneMcpServer::with_workflow_control(service, fake.clone()),
+    ] {
+        let (server_transport, client_transport) = tokio::io::duplex(128 * 1024);
+        let handle = tokio::spawn(async move {
+            server.serve(server_transport).await?.waiting().await?;
+            anyhow::Ok(())
+        });
+        let client =
+            <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+        let result = call(&client, "vyane_workflow_plan", serde_json::json!({
+            "workflow_toml": "[workflow]\nname='static'\n[[step]]\nid='one'\ntarget='unconfigured'\nprompt='{{vars.unrendered}}'"
+        })).await?;
+        assert_eq!(result["schema_version"], 1);
+        assert_eq!(result["steps"][0]["prompt_template"], "{{vars.unrendered}}");
+        if let Some(expected) = &expected {
+            assert_eq!(&result, expected);
+        } else {
+            expected = Some(result);
+        }
+        assert!(fake.submissions.lock().unwrap().is_empty());
+        assert!(fake.statuses.lock().unwrap().is_empty());
+        assert!(fake.cancellations.lock().unwrap().is_empty());
+        client.cancel().await?;
+        handle.await??;
+    }
+    Ok(())
 }

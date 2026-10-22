@@ -69,8 +69,19 @@ fn controller() -> ControllerRef {
     }
 }
 
+fn private_tempdir() -> TempDir {
+    let directory = tempfile::tempdir().expect("tempdir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restrict tempdir permissions");
+    }
+    directory
+}
+
 fn store() -> (TempDir, Arc<TestClock>, SqliteAgentStore) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_tempdir();
     let clock = Arc::new(TestClock::new());
     let store =
         SqliteAgentStore::open_with_clock(directory.path().join("agent.sqlite"), clock.clone())

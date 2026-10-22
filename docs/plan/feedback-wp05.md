@@ -49,13 +49,12 @@ surprising:
   and `ALICE` are distinct owners.
 - **`limit` with `None` returns every match.** The spec calls `None` an
   "implementation default"; returning all matches is that default.
-- **Reasoning / cache token billing** (in `cost`): by default reasoning tokens
-  are assumed folded into `output_tokens` and cached tokens into
-  `input_tokens` (no separate charge). A `ModelPricing` entry may declare
-  `reasoning_per_1m` / `cache_read_per_1m` to bill those tokens **in addition**,
-  which the caller does only when their `Usage` reports them as distinct counts.
-  This is "the table's convention" per WP-05; the builtin table carries no
-  separate rates, so it bills input + output only.
+- **推理／缓存计费**（`cost`）：推理子计数必须包含在 `output_tokens` 中，
+  缓存子计数必须包含在 `input_tokens` 中。`ModelPricing` 设置
+  `reasoning_per_1m`／`cache_read_per_1m` 时，先从对应总量中扣除子计数，
+  再用专用费率替换该部分的普通费率。超出父计数的子计数钳制到父计数。
+  上游分别报告计数时，调用方须先归一化。内置价格表没有专用费率，
+  因此仍只按输入总量与输出总量计费。
 - **Builtin price table is illustrative.** Public list prices (USD per 1M tokens)
   for a few well-known models, best-effort and clearly marked as will-go-stale;
   `PriceTable::with_overrides` lets config win, as required.

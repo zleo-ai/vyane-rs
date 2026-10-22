@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn goal_database_is_opened_only_after_explicit_reader_construction() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         assert!(!service.storage_paths().goal_db_path().exists());
 
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn frozen_owner_hides_a_foreign_same_id_goal() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
         create_continuity_goal(&store, "foreign", "shared", "foreign-quota");
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn authenticated_principal_context_can_freeze_a_non_local_owner() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
         create_continuity_goal(
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn repeated_projection_is_stable_and_performs_no_writes() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
         let goal = create_continuity_goal(&store, "local", "stable", "stable-quota");
@@ -529,8 +529,8 @@ mod tests {
 
     #[test]
     fn dynamic_blocker_reason_is_replaced_by_a_closed_code() {
-        let directory = TempDir::new().unwrap();
-        let workdir = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
+        let workdir = crate::test_support::private_tempdir();
         let service = service(&directory);
         let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
         let goal = create_continuity_goal(&store, "local", "blocked", "blocked-quota");
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn failures_use_the_closed_read_taxonomy() {
-        let directory = TempDir::new().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let service = service(&directory);
         let reader = service
             .goal_reader(OwnerContext::single_user_local())

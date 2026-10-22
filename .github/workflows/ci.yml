@@ -42,6 +42,9 @@ jobs:
       - name: Check minimum supported Rust version
         run: cargo check --workspace --all-targets --locked
 
+      - name: Test workspace publication plan without uploading
+        run: python3 .github/scripts/test-publish-workspace.py
+
   test:
     timeout-minutes: 30
     strategy:
@@ -75,6 +78,10 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test public parity report regressions
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 .github/scripts/test-parity-report.py
 
       - name: Validate public parity report
         if: matrix.os == 'ubuntu-latest'

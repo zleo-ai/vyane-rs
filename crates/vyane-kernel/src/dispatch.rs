@@ -7,6 +7,7 @@
 //! [`vyane_core::ErrorKind::failover_eligible`]; the kernel never re-implements
 //! that rule, it only calls it.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,9 +19,9 @@ use serde::Serialize;
 use vyane_core::{
     AdapterTransport, Attempt, AttemptOutcome, BoundTarget, CancellationToken, ChatClient,
     ChatMessage, ChatRequest, EnvPolicy, ErrorKind, Harness, HarnessExecutionContext, HarnessJob,
-    HarnessLifecycleReporter, HarnessSpawnAuthority, Ledger, NativeSessionState, PinnedWorkdir,
-    Result, RunRecord, RunStatus, SessionExecutionLease, SessionStore, SessionUpdate, Target,
-    TaskSpec, Usage, VyaneError,
+    HarnessLifecycleReporter, HarnessSpawnAuthority, Ledger, ModelId, ModelTokenRate,
+    NativeSessionState, PinnedWorkdir, Result, RunRecord, RunStatus, SessionExecutionLease,
+    SessionStore, SessionUpdate, Target, TaskSpec, Usage, VyaneError, estimate_configured_cost,
 };
 
 use crate::digest::task_digest;
@@ -58,6 +59,9 @@ pub struct Dispatcher {
     sessions: Arc<dyn SessionStore>,
     owner: String,
     harness_sandbox_ceiling: vyane_core::Sandbox,
+    /// Explicit model rates from configuration. Empty means every model is
+    /// unpriced; built-in list prices are never consulted.
+    model_rates: BTreeMap<String, ModelTokenRate>,
     /// Process-local authority shared only by clones of this dispatcher.
     ///
     /// This deliberately has no serializable representation.  A prepared
@@ -72,12 +76,51 @@ struct DispatcherIdentity {
     _marker: u8,
 }
 
-/// Result of a completed dispatch: the persisted run record plus successful
-/// answer text when the run produced one.
+/// Result of a completed dispatch: the run record, successful answer text
+/// when the run produced one, and whether post-run persistence landed.
+///
+/// [`RunRecord::status`] is the model call's terminal status. A failed
+/// [`DispatchPersistence`] step means history or the next transcript may be
+/// missing; it is not a reason to repeat the call.
 #[derive(Debug, Clone, Serialize)]
 pub struct DispatchOutcome {
     pub record: RunRecord,
     pub output: Option<String>,
+    pub persistence: DispatchPersistence,
+}
+
+/// Ledger and session writes that happen after the model call has finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DispatchPersistence {
+    pub ledger: PersistenceStep,
+    pub session: PersistenceStep,
+}
+
+impl DispatchPersistence {
+    /// Whether every applicable post-run write landed.
+    ///
+    /// [`PersistenceStep::NotRequested`] counts as complete: there was nothing
+    /// to write. A failed step does not.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        !matches!(self.ledger, PersistenceStep::Failed { .. })
+            && !matches!(self.session, PersistenceStep::Failed { .. })
+    }
+}
+
+/// One post-run persistence step.
+///
+/// `kind` is the stable [`ErrorKind`] token. Free-form store messages stay
+/// out of this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PersistenceStep {
+    /// The write completed.
+    Saved,
+    /// The step does not apply to this run.
+    NotRequested,
+    /// The write failed after the run finished.
+    Failed { kind: ErrorKind },
 }
 
 /// A live event during a streaming dispatch. The callback receives these as
@@ -436,8 +479,28 @@ impl Dispatcher {
             sessions,
             owner: DEFAULT_OWNER.to_string(),
             harness_sandbox_ceiling: vyane_core::Sandbox::Full,
+            model_rates: BTreeMap::new(),
             identity: Arc::new(DispatcherIdentity { _marker: 0 }),
         }
+    }
+
+    /// Replace the explicit model rates used when a run record is assembled.
+    ///
+    /// Rates are USD per 1,000,000 tokens. A model that is absent, or a run
+    /// with no usage, keeps `cost_usd` unset. This does not fill unknown
+    /// models with zero or with any built-in price list.
+    #[must_use]
+    pub fn with_model_rates(mut self, rates: BTreeMap<String, ModelTokenRate>) -> Self {
+        self.model_rates = rates;
+        self
+    }
+
+    /// Price aggregated `usage` with the configured rate for `model`.
+    ///
+    /// Missing usage, or a model with no configured rate, stays `None`.
+    /// Reasoning and cached counts are subsets of output and input.
+    fn configured_cost_usd(&self, model: &ModelId, usage: Option<&Usage>) -> Option<f64> {
+        estimate_configured_cost(self.model_rates.get(model.as_str()), usage)
     }
 
     /// Override the owner scope written onto records (default `"local"`).
@@ -811,6 +874,7 @@ impl Dispatcher {
             .workdir
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned());
+        let cost_usd = self.configured_cost_usd(&target.model, usage_total.as_ref());
 
         let record = RunRecord {
             run_id: execution_scope.execution_id.clone(),
@@ -829,32 +893,34 @@ impl Dispatcher {
             attempts,
             status,
             usage: usage_total,
-            cost_usd: None,
+            cost_usd,
             session_id: session_id.clone(),
             output_chars,
             error: error_msg,
             labels: task.labels.clone(),
         };
 
-        // Persistence after a completed run is **best-effort** (architect
-        // decision): the model call already happened, so a ledger or session
-        // store error must not convert a successful run into a caller-visible
-        // failure. We emit a `tracing::warn` and return the record normally.
-        // Pre-execution configuration/session failures use `Result::Err`; once
-        // an external model call completed, the truthful run is returned.
-        if let Err(e) = self.ledger.append(&record).await {
-            // Kind-only; never log free-form ledger messages (WP-318).
-            tracing::warn!(
-                run_id = %record.run_id,
-                error = e.kind.as_str(),
-                "ledger append failed after run completed; returning run anyway"
-            );
-        }
+        // The model call already happened. A ledger or session error must not
+        // be reported as a failed run: callers that retry on run failure would
+        // repeat a side effect that already occurred. The failure is still
+        // visible on `DispatchPersistence`. Pre-execution configuration and
+        // session failures stay `Result::Err`.
+        let ledger = match self.ledger.append(&record).await {
+            Ok(()) => PersistenceStep::Saved,
+            Err(error) => {
+                // Kind-only; never log free-form ledger messages.
+                tracing::warn!(
+                    run_id = %record.run_id,
+                    error = error.kind.as_str(),
+                    "ledger append failed after run completed"
+                );
+                PersistenceStep::Failed { kind: error.kind }
+            }
+        };
 
-        // Session continuity is likewise best-effort. Only runs that name a
-        // session touch the store.
-        if let Some(sid) = session_id.as_deref()
-            && let Err(e) = self
+        // Only runs that name a session touch the store.
+        let session = if let Some(sid) = session_id.as_deref() {
+            match self
                 .update_session(
                     sid,
                     &session_ctx,
@@ -863,15 +929,26 @@ impl Dispatcher {
                     transcript_delta,
                 )
                 .await
-        {
-            tracing::warn!(
-                session_id = sid,
-                error = e.kind.as_str(),
-                "session store update failed after run was recorded"
-            );
-        }
+            {
+                Ok(()) => PersistenceStep::Saved,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = sid,
+                        error = error.kind.as_str(),
+                        "session store update failed after the run finished"
+                    );
+                    PersistenceStep::Failed { kind: error.kind }
+                }
+            }
+        } else {
+            PersistenceStep::NotRequested
+        };
 
-        Ok(DispatchOutcome { record, output })
+        Ok(DispatchOutcome {
+            record,
+            output,
+            persistence: DispatchPersistence { ledger, session },
+        })
     }
 
     /// Stream a single HTTP or harness attempt, calling `on_event` for each
@@ -977,10 +1054,7 @@ impl Dispatcher {
                 )
                 .await;
             prepared.finish_stream_probe(false);
-            return Ok(Some(DispatchOutcome {
-                record,
-                output: None,
-            }));
+            return Ok(Some(record));
         }
 
         // Build the executor via the same factory seam `dispatch` uses.
@@ -1042,10 +1116,7 @@ impl Dispatcher {
                     Err(&VyaneError::cancelled()),
                 )
                 .await;
-            return Ok(Some(DispatchOutcome {
-                record,
-                output: None,
-            }));
+            return Ok(Some(record));
         }
 
         // Assemble the request: system (if any) + user. No transcript replay
@@ -1069,8 +1140,8 @@ impl Dispatcher {
             Ok(s) => s,
             Err(e) if e.kind == ErrorKind::Unsupported => return Ok(None),
             Err(e) => {
-                let record = self
-                    .assemble_stream_record(
+                return Ok(Some(
+                    self.assemble_stream_record(
                         execution_scope,
                         task,
                         bound,
@@ -1078,11 +1149,8 @@ impl Dispatcher {
                         attempt_start,
                         Err(&e),
                     )
-                    .await;
-                return Ok(Some(DispatchOutcome {
-                    record,
-                    output: None,
-                }));
+                    .await,
+                ));
             }
         };
 
@@ -1129,7 +1197,7 @@ impl Dispatcher {
                         let record = self.assemble_stream_record(
                             execution_scope, task, bound, attempt_started_at, attempt_start, Err(&e),
                         ).await;
-                        return Ok(Some(DispatchOutcome { record, output: None }));
+                        return Ok(Some(record));
                     }
                     _ = tokio::time::sleep(d) => {
                         let e = VyaneError::new(
@@ -1139,7 +1207,7 @@ impl Dispatcher {
                         let record = self.assemble_stream_record(
                             execution_scope, task, bound, attempt_started_at, attempt_start, Err(&e),
                         ).await;
-                        return Ok(Some(DispatchOutcome { record, output: None }));
+                        return Ok(Some(record));
                     }
                     _ = &mut event_loop => {}
                 }
@@ -1152,7 +1220,7 @@ impl Dispatcher {
                         let record = self.assemble_stream_record(
                             execution_scope, task, bound, attempt_started_at, attempt_start, Err(&e),
                         ).await;
-                        return Ok(Some(DispatchOutcome { record, output: None }));
+                        return Ok(Some(record));
                     }
                     _ = &mut event_loop => {}
                 }
@@ -1168,7 +1236,7 @@ impl Dispatcher {
             Ok(v) => Ok(v),
             Err(e) => Err(e),
         };
-        let record = self
+        let mut outcome = self
             .assemble_stream_record(
                 execution_scope,
                 task,
@@ -1178,12 +1246,10 @@ impl Dispatcher {
                 result_ref,
             )
             .await;
-        let output = if record.status == RunStatus::Success {
-            Some(text)
-        } else {
-            None
-        };
-        Ok(Some(DispatchOutcome { record, output }))
+        if outcome.record.status == RunStatus::Success {
+            outcome.output = Some(text);
+        }
+        Ok(Some(outcome))
     }
 
     /// Harness streaming path: calls Harness::run_stream, converting
@@ -1276,7 +1342,7 @@ impl Dispatcher {
                 let result: (String, Option<Usage>) = (text.clone(), usage);
                 let result_ref: std::result::Result<&(String, Option<Usage>), &VyaneError> =
                     Ok(&result);
-                let record = self
+                let mut outcome = self
                     .assemble_stream_record(
                         execution_scope,
                         task,
@@ -1286,12 +1352,10 @@ impl Dispatcher {
                         result_ref,
                     )
                     .await;
-                let output = if record.status == RunStatus::Success {
-                    Some(text)
-                } else {
-                    None
-                };
-                Ok(Some(DispatchOutcome { record, output }))
+                if outcome.record.status == RunStatus::Success {
+                    outcome.output = Some(text);
+                }
+                Ok(Some(outcome))
             }
             Err(e) if e.kind == ErrorKind::Unsupported => {
                 // Harness doesn't support streaming → fall back to dispatch.
@@ -1300,8 +1364,8 @@ impl Dispatcher {
             Err(e) => {
                 let result_ref: std::result::Result<&(String, Option<Usage>), &VyaneError> =
                     Err(&e);
-                let record = self
-                    .assemble_stream_record(
+                Ok(Some(
+                    self.assemble_stream_record(
                         execution_scope,
                         task,
                         bound,
@@ -1309,19 +1373,18 @@ impl Dispatcher {
                         attempt_start,
                         result_ref,
                     )
-                    .await;
-                Ok(Some(DispatchOutcome {
-                    record,
-                    output: None,
-                }))
+                    .await,
+                ))
             }
         }
     }
 
     /// Assemble a single-attempt [`RunRecord`] for a streaming run and append
-    /// it to the ledger (best-effort). This is the kernel-owned replacement
-    /// for the CLI's former hand-rolled `build_stream_record` — same fields,
-    /// same status mapping, same best-effort append rule, but no duplication.
+    /// it to the ledger. Streaming has no session, so that step is
+    /// [`PersistenceStep::NotRequested`]. A ledger failure stays on the
+    /// returned outcome and does not change the run status. This is the
+    /// kernel-owned replacement for the CLI's former hand-rolled
+    /// `build_stream_record`.
     async fn assemble_stream_record(
         &self,
         execution_scope: &ExecutionScope,
@@ -1330,7 +1393,7 @@ impl Dispatcher {
         attempt_started_at: chrono::DateTime<Utc>,
         attempt_start: Instant,
         result: std::result::Result<&(String, Option<Usage>), &VyaneError>,
-    ) -> RunRecord {
+    ) -> DispatchOutcome {
         let now = Utc::now();
         let duration_ms = attempt_start.elapsed().as_millis() as u64;
 
@@ -1381,23 +1444,34 @@ impl Dispatcher {
             }],
             status,
             usage,
-            cost_usd: None,
+            cost_usd: self.configured_cost_usd(&bound.target.model, usage.as_ref()),
             session_id: task.session.as_ref().map(|s| s.as_str().to_string()),
             output_chars,
             error: error_msg,
             labels: task.labels.clone(),
         };
 
-        if let Err(e) = self.ledger.append(&record).await {
-            // Kind-only; never log free-form ledger messages (WP-318).
-            tracing::warn!(
-                run_id = %record.run_id,
-                error = e.kind.as_str(),
-                "ledger append failed after streaming run completed; returning run anyway"
-            );
-        }
+        let ledger = match self.ledger.append(&record).await {
+            Ok(()) => PersistenceStep::Saved,
+            Err(error) => {
+                // Kind-only; never log free-form ledger messages.
+                tracing::warn!(
+                    run_id = %record.run_id,
+                    error = error.kind.as_str(),
+                    "ledger append failed after streaming run completed"
+                );
+                PersistenceStep::Failed { kind: error.kind }
+            }
+        };
 
-        record
+        DispatchOutcome {
+            record,
+            output: None,
+            persistence: DispatchPersistence {
+                ledger,
+                session: PersistenceStep::NotRequested,
+            },
+        }
     }
 
     /// Load the session continuity context for `task`, if it names a session.

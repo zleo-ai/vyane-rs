@@ -32,6 +32,8 @@ mod output;
 mod review;
 mod supervisor;
 mod task;
+#[cfg(test)]
+mod test_support;
 mod workflow_control;
 
 use std::process::ExitCode;

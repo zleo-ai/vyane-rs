@@ -8,24 +8,39 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
-use vyane_core::{Effort, ErrorKind, ModelId, Protocol, Sandbox, VyaneError, WebSearchContextSize};
+use vyane_core::{
+    Effort, ErrorKind, ModelId, ModelTokenRate, Protocol, Sandbox, VyaneError, WebSearchContextSize,
+};
 use vyane_provider::ProviderPatch;
 
-/// One parsed config layer: `[providers.*]`, `[profiles.*]`, and optional
-/// monotonic permission ceilings.
+/// Config document version this crate will load.
 ///
-/// `cost` and other v0.1-future sections (see `profiles.example.toml`) are
-/// intentionally not modeled here — parsing them is out of this work
-/// package's scope, and `#[serde(deny_unknown_fields)]` is deliberately
-/// *not* set so unrelated sections don't break parsing of the sections this
-/// crate does own.
+/// An omitted `schema_version` is this version. Any other explicit value is
+/// rejected while the document is parsed, before a layer can be merged.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// One parsed config layer: `[providers.*]`, `[profiles.*]`, optional
+/// `[cost.models.*]` rates, and optional monotonic permission ceilings.
+///
+/// `#[serde(deny_unknown_fields)]` is deliberately not set on the root, so
+/// unrelated sections do not break parsing of the sections this crate owns.
+/// A model rate table is closed: unknown price fields are rejected.
+///
+/// `schema_version` is checked and then dropped. It is not a field, so
+/// in-code construction stays valid: no field means the supported document,
+/// and an explicit unknown version never becomes a [`RawRoot`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "SchemaCheckedRoot")]
 pub struct RawRoot {
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderPatch>,
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfilePatch>,
+    /// Explicit model prices for this layer. Omitted means this layer adds none.
+    #[serde(default, skip_serializing_if = "RawCostTable::is_empty")]
+    pub cost: RawCostTable,
     /// Optional native-agent ceiling contributed by this exact config layer.
     ///
     /// Every configured layer is retained as an independent ceiling instead
@@ -36,6 +51,134 @@ pub struct RawRoot {
     /// Optional CLI-harness sandbox ceiling contributed by this exact layer.
     #[serde(default)]
     pub harness_permissions: Option<HarnessPermissionCeiling>,
+}
+
+#[derive(Debug)]
+struct UnsupportedSchemaVersion {
+    found: i64,
+}
+
+impl fmt::Display for UnsupportedSchemaVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unsupported config schema_version {}; expected {} or omitted",
+            self.found, CONFIG_SCHEMA_VERSION
+        )
+    }
+}
+
+/// Field mirror used only so `schema_version` can be read without storing it
+/// on [`RawRoot`].
+#[derive(Deserialize)]
+#[serde(remote = "RawRoot")]
+struct RawRootFields {
+    #[serde(default)]
+    providers: BTreeMap<String, ProviderPatch>,
+    #[serde(default)]
+    profiles: BTreeMap<String, ProfilePatch>,
+    #[serde(default)]
+    cost: RawCostTable,
+    #[serde(default)]
+    native_permissions: Option<NativePermissionCeiling>,
+    #[serde(default)]
+    harness_permissions: Option<HarnessPermissionCeiling>,
+}
+
+struct DecodedRoot(RawRoot);
+
+impl<'de> Deserialize<'de> for DecodedRoot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawRootFields::deserialize(deserializer).map(DecodedRoot)
+    }
+}
+
+#[derive(Deserialize)]
+struct SchemaCheckedRoot {
+    #[serde(default)]
+    schema_version: Option<i64>,
+    #[serde(flatten)]
+    root: DecodedRoot,
+}
+
+impl TryFrom<SchemaCheckedRoot> for RawRoot {
+    type Error = UnsupportedSchemaVersion;
+
+    fn try_from(value: SchemaCheckedRoot) -> Result<Self, Self::Error> {
+        match value.schema_version {
+            None => Ok(value.root.0),
+            Some(version) if version == i64::from(CONFIG_SCHEMA_VERSION) => Ok(value.root.0),
+            Some(found) => Err(UnsupportedSchemaVersion { found }),
+        }
+    }
+}
+
+/// Optional `[cost]` table. Rates are USD per 1,000,000 tokens (`*_per_mtok`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RawCostTable {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, RawModelRate>,
+}
+
+impl RawCostTable {
+    fn is_empty(&self) -> bool {
+        self.models.is_empty()
+    }
+}
+
+/// One model's explicit price. Input and output rates are required so a
+/// partial table cannot be mistaken for a free model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawModelRate {
+    pub input_per_mtok: f64,
+    pub output_per_mtok: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_per_mtok: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_per_mtok: Option<f64>,
+}
+
+impl RawModelRate {
+    pub(crate) fn to_rate(&self, model: &str) -> std::result::Result<ModelTokenRate, VyaneError> {
+        Ok(ModelTokenRate {
+            input_per_1m: finite_rate(model, "input_per_mtok", self.input_per_mtok)?,
+            output_per_1m: finite_rate(model, "output_per_mtok", self.output_per_mtok)?,
+            reasoning_per_1m: optional_rate(model, "reasoning_per_mtok", self.reasoning_per_mtok)?,
+            cache_read_per_1m: optional_rate(
+                model,
+                "cache_read_per_mtok",
+                self.cache_read_per_mtok,
+            )?,
+        })
+    }
+}
+
+fn optional_rate(
+    model: &str,
+    field: &str,
+    value: Option<f64>,
+) -> std::result::Result<Option<f64>, VyaneError> {
+    value
+        .map(|value| finite_rate(model, field, value))
+        .transpose()
+}
+
+fn finite_rate(model: &str, field: &str, value: f64) -> std::result::Result<f64, VyaneError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(VyaneError::new(
+            ErrorKind::Config,
+            format!(
+                "cost rate for model `{model}` field `{field}` must be a non-negative finite \
+                 number of USD per 1,000,000 tokens"
+            ),
+        ))
+    }
 }
 
 /// One monotonic CLI-harness permission ceiling.
