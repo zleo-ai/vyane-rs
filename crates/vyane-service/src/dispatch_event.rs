@@ -3,7 +3,9 @@
 //! The kernel appends exactly one [`RunRecord`] after a local dispatch reaches
 //! a terminal status. This wrapper forwards that write to the run ledger, then
 //! appends one durable event on the existing [`EventLog`]. It does not buffer
-//! events, open a subscription, or start a resident loop.
+//! events, open a subscription, or start a resident loop. A read replays that
+//! same stream for one owner and one run; it does not subscribe or open a
+//! second queue.
 
 use std::collections::BTreeMap;
 
@@ -11,7 +13,8 @@ use async_trait::async_trait;
 use sha2::{Digest as _, Sha256};
 use vyane_core::{Ledger, RunQuery, RunRecord};
 use vyane_ledger::{
-    EventCategory, EventDurability, EventLog, EventLogError, EventSource, JsonlLedger, NewEvent,
+    EventCategory, EventCursor, EventDurability, EventLog, EventLogError, EventRecord, EventSource,
+    JsonlLedger, NewEvent,
 };
 
 pub(crate) const DISPATCH_EVENT_STREAM: &str = "dispatch";
@@ -103,6 +106,51 @@ async fn append_terminal_dispatch(
         .map(|_| ())
 }
 
+const TERMINAL_READ_PAGE_LIMIT: usize = 256;
+
+/// Replay terminal dispatch events already stored for one owner and one run.
+///
+/// The owner selects that owner's existing `dispatch` stream. Another owner's
+/// file is never opened, so a foreign run yields no events. This is a bounded
+/// replay of the log the append path already writes.
+pub(crate) async fn read_terminal_dispatch_events(
+    events: &EventLog,
+    owner: &str,
+    run_id: &str,
+) -> Result<Vec<EventRecord>, EventLogError> {
+    let mut cursor = EventCursor::default();
+    let mut matched = Vec::new();
+    loop {
+        let page = events
+            .read_from(
+                owner,
+                DISPATCH_EVENT_STREAM,
+                cursor.clone(),
+                TERMINAL_READ_PAGE_LIMIT,
+            )
+            .await?;
+        for event in page.events {
+            if is_terminal_event_for_run(&event, run_id) {
+                matched.push(event);
+            }
+        }
+        if !page.has_more || page.next_cursor == cursor {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    Ok(matched)
+}
+
+fn is_terminal_event_for_run(event: &EventRecord, run_id: &str) -> bool {
+    event.event_type == DISPATCH_TERMINAL_EVENT_TYPE
+        && event
+            .payload
+            .get("run_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(run_id)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -116,7 +164,10 @@ mod tests {
     };
     use vyane_ledger::{EventCategory, EventLog, EventSource, JsonlLedger};
 
-    use super::{DISPATCH_EVENT_STREAM, DispatchEventLedger, dispatch_terminal_event_id};
+    use super::{
+        DISPATCH_EVENT_STREAM, DispatchEventLedger, dispatch_terminal_event_id,
+        read_terminal_dispatch_events,
+    };
     use crate::config::{Runtime, StoragePaths};
 
     fn target() -> Target {
@@ -262,6 +313,63 @@ mod tests {
         assert_eq!(queried[0].run_id, "run-a");
         assert_eq!(events_for(directory.path(), "alice").await.len(), 1);
         assert!(events_for(directory.path(), "local").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_one_run_returns_nothing_for_another_owner() {
+        let (directory, runtime) = runtime();
+        runtime
+            .ledger
+            .append(&terminal_record("alice", "run-a", RunStatus::Success))
+            .await
+            .unwrap();
+        runtime
+            .ledger
+            .append(&terminal_record("alice", "run-other", RunStatus::Cancelled))
+            .await
+            .unwrap();
+        runtime
+            .ledger
+            .append(&terminal_record("bob", "run-b", RunStatus::Error))
+            .await
+            .unwrap();
+
+        let events = EventLog::new(directory.path().join("events"));
+        let alice = read_terminal_dispatch_events(&events, "alice", "run-a")
+            .await
+            .unwrap();
+        let alice_other = read_terminal_dispatch_events(&events, "alice", "run-b")
+            .await
+            .unwrap();
+        let bob = read_terminal_dispatch_events(&events, "bob", "run-a")
+            .await
+            .unwrap();
+
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].owner, "alice");
+        assert_eq!(alice[0].event_id, dispatch_terminal_event_id("run-a"));
+        assert_eq!(alice[0].event_type, "dispatch.terminal");
+        assert_eq!(
+            alice[0]
+                .payload
+                .get("run_id")
+                .and_then(|value| value.as_str()),
+            Some("run-a")
+        );
+        assert_eq!(
+            alice[0]
+                .payload
+                .get("status")
+                .and_then(|value| value.as_str()),
+            Some("success")
+        );
+        assert!(alice_other.is_empty());
+        assert!(bob.is_empty());
+        let bob_own = read_terminal_dispatch_events(&events, "bob", "run-b")
+            .await
+            .unwrap();
+        assert_eq!(bob_own.len(), 1);
+        assert_eq!(bob_own[0].owner, "bob");
     }
 
     #[tokio::test]
