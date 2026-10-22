@@ -1416,6 +1416,56 @@ async fn responses_stream_has_no_reasoning_events_but_still_completes() {
 // or concurrent wire paths stay schedulable under suite load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
+async fn responses_stream_normalizes_cached_and_reasoning_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":8,\"output_tokens\":6,\"input_tokens_details\":{\"cached_tokens\":1},\"output_tokens_details\":{\"reasoning_tokens\":2}}}}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiResponsesClient::with_options(bearer_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+    // Cache and reasoning stay on the detail fields. Input is not increased
+    // by cached tokens, unlike Anthropic `message_delta` usage.
+    assert_eq!(events.len(), 3);
+    assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "hi"));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::Usage(usage) if *usage == Usage {
+            input_tokens: 8,
+            output_tokens: 6,
+            reasoning_tokens: Some(2),
+            cached_input_tokens: Some(1),
+        }
+    ));
+    assert!(matches!(
+        &events[2],
+        StreamEvent::Done {
+            finish_reason: None
+        }
+    ));
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
 async fn responses_stream_reasoning_delta_is_normalized_when_present() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
