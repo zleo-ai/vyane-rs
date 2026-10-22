@@ -7,6 +7,7 @@
 //! a default effort level.
 
 use crate::decision::{RouteEffort, RouteTier};
+use crate::feedback::{FeedbackNote, FeedbackScoring};
 
 /// Explicit and structural inputs for route tiering. All fields are optional
 /// or defaulted; the router works with a zero-valued `ComplexitySignals` (just
@@ -125,6 +126,35 @@ pub fn complexity_score(task: &str, signals: &ComplexitySignals, tags: &[String]
     (score.min(1.0) * 1000.0).round() / 1000.0
 }
 
+/// Deterministic score plus the feedback notes scoring actually admitted.
+///
+/// `score` is always [`complexity_score`]. [`FeedbackScoring::Disabled`] drops
+/// `feedback` without reading it. [`FeedbackScoring::Enabled`] records the
+/// notes and still does not add them to `score`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScoredComplexity {
+    pub score: f64,
+    pub feedback_notes: Vec<FeedbackNote>,
+}
+
+pub(crate) fn complexity_score_with_feedback(
+    task: &str,
+    signals: &ComplexitySignals,
+    tags: &[String],
+    feedback: &[FeedbackNote],
+    feedback_scoring: FeedbackScoring,
+) -> ScoredComplexity {
+    let score = complexity_score(task, signals, tags);
+    let feedback_notes = match feedback_scoring {
+        FeedbackScoring::Enabled => feedback.to_vec(),
+        FeedbackScoring::Disabled => Vec::new(),
+    };
+    ScoredComplexity {
+        score,
+        feedback_notes,
+    }
+}
+
 /// Map a complexity score to a tier, honoring explicit overrides and the
 /// frontier guard.
 ///
@@ -163,6 +193,7 @@ pub fn effort_for_tier(tier: RouteTier) -> RouteEffort {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feedback::FeedbackOutcome;
 
     #[test]
     fn zero_signals_gives_zero_score() {
@@ -255,5 +286,26 @@ mod tests {
         };
         let score = complexity_score("hi", &signals, &[]);
         assert!((score - 0.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn feedback_notes_do_not_change_the_score() {
+        let signals = ComplexitySignals {
+            changed_files: 5,
+            ..ComplexitySignals::new()
+        };
+        let notes = vec![FeedbackNote {
+            target_key: "security architecture review".into(),
+            outcome: FeedbackOutcome::Failed,
+        }];
+        let plain = complexity_score("hi", &signals, &[]);
+        let disabled =
+            complexity_score_with_feedback("hi", &signals, &[], &notes, FeedbackScoring::Disabled);
+        let enabled =
+            complexity_score_with_feedback("hi", &signals, &[], &notes, FeedbackScoring::Enabled);
+        assert_eq!(disabled.score, plain);
+        assert!(disabled.feedback_notes.is_empty());
+        assert_eq!(enabled.score, plain);
+        assert_eq!(enabled.feedback_notes, notes);
     }
 }
