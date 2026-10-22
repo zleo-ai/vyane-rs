@@ -364,6 +364,9 @@ impl WorkflowPlan {
             WORKFLOW_PLAN_MAX_NAME_BYTES,
             &mut problems,
         );
+        if self.name.trim().is_empty() {
+            problems.push("workflow name is required".into());
+        }
         if let Some(description) = self.description.as_deref() {
             validate_text(
                 "workflow description",
@@ -420,6 +423,11 @@ impl WorkflowPlan {
                 WORKFLOW_PLAN_MAX_STEP_ID_BYTES,
                 &mut problems,
             );
+            if step.id.trim().is_empty() {
+                problems.push(format!(
+                    "workflow plan step at order {order} is missing required id"
+                ));
+            }
             if !ids.insert(step.id.as_str()) {
                 problems.push(format!("workflow plan repeats step id `{}`", step.id));
             }
@@ -451,6 +459,12 @@ impl WorkflowPlan {
                     WORKFLOW_PLAN_MAX_TARGET_BYTES,
                     &mut problems,
                 );
+                if target.trim().is_empty() {
+                    problems.push(format!(
+                        "workflow plan step `{}` has an empty target",
+                        step.id
+                    ));
+                }
             }
             if matches!(&step.targets, WorkflowPlanTargets::FanOut { targets } if targets.is_empty() || targets.len() > WORKFLOW_PLAN_MAX_TARGETS)
             {
@@ -1273,6 +1287,24 @@ effort = "high"
         let bytes = serde_json::to_vec(plan).unwrap();
         let error = WorkflowPlan::from_json(&bytes).unwrap_err().to_string();
         assert!(error.contains(needle), "{error}");
+    }
+
+    #[test]
+    fn verify_rejects_whitespace_only_name_id_and_target() {
+        let base = workflow(&source("stable")).compile_plan().unwrap();
+        assert!(base.verify().is_ok());
+
+        let mut name = base.clone();
+        name.name = " ".into();
+        reject_existing(&rebind(name), "workflow name is required");
+
+        let mut id = base.clone();
+        id.steps[0].id = "\t".into();
+        reject_existing(&rebind(id), "missing required id");
+
+        let mut target = base.clone();
+        target.steps[1].targets = WorkflowPlanTargets::Single { target: " ".into() };
+        reject_existing(&rebind(target), "has an empty target");
     }
 
     #[test]
