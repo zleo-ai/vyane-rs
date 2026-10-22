@@ -1202,6 +1202,56 @@ async fn anthropic_stream_normalizes_events() {
 // or concurrent wire paths stay schedulable under suite load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
+async fn anthropic_stream_normalizes_cached_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+                "event: message_delta\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":4,\"output_tokens\":2,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":5}}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        AnthropicMessagesClient::with_options(x_api_key_endpoint(server.uri()), client_options(1))
+            .unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+    assert_eq!(events.len(), 3);
+    assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "hi"));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::Usage(usage) if *usage == Usage {
+            input_tokens: 39,
+            output_tokens: 2,
+            reasoning_tokens: None,
+            cached_input_tokens: Some(30),
+        }
+    ));
+    assert!(matches!(
+        &events[2],
+        StreamEvent::Done {
+            finish_reason: Some(reason)
+        } if reason == "tool_use"
+    ));
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
 async fn malformed_json_maps_to_protocol_for_each_complete_protocol() {
     for path_name in ["/v1/chat/completions", "/v1/messages", "/v1/responses"] {
         let server = MockServer::start().await;
