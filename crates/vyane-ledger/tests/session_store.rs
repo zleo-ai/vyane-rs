@@ -127,6 +127,29 @@ async fn load_missing_session_returns_none() {
 }
 
 #[tokio::test]
+async fn whitespace_only_owner_is_rejected_and_internal_space_round_trips() {
+    let dir = TempDir::new().unwrap();
+    let store = FsSessionStore::new(dir.path());
+    for owner in ["   ", "\t", "\n"] {
+        let error = store.save(owner, &session("s1", owner)).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Config);
+        let text = error.to_string();
+        assert!(text.contains("owner"), "{text}");
+        assert!(!text.contains(owner), "{text}");
+        assert!(!owner_dir(dir.path(), owner).exists());
+    }
+
+    let rec = session("s1", "local user");
+    store.save("local user", &rec).await.unwrap();
+    let back = store
+        .load("local user", "s1")
+        .await
+        .unwrap()
+        .expect("session should exist");
+    assert_eq!(back.owner, "local user");
+}
+
+#[tokio::test]
 async fn save_then_load_roundtrips() {
     let dir = TempDir::new().unwrap();
     let store = FsSessionStore::new(dir.path());

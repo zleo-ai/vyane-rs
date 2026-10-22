@@ -982,7 +982,11 @@ fn write_envelope_atomic_with_sync(
 }
 
 fn validate_owner(owner: &str) -> Result<()> {
-    validate_text("owner", owner, MAX_OWNER_BYTES)
+    validate_text("owner", owner, MAX_OWNER_BYTES)?;
+    if owner.trim().is_empty() {
+        return Err(VyaneError::config("owner must not be only whitespace"));
+    }
+    Ok(())
 }
 
 fn validate_identity(owner: &str, session_id: &str) -> Result<()> {
