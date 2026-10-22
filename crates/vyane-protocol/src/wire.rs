@@ -1600,7 +1600,9 @@ mod hosted_search_domain_tests {
     }
 
     fn assert_invalid(domains: Vec<String>) {
-        let error = HostedWebSearchRequest::try_from(&request(Some(domains))).unwrap_err();
+        let Err(error) = HostedWebSearchRequest::try_from(&request(Some(domains))) else {
+            panic!("bad hosted search domain must be rejected");
+        };
         assert_eq!(error.kind, ErrorKind::Config);
         let text = error.to_string();
         assert!(
