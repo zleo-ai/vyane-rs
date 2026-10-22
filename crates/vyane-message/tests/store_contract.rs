@@ -172,6 +172,138 @@ fn enqueue_restart_dedupe_and_body_free_events() {
 }
 
 #[test]
+fn duplicate_delivery_id_does_not_create_a_second_visible_message() {
+    let (directory, _clock, store) = test_store();
+    let delivery_id = uuid::Uuid::now_v7().to_string();
+    let first = store
+        .enqueue_with_delivery_ids(
+            "alice",
+            &message("same-delivery", "body", "worker-a"),
+            std::slice::from_ref(&delivery_id),
+        )
+        .unwrap();
+    assert!(!first.existing);
+    assert_eq!(first.bundle.deliveries.len(), 1);
+    assert_eq!(first.bundle.deliveries[0].id, delivery_id);
+
+    let replay = store
+        .enqueue_with_delivery_ids(
+            "alice",
+            &message("same-delivery", "body", "worker-a"),
+            std::slice::from_ref(&delivery_id),
+        )
+        .unwrap();
+    assert!(replay.existing);
+    assert_eq!(replay.bundle.message.id, first.bundle.message.id);
+    assert_eq!(replay.bundle.deliveries[0].id, delivery_id);
+
+    let other_id = uuid::Uuid::now_v7().to_string();
+    assert!(matches!(
+        store.enqueue_with_delivery_ids(
+            "alice",
+            &message("same-delivery", "body", "worker-a"),
+            &[other_id],
+        ),
+        Err(MessageStoreError::IdempotencyConflict)
+    ));
+    assert!(matches!(
+        store.enqueue_with_delivery_ids(
+            "alice",
+            &message("other-delivery", "body", "worker-a"),
+            std::slice::from_ref(&delivery_id),
+        ),
+        Err(MessageStoreError::IdempotencyConflict)
+    ));
+    let mut duplicated = message("duplicate-ids", "body", "worker-a");
+    duplicated.deliveries.push(NewDelivery {
+        route: "worker".into(),
+        target: endpoint(EndpointKind::Worker, "worker-b"),
+        available_at: None,
+        expires_at: None,
+        max_attempts: 3,
+    });
+    assert!(matches!(
+        store.enqueue_with_delivery_ids(
+            "alice",
+            &duplicated,
+            &[delivery_id.clone(), delivery_id.clone()],
+        ),
+        Err(MessageStoreError::InvalidInput(_))
+    ));
+
+    let visible = |store: &SqliteMessageStore| {
+        let conversation = store
+            .list_conversation("alice", "conversation-1", None, 10)
+            .unwrap();
+        let mailbox = store
+            .list_mailbox("alice", &mailbox("worker-a"), &MailboxQuery::default())
+            .unwrap();
+        (conversation, mailbox)
+    };
+    let (conversation, mailbox) = visible(&store);
+    assert_eq!(conversation.items.len(), 1);
+    assert_eq!(conversation.items[0].message.id, first.bundle.message.id);
+    assert_eq!(conversation.items[0].deliveries.len(), 1);
+    assert_eq!(conversation.items[0].deliveries[0].id, delivery_id);
+    assert_eq!(mailbox.items.len(), 1);
+    assert_eq!(mailbox.items[0].message.id, first.bundle.message.id);
+    assert_eq!(mailbox.items[0].delivery.id, delivery_id);
+
+    let bob = store
+        .enqueue_with_delivery_ids(
+            "bob",
+            &message("bob-delivery", "body", "worker-a"),
+            std::slice::from_ref(&delivery_id),
+        )
+        .unwrap();
+    assert!(!bob.existing);
+    assert_eq!(bob.bundle.deliveries[0].id, delivery_id);
+    let (conversation, mailbox) = visible(&store);
+    assert_eq!(conversation.items.len(), 1);
+    assert_eq!(mailbox.items.len(), 1);
+
+    let second_id = uuid::Uuid::now_v7().to_string();
+    let second = store
+        .enqueue_with_delivery_ids(
+            "alice",
+            &message("second-delivery", "other", "worker-a"),
+            std::slice::from_ref(&second_id),
+        )
+        .unwrap();
+    assert!(!second.existing);
+    let (conversation, mailbox) = visible(&store);
+    assert_eq!(conversation.items.len(), 2);
+    assert_eq!(
+        mailbox
+            .items
+            .iter()
+            .filter(|item| item.delivery.id == delivery_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        mailbox
+            .items
+            .iter()
+            .filter(|item| item.delivery.id == second_id)
+            .count(),
+        1
+    );
+
+    let reopened = SqliteMessageStore::open(directory.path().join("messages.sqlite3")).unwrap();
+    let (conversation, mailbox) = visible(&reopened);
+    assert_eq!(conversation.items.len(), 2);
+    assert_eq!(
+        mailbox
+            .items
+            .iter()
+            .filter(|item| item.delivery.id == delivery_id)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn mailbox_listing_is_owner_target_due_and_limit_scoped() {
     let (_directory, _clock, store) = test_store();
     let first = store
