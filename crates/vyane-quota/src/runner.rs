@@ -188,11 +188,30 @@ fn secret_value_continues(line: &str) -> bool {
         }
         let quote = raw.as_bytes()[0];
         if quote == b'"' || quote == b'\'' {
-            raw.bytes().filter(|byte| *byte == quote).count() % 2 == 1
+            unescaped_quote_is_odd(raw, quote)
         } else {
             false
         }
     })
+}
+
+fn unescaped_quote_is_odd(raw: &str, quote: u8) -> bool {
+    let mut count = 0;
+    let mut escaped = false;
+    for byte in raw.bytes() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' {
+            escaped = true;
+            continue;
+        }
+        if byte == quote {
+            count += 1;
+        }
+    }
+    count % 2 == 1
 }
 
 fn key_names_token_or_password(key: &str) -> bool {
@@ -498,6 +517,12 @@ mod tests {
                 "password:\nerror: upstream timeout",
                 "error: upstream timeout",
             ),
+            (
+                "accessToken: \"say \\\"hi\\\"\"\nprovider returned 401",
+                "provider returned 401",
+            ),
+            ("userPassword: \"secret\\\"\"\nretry later", "retry later"),
+            ("\"access_token\": \"super\\\"\nsecret-token\"", ""),
             ("\"password\": \"super-secret-password\"", ""),
             ("token =", ""),
             ("upstream failed token=super-secret-token", ""),
