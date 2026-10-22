@@ -36,11 +36,11 @@ use uuid::Uuid;
 use vyane_core::error::{ErrorKind, Result, VyaneError};
 use vyane_core::{
     NativeSessionBinding, NativeSessionState, NativeSessionTransition, SessionExecutionLease,
-    SessionRecord, SessionSnapshot, SessionStore, SessionUpdate,
+    SessionRecord, SessionRef, SessionSnapshot, SessionStore, SessionUpdate,
 };
 
 const MAX_OWNER_BYTES: usize = 256;
-const MAX_SESSION_ID_BYTES: usize = 1024;
+const MAX_SESSION_ID_BYTES: usize = SessionRef::MAX_ID_BYTES;
 const MAX_EXECUTION_ID_BYTES: usize = 256;
 const MAX_NATIVE_SESSION_ID_BYTES: usize = 512;
 const MAX_DOMAIN_TEXT_BYTES: usize = 512;
