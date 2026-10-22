@@ -1088,6 +1088,65 @@ async fn openai_chat_stream_normalizes_events() {
 // or concurrent wire paths stay schedulable under suite load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
+async fn openai_chat_stream_normalizes_reasoning_usage_and_text() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"check the file\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"reasoning\":\"and the alias\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":2},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let client =
+        OpenAiChatClient::with_options(bearer_endpoint(server.uri()), client_options(1)).unwrap();
+    let events = client
+        .stream(request())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+    assert_eq!(events.len(), 5);
+    assert!(matches!(
+        &events[0],
+        StreamEvent::ReasoningDelta(text) if text == "check the file"
+    ));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::ReasoningDelta(text) if text == "and the alias"
+    ));
+    assert!(matches!(&events[2], StreamEvent::Delta(text) if text == "answer"));
+    assert!(matches!(
+        &events[3],
+        StreamEvent::Usage(usage) if *usage == Usage {
+            input_tokens: 7,
+            output_tokens: 5,
+            reasoning_tokens: Some(1),
+            cached_input_tokens: Some(2),
+        }
+    ));
+    assert!(matches!(
+        &events[4],
+        StreamEvent::Done {
+            finish_reason: Some(reason)
+        } if reason == "stop"
+    ));
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
 async fn anthropic_stream_normalizes_events() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
