@@ -15,12 +15,13 @@ mod secrets;
 
 pub use layer::ConfigLayers;
 pub use model::{
-    GenParamsPatch, HarnessPermissionCeiling, NativeCommandNetworkPolicyConfig,
-    NativeCommandNetworkRouteConfig, NativeCommandNetworkRuleConfig, NativeCommandPolicyConfig,
-    NativeCommandRuleConfig, NativePathPolicyConfig, NativePermissionCeiling,
-    NativeToolPermissionEffectConfig, NativeToolPermissionPolicyConfig,
-    NativeToolPermissionRuleConfig, NativeWebFetchPolicyConfig, NativeWebSearchPolicyConfig,
-    ProfilePatch, RawCostTable, RawFailoverElement, RawModelRate, RawRoot,
+    CONFIG_SCHEMA_VERSION, GenParamsPatch, HarnessPermissionCeiling,
+    NativeCommandNetworkPolicyConfig, NativeCommandNetworkRouteConfig,
+    NativeCommandNetworkRuleConfig, NativeCommandPolicyConfig, NativeCommandRuleConfig,
+    NativePathPolicyConfig, NativePermissionCeiling, NativeToolPermissionEffectConfig,
+    NativeToolPermissionPolicyConfig, NativeToolPermissionRuleConfig, NativeWebFetchPolicyConfig,
+    NativeWebSearchPolicyConfig, ProfilePatch, RawCostTable, RawFailoverElement, RawModelRate,
+    RawRoot,
 };
 pub use resolve::ResolvedConfig;
 pub use secrets::{env_lookup_with_secrets, load_secrets_file};

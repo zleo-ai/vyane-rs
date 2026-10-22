@@ -149,6 +149,7 @@ impl ConfigLayers {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::CONFIG_SCHEMA_VERSION;
     use vyane_core::{AuthStyle, ModelId, Protocol};
 
     fn provider_toml(base_url: &str) -> String {
@@ -474,5 +475,87 @@ mod tests {
             "#,
         );
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn omitted_schema_version_still_loads() {
+        let text = format!(
+            "{}\n[notes]\nleftover = true\n",
+            provider_toml("https://omitted.example")
+        );
+        let root: RawRoot = toml::from_str(&text).unwrap();
+        assert_eq!(
+            root.providers["anthropic"].base_url.as_deref(),
+            Some("https://omitted.example")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, &text).unwrap();
+        let mut layers = ConfigLayers::new();
+        layers.merge_file(&path).unwrap();
+        assert_eq!(
+            layers.providers.get("anthropic").unwrap().base_url,
+            "https://omitted.example"
+        );
+
+        let current = format!("schema_version = {CONFIG_SCHEMA_VERSION}\n{text}");
+        let current_root: RawRoot = toml::from_str(&current).unwrap();
+        assert_eq!(
+            current_root.providers["anthropic"].base_url.as_deref(),
+            Some("https://omitted.example")
+        );
+        let current_path = dir.path().join("current.toml");
+        std::fs::write(&current_path, &current).unwrap();
+        let mut current_layers = ConfigLayers::new();
+        current_layers.merge_file(&current_path).unwrap();
+        assert_eq!(
+            current_layers.providers.get("anthropic").unwrap().base_url,
+            "https://omitted.example"
+        );
+    }
+
+    #[test]
+    fn unknown_schema_version_fails_closed_before_use() {
+        let text = format!(
+            "schema_version = 99\n{}\n",
+            provider_toml("https://rejected.example")
+        );
+        let parsed = toml::from_str::<RawRoot>(&text).unwrap_err();
+        let parsed_text = parsed.to_string();
+        assert!(
+            parsed_text.contains("schema_version") && parsed_text.contains("99"),
+            "{parsed_text}"
+        );
+
+        let weird = toml::from_str::<RawRoot>("schema_version = \"future\"\n").unwrap_err();
+        assert!(weird.to_string().contains("schema_version"), "{weird}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, &text).unwrap();
+        let mut layers = ConfigLayers::new();
+        layers
+            .merge(&toml::from_str(&provider_toml("https://kept.example")).unwrap())
+            .unwrap();
+        let err = layers.merge_file(&path).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Config);
+        let mut detail = err.to_string();
+        let mut source = std::error::Error::source(&err);
+        while let Some(next) = source {
+            detail.push('\n');
+            detail.push_str(&next.to_string());
+            source = std::error::Error::source(next);
+        }
+        assert!(
+            detail.contains("schema_version") && detail.contains("99"),
+            "{detail}"
+        );
+        assert_eq!(
+            layers.providers.get("anthropic").unwrap().base_url,
+            "https://kept.example"
+        );
+        assert!(layers.profiles.is_empty());
+        assert!(layers.model_rates.is_empty());
     }
 }
