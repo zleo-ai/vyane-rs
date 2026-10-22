@@ -447,6 +447,9 @@ impl NamedGate {
         }
         if let Some(uri) = &self.evidence_uri {
             // Public-safe: allow only relative or synthetic URIs, not file:// private paths.
+            if uri.trim().is_empty() {
+                return Err(ReceiptError::InvalidInput("evidence_uri"));
+            }
             if uri.starts_with("file://") || uri.contains('\0') {
                 return Err(ReceiptError::InvalidInput(
                     "evidence_uri must not be a private file path",
@@ -1110,6 +1113,22 @@ mod tests {
             evidence_uri: None,
             content_digest: None,
         }
+    }
+
+    #[test]
+    fn named_gate_rejects_whitespace_only_evidence_uri() {
+        let mut blank = passed("build");
+        blank.evidence_uri = Some("   ".into());
+        match blank.validate() {
+            Err(ReceiptError::InvalidInput(message)) => {
+                assert_eq!(message, "evidence_uri");
+            }
+            other => panic!("whitespace evidence uri must be invalid, got {other:?}"),
+        }
+        let mut spaced = passed("build");
+        spaced.evidence_uri = Some("synthetic://fixture/my gate".into());
+        assert!(spaced.validate().is_ok());
+        assert!(passed("build").validate().is_ok());
     }
 
     #[test]
