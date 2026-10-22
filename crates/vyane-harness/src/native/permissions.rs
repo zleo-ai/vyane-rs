@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -530,9 +530,85 @@ pub struct ApprovalPlan {
     /// Cross-language plan digest compatible with the original Python
     /// canonical JSON contract for the supported integer-only JSON subset.
     pub canonical_plan_hash: String,
-    /// Versioned invocation binding that also includes the tool-call id. Future
-    /// approval execution must consume this hash, not the reusable plan hash.
+    /// Versioned invocation binding that also includes the tool-call id.
+    /// [`NativeAskConsumption`] grants this hash once. The canonical plan hash
+    /// stays reusable across tool-call ids and is not a grant.
     pub approval_binding_hash: String,
+}
+
+/// Why an exact ask plan did not grant.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum NativeAskConsumptionError {
+    /// The call is not an exact current ask. This includes default deny,
+    /// an explicit deny or allow, a missing plan, and a plan that does not
+    /// match the decision.
+    #[error("native ask consumption rejected")]
+    Rejected,
+    /// This exact ask binding already granted once.
+    #[error("native ask plan was already consumed")]
+    AlreadyConsumed,
+}
+
+impl NativeAskConsumptionError {
+    /// Stable snake_case token. Plan contents stay out of the token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rejected => "rejected",
+            Self::AlreadyConsumed => "already_consumed",
+        }
+    }
+}
+
+/// Process-local record of exact ask plans that have already granted once.
+///
+/// The key is [`ApprovalPlan::approval_binding_hash`]. Entries are not expired
+/// or evicted: dropping a binding would let that plan grant again.
+#[derive(Debug, Default)]
+pub struct NativeAskConsumption {
+    consumed: Mutex<BTreeSet<String>>,
+}
+
+impl NativeAskConsumption {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            consumed: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// Grant `plan` once when it is exactly the ask decision for `call`.
+    ///
+    /// `Ok` is only [`PermissionEffect::Allow`], and only on the first exact
+    /// consume. Reuse, a non-ask decision, a missing plan, and any inexact
+    /// plan fail closed and do not grant. A rejected attempt does not consume
+    /// the binding.
+    pub fn consume(
+        &self,
+        policy: &PermissionPolicy,
+        call: &ToolCall,
+        context: &ToolContext,
+        plan: &ApprovalPlan,
+    ) -> Result<PermissionEffect, NativeAskConsumptionError> {
+        let decision = policy.decide(call, context);
+        if decision.effect != PermissionEffect::Ask {
+            return Err(NativeAskConsumptionError::Rejected);
+        }
+        let Some(expected) = decision.approval else {
+            return Err(NativeAskConsumptionError::Rejected);
+        };
+        if expected != *plan {
+            return Err(NativeAskConsumptionError::Rejected);
+        }
+        let mut consumed = self
+            .consumed
+            .lock()
+            .map_err(|_| NativeAskConsumptionError::Rejected)?;
+        if !consumed.insert(expected.approval_binding_hash.clone()) {
+            return Err(NativeAskConsumptionError::AlreadyConsumed);
+        }
+        Ok(PermissionEffect::Allow)
+    }
 }
 
 impl ApprovalPlan {
@@ -1478,5 +1554,99 @@ mod tests {
         assert_eq!(PermissionEffect::Allow.as_str(), "allow");
         assert_eq!(PermissionEffect::Ask.to_string(), "ask");
         assert_eq!(PermissionEffect::Deny.as_str(), "deny");
+    }
+
+    #[test]
+    fn exact_ask_plan_is_allowed_once_and_rejected_on_reuse() {
+        assert_eq!(NativeAskConsumptionError::Rejected.as_str(), "rejected");
+        assert_eq!(
+            NativeAskConsumptionError::AlreadyConsumed.as_str(),
+            "already_consumed"
+        );
+
+        let policy = PermissionPolicy::new(PermissionEffect::Ask);
+        let invocation = call(BTreeMap::new());
+        let context = context();
+        let plan = policy
+            .decide(&invocation, &context)
+            .approval
+            .expect("ask plan");
+        let consumption = NativeAskConsumption::new();
+
+        let mut forged = plan.clone();
+        forged.tool = "other".into();
+        assert_eq!(
+            consumption
+                .consume(&policy, &invocation, &context, &forged)
+                .expect_err("inexact plan"),
+            NativeAskConsumptionError::Rejected
+        );
+
+        let deny = PermissionPolicy::deny_by_default();
+        assert_eq!(
+            deny.decide(&invocation, &context).effect,
+            PermissionEffect::Deny
+        );
+        assert_eq!(
+            consumption
+                .consume(&deny, &invocation, &context, &plan)
+                .expect_err("default deny"),
+            NativeAskConsumptionError::Rejected
+        );
+        assert_eq!(
+            deny.decide(&invocation, &context).effect,
+            PermissionEffect::Deny
+        );
+        let floor = protected_paths_policy().expect("floor");
+        assert_eq!(
+            floor.decide(&invocation, &context).effect,
+            PermissionEffect::Deny
+        );
+        assert_eq!(
+            consumption
+                .consume(&floor, &invocation, &context, &plan)
+                .expect_err("deny floor"),
+            NativeAskConsumptionError::Rejected
+        );
+
+        assert_eq!(
+            consumption
+                .consume(&policy, &invocation, &context, &plan)
+                .expect("first consume"),
+            PermissionEffect::Allow
+        );
+        assert_eq!(
+            consumption
+                .consume(&policy, &invocation, &context, &plan)
+                .expect_err("second consume"),
+            NativeAskConsumptionError::AlreadyConsumed
+        );
+
+        let mut other = invocation.clone();
+        other.id = "call-2".into();
+        let other_plan = policy
+            .decide(&other, &context)
+            .approval
+            .expect("other ask plan");
+        assert_eq!(plan.canonical_plan_hash, other_plan.canonical_plan_hash);
+        assert_ne!(plan.approval_binding_hash, other_plan.approval_binding_hash);
+        assert_eq!(
+            consumption
+                .consume(&policy, &other, &context, &plan)
+                .expect_err("reusable plan hash"),
+            NativeAskConsumptionError::Rejected
+        );
+        assert_eq!(
+            consumption
+                .consume(&policy, &other, &context, &other_plan)
+                .expect("distinct binding"),
+            PermissionEffect::Allow
+        );
+        assert_eq!(
+            consumption
+                .consume(&policy, &other, &context, &other_plan)
+                .expect_err("distinct binding reuse"),
+            NativeAskConsumptionError::AlreadyConsumed
+        );
     }
 }
