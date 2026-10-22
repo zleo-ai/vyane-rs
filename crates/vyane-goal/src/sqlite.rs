@@ -485,6 +485,18 @@ fn ensure_lease_holder(
     Ok(())
 }
 
+fn ensure_substantive_acceptance_criteria(criteria: &[AcceptanceCriterion]) -> Result<()> {
+    if criteria
+        .iter()
+        .any(|criterion| criterion.kind.trim().is_empty() || criterion.target.trim().is_empty())
+    {
+        return Err(GoalStoreError::CorruptData(
+            "acceptance criteria must not be empty or whitespace".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_verification_against_goal(
     goal: &GoalRecord,
     verification: &AcceptanceVerification,
@@ -1615,6 +1627,7 @@ impl GoalStore for SqliteGoalStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let before = get_in_transaction(&transaction, owner, id)?
             .ok_or_else(|| GoalStoreError::NotFound { id: id.to_string() })?;
+        ensure_substantive_acceptance_criteria(&before.acceptance_criteria)?;
         ensure_transition(&before, GoalStatus::Completed, "complete")?;
         // Lease evaluation uses the caller's unclamped time so a prior future-dated
         // mutation cannot false-expire an active lease via the monotonic clamp.
@@ -2230,6 +2243,7 @@ fn record_pursuit_checkpoint_in_transaction(
                 }
                 PursuitCheckpointStatus::Achieved => {
                     ensure_transition(before, GoalStatus::Completed, "complete")?;
+                    ensure_substantive_acceptance_criteria(&before.acceptance_criteria)?;
                     let verified =
                         verifier_satisfied_indices(transaction, &before.owner, &before.id)?;
                     let remaining = before
