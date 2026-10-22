@@ -30,10 +30,22 @@ use crate::workdir::WorkdirIdentity;
 pub struct SessionRef(pub String);
 
 impl SessionRef {
+    /// Fallible constructor for a caller-supplied session id.
+    ///
+    /// An empty id is a config error. Input boundaries use this so a blank
+    /// `--session` or JSON field returns `Result` instead of panicking.
+    pub fn try_new(id: impl Into<String>) -> crate::Result<Self> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err(crate::VyaneError::config("session id must not be empty"));
+        }
+        Ok(Self(id))
+    }
+
     /// # Panics
     ///
-    /// Panics if `id` is empty. A session id is a continuity key, so the
-    /// existing constructor rejects an empty value instead of storing one.
+    /// Panics if `id` is empty. Internal callers pass a known id. Input
+    /// boundaries use [`Self::try_new`].
     pub fn new(id: impl Into<String>) -> Self {
         let id = id.into();
         assert!(!id.is_empty(), "session id must not be empty");
@@ -311,6 +323,14 @@ mod tests {
         let rejected = std::panic::catch_unwind(|| SessionRef::new(""));
         assert!(rejected.is_err(), "empty session id must be rejected");
         assert_eq!(SessionRef::new("sess-1").as_str(), "sess-1");
+        match SessionRef::try_new("") {
+            Err(error) => assert_eq!(error.kind, crate::ErrorKind::Config),
+            Ok(_) => panic!("empty session id is a config error"),
+        }
+        match SessionRef::try_new("sess-1") {
+            Ok(session) => assert_eq!(session.as_str(), "sess-1"),
+            Err(_) => panic!("non-empty session id must be accepted"),
+        }
     }
 
     #[test]
