@@ -430,6 +430,35 @@ async fn page_byte_cap_advertises_more_and_cursor_reads_every_event() {
 }
 
 #[tokio::test]
+async fn whitespace_only_event_id_is_rejected_and_internal_space_is_kept() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("events");
+    let log = EventLog::new(&root);
+    for id in ["   ", "\t", "\n"] {
+        let mut bad = event("alice", "worker.started");
+        bad.event_id = id.into();
+        let error = log
+            .append("task-1", bad, EventDurability::Durable)
+            .await
+            .unwrap_err();
+        assert_eq!(error.as_str(), "invalid_input");
+        let text = error.to_string();
+        assert!(text.contains("event_id"), "{text}");
+        assert!(!text.contains(id), "{text}");
+    }
+    assert!(!owner_root(&root, "alice").join("task-1.jsonl").exists());
+
+    let mut kept = event("alice", "worker.started");
+    kept.event_id = "event 1".into();
+    let stored = log
+        .append("task-1", kept, EventDurability::Durable)
+        .await
+        .unwrap();
+    assert_eq!(stored.event_id, "event 1");
+    assert_eq!(stored.sequence, 1);
+}
+
+#[tokio::test]
 async fn event_type_tokens_are_bounded_ascii_and_do_not_append_when_rejected() {
     let directory = TempDir::new().unwrap();
     let root = directory.path().join("events");
