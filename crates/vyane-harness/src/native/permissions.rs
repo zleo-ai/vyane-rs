@@ -1098,7 +1098,7 @@ mod tests {
             );
         }
         assert!(allow.clone().with_argument_pattern("path", "^ok$").is_ok());
-        assert!(allow.with_argument_pattern("path", " ".repeat(1)).is_ok());
+        assert!(allow.with_argument_pattern("path", " ").is_ok());
         let blank = NativeToolPermissionPolicy {
             default: PermissionEffect::Allow,
             rules: vec![NativeToolPermissionRule {
