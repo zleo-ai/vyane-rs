@@ -248,14 +248,41 @@ impl KernelStore {
         Ok(store)
     }
 
-    /// Attach to a sqlite path this process already initialized.
-    /// Skips schema work; the file must already exist.
-    #[must_use]
-    pub(crate) fn reuse(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            allow_create: false,
+    /// Discover an existing kernel store without initialization or migration.
+    /// Read-only schema and kernel metadata checks also reject unrelated SQLite
+    /// files, including ones whose application uses the same `user_version`.
+    pub(crate) fn probe_existing(path: impl Into<PathBuf>) -> KernelStoreResult<Self> {
+        let path = path.into();
+        let conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let found: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found != SCHEMA_VERSION {
+            return Err(KernelStoreError::UnsupportedSchema {
+                found,
+                supported: SCHEMA_VERSION,
+            });
         }
+        let identity: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kernel_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if identity.as_deref() != Some(SCHEMA_VERSION.to_string().as_str()) {
+            return Err(KernelStoreError::InvalidInput(
+                "missing kernel schema identity",
+            ));
+        }
+        Ok(Self {
+            path,
+            allow_create: false,
+        })
     }
 
     #[must_use]
