@@ -1,11 +1,16 @@
 # Changelog
 
-User-visible changes in the public repository. Versions follow the
-[release policy](RELEASING.md). There are no confirmed tagged releases as of
-2026-10-15; the workspace version `0.1.0` is not evidence of publication.
+User-visible changes in the public repository. Versions follow
+[VERSIONING.md](VERSIONING.md) and the [release policy](RELEASING.md).
+A git tag names a source snapshot. It is not a crates.io publication.
 This is a curated history, not a complete reconstruction of all development.
 
 ## Unreleased
+
+## 0.1.0 - 2026-10-23
+
+Source snapshot `v0.1.0`. The tag is created on the `main` commit that
+contains this section. It does not upload packages.
 
 ### Added
 
@@ -69,6 +74,17 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Fixed
 
+- Malformed `secrets.env` lines no longer include the line text in the
+  config error. The message names the file, the line number, and whether the
+  line lacks `=` or has an empty key. A normal `KEY=VALUE` line, including a
+  value that contains `=`, still loads
+  ([#280](https://github.com/zleo-ai/vyane-rs/pull/280)).
+- Empty, whitespace-only, oversized, or control-character identifiers and
+  paths fail at the checks that already rejected a nearby invalid form.
+  This covers session ids, owners, event ids, workflow names and targets,
+  route values, source and workdir paths, evidence URIs, hosted-search
+  domains, and permission patterns. Text with an internal space stays valid.
+  The error names the field and does not echo the rejected value.
 - MCP dispatch and broadcast reject oversized task, system, workdir, target,
   and route inputs before the service runs, using the same per-field limits
   as the workflow plan fields they stand in for. A value at the limit still
@@ -110,9 +126,10 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Known limitations
 
-- Full Python Vyane parity is not delivered. The public snapshot has 44 selected
-  behavior cases (30 normalized matches, 14 open differences); see the
-  [capability matrix](parity/ORIGINAL-VYANE-PARITY.md) for broader gaps.
+- Full Python Vyane parity is not delivered. `v0.1.0` is a source snapshot,
+  not that alignment. This tag does not retitle the capability matrix.
+  Decision-layer rows and optional adapters stay open.
+  See the [capability matrix](parity/ORIGINAL-VYANE-PARITY.md).
 - Real package and registry readiness remain unverified. The publication-order
   regression uses synthetic archives; its success and source installation do
   not establish publishable artifacts. See [RELEASING.md](RELEASING.md).

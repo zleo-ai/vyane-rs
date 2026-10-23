@@ -9,17 +9,17 @@ publication-order evidence updated by
 | Surface | Observed state |
 | --- | --- |
 | `Cargo.toml`, workspace package manifests and `Cargo.lock` | 18 workspace crates at `0.1.0`; member versions inherit the workspace version. |
-| Remote Git tags / GitHub Releases | No tags and no Releases returned by the GitHub API. |
-| `docs/CHANGELOG.md` | One `Unreleased` section; no historical release date is inferred. |
+| Remote Git tags / GitHub Releases | `v0.1.0` is the first source tag, cut on the commit that records that changelog section. No crates.io release is implied. Older tags are not invented. |
+| `docs/CHANGELOG.md` | `0.1.0 - 2026-10-23` plus a new empty `Unreleased` section. |
 | Roadmap v0.1–v0.4 headings | Implementation scope labels, not registry versions or release history. |
 | Publication preflight | The publication order now covers all 18 workspace crates, including `vyane-quota`, in dependency order. Offline regression exercises the real preflight with synthetic archives; real Cargo packaging remains unverified. |
 | Registry distribution | Not established by a source build or GitHub release inventory. Do not recommend `cargo install vyane-cli` until the actual published artifact and ownership are verified. |
 
-Do not bump versions, manufacture historical tags or dates, or claim package
-readiness to make these surfaces appear consistent. The missing-member check
-is repaired; an authorized release candidate still needs a real package
-preflight and registry verification. No publication, tag creation, or
-protected-environment approval follows from this repair or a documentation update.
+Do not invent tags for older commits or claim that a source tag uploaded
+packages. Numbering rules are in [VERSIONING.md](VERSIONING.md). An authorized
+registry release still needs a real package preflight and the publish
+workflow. No publication or protected-environment approval follows from the
+`v0.1.0` source tag.
 
 ## Version policy
 
