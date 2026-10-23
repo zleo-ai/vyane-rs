@@ -1,7 +1,8 @@
 # Roadmap
 
 These version-shaped headings are historical implementation milestones, not
-published versions. The workspace remains `0.1.0`; see [release status](RELEASING.md).
+package numbers. The named source snapshot is `v0.1.0`; see
+[versioning](VERSIONING.md). It is not a crates.io release and not full parity.
 
 Scope, not schedule. Milestones list *what*, in dependency order; there are no
 dates and no time estimates. `vyane-core` (the four-layer model, traits, error

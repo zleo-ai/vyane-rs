@@ -217,12 +217,12 @@ configuration). You can still request Copilot manually, but that does
 
 ## Releases
 
-See [RELEASING.md](docs/RELEASING.md) for version selection, changelog upkeep,
-release notes and the current package-preflight blocker. The authorization
-requirements below still apply.
+See [VERSIONING.md](docs/VERSIONING.md) for how the number and git tag move,
+and [RELEASING.md](docs/RELEASING.md) for publication. A source tag does not
+publish packages.
 
 Crates.io publication is manual and requires authority distinct from merging,
-creating a tag, or possessing a registry credential:
+creating a source tag, or possessing a registry credential:
 
 1. Configure the GitHub environment named exactly `crates-io` with at least one
    required reviewer, enable **Prevent self-review**, and store
@@ -231,8 +231,9 @@ creating a tag, or possessing a registry credential:
    name: GitHub's expression syntax does not let the workflow prove which
    secret scope won precedence. The workflow refuses to proceed if reviewer
    protections are absent or unreadable.
-2. Create the intended `vMAJOR.MINOR.PATCH` tag on the exact current `main`
-   commit only after separate publication authorization has been requested.
+2. Publication uses the source tag from [VERSIONING.md](docs/VERSIONING.md).
+   Do not create a second tag. Dispatch the workflow only after separate
+   publication authorization. The tag must point at current `main`.
 3. Dispatch the Publish workflow from `main` and supply that existing tag as
    the required `release_tag` input. A different dispatch ref, stale `main`,
    dirty checkout, missing tag, or tag pointing anywhere else fails closed. The

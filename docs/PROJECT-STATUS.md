@@ -5,7 +5,7 @@ Checked against source `fe43941` on 2026-10-15. See the [README](../README.md) f
 ## Availability
 
 
-This is an early, source-build project with unstable APIs. The Cargo version is **0.1.0**; roadmap labels such as v0.2–v0.4 describe implementation milestones, not published releases. On 2026-10-15 the repository had no Git tags or GitHub Releases. Use the [source quickstart](../README.md#quickstart); registry installation is not a verified distribution path. The [release checklist](RELEASING.md) records a current blocker: 18 workspace crates, but only 17 entries in the publication order (`vyane-quota` is missing).
+This is an early, source-build project with unstable APIs. The workspace version is **0.1.0**. Git tag `v0.1.0` names that source snapshot; it is not a crates.io release. Roadmap labels such as v0.2–v0.4 remain implementation milestones, not the next package numbers. See [VERSIONING.md](VERSIONING.md). Use the [source quickstart](../README.md#quickstart). Registry installation is not a verified distribution path. The publication order includes all 18 workspace crates. Uploading them still needs the separate publish approval in [RELEASING.md](RELEASING.md).
 
 | Available in the public source | Boundary |
 | --- | --- |
