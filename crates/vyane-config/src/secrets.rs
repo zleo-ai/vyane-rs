@@ -43,22 +43,14 @@ fn parse_secrets(text: &str, path: &Path) -> Result<BTreeMap<String, String>> {
         let (key, value) = trimmed.split_once('=').ok_or_else(|| {
             VyaneError::new(
                 ErrorKind::Config,
-                format!(
-                    "{}:{}: expected `KEY=VALUE`, got `{trimmed}`",
-                    path.display(),
-                    line_no + 1
-                ),
+                format!("{}:{}: expected `KEY=VALUE`", path.display(), line_no + 1),
             )
         })?;
         let key = key.trim();
         if key.is_empty() {
             return Err(VyaneError::new(
                 ErrorKind::Config,
-                format!(
-                    "{}:{}: empty key in `{trimmed}`",
-                    path.display(),
-                    line_no + 1
-                ),
+                format!("{}:{}: empty key", path.display(), line_no + 1),
             ));
         }
         out.insert(key.to_string(), value.trim().to_string());
@@ -102,6 +94,25 @@ mod tests {
         let text = "NOT_A_VALID_LINE\n";
         let err = parse_secrets(text, Path::new("secrets.env")).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Config);
+    }
+
+    #[test]
+    fn malformed_secrets_do_not_expose_values_in_error_formats() {
+        const CANARY: &str = "AUDIT_CANARY_NOT_A_SECRET";
+        for (line, expected) in [
+            (CANARY.to_string(), "expected `KEY=VALUE`"),
+            (format!("={CANARY}"), "empty key"),
+        ] {
+            let text = format!("# ignored comment\n{line}\n");
+            let error = parse_secrets(&text, Path::new("secrets.env")).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Config);
+            assert_eq!(
+                error.to_string(),
+                format!("Config: secrets.env:2: {expected}")
+            );
+            assert!(!format!("{error:#}").contains(CANARY));
+            assert!(!format!("{error:?}").contains(CANARY));
+        }
     }
 
     #[test]
