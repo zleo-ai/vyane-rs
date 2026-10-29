@@ -16,6 +16,18 @@ use vyane_core::{
 };
 use vyane_ledger::FsSessionStore;
 
+fn private_tempdir() -> TempDir {
+    // Temp-directory defaults differ across platforms; inspection requires an
+    // owner-only root before it runs and must never repair it itself.
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir().unwrap()
+}
+
 fn session(id: &str, owner: &str) -> SessionRecord {
     let now = Utc::now();
     SessionRecord {
@@ -168,7 +180,7 @@ fn write_private_record(path: &std::path::Path, record: &SessionRecord) {
 
 #[tokio::test]
 async fn inspect_snapshot_reads_legacy_flat_record_without_any_disk_mutation() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_tempdir();
     let store = FsSessionStore::new(dir.path());
     write_private_record(&dir.path().join("a_b.json"), &session("a/b", "alice"));
     let before = disk_snapshot(dir.path());
@@ -190,7 +202,7 @@ async fn inspect_snapshot_reads_legacy_flat_record_without_any_disk_mutation() {
 
 #[tokio::test]
 async fn inspect_snapshot_missing_legal_long_ids_returns_none_without_disk_mutation() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_tempdir();
     let store = FsSessionStore::new(dir.path());
     let before = disk_snapshot(dir.path());
     let mut failures = Vec::new();
@@ -253,7 +265,7 @@ async fn inspect_snapshot_reads_digest_ids_without_scanning_unrelated_records() 
 
 #[tokio::test]
 async fn inspect_snapshot_reads_legacy_ids_at_the_filename_byte_boundary() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_tempdir();
     let store = FsSessionStore::new(dir.path());
     for id in ["x".repeat(250), format!("{}x", "界".repeat(83))] {
         assert_eq!(id.len(), 250);
@@ -278,7 +290,7 @@ async fn inspect_snapshot_reads_legacy_ids_at_the_filename_byte_boundary() {
 
 #[tokio::test]
 async fn inspect_snapshot_checks_exact_legacy_identity_and_propagates_bad_data() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_tempdir();
     let store = FsSessionStore::new(dir.path());
     let path = dir.path().join("a_b.json");
     write_private_record(&path, &session("a/b", "alice"));

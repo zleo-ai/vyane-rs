@@ -24,6 +24,55 @@ use vyane_service::{SessionView, StoragePaths, VyaneService};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_first_start_missing_session_is_not_found_under_permissive_umasks() -> anyhow::Result<()>
+{
+    for mask in ["0022", "0002"] {
+        let root = common::private_tempdir();
+        let config = root.path().join("config.toml");
+        fs::write(&config, "")?;
+        let data = root.path().join("data");
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .env_clear()
+            .env("HOME", root.path())
+            .env("XDG_CONFIG_HOME", root.path().join("absent-config"))
+            .env("VYANE_DATA_DIR", &data)
+            .env("RUST_LOG", "off")
+            .current_dir(root.path())
+            .args([
+                "-c",
+                "umask \"$1\"; shift; exec \"$@\"",
+                "session-startup",
+                mask,
+            ])
+            .arg(env!("CARGO_BIN_EXE_vyane"))
+            .arg("--config")
+            .arg(&config)
+            .args(["session", "inspect", "missing", "--json"])
+            .kill_on_drop(true);
+        if let Some(path) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", path);
+        }
+        let output = tokio::time::timeout(TIMEOUT, command.output()).await??;
+        let error: Value = serde_json::from_slice(&output.stderr).with_context(|| {
+            format!(
+                "CLI stderr under umask {mask}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })?;
+        assert_eq!(output.status.code(), Some(2), "umask {mask}: {error}");
+        assert_eq!(error["error"]["kind"], "not_found");
+        assert_eq!(error["error"]["message"], "session not found");
+        assert!(
+            !data.join("sessions").exists(),
+            "inspection must not initialize storage"
+        );
+    }
+    Ok(())
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     service: VyaneService,
