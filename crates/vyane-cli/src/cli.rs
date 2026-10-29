@@ -818,6 +818,9 @@ pub struct BroadcastArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
+    /// Compare successful answers using lexical statistics (at most 64 targets).
+    #[arg(long)]
+    pub compare: bool,
 }
 
 #[derive(Debug, Args)]
