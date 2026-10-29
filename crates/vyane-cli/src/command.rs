@@ -2451,6 +2451,9 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
     // Same config-phase exit-code contract as `run_dispatch`.
     let phase = load_config(config_path.as_deref()).and_then(|loaded| {
         let targets = split_targets(&args.targets)?;
+        if args.compare && targets.len() > vyane_service::MAX_BROADCAST_COMPARE_TARGETS {
+            return Err(vyane_service::BroadcastCompareLimit.into());
+        }
         let mut chains = Vec::with_capacity(targets.len());
         for target in &targets {
             chains.push(resolve_target_chain(&loaded, target)?);
@@ -2468,6 +2471,7 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
         }
     };
     let json = args.json;
+    let compare = args.compare;
     let task = task_from_broadcast(args)?;
     vyane_service::validate_user_routing_labels(&task.labels)?;
     let runtime = Runtime::new(loaded.config, StoragePaths::resolve()?)?;
@@ -2530,10 +2534,34 @@ async fn run_broadcast(config_path: Option<PathBuf>, args: BroadcastArgs) -> Res
         }
     }
 
+    let comparison = if compare {
+        let inputs: Vec<_> = rows
+            .iter()
+            .map(|row| vyane_service::BroadcastCompareInput {
+                target: &row.target,
+                record: row.record.as_ref(),
+                output: row.output.as_deref(),
+            })
+            .collect();
+        Some(vyane_service::compare_broadcast_results(&inputs)?)
+    } else {
+        None
+    };
     if json {
-        println!("{}", serde_json::to_string_pretty(&json_rows)?);
+        if let Some(comparison) = comparison {
+            let body = serde_json::json!({"results": json_rows, "comparison": comparison});
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&json_rows)?);
+        }
     } else {
         crate::output::print_broadcast_table(&rows);
+        if let Some(comparison) = comparison {
+            print!(
+                "{}",
+                crate::output::format_broadcast_comparison(&comparison)
+            );
+        }
     }
 
     // Exit 1 means at least one model call failed. Exit 3 means every call

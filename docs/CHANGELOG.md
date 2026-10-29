@@ -7,6 +7,14 @@ This is a curated history, not a complete reconstruction of all development.
 
 ## Unreleased
 
+### Added
+
+- `vyane broadcast --compare` adds a local lexical comparison of successful
+  text results: term counts, vocabulary overlap, and measured speed rankings.
+  With `--json`, the opt-in result is `{ results, comparison }`; ordinary
+  broadcast output and exit codes remain compatible. No additional model call
+  is made. Comparison accepts at most 64 targets.
+
 ### Fixed
 
 - A workflow variable key that contains a control character is rejected.

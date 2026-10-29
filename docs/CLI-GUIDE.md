@@ -40,6 +40,36 @@ workdirs and sandboxes above read-only are rejected before daemon contact. This 
 workflow control, not general task, board, collaboration, or multi-principal
 MCP parity.
 
+## Compare broadcast results
+
+```sh
+vyane broadcast --targets fast,careful --compare "Explain the tradeoffs"
+vyane broadcast --targets fast,careful --compare --json "Explain the tradeoffs"
+```
+
+`--compare` computes local statistics after the normal broadcast completes.
+Only successful, nonblank text results participate. The ordinary table is
+followed by character and word counts, top and unique terms, pairwise vocabulary
+overlap, and a speed ranking. It makes no extra model calls. This is a lexical
+comparison and does not judge factual accuracy or semantic agreement.
+
+Without the flag, JSON stays the existing array. With the flag, JSON contains
+`results` (the unchanged array) and `comparison`. Each participating result keeps
+its zero-based input `index`, so duplicate target names remain distinct. Fewer
+than two participating results sets `comparable=false` with a `reason`; it does
+not turn a failed broadcast into success. Existing exit codes still apply.
+
+Character counts use Unicode scalar values. Words are lowercase ASCII
+alphanumeric runs; top terms break frequency ties by first occurrence, while
+unique terms sort by descending length then lexical order. Both term lists are
+limited to ten entries. Pairwise similarity is Jaccard vocabulary overlap,
+rounded to three decimals; the average uses the unrounded scored pairs. A pair
+with an empty ASCII token set has `similarity=null`, including text entirely in
+scripts that produce no ASCII tokens. Such pairs do not contribute to the
+average. Missing or reversed recorded timestamps are excluded from speed
+rankings. Comparison accepts at most 64 input targets and rejects a larger
+request before dispatching any target.
+
 ## Static configuration JSON
 
 `vyane check --json` exposes the same static `ConfigCheckReport` as MCP

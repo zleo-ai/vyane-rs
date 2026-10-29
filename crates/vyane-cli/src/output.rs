@@ -2086,6 +2086,53 @@ pub fn print_broadcast_table(rows: &[BroadcastRow]) {
     print!("{}", format_broadcast_table(rows));
 }
 
+/// Human lexical comparison appended after the ordinary broadcast table.
+pub fn format_broadcast_comparison(report: &vyane_service::BroadcastComparison) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::from("\nComparison (lexical)\n");
+    if let Some(reason) = report.reason {
+        let _ = writeln!(out, "Unavailable: {reason}");
+    }
+    for entry in &report.per_target {
+        let duration = entry
+            .duration_seconds
+            .map_or_else(|| "unknown".to_string(), |value| format!("{value:.3}s"));
+        let _ = writeln!(
+            out,
+            "[{}] {}: {} chars, {} words, {}",
+            entry.index,
+            terminal_safe(&entry.target),
+            entry.char_count,
+            entry.word_count,
+            duration
+        );
+        let _ = writeln!(out, "  Top terms: {}", entry.top_terms.join(", "));
+        let _ = writeln!(out, "  Unique terms: {}", entry.unique_terms.join(", "));
+    }
+    for pair in &report.pairwise_similarity {
+        let score = pair
+            .similarity
+            .map_or_else(|| "unscorable".to_string(), |value| format!("{value:.3}"));
+        let _ = writeln!(
+            out,
+            "[{}] vs [{}]: {score}",
+            pair.left_index, pair.right_index
+        );
+    }
+    let average = report
+        .average_similarity
+        .map_or_else(|| "unscorable".to_string(), |value| format!("{value:.3}"));
+    let _ = writeln!(out, "Average similarity: {average}");
+    let ranking: Vec<_> = report
+        .speed_ranking
+        .iter()
+        .map(|index| format!("[{index}]"))
+        .collect();
+    let _ = writeln!(out, "Speed ranking: {}", ranking.join(" > "));
+    out
+}
+
 pub fn workflow_status_name(status: WorkflowRunStatus) -> &'static str {
     status.as_str()
 }

@@ -33,6 +33,7 @@ mod agent_execution;
 mod agent_recovery;
 mod agent_supervisor;
 mod approval_fsm;
+mod broadcast_compare;
 mod config;
 mod diagnostics;
 mod dispatch_event;
@@ -84,6 +85,11 @@ pub use agent_supervisor::{
 };
 pub use approval_fsm::{
     DeliveryEvent, DeliveryPhase, DeliveryTransitionError, transition as transition_delivery,
+};
+pub use broadcast_compare::{
+    BROADCAST_COMPARE_INSUFFICIENT_TEXT, BroadcastCompareInput, BroadcastCompareLimit,
+    BroadcastComparison, BroadcastPairSimilarity, BroadcastTargetComparison,
+    MAX_BROADCAST_COMPARE_TARGETS, compare_broadcast_results,
 };
 pub use config::{LoadedConfig, Runtime, StoragePaths, load_config};
 pub use diagnostics::{
