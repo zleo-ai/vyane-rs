@@ -1733,7 +1733,10 @@ fn validate_workflow_vars(vars: &BTreeMap<String, String>) -> WorkflowResult<()>
     }
     let mut total = 0usize;
     for (index, (key, value)) in vars.iter().enumerate() {
-        if key.is_empty() || key.len() > WORKFLOW_VAR_KEY_MAX_BYTES || key.contains('\0') {
+        if key.is_empty()
+            || key.len() > WORKFLOW_VAR_KEY_MAX_BYTES
+            || key.chars().any(char::is_control)
+        {
             return Err(WorkflowError::validation(vec![format!(
                 "workflow var {} has an invalid key",
                 index + 1
@@ -2292,6 +2295,24 @@ prompt = "run"
 
         assert!(!error.contains(secret));
         assert!(error.contains("invalid value"));
+    }
+
+    #[test]
+    fn workflow_var_keys_reject_control_characters_without_echoing_them() {
+        let secret = "WORKFLOW_VAR_KEY_SECRET_MUST_NOT_BE_ECHOED";
+        for key in [
+            format!("{secret}\n"),
+            format!("{secret}\t"),
+            format!("{secret}\0"),
+        ] {
+            let vars = BTreeMap::from([(key, "value".into())]);
+            let error = validate_workflow_vars(&vars).unwrap_err().to_string();
+            assert!(error.contains("invalid key"), "{error}");
+            assert!(!error.contains(secret), "{error}");
+        }
+
+        let vars = BTreeMap::from([("my key".into(), "value\nline".into())]);
+        assert!(validate_workflow_vars(&vars).is_ok());
     }
 
     #[test]

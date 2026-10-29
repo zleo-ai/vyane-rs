@@ -9,6 +9,9 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Fixed
 
+- A workflow variable key that contains a control character is rejected.
+  The error names the position, not the key. A key with an internal space
+  stays valid, and a value may still contain a newline.
 - A goal observation whose goal id contains a control character is rejected
   before it is recorded. The receipt omits the id. An id with an internal
   space still reaches lookup.
