@@ -225,7 +225,10 @@ impl GoalObservationSink {
         let kind = observation.signal_kind();
         // Kind-only; never log repos, PR numbers, or observation ids (WP-334).
         let observation_kind = observation.kind.as_str();
-        if observation.goal_id.trim().is_empty() || observation.goal_id.len() > 256 {
+        if observation.goal_id.trim().is_empty()
+            || observation.goal_id.len() > 256
+            || observation.goal_id.chars().any(char::is_control)
+        {
             tracing::warn!(
                 kind = observation_kind,
                 status = GoalObservationStatus::Rejected.as_str(),
@@ -853,6 +856,41 @@ mod tests {
                 .unwrap()
                 .contains("SENSITIVE")
         );
+    }
+
+    #[test]
+    fn control_character_goal_id_is_rejected_before_record() {
+        let directory = crate::test_support::private_tempdir();
+        let service = service(&directory);
+        let store = SqliteGoalStore::open(service.storage_paths().goal_db_path()).unwrap();
+        create_goal(&store, "local", "goal");
+        let before = store.get("local", "goal").unwrap().unwrap();
+        let sink = service
+            .goal_observation_ingress(OwnerContext::single_user_local())
+            .unwrap()
+            .bind_source("watcher")
+            .unwrap();
+
+        let newline = sink.ingest(
+            reset("CANARY\nsecret"),
+            Utc.timestamp_opt(2_004, 0).unwrap(),
+        );
+        let tab = sink.ingest(
+            reset("CANARY\tsecret"),
+            Utc.timestamp_opt(2_005, 0).unwrap(),
+        );
+        let spaced = sink.ingest(reset("goal 1"), Utc.timestamp_opt(2_006, 0).unwrap());
+
+        assert_eq!(newline.status, GoalObservationStatus::Rejected);
+        assert_eq!(newline.goal_id, None);
+        assert_eq!(tab.status, GoalObservationStatus::Rejected);
+        assert_eq!(tab.goal_id, None);
+        assert_eq!(spaced.status, GoalObservationStatus::Absent);
+        assert_eq!(spaced.goal_id.as_deref(), Some("goal 1"));
+        assert_eq!(store.get("local", "goal").unwrap().unwrap(), before);
+        let rendered = serde_json::to_string(&newline).unwrap();
+        assert!(!rendered.contains("CANARY"), "{rendered}");
+        assert!(!rendered.contains('\n'), "{rendered}");
     }
 
     #[test]

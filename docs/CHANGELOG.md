@@ -7,6 +7,12 @@ This is a curated history, not a complete reconstruction of all development.
 
 ## Unreleased
 
+### Fixed
+
+- A goal observation whose goal id contains a control character is rejected
+  before it is recorded. The receipt omits the id. An id with an internal
+  space still reaches lookup.
+
 ## 0.1.0 - 2026-10-23
 
 Source snapshot `v0.1.0`. The tag is created on the `main` commit that
