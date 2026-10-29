@@ -9,6 +9,13 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Added
 
+- Read one saved session's redacted metadata through `GET /v1/sessions/:id`
+  or MCP `vyane_session_inspect`. Inspection leaves legacy files and permissions
+  unchanged and returns not-found for valid missing long IDs. Custom session
+  stores opt in through `SessionStore::inspect_snapshot`; execution loads keep
+  their existing migration behavior. Base and CLI MCP tool counts are eight and
+  eleven respectively.
+
 - `vyane broadcast --compare` adds a local lexical comparison of successful
   text results: term counts, vocabulary overlap, and measured speed rankings.
   With `--json`, the opt-in result is `{ results, comparison }`; ordinary

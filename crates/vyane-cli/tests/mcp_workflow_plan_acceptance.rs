@@ -145,7 +145,7 @@ fn assert_invalid(value: &Value) {
 async fn stdio_plan_matches_cli_schema_without_daemon_targets_or_execution() -> anyhow::Result<()> {
     let session = Session::start().await?;
     let tools = session.client.list_all_tools().await?;
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
     let tool = tools
         .iter()
         .find(|t| t.name == "vyane_workflow_plan")

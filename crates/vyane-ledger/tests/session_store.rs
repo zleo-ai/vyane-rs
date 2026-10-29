@@ -16,6 +16,18 @@ use vyane_core::{
 };
 use vyane_ledger::FsSessionStore;
 
+fn private_tempdir() -> TempDir {
+    // Temp-directory defaults differ across platforms; inspection requires an
+    // owner-only root before it runs and must never repair it itself.
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir().unwrap()
+}
+
 fn session(id: &str, owner: &str) -> SessionRecord {
     let now = Utc::now();
     SessionRecord {
@@ -119,6 +131,386 @@ fn json_files(path: &std::path::Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+// Capture entries, bytes, and permissions: a successful inspection must not
+// migrate records, create locks/directories, or repair permissions on disk.
+fn disk_snapshot(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, (Vec<u8>, u32)> {
+    fn visit(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        entries: &mut std::collections::BTreeMap<std::path::PathBuf, (Vec<u8>, u32)>,
+    ) {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.permissions().mode()
+        };
+        #[cfg(not(unix))]
+        let mode = u32::from(metadata.permissions().readonly());
+        let bytes = if metadata.is_file() {
+            std::fs::read(path).unwrap()
+        } else {
+            Vec::new()
+        };
+        entries.insert(
+            path.strip_prefix(root).unwrap().to_path_buf(),
+            (bytes, mode),
+        );
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                visit(root, &entry.unwrap().path(), entries);
+            }
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    visit(root, root, &mut entries);
+    entries
+}
+
+fn write_private_record(path: &std::path::Path, record: &SessionRecord) {
+    std::fs::write(path, serde_json::to_vec(record).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn inspect_snapshot_reads_legacy_flat_record_without_any_disk_mutation() {
+    let dir = private_tempdir();
+    let store = FsSessionStore::new(dir.path());
+    write_private_record(&dir.path().join("a_b.json"), &session("a/b", "alice"));
+    let before = disk_snapshot(dir.path());
+
+    let snapshot = store
+        .inspect_snapshot("alice", "a/b")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.record.session_id, "a/b");
+    assert_eq!(snapshot.record.owner, "alice");
+    assert_eq!(snapshot.session_revision, 0);
+    assert!(matches!(
+        snapshot.native_session,
+        NativeSessionState::LegacyUnbound { .. }
+    ));
+    assert_eq!(disk_snapshot(dir.path()), before);
+}
+
+#[tokio::test]
+async fn inspect_snapshot_missing_legal_long_ids_returns_none_without_disk_mutation() {
+    let dir = private_tempdir();
+    let store = FsSessionStore::new(dir.path());
+    let before = disk_snapshot(dir.path());
+    let mut failures = Vec::new();
+    for id in [
+        "x".repeat(250),
+        "x".repeat(251),
+        "x".repeat(1024),
+        "界".repeat(341),
+    ] {
+        let result = store.inspect_snapshot("alice", &id).await;
+        if !matches!(result, Ok(None)) {
+            failures.push((id.len(), result));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "legal missing ids must return None: {failures:?}"
+    );
+    assert_eq!(disk_snapshot(dir.path()), before);
+}
+
+#[tokio::test]
+async fn inspect_snapshot_reads_digest_ids_without_scanning_unrelated_records() {
+    let dir = TempDir::new().unwrap();
+    let store = FsSessionStore::new(dir.path());
+    // Establish a private owner namespace using the normal writer.
+    store
+        .save("alice", &session("seed", "alice"))
+        .await
+        .unwrap();
+    let namespace = owner_dir(dir.path(), "alice");
+    std::fs::write(
+        namespace.join("unrelated.json"),
+        b"malformed unrelated record",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("unrelated.json"),
+        b"malformed unrelated legacy",
+    )
+    .unwrap();
+    for id in [
+        "x".repeat(250),
+        "x".repeat(251),
+        "x".repeat(1024),
+        "界".repeat(341),
+        "opaque/a?b#c%20".into(),
+    ] {
+        let mut hash = Sha256::new();
+        hash.update(b"vyane.session.v1\0");
+        hash.update(id.as_bytes());
+        let path = namespace.join(format!("{:x}.json", hash.finalize()));
+        write_private_record(&path, &session(&id, "alice"));
+        let before = disk_snapshot(dir.path());
+        let snapshot = store.inspect_snapshot("alice", &id).await.unwrap().unwrap();
+        assert_eq!(snapshot.record.session_id, id);
+        assert_eq!(disk_snapshot(dir.path()), before);
+    }
+}
+
+#[tokio::test]
+async fn inspect_snapshot_reads_legacy_ids_at_the_filename_byte_boundary() {
+    let dir = private_tempdir();
+    let store = FsSessionStore::new(dir.path());
+    for id in ["x".repeat(250), format!("{}x", "界".repeat(83))] {
+        assert_eq!(id.len(), 250);
+        write_private_record(
+            &dir.path().join(format!("{id}.json")),
+            &session(&id, "alice"),
+        );
+        let before = disk_snapshot(dir.path());
+        assert_eq!(
+            store
+                .inspect_snapshot("alice", &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .record
+                .session_id,
+            id
+        );
+        assert_eq!(disk_snapshot(dir.path()), before);
+    }
+}
+
+#[tokio::test]
+async fn inspect_snapshot_checks_exact_legacy_identity_and_propagates_bad_data() {
+    let dir = private_tempdir();
+    let store = FsSessionStore::new(dir.path());
+    let path = dir.path().join("a_b.json");
+    write_private_record(&path, &session("a/b", "alice"));
+    let before = disk_snapshot(dir.path());
+    assert!(
+        store
+            .inspect_snapshot("bob", "a/b")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .inspect_snapshot("alice", "a_b")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(disk_snapshot(dir.path()), before);
+    for body in [b"{bad JSON".as_slice(), br#"{"session_revision":1}"#] {
+        std::fs::write(&path, body).unwrap();
+        let before = disk_snapshot(dir.path());
+        assert!(store.inspect_snapshot("alice", "a/b").await.is_err());
+        assert_eq!(disk_snapshot(dir.path()), before);
+    }
+}
+
+#[tokio::test]
+async fn inspect_snapshot_prefers_digest_record_and_rejects_corruption_without_legacy_fallback() {
+    let dir = TempDir::new().unwrap();
+    let store = FsSessionStore::new(dir.path());
+    store
+        .save("alice", &session("shared", "alice"))
+        .await
+        .unwrap();
+    write_private_record(&dir.path().join("shared.json"), &session("shared", "alice"));
+    let path = json_files(&owner_dir(dir.path(), "alice")).pop().unwrap();
+    let mut current = session("shared", "alice");
+    current.run_count = 9;
+    write_private_record(&path, &current);
+    assert_eq!(
+        store
+            .inspect_snapshot("alice", "shared")
+            .await
+            .unwrap()
+            .unwrap()
+            .record
+            .run_count,
+        9
+    );
+    for invalid in [session("shared", "bob"), session("other", "alice")] {
+        write_private_record(&path, &invalid);
+        let before = disk_snapshot(dir.path());
+        assert!(store.inspect_snapshot("alice", "shared").await.is_err());
+        assert_eq!(disk_snapshot(dir.path()), before);
+    }
+    std::fs::write(&path, b"{bad JSON").unwrap();
+    let before = disk_snapshot(dir.path());
+    assert!(store.inspect_snapshot("alice", "shared").await.is_err());
+    assert_eq!(disk_snapshot(dir.path()), before);
+}
+
+#[tokio::test]
+async fn inspect_snapshot_missing_root_stays_absent_and_invalid_identity_fails() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("absent");
+    let store = FsSessionStore::new(&root);
+    assert!(
+        store
+            .inspect_snapshot("alice", "missing")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!root.exists());
+    for (owner, id) in [("", "id"), ("alice", ""), ("alice", "bad\0id")] {
+        assert!(store.inspect_snapshot(owner, id).await.is_err());
+    }
+    assert!(!root.exists());
+    std::fs::write(&root, "not a directory").unwrap();
+    assert!(
+        store
+            .inspect_snapshot("alice", &"x".repeat(1024))
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&root).unwrap(), "not a directory");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn inspect_snapshot_rejects_symlinks_and_non_regular_entries_without_writes() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("sessions");
+    std::fs::create_dir(&root).unwrap();
+    let store = FsSessionStore::new(&root);
+    store
+        .save("alice", &session("shared", "alice"))
+        .await
+        .unwrap();
+    let namespace = owner_dir(&root, "alice");
+    let target = dir.path().join("target.json");
+    write_private_record(&target, &session("shared", "alice"));
+    let target_bytes = std::fs::read(&target).unwrap();
+    let path = json_files(&namespace).pop().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    symlink(&target, &path).unwrap();
+    assert!(store.inspect_snapshot("alice", "shared").await.is_err());
+    std::fs::remove_file(&path).unwrap();
+    let legacy = root.join("shared.json");
+    symlink(&target, &legacy).unwrap();
+    assert!(store.inspect_snapshot("alice", "shared").await.is_err());
+    std::fs::remove_file(&legacy).unwrap();
+    std::fs::create_dir(&legacy).unwrap();
+    assert!(store.inspect_snapshot("alice", "shared").await.is_err());
+    let parked = dir.path().join("owner-parked");
+    std::fs::rename(&namespace, &parked).unwrap();
+    symlink(&parked, &namespace).unwrap();
+    assert!(
+        store
+            .inspect_snapshot("alice", &"x".repeat(1024))
+            .await
+            .is_err()
+    );
+    std::fs::remove_file(&namespace).unwrap();
+    let root_alias = dir.path().join("root-alias");
+    symlink(&root, &root_alias).unwrap();
+    assert!(
+        FsSessionStore::new(root_alias)
+            .inspect_snapshot("alice", "shared")
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), target_bytes);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn inspect_snapshot_rejects_public_permissions_without_repairing_them() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = TempDir::new().unwrap();
+    let store = FsSessionStore::new(dir.path());
+    store
+        .save("alice", &session("shared", "alice"))
+        .await
+        .unwrap();
+    let namespace = owner_dir(dir.path(), "alice");
+    let file = json_files(&namespace).pop().unwrap();
+    let legacy = dir.path().join("legacy.json");
+    write_private_record(&legacy, &session("legacy", "alice"));
+    for path in [
+        dir.path(),
+        namespace.as_path(),
+        file.as_path(),
+        legacy.as_path(),
+    ] {
+        let original = std::fs::metadata(path).unwrap().permissions();
+        std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(original.mode() | 0o044),
+        )
+        .unwrap();
+        let before = disk_snapshot(dir.path());
+        let id = if path == legacy { "legacy" } else { "shared" };
+        assert!(
+            store.inspect_snapshot("alice", id).await.is_err(),
+            "{path:?}"
+        );
+        assert_eq!(disk_snapshot(dir.path()), before);
+        std::fs::set_permissions(path, original).unwrap();
+    }
+    // Owner-only read permissions are enough; inspection never requires a
+    // writable record or chmod to the writer's usual 0600 mode.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
+    std::fs::set_permissions(&namespace, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let before = disk_snapshot(dir.path());
+    assert!(
+        store
+            .inspect_snapshot("alice", "shared")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(disk_snapshot(dir.path()), before);
+    std::fs::set_permissions(&namespace, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn inspect_snapshot_propagates_permission_denied_instead_of_reporting_missing() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = TempDir::new().unwrap();
+    let store = FsSessionStore::new(dir.path());
+    store
+        .save("alice", &session("shared", "alice"))
+        .await
+        .unwrap();
+    let namespace = owner_dir(dir.path(), "alice");
+    let file = json_files(&namespace).pop().unwrap();
+    for path in [&file, &namespace] {
+        let original = std::fs::metadata(path).unwrap().permissions();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = store.inspect_snapshot("alice", "shared").await;
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(path, original).unwrap();
+        assert_eq!(mode, 0, "inspection must not repair permissions");
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Io);
+        let source = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+}
+
 #[tokio::test]
 async fn load_missing_session_returns_none() {
     let dir = TempDir::new().unwrap();
@@ -187,6 +579,10 @@ async fn plain_legacy_native_id_loads_only_as_legacy_unbound_revision_zero() {
         .await
         .unwrap()
         .unwrap();
+    assert!(
+        !dir.path().join("legacy.json").exists(),
+        "execution snapshot loads still migrate"
+    );
     assert_eq!(snapshot.session_revision, 0);
     assert!(matches!(
         snapshot.native_session,

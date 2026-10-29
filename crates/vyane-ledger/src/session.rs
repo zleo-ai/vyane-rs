@@ -413,6 +413,44 @@ impl FsSessionStore {
             .map(SessionEnvelope::into_snapshot))
     }
 
+    fn inspect_snapshot_blocking(
+        root: &Path,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<Option<SessionSnapshot>> {
+        validate_identity(owner, session_id)?;
+        if !inspect_private_directory_exists(root)? {
+            return Ok(None);
+        }
+        let owner_root = owner_directory(root, owner);
+        if inspect_private_directory_exists(&owner_root)? {
+            let path = owner_root.join(format!("{}.json", session_key(session_id)));
+            if let Some(envelope) = read_envelope_with_permissions(&path, ReadPermissions::Verify)?
+            {
+                validate_record_identity(&envelope.record, owner, session_id, &path)?;
+                return Ok(Some(envelope.into_snapshot()));
+            }
+        }
+
+        // The historical layout used one filename component, limited to 255
+        // bytes including `.json`. Opaque ids use the digest path above; long
+        // ids cannot name a legacy record and must not become an I/O failure.
+        let safe_id = legacy_safe_id(session_id);
+        if safe_id.len() > 255 - ".json".len() {
+            return Ok(None);
+        }
+        let path = root.join(format!("{safe_id}.json"));
+        let Some(envelope) = read_envelope_with_permissions(&path, ReadPermissions::Verify)? else {
+            return Ok(None);
+        };
+        // The old filename mapping was lossy and had no owner namespace.
+        if envelope.record.owner != owner || envelope.record.session_id != session_id {
+            return Ok(None);
+        }
+        validate_record_identity(&envelope.record, owner, session_id, &path)?;
+        Ok(Some(envelope.into_snapshot()))
+    }
+
     fn acquire_execution_lease_blocking(
         root: &Path,
         owner: &str,
@@ -831,6 +869,21 @@ impl FsSessionStore {
 
 #[async_trait]
 impl SessionStore for FsSessionStore {
+    async fn inspect_snapshot(
+        &self,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<Option<SessionSnapshot>> {
+        let root = self.dir.clone();
+        let owner = owner.to_string();
+        let session_id = session_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            Self::inspect_snapshot_blocking(&root, &owner, &session_id)
+        })
+        .await
+        .map_err(|join_err| VyaneError::new(ErrorKind::Io, join_err.to_string()))?
+    }
+
     async fn acquire_execution_lease(
         &self,
         owner: &str,
@@ -1366,7 +1419,51 @@ fn private_directory_exists(path: &Path) -> Result<bool> {
     }
 }
 
+fn inspect_private_directory_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            verify_private_permissions(&metadata, path)?;
+            Ok(true)
+        }
+        Ok(_) => Err(VyaneError::config(format!(
+            "session storage directory {} is not a real directory",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn verify_private_permissions(metadata: &std::fs::Metadata, path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(VyaneError::config(format!(
+                "session storage entry {} is not private",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (metadata, path);
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ReadPermissions {
+    Repair,
+    Verify,
+}
+
 fn read_envelope(path: &Path) -> Result<Option<SessionEnvelope>> {
+    read_envelope_with_permissions(path, ReadPermissions::Repair)
+}
+
+fn read_envelope_with_permissions(
+    path: &Path,
+    permissions: ReadPermissions,
+) -> Result<Option<SessionEnvelope>> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => metadata,
         Ok(_) => {
@@ -1388,6 +1485,9 @@ fn read_envelope(path: &Path) -> Result<Option<SessionEnvelope>> {
         ));
     }
 
+    if matches!(permissions, ReadPermissions::Verify) {
+        verify_private_permissions(&metadata, path)?;
+    }
     let mut file = File::open(path)?;
     let opened_metadata = file.metadata()?;
     if !opened_metadata.file_type().is_file() {
@@ -1405,7 +1505,23 @@ fn read_envelope(path: &Path) -> Result<Option<SessionEnvelope>> {
             ),
         ));
     }
-    set_private_file_permissions(path)?;
+    match permissions {
+        ReadPermissions::Repair => set_private_file_permissions(path)?,
+        ReadPermissions::Verify => {
+            verify_private_permissions(&opened_metadata, path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt as _;
+                if metadata.dev() != opened_metadata.dev()
+                    || metadata.ino() != opened_metadata.ino()
+                {
+                    return Err(VyaneError::config(
+                        "session storage entry changed identity while opening",
+                    ));
+                }
+            }
+        }
+    }
     let mut bytes = Vec::new();
     (&mut file)
         .take(MAX_SESSION_RECORD_BYTES.saturating_add(1))

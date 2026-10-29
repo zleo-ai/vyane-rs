@@ -153,8 +153,8 @@ impl Runtime {
     pub fn new(config: ResolvedConfig, paths: StoragePaths) -> Result<Self> {
         std::fs::create_dir_all(&paths.data_dir)
             .with_context(|| format!("create data dir {}", paths.data_dir.display()))?;
-        std::fs::create_dir_all(&paths.sessions_dir)
-            .with_context(|| format!("create sessions dir {}", paths.sessions_dir.display()))?;
+        // Leave absent session storage for the first writer to create privately.
+        // Existing roots stay untouched for read-only inspection to validate.
         if let Some(parent) = paths.ledger_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create ledger dir {}", parent.display()))?;
@@ -261,6 +261,50 @@ impl StoragePaths {
 mod tests {
     use super::*;
     use vyane_config::HarnessPermissionCeiling;
+
+    #[tokio::test]
+    async fn fresh_service_inspects_missing_sessions_before_any_save_or_list_without_writes() {
+        let root = crate::test_support::private_tempdir();
+        let paths = StoragePaths::from_data_dir(root.path().join("data"));
+        let service = crate::VyaneService::from_local_storage(paths.clone()).unwrap();
+        for id in [
+            "missing".into(),
+            "x".repeat(251),
+            "x".repeat(1024),
+            "界".repeat(341),
+        ] {
+            assert!(service.session(&id).await.unwrap().is_none());
+        }
+        // Session storage is created privately by the first writer, not by a
+        // fresh runtime or a read-only inspection.
+        assert!(!paths.sessions_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fresh_service_preserves_existing_public_session_root_and_inspection_rejects_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_support::private_tempdir();
+        let paths = StoragePaths::from_data_dir(root.path().join("data"));
+        std::fs::create_dir_all(&paths.sessions_dir).unwrap();
+        std::fs::set_permissions(&paths.sessions_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let service = crate::VyaneService::from_local_storage(paths.clone()).unwrap();
+        assert_eq!(
+            service.session("missing").await.unwrap_err().kind,
+            vyane_core::ErrorKind::Config
+        );
+        assert_eq!(
+            std::fs::metadata(&paths.sessions_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(std::fs::read_dir(&paths.sessions_dir).unwrap().count(), 0);
+    }
 
     #[test]
     fn explicit_data_dir_derives_all_storage_paths_without_environment_state() {

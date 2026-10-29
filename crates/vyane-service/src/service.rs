@@ -890,7 +890,7 @@ impl VyaneService {
         Ok(self
             .runtime
             .sessions
-            .load_snapshot(owner, session_id)
+            .inspect_snapshot(owner, session_id)
             .await?
             .map(SessionView::from))
     }
