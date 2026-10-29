@@ -2,7 +2,7 @@
 //!
 //! `initialize` stays on the 2025-11-25 legacy lifecycle even when a client
 //! offers 2026-07-28. `server/discover` can still negotiate 2026-07-28. Both
-//! paths keep the seven-tool library contract.
+//! paths keep the eight-tool library contract.
 
 #![allow(clippy::unwrap_used)]
 
@@ -13,12 +13,13 @@ use rmcp::{
 use vyane_mcp::VyaneMcpServer;
 use vyane_service::{StoragePaths, VyaneService};
 
-const BASE_TOOLS: [&str; 7] = [
+const BASE_TOOLS: [&str; 8] = [
     "vyane_broadcast",
     "vyane_check",
     "vyane_dispatch",
     "vyane_history",
     "vyane_route",
+    "vyane_session_inspect",
     "vyane_sessions",
     "vyane_workflow_plan",
 ];

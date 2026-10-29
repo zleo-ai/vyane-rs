@@ -1905,6 +1905,7 @@ fn router_from_parts(
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/runs", get(runs))
         .route("/v1/sessions", get(sessions))
+        .route("/v1/sessions/{id}", get(session_inspect))
         .route(
             "/v1/goals/{id}/continuity-next",
             on(MethodFilter::GET, goal_continuity_next)
@@ -2411,6 +2412,37 @@ async fn sessions(
         ApiError::internal("session storage unavailable")
     })?;
     Ok(Json(ItemsEnvelope { items: records }))
+}
+
+#[derive(Serialize)]
+struct SessionInspectResponse {
+    session: SessionView,
+}
+
+async fn session_inspect(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+    RawQuery(query): RawQuery,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<SessionInspectResponse>, ApiError> {
+    if query.is_some() || body.is_err() || body.is_ok_and(|body| !body.is_empty()) {
+        return Err(ApiError::bad_request(
+            "session inspect does not accept query parameters or a request body",
+        ));
+    }
+    let Path(id) = path.map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let id = vyane_core::SessionRef::try_new(id)
+        .map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let session = state
+        .service
+        .session(id.as_str())
+        .await
+        .map_err(|_| ApiError::internal("session storage unavailable"))?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "session not found".into(),
+        })?;
+    Ok(Json(SessionInspectResponse { session }))
 }
 
 /// `POST /v1/tasks` — submit a dispatch asynchronously. Returns the task id

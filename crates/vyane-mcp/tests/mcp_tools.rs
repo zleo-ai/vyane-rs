@@ -792,6 +792,7 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
             "vyane_dispatch",
             "vyane_history",
             "vyane_route",
+            "vyane_session_inspect",
             "vyane_sessions",
             "vyane_workflow_plan",
         ]

@@ -62,7 +62,7 @@ vyane-kernel      dispatch / broadcast / failover state machine + streaming
 vyane-router      deterministic routing: complexity scoring, tag inference, tier mapping
 vyane-workflow    declarative workflow engine (DAG + journal/resume)
 vyane-service     shared facade: config loading, selector resolution, routing adapter
-vyane-mcp         MCP server (rmcp 3.3 SDK, 6 base tools over stdio)
+vyane-mcp         MCP server (rmcp 3.3 SDK, 8 base tools over stdio)
 vyane-cli         front-end: CLI + REST API (axum) + MCP launcher
 ```
 
@@ -81,7 +81,7 @@ interchangeable operations:
 |----------|---------|-------------------|
 | CLI | `vyane dispatch/broadcast/review/route/task/workflow/a2a/goal` | `vyane-cli/src/command.rs` |
 | REST API | `vyane serve` (axum, 10 endpoints + SSE) | `vyane-cli/src/api.rs` |
-| MCP | `vyane mcp` (rmcp 3.3, 6 base or 9 daemon-backed tools over stdio) | `vyane-mcp/src/lib.rs` |
+| MCP | `vyane mcp` (rmcp 3.3, 8 base or 11 daemon-backed tools over stdio) | `vyane-mcp/src/lib.rs` |
 
 When adding a shared operation, implement it in `vyane-service` and expose it
 through each applicable front-end. If an operation is intentionally

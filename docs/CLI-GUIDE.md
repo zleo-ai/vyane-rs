@@ -15,10 +15,10 @@ exposes a different subset of operations; they are not interchangeable:
 | **REST API** | `vyane serve --addr 127.0.0.1:9721` | programmatic access from any HTTP client |
 | **MCP** | `vyane mcp` | let other agents (Claude, Codex, …) call vyane as a tool |
 
-The production CLI MCP surface contains ten tools: dispatch, broadcast,
-history, sessions, `vyane_route`, `vyane_check`, `vyane_workflow_plan`, and
+The production CLI MCP surface contains eleven tools: dispatch, broadcast,
+history, sessions, `vyane_session_inspect`, `vyane_route`, `vyane_check`, `vyane_workflow_plan`, and
 authenticated durable workflow submit/status/cancel. The library's base server
-contains seven tools; only submit/status/cancel require an injected control port.
+contains eight tools; only submit/status/cancel require an injected control port.
 Generic success payloads have a 1 MiB cap;
 the two new diagnostics use stricter, smaller bounds. `vyane_route` is a
 Rust-side deterministic preview extension, not a same-name parity claim
@@ -289,6 +289,29 @@ support:
 | `POST` | `/v1/tasks/:id/cancel` | cancel a running task |
 | `GET` | `/v1/runs` | query the run ledger (filter by status/provider/start time) |
 | `GET` | `/v1/sessions` | list saved sessions |
+| `GET` | `/v1/sessions/:id` | inspect one saved session's metadata |
+
+Session inspection is also available as MCP
+`vyane_session_inspect({"session_id":"example-session"})`. Both surfaces return
+`{ "session": SessionView }` in the existing local owner scope. The view includes
+the schema version, session ID, target, timestamps, run and transcript-message
+counts, session revision, native state, and `native_resume_available=false`.
+It omits transcript bodies, owner, native runtime ID, workdir, and private
+binding details. A saved native state does not grant resume authority.
+
+Inspection does not migrate legacy files, create lock files, repair permissions,
+or change session data. It reads a matching hashed record first, then an exact
+legacy record when that filename fits. A valid missing ID, including a long ID,
+returns HTTP 404 or MCP `not_found`. Invalid IDs return HTTP 400 or MCP
+`invalid_argument`; unreadable, malformed, or unsafe storage returns a fixed
+HTTP 500 or MCP `internal` error without storage details. Existing REST
+authentication still applies. REST rejects query parameters and request bodies;
+the MCP tool rejects extra fields, including an owner selector.
+
+Custom `SessionStore` implementations must implement the nonmutating
+`inspect_snapshot` method to support service inspection. Its default returns
+unsupported rather than invoking a potentially migrating load. Execution's
+existing `load` and `load_snapshot` migration behavior is unchanged.
 
 History accepts an inclusive start-time cutoff through
 `vyane history --since 2026-01-01T12:00:00Z`, the REST query parameter

@@ -395,6 +395,22 @@ pub trait SessionStore: Send + Sync {
             .await?
             .map(SessionSnapshot::from_legacy_record))
     }
+    /// Inspect one owner/session snapshot without writing storage, migrating
+    /// records, creating locks, or changing permissions. Implementations must
+    /// validate the embedded identity and reject unsafe storage entries.
+    ///
+    /// Fail closed by default: `load` and `load_snapshot` may migrate records
+    /// and therefore cannot serve as a read-only fallback.
+    async fn inspect_snapshot(
+        &self,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<Option<SessionSnapshot>> {
+        let _ = (owner, session_id);
+        Err(crate::error::VyaneError::unsupported(
+            "session store does not support read-only snapshot inspection",
+        ))
+    }
     /// Save inside an explicit owner authority and reject a mismatched embedded
     /// owner rather than trusting caller-controlled record data.
     async fn save(&self, owner: &str, record: &SessionRecord) -> Result<()>;
@@ -443,6 +459,36 @@ mod tests {
 
     use super::*;
     use crate::{ModelId, NativeSideEffect, ToolChatMessage, ToolChoice, VyaneError};
+
+    struct StoreWithoutInspection;
+
+    #[async_trait]
+    impl SessionStore for StoreWithoutInspection {
+        async fn load(&self, _: &str, _: &str) -> Result<Option<SessionRecord>> {
+            panic!("inspection must not fall back to potentially migrating load")
+        }
+
+        async fn save(&self, _: &str, _: &SessionRecord) -> Result<()> {
+            panic!("inspection must not write")
+        }
+
+        async fn apply_update(&self, _: &str, _: &SessionUpdate) -> Result<SessionRecord> {
+            panic!("inspection must not update")
+        }
+
+        async fn list(&self, _: &str) -> Result<Vec<SessionRecord>> {
+            panic!("inspection must not enumerate the store")
+        }
+    }
+
+    #[test]
+    fn snapshot_inspection_default_fails_closed_without_calling_legacy_load_or_list() {
+        let error = futures::executor::block_on(
+            StoreWithoutInspection.inspect_snapshot("local", "missing"),
+        )
+        .expect_err("a store must opt in to read-only inspection");
+        assert_eq!(error.kind, crate::ErrorKind::Unsupported);
+    }
 
     #[derive(Default)]
     struct RecordingAuthority {

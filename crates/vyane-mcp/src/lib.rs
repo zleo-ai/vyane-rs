@@ -4,12 +4,12 @@
 //! history, session, and static diagnostic operations as callable tools.
 //!
 //! The server is transport-agnostic: it wraps a [`vyane_service::VyaneService`]
-//! and registers seven base tools (`vyane_dispatch`, `vyane_broadcast`,
-//! `vyane_history`, `vyane_sessions`, `vyane_route`, `vyane_check`, and
+//! and registers eight base tools (`vyane_dispatch`, `vyane_broadcast`,
+//! `vyane_history`, `vyane_sessions`, `vyane_session_inspect`, `vyane_route`, `vyane_check`, and
 //! `vyane_workflow_plan`). An
 //! embedding process may inject an authenticated [`WorkflowControl`] port to
 //! add workflow submit/status/cancel without giving this crate daemon discovery
-//! or credentials. The `vyane mcp` CLI injects that port and exposes ten tools.
+//! or credentials. The `vyane mcp` CLI injects that port and exposes eleven tools.
 //!
 //! ## Tool result contract
 //!
@@ -49,7 +49,7 @@ use tokio_util::sync::CancellationToken;
 use vyane_core::{ErrorKind, RunStatus, VyaneError};
 use vyane_service::{
     BroadcastParams, DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError, DiagnosticErrorKind,
-    DispatchParams, HistoryFilter, RoutePreviewParams, RunView, VyaneService,
+    DispatchParams, HistoryFilter, RoutePreviewParams, RunView, SessionView, VyaneService,
 };
 use vyane_workflow::{
     WORKFLOW_PLAN_MAX_PROMPT_BYTES, WORKFLOW_PLAN_MAX_ROUTE_VALUES, WORKFLOW_PLAN_MAX_SYSTEM_BYTES,
@@ -63,6 +63,7 @@ const BASE_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch server. \
     Use vyane_dispatch to run a task against a configured target (profile name, provider/model, or auto), \
     vyane_broadcast to fan one task out to several targets concurrently, \
     vyane_history to query the run ledger, vyane_sessions to list saved sessions, \
+    vyane_session_inspect to inspect one saved session without transcript or native binding details, \
     vyane_route to preview deterministic routing, and vyane_check for a static-only redacted config check. \
     Use vyane_workflow_plan to compile caller-supplied workflow sources without execution; its payload includes the supplied prompts, system text, and workdirs. \
     A result with operation_status=completed is final even when detail_omitted=true; use its run receipt and never retry it as an execution failure.";
@@ -542,6 +543,18 @@ struct ToolItems<T> {
     items: T,
 }
 
+/// Read one session in the server's local owner scope.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionInspectArgs {
+    pub session_id: String,
+}
+
+#[derive(Serialize)]
+struct SessionInspectResponse {
+    session: SessionView,
+}
+
 #[derive(Serialize)]
 struct DispatchToolOutput {
     operation_status: &'static str,
@@ -932,6 +945,41 @@ impl VyaneMcpServer {
             Ok(sessions) => Ok(success_json(&ToolItems { items: sessions })),
             Err(error) => Ok(error_json(classify_service_error(&error))),
         }
+    }
+
+    /// Inspect one saved session without exposing execution authority.
+    #[tool(
+        description = "Inspect one saved vyane session. Returns { session: SessionView } without transcript or native binding details.",
+        input_schema = rmcp::handler::server::tool::schema_for_type::<SessionInspectArgs>()
+    )]
+    async fn vyane_session_inspect(
+        &self,
+        arguments: JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        let args: SessionInspectArgs = match parse_arguments(arguments) {
+            Ok(args) => args,
+            Err(error) => return Ok(error_json(error)),
+        };
+        let id = match vyane_core::SessionRef::try_new(args.session_id) {
+            Ok(id) => id,
+            Err(_) => {
+                return Ok(error_json(SafeToolError::invalid_argument(
+                    "invalid session id",
+                )));
+            }
+        };
+        let result = match self.service.session(id.as_str()).await {
+            Ok(Some(session)) => success_json(&SessionInspectResponse { session }),
+            Ok(None) => error_json(SafeToolError {
+                code: PublicErrorCode::NotFound,
+                message: "session not found",
+            }),
+            Err(_) => error_json(SafeToolError {
+                code: PublicErrorCode::Internal,
+                message: "session storage unavailable",
+            }),
+        };
+        Ok(result)
     }
 
     /// Preview deterministic routing without dispatching or echoing the task.
@@ -2494,7 +2542,7 @@ mod tests {
             <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
 
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         for tool in &tools {
             let expected = match tool.name.as_ref() {
                 "vyane_dispatch" => rmcp::handler::server::tool::schema_for_type::<
@@ -2508,6 +2556,9 @@ mod tests {
                 >(),
                 "vyane_sessions" => {
                     rmcp::handler::server::tool::schema_for_type::<rmcp::model::EmptyObject>()
+                }
+                "vyane_session_inspect" => {
+                    rmcp::handler::server::tool::schema_for_type::<SessionInspectArgs>()
                 }
                 "vyane_route" => rmcp::handler::server::tool::schema_for_type::<
                     rmcp::handler::server::wrapper::Parameters<RouteArgs>,

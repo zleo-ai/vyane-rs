@@ -132,11 +132,11 @@ impl WorkflowControl for SucceededWorkflowControl {
 }
 
 #[tokio::test]
-async fn optional_workflow_port_preserves_seven_tool_default_and_enables_strict_control_tools()
+async fn optional_workflow_port_preserves_eight_tool_default_and_enables_strict_control_tools()
 -> anyhow::Result<()> {
     let (service, _root) = test_service()?;
     let default_tools = list_tools(VyaneMcpServer::new(service.clone())).await?;
-    assert_eq!(default_tools.len(), 7);
+    assert_eq!(default_tools.len(), 8);
     assert!(
         default_tools
             .iter()
@@ -163,7 +163,7 @@ async fn optional_workflow_port_preserves_seven_tool_default_and_enables_strict_
         .into_iter()
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 10);
+    assert_eq!(names.len(), 11);
     for name in [
         "vyane_workflow_submit",
         "vyane_workflow_status",
