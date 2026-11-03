@@ -522,6 +522,7 @@ fn templating_substitutes_outputs_vars_workflow_and_escape() {
             output: Some("draft text".to_string()),
             outputs: None,
             error: None,
+            worktrees: Vec::new(),
         },
     );
     steps.insert(
@@ -548,6 +549,7 @@ fn templating_substitutes_outputs_vars_workflow_and_escape() {
                 },
             ]),
             error: None,
+            worktrees: Vec::new(),
         },
     );
     let vars = BTreeMap::from([("topic".to_string(), "rust".to_string())]);

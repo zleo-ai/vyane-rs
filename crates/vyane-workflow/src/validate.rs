@@ -6,6 +6,7 @@ use crate::error::{WorkflowError, WorkflowResult};
 use crate::model::{StepTargets, Workflow, WorkflowRouteHints};
 use crate::plan::WorkflowPlan;
 use crate::template::validate_template;
+use crate::worktree::isolation_problems;
 
 pub const MAX_TEMPLATE_ANCESTOR_RELATIONS: usize = 65_536;
 
@@ -198,6 +199,13 @@ pub fn validate_workflow(
             )),
             (Some(_), None) | (None, Some(_)) => {}
         }
+
+        problems.extend(isolation_problems(
+            &display_step_id(step),
+            step.sandbox,
+            step.isolation,
+            step.isolation_base.as_deref(),
+        ));
     }
 
     let mut resolved_targets = BTreeMap::new();
