@@ -32,8 +32,9 @@ and **not** to resume the WP-179–465 pure-formatter residual train.
   (current public impl vs Python / Horus / Tauri plans; names the next kernel
   work package without implementing it).
 - **Capability counts remain honest:** after LED-05 moved to `partial` on
-  hermetic receipt/dogfood evidence, the 53-item matrix is
-  7 implemented / 23 partial / 12 missing / 9 different / 2 planned. No
+  hermetic receipt/dogfood evidence and GOV-06 moved to `partial` on opt-in
+  foreground worktree isolation, the 53-item matrix is
+  7 implemented / 24 partial / 11 missing / 9 different / 2 planned. No
   unqualified whole-system “implemented” claims.
 
 ## Active P0-P3 whole-system parity program
@@ -42,8 +43,8 @@ Unqualified “full parity” means whole-system capability parity, not merely p
 Private credentials, deployment details, endpoints, paths, and identity data
 must not enter this public repository; the corresponding generic contracts and
 optional/private adapter boundaries must nevertheless be verifiable. In the
-current public integration baseline the 53 matrix items are 7 implemented, 23 partial,
-12 missing, 9 different, and 2 planned.
+current public integration baseline the 53 matrix items are 7 implemented, 24 partial,
+11 missing, 9 different, and 2 planned.
 
 | wave | active scope |
 |------|--------------|

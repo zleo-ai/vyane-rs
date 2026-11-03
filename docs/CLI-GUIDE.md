@@ -576,6 +576,65 @@ but does not load runtime configuration, resolve targets, render templates,
 call models or create a journal. Requested capabilities do not authorize
 execution or establish runtime readiness.
 
+### Worktree isolation for write steps
+
+By default every target of a step runs in the same workdir, so a write-capable
+`fan_out` lets agents overwrite each other. A step can opt into one git
+worktree per target:
+
+```toml
+[[step]]
+id = "impl"
+fan_out = ["claude", "codex"]
+sandbox = "write"
+isolation = "worktree"   # "none" (default) or "worktree"
+isolation_base = "HEAD"  # optional commit-ish; default HEAD
+prompt = "Implement the change"
+```
+
+Before dispatch, each target gets a worktree at
+`<data_dir>/worktrees/<run-id>/<step-order>-<target-index>-<attempt>` on a new
+branch `vyane/wt/<run-id>/<step-order>-<target-index>-<attempt>`. The base is
+resolved once per step, so every target starts from the same commit. A step
+`workdir` inside the repository maps to the same subdirectory of the worktree.
+The worktree is recorded in the journal as `active` before the target runs.
+
+After the target finishes, fails, times out or is cancelled, the worktree is
+settled:
+
+- no uncommitted, untracked or ignored files, and both `HEAD` and the branch
+  still at the base commit → the worktree is removed (`git worktree remove`
+  without `--force`) and the branch is deleted only if it still points at the
+  base commit;
+- otherwise it is kept with its branch: `dirty` for files, `committed` for new
+  commits, `unknown_state` when any check fails;
+- a removal that does not finish is reported as `cleanup_failed`.
+
+When in doubt the worktree is kept; no check failure leads to a removal.
+`vyane workflow run`, `resume` and `replay` print one line per isolated target,
+for example `impl/claude: worktree kept: vyane/wt/<run>/0-0-0 <path> (base
+1a2b3c4 → head 5d6e7f8, committed)`; `--json` carries the same data in the
+journal step's `worktrees` array. A resumed run never removes a worktree left
+`active` by a crash: it becomes `kept` (`unknown_state`) and the retry uses the
+next attempt number and a new path. Merging, pushing and deleting kept
+worktrees stay manual (`git worktree list`, `git worktree remove`,
+`git branch -D`).
+
+Git runs with `GIT_*` variables removed, repository hooks disabled
+(`core.hooksPath=/dev/null`) and `core.fsmonitor=false`. Worktree paths are
+checked to stay below `<data_dir>/worktrees`.
+
+`isolation = "worktree"` with a read-only sandbox, an unknown `isolation`
+value, `isolation_base` without worktree isolation, and an empty, oversized
+(more than 256 bytes), option-like (`-…`) or control-character base are
+rejected before any journal is created. Plans without isolation keep their
+bytes and digest. `vyane workflow plan` shows `isolation=worktree` on such
+steps. The resident daemon does not isolate: `vyane workflow submit`, the
+daemon workflow API and MCP `vyane_workflow_submit` reject an isolation request
+with `isolation_unsupported` before creating a task. Isolation is foreground
+only, opt-in, and not available for `dispatch`, `broadcast` or AgentRuns;
+Windows is not supported.
+
 This closes the repository-local shared typed-plan prerequisite and CLI static
 plan inspection/export plus MCP source-to-plan compilation, not workflow parity.
 Dynamic control flow, nested

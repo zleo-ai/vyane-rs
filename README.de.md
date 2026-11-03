@@ -72,7 +72,7 @@ Residente Ausführung, persistente Workflows und lokale Ziele werden weiterentwi
 <details>
 <summary>Stand der Nachweise</summary>
 
-Die [öffentliche Funktionsmatrix](docs/parity/ORIGINAL-VYANE-PARITY.md) erfasst 53 Funktionen in 8 Bereichen: 7 implementiert, 23 teilweise implementiert, 12 fehlend, 9 bewusst abweichend oder noch zu entscheiden und 2 geplant. Das [bereinigte Manifest](docs/parity/fixtures/v1/manifest.json) enthält 44 Fälle in 5 Testsuiten: 30 Übereinstimmungen nach Normalisierung und 14 offene Unterschiede. Diese begrenzten Prüfungen sind keine prozentuale Paritätsangabe für das Gesamtsystem.
+Die [öffentliche Funktionsmatrix](docs/parity/ORIGINAL-VYANE-PARITY.md) erfasst 53 Funktionen in 8 Bereichen: 7 implementiert, 24 teilweise implementiert, 11 fehlend, 9 bewusst abweichend oder noch zu entscheiden und 2 geplant. Das [bereinigte Manifest](docs/parity/fixtures/v1/manifest.json) enthält 44 Fälle in 5 Testsuiten: 30 Übereinstimmungen nach Normalisierung und 14 offene Unterschiede. Diese begrenzten Prüfungen sind keine prozentuale Paritätsangabe für das Gesamtsystem.
 
 </details>
 
