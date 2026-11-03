@@ -583,6 +583,128 @@ async fn subdirectory_workdir_maps_into_the_worktree() {
     assert_eq!(settlement.disposition, WorktreeDisposition::Removed);
 }
 
+/// Commit a tree where `sub` is not a directory, then restore `sub/dir`.
+/// Returns the commit in between.
+fn commit_with_sub_replaced(repo: &Repo, replace: impl FnOnce(&Path)) -> String {
+    git(&repo.repo, &["rm", "-r", "-q", "sub"]);
+    replace(&repo.repo.join("sub"));
+    git(&repo.repo, &["add", "sub"]);
+    git(
+        &repo.repo,
+        &["commit", "-q", "-m", "sub is not a directory"],
+    );
+    let base = repo.head();
+    git(&repo.repo, &["rm", "-q", "sub"]);
+    std::fs::create_dir_all(repo.repo.join("sub/dir")).unwrap();
+    std::fs::write(repo.repo.join("sub/dir/file.txt"), "nested\n").unwrap();
+    git(&repo.repo, &["add", "sub"]);
+    git(
+        &repo.repo,
+        &["commit", "-q", "-m", "sub is a directory again"],
+    );
+    base
+}
+
+fn assert_no_worktree_left(repo: &Repo, run_id: &WorkflowRunId) {
+    let branch = format!("vyane/wt/{run_id}/0-0-0");
+    assert!(!repo.branch_exists(&branch), "branch {branch} was left");
+    assert_eq!(repo.worktree_count(), 1, "only the main tree remains");
+    let leaf = repo.worktrees.join(run_id.as_str()).join("0-0-0");
+    assert!(!leaf.exists(), "{leaf:?} was left");
+}
+
+/// The step workdir is a file at the isolation base. Provisioning fails after
+/// `git worktree add`, and the new worktree and branch are removed again.
+#[tokio::test]
+async fn workdir_that_is_a_file_at_base_leaves_no_worktree() {
+    let repo = Repo::new();
+    let base = commit_with_sub_replaced(&repo, |sub| std::fs::write(sub, "a file\n").unwrap());
+    let run_id = WorkflowRunId::generate();
+    let error = provision(
+        &repo.provisioner(),
+        &run_id,
+        &repo.repo.join("sub/dir"),
+        &base,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.as_str(), "add_failed", "{error}");
+    assert!(!matches!(error, WorktreeError::LeftInPlace { .. }));
+    assert_no_worktree_left(&repo, &run_id);
+}
+
+/// The step workdir runs through a tracked symlink at the isolation base.
+/// Nothing is created through it, and the new worktree is removed again.
+#[tokio::test]
+async fn workdir_through_a_symlink_at_base_creates_nothing_outside() {
+    let repo = Repo::new();
+    let outside = repo._temp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let target = outside.clone();
+    let base = commit_with_sub_replaced(&repo, move |sub| {
+        std::os::unix::fs::symlink(&target, sub).unwrap();
+    });
+    let run_id = WorkflowRunId::generate();
+    let error = provision(
+        &repo.provisioner(),
+        &run_id,
+        &repo.repo.join("sub/dir"),
+        &base,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.as_str(), "path_escape", "{error}");
+    assert_eq!(
+        std::fs::read_dir(&outside).unwrap().count(),
+        0,
+        "a directory was created outside the worktree"
+    );
+    assert_no_worktree_left(&repo, &run_id);
+}
+
+/// When the new worktree cannot be removed either, the error carries it so
+/// the caller can record it.
+#[tokio::test]
+async fn unfinished_worktree_that_cannot_be_removed_is_reported() {
+    let repo = Repo::new();
+    let base = commit_with_sub_replaced(&repo, |sub| std::fs::write(sub, "a file\n").unwrap());
+    let tools = repo._temp.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    let wrapper = tools.join("no-remove-git");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"remove\" ]; then exit 1; fi\ndone\nexec git \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run_id = WorkflowRunId::generate();
+    let error = provision(
+        &repo.provisioner().with_git_program(&wrapper),
+        &run_id,
+        &repo.repo.join("sub/dir"),
+        &base,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.as_str(), "add_failed", "{error}");
+    let WorktreeError::LeftInPlace {
+        branch,
+        root,
+        base_sha,
+        ..
+    } = &error
+    else {
+        panic!("expected a left-in-place error, got {error:?}");
+    };
+    assert_eq!(base_sha, &base);
+    assert!(root.exists());
+    assert!(repo.branch_exists(branch));
+    let entry = vyane_workflow::JournalWorktree::left_in_place("alpha", 0, &error).unwrap();
+    assert_eq!(entry.disposition, WorktreeDisposition::CleanupFailed);
+    assert_eq!(entry.branch, *branch);
+    assert_eq!(PathBuf::from(&entry.path), *root);
+}
+
 #[tokio::test]
 async fn provisioning_errors_are_closed_codes_and_never_dispatch_paths() {
     let repo = Repo::new();
@@ -623,6 +745,7 @@ async fn symlinked_run_directory_is_a_path_escape() {
     let repo = Repo::new();
     let outside = repo._temp.path().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::create_dir_all(&repo.worktrees).unwrap();
     let run_id = WorkflowRunId::generate();
     std::os::unix::fs::symlink(&outside, repo.worktrees.join(run_id.as_str())).unwrap();
@@ -631,6 +754,108 @@ async fn symlinked_run_directory_is_a_path_escape() {
         .unwrap_err();
     assert_eq!(error.as_str(), "path_escape");
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    let mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755, "the symlink target's permissions changed");
+}
+
+fn set_mtime(path: &Path, stamp: &str) {
+    let status = Command::new("touch")
+        .args(["-m", "-t", stamp])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// A target plants a nested repository whose config defines a clean filter
+/// and stages it as a gitlink. Settlement must not run git inside it: the
+/// filter would run outside the target's sandbox with Vyane's privileges.
+#[tokio::test]
+async fn settle_never_runs_a_nested_repository_filter() {
+    let repo = Repo::new();
+    let provisioner = repo.provisioner();
+    let run_id = WorkflowRunId::generate();
+    let worktree = provision(&provisioner, &run_id, &repo.repo, "HEAD")
+        .await
+        .unwrap();
+    let marker = repo._temp.path().join("filter-ran");
+    let nested = worktree.root.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    git(&nested, &["init", "-q"]);
+    std::fs::write(nested.join("f.txt"), "data\n").unwrap();
+    git(&nested, &["add", "f.txt"]);
+    git(&nested, &["commit", "-q", "-m", "nested"]);
+    git(
+        &nested,
+        &[
+            "config",
+            "filter.x.clean",
+            &format!("echo hit >> '{}'; cat", marker.display()),
+        ],
+    );
+    std::fs::write(nested.join(".gitattributes"), "* filter=x\n").unwrap();
+    git(&worktree.root, &["add", "nested"]);
+
+    // The setup is live: a submodule-recursing status runs the filter.
+    set_mtime(&nested.join("f.txt"), "200101010000");
+    git(
+        &worktree.root,
+        &["status", "--porcelain", "--ignore-submodules=none"],
+    );
+    assert!(marker.exists(), "the planted filter did not run in setup");
+    std::fs::remove_file(&marker).unwrap();
+    set_mtime(&nested.join("f.txt"), "200201010000");
+
+    let settlement = provisioner.settle(&worktree).await;
+    assert!(
+        !marker.exists(),
+        "settlement ran a filter from the nested repository"
+    );
+    assert_eq!(settlement.disposition, WorktreeDisposition::Kept);
+    assert_eq!(
+        settlement.kept_reason,
+        Some(WorktreeKeptReason::UnknownState)
+    );
+    assert!(worktree.root.exists());
+    assert!(repo.branch_exists(&worktree.branch));
+}
+
+/// A `.git` file rewritten inside the tree no longer names the recorded git
+/// directory, so the tree is kept without being probed through it.
+#[tokio::test]
+async fn rewritten_git_file_keeps_the_worktree() {
+    let repo = Repo::new();
+    let provisioner = repo.provisioner();
+    let run_id = WorkflowRunId::generate();
+    let worktree = provision(&provisioner, &run_id, &repo.repo, "HEAD")
+        .await
+        .unwrap();
+    assert!(
+        worktree
+            .git_dir
+            .starts_with(repo.repo.join(".git/worktrees")),
+        "{:?}",
+        worktree.git_dir
+    );
+    let original = std::fs::read(worktree.root.join(".git")).unwrap();
+    std::fs::write(
+        worktree.root.join(".git"),
+        format!("gitdir: {}\n", worktree.root.join(".fake").display()),
+    )
+    .unwrap();
+
+    let settlement = provisioner.settle(&worktree).await;
+    assert_eq!(
+        settlement.kept_reason,
+        Some(WorktreeKeptReason::UnknownState)
+    );
+    assert!(worktree.root.exists());
+    assert!(repo.branch_exists(&worktree.branch));
+
+    // Restored, the same tree settles normally.
+    std::fs::write(worktree.root.join(".git"), original).unwrap();
+    let settlement = provisioner.settle(&worktree).await;
+    assert_eq!(settlement.disposition, WorktreeDisposition::Removed);
 }
 
 /// Settle never runs a removing command on a path outside its root.
@@ -863,6 +1088,8 @@ struct FakeProvisioner {
     /// Journal file to inspect at settle time, when set.
     journal: Mutex<Option<PathBuf>>,
     seen_at_settle: Mutex<Vec<String>>,
+    /// Target index whose worktree is created but reported as left in place.
+    leave_in_place: Mutex<Option<u32>>,
 }
 
 impl FakeProvisioner {
@@ -873,6 +1100,7 @@ impl FakeProvisioner {
             settles: AtomicUsize::new(0),
             journal: Mutex::new(None),
             seen_at_settle: Mutex::new(Vec::new()),
+            leave_in_place: Mutex::new(None),
         }
     }
 }
@@ -893,8 +1121,17 @@ impl WorktreeProvisioner for FakeProvisioner {
             return Err(WorktreeError::PathExists);
         }
         std::fs::create_dir_all(&root).unwrap();
+        if *self.leave_in_place.lock().unwrap() == Some(request.target_index) {
+            return Err(WorktreeError::LeftInPlace {
+                cause: Box::new(WorktreeError::PathEscape),
+                branch: request.branch(),
+                root,
+                base_sha: "b".repeat(40),
+            });
+        }
         Ok(ProvisionedWorktree {
             path: root.clone(),
+            git_dir: root.join(".git"),
             root,
             source_root: self.root.clone(),
             branch: request.branch(),
@@ -1192,4 +1429,35 @@ async fn provisioning_failure_fails_only_that_target_without_dispatch() {
         !workdirs.contains_key("beta"),
         "beta must not be dispatched"
     );
+}
+
+/// A worktree that provisioning created but could not remove again is
+/// recorded as `cleanup_failed`, and its target is not dispatched.
+#[tokio::test]
+async fn worktree_left_in_place_by_provisioning_is_journaled() {
+    let directory = TempDir::new().unwrap();
+    let journal_dir = directory.path().join("journals");
+    let provisioner = Arc::new(FakeProvisioner::new(directory.path()));
+    *provisioner.leave_in_place.lock().unwrap() = Some(1);
+    let (engine, probe) = engine_with(Arc::clone(&provisioner), &journal_dir);
+    let outcome = engine
+        .run(&write_fan_out(), BTreeMap::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    let step = &outcome.journal.steps["impl"];
+    let outputs = step.outputs.as_ref().unwrap();
+    assert!(outputs[0].ok);
+    assert!(!outputs[1].ok);
+    assert_eq!(step.worktrees.len(), 2);
+    let left = &step.worktrees[1];
+    assert_eq!(left.target, "beta");
+    assert_eq!(left.attempt, 0);
+    assert_eq!(left.disposition, WorktreeDisposition::CleanupFailed);
+    assert!(left.branch.ends_with("/0-1-0"), "{}", left.branch);
+    assert!(PathBuf::from(&left.path).ends_with("0-1-0"));
+    assert!(!probe.workdirs.lock().unwrap().contains_key("beta"));
+    // Only the dispatched worktree is settled; the left one is reported.
+    assert_eq!(provisioner.settles.load(Ordering::SeqCst), 1);
+    let persisted = read_journal(&journal_dir, outcome.wf_run_id.as_str()).unwrap();
+    assert_eq!(persisted.steps["impl"].worktrees, step.worktrees);
 }

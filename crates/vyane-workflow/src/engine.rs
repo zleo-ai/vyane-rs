@@ -1051,11 +1051,28 @@ impl WorkflowEngine {
                         entry: state.worktrees.len() - 1,
                     });
                 }
-                Err(message) => targets.push(IsolatedTarget::Failed(message)),
+                Err(ProvisionFailure { message, left }) => {
+                    // A worktree that could be neither finished nor removed
+                    // is recorded, so it is reported and never reused.
+                    if let Some((attempt, error)) = left
+                        && let Some(entry) =
+                            JournalWorktree::left_in_place(name.clone(), attempt, &error)
+                    {
+                        state.worktrees.push(entry);
+                    }
+                    targets.push(IsolatedTarget::Failed(message));
+                }
             }
         }
         targets
     }
+}
+
+/// Why a target got no worktree. `left` carries the attempt and error of a
+/// worktree that provisioning created but could not remove again.
+struct ProvisionFailure {
+    message: String,
+    left: Option<(u32, WorktreeError)>,
 }
 
 /// Provision on a spawned task so it progresses even while the engine loop
@@ -1068,7 +1085,7 @@ async fn provision_one(
     first_attempt: u32,
     source: PathBuf,
     base: String,
-) -> Result<(u32, ProvisionedWorktree), String> {
+) -> Result<(u32, ProvisionedWorktree), ProvisionFailure> {
     let handle = tokio::spawn(async move {
         let mut attempt = first_attempt;
         loop {
@@ -1088,16 +1105,21 @@ async fn provision_one(
                     attempt = attempt.saturating_add(1);
                 }
                 Err(error) => {
-                    return Err(format!(
-                        "worktree isolation failed [{}]: {error}",
-                        error.as_str()
-                    ));
+                    let message =
+                        format!("worktree isolation failed [{}]: {error}", error.as_str());
+                    let left = matches!(error, WorktreeError::LeftInPlace { .. })
+                        .then_some((attempt, error));
+                    return Err(ProvisionFailure { message, left });
                 }
             }
         }
     });
     handle.await.unwrap_or_else(|_| {
-        Err("worktree isolation failed [add_failed]: provisioner task ended unexpectedly".into())
+        Err(ProvisionFailure {
+            message: "worktree isolation failed [add_failed]: provisioner task ended unexpectedly"
+                .into(),
+            left: None,
+        })
     })
 }
 

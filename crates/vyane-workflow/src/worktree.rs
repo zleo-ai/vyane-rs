@@ -155,6 +155,10 @@ pub struct ProvisionedWorktree {
     pub root: PathBuf,
     /// Top level of the source repository.
     pub source_root: PathBuf,
+    /// Per-worktree git directory, recorded when the worktree was created.
+    /// Settlement names it explicitly instead of trusting the `.git` file
+    /// inside the tree, which the target may have rewritten.
+    pub git_dir: PathBuf,
     pub branch: String,
     /// Full commit id the branch was created at.
     pub base_sha: String,
@@ -190,6 +194,35 @@ impl JournalWorktree {
             disposition: WorktreeDisposition::Active,
             kept_reason: None,
         }
+    }
+
+    /// Record a worktree that provisioning created but could neither finish
+    /// nor remove again. `None` for every other provisioning error.
+    #[must_use]
+    pub fn left_in_place(
+        target: impl Into<String>,
+        attempt: u32,
+        error: &WorktreeError,
+    ) -> Option<Self> {
+        let WorktreeError::LeftInPlace {
+            branch,
+            root,
+            base_sha,
+            ..
+        } = error
+        else {
+            return None;
+        };
+        Some(Self {
+            target: target.into(),
+            attempt,
+            branch: branch.clone(),
+            path: root.to_string_lossy().into_owned(),
+            base_sha: base_sha.clone(),
+            head_sha: None,
+            disposition: WorktreeDisposition::CleanupFailed,
+            kept_reason: None,
+        })
     }
 
     /// Record a settlement outcome.
@@ -316,18 +349,30 @@ pub enum WorktreeError {
     AddFailed { detail: String },
     #[error("worktree path is outside the worktree root")]
     PathEscape,
+    /// `git worktree add` succeeded, a later step failed with `cause`, and
+    /// removing the new worktree did not finish either. The caller must
+    /// record the worktree; it is never left unreported.
+    #[error("{cause}; the new worktree could not be removed and was left in place")]
+    LeftInPlace {
+        cause: Box<WorktreeError>,
+        branch: String,
+        root: PathBuf,
+        base_sha: String,
+    },
 }
 
 impl WorktreeError {
-    /// Stable snake_case kind token.
+    /// Stable snake_case kind token. A worktree left in place reports the
+    /// code of the failure that stopped provisioning.
     #[must_use]
-    pub const fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::NotARepository => "not_a_repository",
             Self::BaseUnresolved => "base_unresolved",
             Self::PathExists => "path_exists",
             Self::AddFailed { .. } => "add_failed",
             Self::PathEscape => "path_escape",
+            Self::LeftInPlace { cause, .. } => cause.as_str(),
         }
     }
 
