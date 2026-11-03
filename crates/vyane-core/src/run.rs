@@ -26,14 +26,22 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Accumulate `other` into `self`.
+    ///
+    /// Counts come from endpoints and child processes, so a hostile or buggy
+    /// report can carry values near `u64::MAX`. Every field saturates instead
+    /// of overflowing (a panic in debug builds, a silent wrap to a tiny count
+    /// in release builds).
     pub fn add(&mut self, other: &Usage) {
-        self.input_tokens += other.input_tokens;
-        self.output_tokens += other.output_tokens;
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
         if let Some(r) = other.reasoning_tokens {
-            *self.reasoning_tokens.get_or_insert(0) += r;
+            let total = self.reasoning_tokens.get_or_insert(0);
+            *total = total.saturating_add(r);
         }
         if let Some(c) = other.cached_input_tokens {
-            *self.cached_input_tokens.get_or_insert(0) += c;
+            let total = self.cached_input_tokens.get_or_insert(0);
+            *total = total.saturating_add(c);
         }
     }
 }
@@ -165,6 +173,58 @@ pub struct RunQuery {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_add_accumulates_every_field() {
+        let mut total = Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+            reasoning_tokens: None,
+            cached_input_tokens: Some(3),
+        };
+        total.add(&Usage {
+            input_tokens: 10,
+            output_tokens: 20,
+            reasoning_tokens: Some(5),
+            cached_input_tokens: Some(30),
+        });
+        assert_eq!(
+            total,
+            Usage {
+                input_tokens: 11,
+                output_tokens: 22,
+                reasoning_tokens: Some(5),
+                cached_input_tokens: Some(33),
+            }
+        );
+    }
+
+    #[test]
+    fn usage_add_saturates_instead_of_overflowing() {
+        let huge = Usage {
+            input_tokens: u64::MAX,
+            output_tokens: u64::MAX - 1,
+            reasoning_tokens: Some(u64::MAX),
+            cached_input_tokens: Some(u64::MAX),
+        };
+        let mut total = Usage {
+            input_tokens: 7,
+            output_tokens: 7,
+            reasoning_tokens: Some(7),
+            cached_input_tokens: Some(7),
+        };
+        total.add(&huge);
+        total.add(&huge);
+        assert_eq!(
+            total,
+            Usage {
+                input_tokens: u64::MAX,
+                output_tokens: u64::MAX,
+                reasoning_tokens: Some(u64::MAX),
+                cached_input_tokens: Some(u64::MAX),
+            }
+        );
+    }
 
     #[test]
     fn run_record_json_roundtrip() {

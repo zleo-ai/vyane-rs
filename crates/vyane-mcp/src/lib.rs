@@ -275,8 +275,9 @@ pub struct DispatchArgs {
     /// Sandbox level for harness runs: `read_only` (default), `write`, or `full`.
     #[serde(default)]
     pub sandbox: Option<String>,
-    /// Optional session id to continue.
+    /// Optional session id to continue. At most 1024 UTF-8 bytes when set.
     #[serde(default)]
+    #[schemars(length(max = 1024))]
     pub session: Option<String>,
     /// System prompt for direct HTTP, appended instructions for harnesses.
     /// At most 1 MiB of UTF-8 bytes when set.
@@ -287,7 +288,11 @@ pub struct DispatchArgs {
     #[serde(default)]
     pub timeout_secs: Option<u64>,
     /// Free-form `key=value` ledger labels. Routing result labels are reserved.
+    /// At most 128 labels, routing hints included. A key is at most 256 bytes
+    /// without surrounding whitespace or control characters; a value is one
+    /// line without control characters.
     #[serde(default)]
+    #[schemars(length(max = 128), inner(length(max = 2097409)))]
     pub labels: Vec<String>,
     /// Auto-routing stage hint (for example `implementation` or `review`).
     /// At most 4096 UTF-8 bytes when set.
@@ -508,6 +513,13 @@ const MAX_EXECUTION_SYSTEM_BYTES: usize = WORKFLOW_PLAN_MAX_SYSTEM_BYTES;
 const MAX_EXECUTION_WORKDIR_BYTES: usize = WORKFLOW_PLAN_MAX_WORKDIR_BYTES;
 const MAX_EXECUTION_TARGET_BYTES: usize = WORKFLOW_PLAN_MAX_TARGET_BYTES;
 const MAX_EXECUTION_ROUTE_VALUES: usize = WORKFLOW_PLAN_MAX_ROUTE_VALUES;
+/// Session ids use the session store's own limit.
+const MAX_EXECUTION_SESSION_BYTES: usize = vyane_core::SessionRef::MAX_ID_BYTES;
+/// Labels use the shared dispatch label limits (the same parser serves CLI
+/// `--label` and REST `labels`). One raw label is `key=value`.
+const MAX_EXECUTION_LABELS: usize = vyane_service::MAX_LABELS;
+const MAX_EXECUTION_LABEL_BYTES: usize =
+    vyane_service::MAX_LABEL_KEY_BYTES + 1 + vyane_service::MAX_LABEL_VALUE_BYTES;
 /// Hard cap for every non-diagnostic MCP success payload. Diagnostics keep a
 /// smaller dedicated budget below. Oversized content is replaced by a stable
 /// limit error rather than being copied into one tool result.
@@ -1351,6 +1363,20 @@ fn validate_dispatch_inputs(args: &DispatchArgs) -> std::result::Result<(), Safe
         MAX_EXECUTION_ROUTE_VALUES,
         MAX_EXECUTION_TARGET_BYTES,
     )?;
+    validate_optional_execution_text(args.session.as_deref(), MAX_EXECUTION_SESSION_BYTES)?;
+    validate_execution_list(
+        &args.labels,
+        MAX_EXECUTION_LABELS,
+        MAX_EXECUTION_LABEL_BYTES,
+    )?;
+    // The merged label set (caller labels plus routing hints) goes through
+    // the same parser CLI and REST use. Its errors are position-only, but
+    // the MCP result keeps a fixed message anyway.
+    vyane_service::parse_labels(dispatch_labels(args)).map_err(|_| {
+        SafeToolError::invalid_argument(
+            "labels must be key=value pairs with a canonical key and a single-line value",
+        )
+    })?;
     Ok(())
 }
 
@@ -1983,6 +2009,31 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_labels_share_the_service_label_rule_without_echo() {
+        const CANARY: &str = "MCP_LABEL_CANARY";
+        for labels in [
+            vec![format!("{CANARY}")],
+            vec![format!("team\n{CANARY}=ops")],
+            vec![format!("team=ops\u{1b}[2J{CANARY}")],
+            vec![format!(" {CANARY}=ops")],
+        ] {
+            let mut args = dispatch_base();
+            args.labels = labels;
+            let error = validate_dispatch_inputs(&args).unwrap_err();
+            assert_eq!(error.code, PublicErrorCode::InvalidArgument);
+            assert!(!error.message.contains(CANARY), "{}", error.message);
+        }
+        let mut hint = dispatch_base();
+        hint.route_tags = vec![format!("tag\n{CANARY}")];
+        assert!(validate_dispatch_inputs(&hint).is_err());
+
+        let mut valid = dispatch_base();
+        valid.labels = vec!["my team=ops = blue".into(), "empty=".into()];
+        valid.route_tags = vec!["security".into()];
+        assert!(validate_dispatch_inputs(&valid).is_ok());
+    }
+
+    #[test]
     fn execution_inputs_use_workflow_field_budgets() {
         assert!(validate_dispatch_inputs(&dispatch_base()).is_ok());
         let mut at_limit = dispatch_base();
@@ -2024,6 +2075,27 @@ mod tests {
         oversize_candidates.route_candidates =
             vec!["profile".into(); MAX_EXECUTION_ROUTE_VALUES + 1];
         assert_execution_limit(validate_dispatch_inputs(&oversize_candidates));
+
+        let mut session_at_limit = dispatch_base();
+        session_at_limit.session = Some("s".repeat(MAX_EXECUTION_SESSION_BYTES));
+        assert!(validate_dispatch_inputs(&session_at_limit).is_ok());
+        let mut oversize_session = dispatch_base();
+        oversize_session.session = Some("s".repeat(MAX_EXECUTION_SESSION_BYTES + 1));
+        assert_execution_limit(validate_dispatch_inputs(&oversize_session));
+
+        let mut labels_at_limit = dispatch_base();
+        labels_at_limit.labels = (0..MAX_EXECUTION_LABELS)
+            .map(|index| format!("k{index}=v"))
+            .collect();
+        assert!(validate_dispatch_inputs(&labels_at_limit).is_ok());
+        let mut too_many_labels = dispatch_base();
+        too_many_labels.labels = (0..=MAX_EXECUTION_LABELS)
+            .map(|index| format!("k{index}=v"))
+            .collect();
+        assert_execution_limit(validate_dispatch_inputs(&too_many_labels));
+        let mut oversize_label = dispatch_base();
+        oversize_label.labels = vec![format!("k={}", "v".repeat(MAX_EXECUTION_LABEL_BYTES - 1))];
+        assert_execution_limit(validate_dispatch_inputs(&oversize_label));
 
         let mut normal_broadcast = broadcast_base();
         normal_broadcast.workdir = Some("/tmp".into());
@@ -2086,6 +2158,18 @@ mod tests {
         assert_eq!(
             dispatch_properties["route_candidates"]["items"]["maxLength"],
             serde_json::json!(MAX_EXECUTION_TARGET_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["session"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_SESSION_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["labels"]["maxItems"],
+            serde_json::json!(MAX_EXECUTION_LABELS)
+        );
+        assert_eq!(
+            dispatch_properties["labels"]["items"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_LABEL_BYTES)
         );
         let broadcast_schema = rmcp::handler::server::tool::schema_for_type::<BroadcastArgs>();
         let broadcast_properties = broadcast_schema["properties"].as_object().unwrap();

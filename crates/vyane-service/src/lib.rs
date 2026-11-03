@@ -164,4 +164,7 @@ pub use service::{
     RUN_VIEW_SCHEMA, RunAttemptOutcomeView, RunAttemptView, RunView, SESSION_VIEW_SCHEMA,
     SessionNativeState, SessionView, VyaneService,
 };
-pub use task::{build_task_spec, parse_labels, validate_user_routing_labels};
+pub use task::{
+    MAX_LABEL_KEY_BYTES, MAX_LABEL_VALUE_BYTES, MAX_LABELS, MAX_LABELS_TOTAL_BYTES,
+    build_task_spec, parse_labels, validate_user_routing_labels,
+};

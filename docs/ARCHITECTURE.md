@@ -108,7 +108,7 @@ Two consequences:
 | `vyane-task` | — | owner-qualified SQLite task lifecycle snapshots/events, revision + executor-epoch CAS, transactional schema migration |
 | `vyane-goal` | — (independent leaf crate) | owner-scoped SQLite goal snapshots plus immutable lifecycle/progress events; acceptance descriptors are data, not executable checks |
 | `vyane-agent` | — (independent leaf crate) | owner-scoped SQLite AgentRun queue and worker-topology truth, fenced two-stage recovery admission, non-serializable active permits and native execution scopes with atomic durable revalidation, bounded tree cancellation, and body-free outbox |
-| `vyane-message` | — (independent leaf crate) | owner-scoped SQLite message/delivery truth, fenced leases, external receipts, per-projector body-free outbox |
+| `vyane-message` | — (leaf crate; `vyane-core` only for the shared identifier rule) | owner-scoped SQLite message/delivery truth, fenced leases, external receipts, per-projector body-free outbox |
 | `vyane-broker` | `vyane-agent`, `vyane-message`, `vyane-ledger` | bounded owner-bound delivery pump, replay-safe adapter boundary, maintenance, body-free message/AgentRun EventLog projectors, and an explicit unwired resident library driver |
 | `vyane-router` | `vyane-core` | target selection / routing policy |
 | `vyane-workflow` | `vyane-kernel` | declarative DAG execution, bounded source bundles, atomic journals, and explicit resume |

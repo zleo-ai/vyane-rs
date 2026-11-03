@@ -1005,16 +1005,13 @@ impl fmt::Display for InProcessAssemblyError {
 
 impl std::error::Error for InProcessAssemblyError {}
 
+/// Shared identifier rule from `vyane-core`: non-blank, bounded, no
+/// surrounding whitespace, no control characters.
 fn validate_text(value: &str, max_bytes: usize) -> Result<(), ()> {
-    if value.is_empty()
-        || value.len() > max_bytes
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
-        Err(())
-    } else {
-        Ok(())
+    if vyane_core::identifier_problem(value, max_bytes).is_some() {
+        return Err(());
     }
+    Ok(())
 }
 
 #[cfg(test)]

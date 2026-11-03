@@ -2612,6 +2612,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "uuid",
+ "vyane-core",
 ]
 
 [[package]]

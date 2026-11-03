@@ -1182,13 +1182,10 @@ fn is_lower_hex(value: &str) -> bool {
         .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+/// Shared identifier rule from `vyane-core`: non-blank, bounded, no
+/// surrounding whitespace, no control characters.
 fn validate_text(value: &str, max: usize) -> Result<(), ()> {
-    if value.is_empty()
-        || value.len() > max
-        || value.trim() != value
-        || value.contains('\0')
-        || value.chars().any(char::is_control)
-    {
+    if vyane_core::identifier_problem(value, max).is_some() {
         return Err(());
     }
     Ok(())

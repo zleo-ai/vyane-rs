@@ -214,12 +214,10 @@ impl fmt::Display for OwnerContextError {
 
 impl std::error::Error for OwnerContextError {}
 
+/// Shared identifier rule from `vyane-core`: non-blank, bounded, no
+/// surrounding whitespace, no control characters.
 fn validate_identity(value: &str) -> std::result::Result<(), ()> {
-    if value.is_empty()
-        || value.len() > MAX_OWNER_BYTES
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
+    if vyane_core::identifier_problem(value, MAX_OWNER_BYTES).is_some() {
         return Err(());
     }
     Ok(())

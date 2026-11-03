@@ -387,7 +387,7 @@ impl KernelStore {
         now: DateTime<Utc>,
     ) -> KernelStoreResult<bool> {
         validate_owner(owner)?;
-        validate_id("effect_id", effect_id)?;
+        validate_id("effect_id", effect_id, 256)?;
         validate_digest(payload_digest)?;
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1513,18 +1513,17 @@ fn assert_optional_lease_fence(
     Ok(())
 }
 
+/// Owners and ids follow the shared identifier rule from `vyane-core`
+/// (non-blank, bounded, no surrounding whitespace, no control characters),
+/// the same rule `OwnerContext` and the agent and message stores apply. The
+/// error names the field only, never the value.
 fn validate_owner(owner: &str) -> KernelStoreResult<()> {
-    if owner.trim().is_empty() || owner.len() > 128 {
-        return Err(KernelStoreError::InvalidInput("owner"));
-    }
-    Ok(())
+    validate_id("owner", owner, 128)
 }
 
-fn validate_id(label: &'static str, value: &str) -> KernelStoreResult<()> {
-    if value.is_empty() || value.len() > 256 {
-        return Err(KernelStoreError::InvalidInput(label));
-    }
-    Ok(())
+fn validate_id(label: &'static str, value: &str, max_bytes: usize) -> KernelStoreResult<()> {
+    vyane_core::validate_identifier(label, value, max_bytes)
+        .map_err(|_| KernelStoreError::InvalidInput(label))
 }
 
 fn validate_digest(digest: &str) -> KernelStoreResult<()> {
@@ -3677,5 +3676,56 @@ mod tests {
         assert!(r.attempts[0].cost.estimated_micro_units.is_none());
         let json = r.to_canonical_json().unwrap();
         assert!(!json.contains("\"actual_micro_units\":0"));
+    }
+
+    /// The kernel store applies the same owner rule as `OwnerContext`: an
+    /// owner with surrounding whitespace or a control character would become
+    /// a separate namespace that looks identical to a real one.
+    #[test]
+    fn effect_owner_rejects_surrounding_whitespace_and_control_characters() {
+        let dir = crate::test_support::private_tempdir();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let digest = "a".repeat(64);
+        for owner in ["local\n", " local", "local ", "lo\u{1b}cal", "lo\0cal"] {
+            let err = store
+                .apply_effect_once(owner, "effect-1", &digest, None, None, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::InvalidInput("owner")),
+                "{owner:?} -> {err:?}"
+            );
+            assert_eq!(store.effect_count(owner).unwrap(), 0);
+        }
+        assert!(validate_owner(&"o".repeat(128)).is_ok());
+        assert!(validate_owner(&"o".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn effect_id_rejects_blank_and_control_characters() {
+        let dir = crate::test_support::private_tempdir();
+        let store = KernelStore::open(dir.path().join("k.sqlite")).unwrap();
+        let digest = "a".repeat(64);
+        for id in [
+            " ",
+            "\t",
+            " effect",
+            "effect\n",
+            "eff\0ect",
+            "eff\u{1b}[2Ject",
+        ] {
+            let err = store
+                .apply_effect_once("local", id, &digest, None, None, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, KernelStoreError::InvalidInput("effect_id")),
+                "{id:?} -> {err:?}"
+            );
+        }
+        assert_eq!(store.effect_count("local").unwrap(), 0);
+        assert!(
+            store
+                .apply_effect_once("local", "effect 1", &digest, None, None, now())
+                .unwrap()
+        );
     }
 }

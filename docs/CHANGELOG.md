@@ -71,6 +71,23 @@ This is a curated history, not a complete reconstruction of all development.
   recorded as a success with truncated output. A streaming OpenAI Chat run
   must report a finish reason before the connection closes; `[DONE]` may
   still be omitted.
+- Adding token usage together saturates at the largest count instead of
+  panicking in debug builds or wrapping to a small count in release builds
+  when an endpoint reports an extreme value.
+- Kernel-store owners and effect ids, and message-store owners, ids,
+  routes, consumers and idempotency keys, reject surrounding whitespace and
+  control characters (NUL included), the same character rule the agent
+  store and owner resolution already apply. Length limits are unchanged, so
+  a kernel-store owner is still limited to 128 bytes. An id with an internal
+  space stays valid. Message-store errors name the field, not the value. A
+  row written by an earlier build with such an id or owner is rejected when
+  a read path re-validates it.
+- Dispatch labels from CLI `--label`, REST `labels` and MCP `labels` share
+  one parser. A key must be non-blank, at most 256 bytes, without
+  surrounding whitespace or control characters; a value is a single line
+  without control characters (newline, tab and NUL included). A dispatch
+  carries at most 128 labels. A label error names the label's position,
+  not its text. MCP `session` and `labels` now have schema length limits.
 
 ## 0.1.0 - 2026-10-23
 
