@@ -15,10 +15,11 @@ exposes a different subset of operations; they are not interchangeable:
 | **REST API** | `vyane serve --addr 127.0.0.1:9721` | programmatic access from any HTTP client |
 | **MCP** | `vyane mcp` | let other agents (Claude, Codex, …) call vyane as a tool |
 
-The production CLI MCP surface contains ten tools: dispatch, broadcast,
-history, sessions, `vyane_route`, `vyane_check`, `vyane_workflow_plan`, and
-authenticated durable workflow submit/status/cancel. The library's base server
-contains seven tools; only submit/status/cancel require an injected control port.
+The production CLI MCP surface contains twelve tools: dispatch, broadcast,
+history, sessions, `vyane_route`, `vyane_check`, `vyane_workflow_plan`,
+`vyane_feedback`, `vyane_outcomes`, and authenticated durable workflow
+submit/status/cancel. The library's base server contains nine tools; only
+submit/status/cancel require an injected control port.
 Generic success payloads have a 1 MiB cap;
 the two new diagnostics use stricter, smaller bounds. `vyane_route` is a
 Rust-side deterministic preview extension, not a same-name parity claim
@@ -258,6 +259,9 @@ support:
 | `GET` | `/v1/tasks/:id/output` | read a successful task's separate mode-0600 output artifact |
 | `POST` | `/v1/tasks/:id/cancel` | cancel a running task |
 | `GET` | `/v1/runs` | query the run ledger (filter by status/provider/start time) |
+| `POST` | `/v1/runs/:run_id/feedback` | rate one of your runs from 1 to 5 (`201` + rating view) |
+| `GET` | `/v1/feedback` | list your ratings, most recent first (`run_id`, `limit`) |
+| `GET` | `/v1/outcomes` | grouped outcome statistics (`group_by`, provider/status/time filters) |
 | `GET` | `/v1/sessions` | list saved sessions |
 
 History accepts an inclusive start-time cutoff through
@@ -386,6 +390,62 @@ not change list responses, authentication, existing errors, or stored records;
 stats still rejects an explicit limit. Clients should tolerate additional stats
 fields. This usage aggregate does not backfill previously missing usage or
 rewrite prices already stored on a run.
+
+### Run ratings and outcome statistics
+
+Rate a run you own from 1 (worst) to 5 (best), then compare targets by how
+their runs went:
+
+```sh
+vyane feedback rate 0195f0c2-0000-7000-8000-000000000000 4
+vyane feedback rate --last 5 --json            # your most recently recorded run
+vyane feedback rate --last 2 --source auto:tests
+vyane feedback list --run 0195f0c2-0000-7000-8000-000000000000 --json
+vyane history --outcomes --group-by provider,model --json
+vyane history --outcomes --include-auto-ratings --since 2026-01-01T00:00:00Z
+```
+
+`--source` is `human` (the default) or `auto:<rule>`, where the rule name
+matches `[a-z0-9][a-z0-9_-]{0,31}`. A rating holds no comment, prompt, or copy
+of the run's provider or model. Ratings are append-only in
+`<data_dir>/feedback.jsonl`; a new rating for the same run and source replaces
+the previous one when read. There is no edit or delete command: rate again.
+`feedback list` returns `{"items": [...], "skipped_lines": N}`, where each item
+has `view_schema`, `feedback_id`, `run_id`, `rating`, `source` and
+`recorded_at`. `skipped_lines` counts unreadable or unknown-schema lines.
+
+A run that does not exist and a run that belongs to another owner give the same
+not-found error (CLI exit 1, REST `404 {"error":"run not found"}`, MCP
+`not_found`). A rating outside 1–5, an invalid source, an invalid grouping,
+`--outcomes` with `--stats`, `--limit`, `--session` or `--label`, and `since`
+later than `until` are caller errors (CLI exit 2, REST `400`, MCP
+`invalid_argument`). Error messages never echo the rejected source or grouping.
+
+`history --outcomes` groups every matching run by 1–4 distinct dimensions:
+`provider`, `protocol`, `harness`, `model`, `effort`, `profile`, `status`
+(default `provider,harness,model,effort`). Provider, protocol, harness and
+model stay separate keys. A direct HTTP run has harness `direct`; effort and
+profile come from the reserved `routing.effort` and `routing.profile` labels
+and are `unknown` when a run did not record them. Each group reports the same
+counts, `success_rate`, `duration`, `cost` and `usage` objects as
+`history --stats`, plus `failover_count` and `failover_rate` (runs with more
+than one attempt, as a one-decimal percentage), `rating_count`, and
+`average_rating` (two decimals, `null` without ratings). Groups are sorted by
+key. The report also carries `group_by`, `include_auto_ratings`, `total_runs`
+and `feedback_skipped_lines`.
+
+Only human ratings count by default. With `--include-auto-ratings` (REST and
+MCP `include_auto_ratings=true`), a run without a human rating uses its latest
+automatic rating; a human rating always wins. Ratings are joined to runs by
+owner and run id, so another owner's ratings never enter your statistics.
+REST `GET /v1/outcomes` and MCP `vyane_outcomes` accept `group_by` as a
+comma-separated string plus `provider`, `status`, `since` and `until`; unknown
+query or argument fields are rejected. The JSON matches the CLI output for the
+same input.
+
+Ratings and outcome statistics are read-only for routing: `vyane route`,
+`auto` dispatch and failover never read them (ADR 0001). A feedback signal in
+route scoring would be a separate, explicitly enabled feature.
 
 SSE streaming events (`POST /v1/dispatch/stream`):
 

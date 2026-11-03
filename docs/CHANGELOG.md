@@ -7,6 +7,18 @@ This is a curated history, not a complete reconstruction of all development.
 
 ## Unreleased
 
+### Added
+
+- `vyane feedback rate|list`, REST `POST /v1/runs/{run_id}/feedback` /
+  `GET /v1/feedback`, and MCP `vyane_feedback` record an owner-scoped 1–5
+  rating for one of your runs. Ratings are append-only; the latest rating per
+  run and source wins. No free-text comment is stored.
+- `vyane history --outcomes`, REST `GET /v1/outcomes`, and MCP
+  `vyane_outcomes` group your runs by provider, protocol, harness, model,
+  effort, profile or status and report success, failover, duration, token,
+  cost and average human rating. Machine-derived ratings are excluded unless
+  requested. Routing decisions do not read ratings.
+
 ### Fixed
 
 - A workflow variable key that contains a control character is rejected.

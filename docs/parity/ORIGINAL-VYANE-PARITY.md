@@ -5,7 +5,7 @@
 比较日期：2026-07-13
 
 `v0.1.0`（2026-10-23）给公开源码快照命名，不是整仓对齐，也不是 crates.io 发布。
-下面的状态计数仍是 2026-07-13 的普查，加上文中已写明的 2026-08-04 账本收据说明。
+下面的状态计数仍是 2026-07-13 的普查，加上文中已写明的 2026-08-04 账本收据说明与 OBS-05 评分/outcome 统计说明。
 其后的输入校验记在变更记录里，不改这些行的状态。决策层和可选适配器仍未收口。
 
 原始 Vyane 参考基线：2026-07-11 完成的一次受控私有基线审计。为保护公开边界，本文不披露
@@ -54,10 +54,12 @@ private-only 项从统计中移除而宣称完成。
 ### 2.1 状态定义
 
 下列状态表示 **Rust 基线自身的实现状态**，不是跨仓行为等价结论。当前 53 项计数为：
-`implemented` 7、`partial` 23、`missing` 12、`different` 9、`planned` 2。
+`implemented` 7、`partial` 24、`missing` 11、`different` 9、`planned` 2。
 （2026-08-04 decision-grade kernel program：LED-05 由 `missing` 升为 `partial`，因公开
 `CompletionReceipt` / gate / artifact digest 契约与 hermetic dogfood 验收已落地；仍无独立
 approval/notification 产品 store 与完整 intervention API。）
+（OBS-05 由 `missing` 升为 `partial`：owner 隔离的运行评分持久化与 outcome 分组统计已在 CLI/REST/MCP
+落地并有真实 run 验收；路由打分、benchmark 运行器仍缺，评分不进入路由决策。）
 
 | 状态 | 含义 |
 | --- | --- |
@@ -181,11 +183,11 @@ approval/notification 产品 store 与完整 intervention API。）
 
 | ID | 能力 | 状态 | 目标层 | 参考能力/行为（私有基线审计） | Rust 证据/缺口 | 验收条件 | 波次 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| OBS-01 | history、attempt、usage、cost 查询 | `partial` | public-core | history query 支持 stats、cost、source 与 time-window filters。 | Rust CLI `history`、REST `/v1/runs` 与 MCP `vyane_history` 复用 ledger 的 inclusive `since`/`until` 时间窗口，按 `started_at` 与 provider/status 组合后再取 limit；CLI/REST/MCP acceptance 覆盖时区、两端边界、非法日期及倒置窗口拒绝。三入口另可显式请求统计模式，按相同筛选统计全部 owner-local run 的 total/success/error/timeout/cancelled 与 final-provider 分组，不受列表默认 limit 截断；统计与显式 limit 互斥，返回计数及一位小数百分比success_rate，空样本rate为null。 | 本地CLI另支持现有owner=local记录的session精确匹配和重复label AND筛选，先筛选后limit、stats覆盖全部匹配；通用REST/MCP不新增这些私有谓词或暴露对应元数据。整体duration已从既有run起止时间生成samples/invalid/total_ms/mean_ms，空或全异常样本null、逆序时间不伪装零值，三入口共用同一投影。provider耗时另由by_provider_duration按既有final-provider归类并复用同一度量，不改provider计数/率形态，whole recorded span包含此前failover腿；三入口另按既有cost_usd汇总known/unknown/invalid与已知金额，空/全未知/溢出不伪装零值，不估价、不写账本；当前dispatch仍不自动填费用。三入口另共享已保存usage的input/output/reasoning/cached-input逐字段known/unknown、精确整数部分总和及overflowed；缺报不补零，各run只计一次，补充CLI/REST/MCP真实路径验收，但不新增usage采集或跨实现等价证据。继续补 source与真实费用来源接线；不把本地CLI扩展或单侧计数/成功率验收扩写成完整 history parity。 | P2 |
+| OBS-01 | history、attempt、usage、cost 查询 | `partial` | public-core | history query 支持 stats、cost、source 与 time-window filters。 | Rust CLI `history`、REST `/v1/runs` 与 MCP `vyane_history` 复用 ledger 的 inclusive `since`/`until` 时间窗口，按 `started_at` 与 provider/status 组合后再取 limit；CLI/REST/MCP acceptance 覆盖时区、两端边界、非法日期及倒置窗口拒绝。三入口另可显式请求统计模式，按相同筛选统计全部 owner-local run 的 total/success/error/timeout/cancelled 与 final-provider 分组，不受列表默认 limit 截断；统计与显式 limit 互斥，返回计数及一位小数百分比success_rate，空样本rate为null。三入口另提供 outcome 分组统计（`history --outcomes`、`GET /v1/outcomes`、`vyane_outcomes`），复用同一组 count/duration/cost/usage 聚合。 | 本地CLI另支持现有owner=local记录的session精确匹配和重复label AND筛选，先筛选后limit、stats覆盖全部匹配；通用REST/MCP不新增这些私有谓词或暴露对应元数据。整体duration已从既有run起止时间生成samples/invalid/total_ms/mean_ms，空或全异常样本null、逆序时间不伪装零值，三入口共用同一投影。provider耗时另由by_provider_duration按既有final-provider归类并复用同一度量，不改provider计数/率形态，whole recorded span包含此前failover腿；三入口另按既有cost_usd汇总known/unknown/invalid与已知金额，空/全未知/溢出不伪装零值，不估价、不写账本；当前dispatch仍不自动填费用。三入口另共享已保存usage的input/output/reasoning/cached-input逐字段known/unknown、精确整数部分总和及overflowed；缺报不补零，各run只计一次，补充CLI/REST/MCP真实路径验收，但不新增usage采集或跨实现等价证据。继续补 source与真实费用来源接线；不把本地CLI扩展或单侧计数/成功率验收扩写成完整 history parity。 | P2 |
 | OBS-02 | task/workflow status 与日志 | `implemented` | public-core | status file、workflow journal 与 daemon store 提供 task/workflow status 和 log。 | Rust durable task snapshot/events、mode-0600 logs/output、workflow journals | 覆盖 queued→terminal 全状态、controller loss、corrupt artifact、pagination/filter 和 concurrent readers。 | — |
 | OBS-03 | live streaming / SSE | `partial` | public-core | status、dispatch、workflow 与 daemon event 可经 SSE 推送。 | Rust dispatch stream CLI+REST SSE，并已有 owner-scoped replayable EventLog storage substrate；EventLog 尚未接 producer 或 subscription，daemon workflow 仍只有 status/cancel | 增加统一 event id/resume token/heartbeat/backpressure contract；dispatch/workflow/worker producers 接同一订阅面，并定义 retention。 | P2 |
 | OBS-04 | dashboard / TUI monitor / optional views | `missing` | optional-adapter | dashboard、monitor 与平台 UI 提供运行状态视图。 | Rust 无 UI/TUI | 先提供稳定 read API/event stream；通用 TUI 可公开，平台 UI 留 optional adapter。 | P3 |
-| OBS-05 | routing feedback、benchmark、quality analytics | `missing` | public-core | feedback、benchmark 与 route outcomes 可形成持久质量信号。 | Rust router 无持久 feedback/benchmark signal | 定义可匿名化 feedback/benchmark schema；默认 deterministic，只有显式启用时进入 route scoring，并记录贡献信号。 | P2 |
+| OBS-05 | routing feedback、benchmark、quality analytics | `partial` | public-core | feedback、benchmark 与 route outcomes 可形成持久质量信号。 | 评分与 outcome 统计已持久化并三端可查：CLI `feedback rate|list` 与 `history --outcomes`、REST `POST /v1/runs/{run_id}/feedback`、`GET /v1/feedback`、`GET /v1/outcomes`、MCP `vyane_feedback`/`vyane_outcomes` 共用 service 操作。评分为 owner 隔离、append-only 的 schema-1 JSONL（1–5，`human` 或 `auto:<rule>`，同 run 同 source 后写覆盖），他人 run 与不存在的 run 同形 NotFound；outcome 按 provider/protocol/harness/model/effort/profile/status 中 1–4 维分组，报告成功率、failover 率、时长、token、成本与平均人工评分，按 `(owner, run_id)` 与 RunRecord join，不复制 provider/model。acceptance 以真实 wiremock run 覆盖三端、跨 owner 与“大量低分后 `route --json` 逐字节不变”。 | 路由打分未接入（OBS-05b，按 ADR 0001 显式启用 + 快照摘要）；无 benchmark 运行器；不存 comment（刻意差异）。 | P2 |
 | OBS-06 | health、watchdogs、quota ledger、notifications | `partial` | optional-adapter | daemon health、worker/session watchdog 与 notification store 形成运维信号；新的 upstream quota/balance 能力是对有限 connector 集合的并发 snapshot view，将 absolute/balance/window 信号归一化并隔离单 connector 失败。它当前不是 durable history/ledger，不能用名称把一次快照扩写成可回放账本。 | WP-76 新增 `vyane-quota`：platform-neutral `QuotaConnector`、closed status/window/card/balance/error schema、connector/card identity 校验、有界 connector/concurrency、整次操作 timeout、稳定排序和单 connector 失败隔离。`QuotaHttpReader` 只接受 HTTP(S)，禁 redirect，限制 response body；hermetic tests 使用 fake 与 loopback mock server。WP-81 增加 generic typed `GoalObservationWatcher` seam 与 one-shot bounded poller，稳定排序并隔离 watcher error/timeout，但没有 production adapter、credential source 或周期 scheduling。仍无具体平台 connector、持久 quota history/ledger、notification store 或 CLI snapshot surface；`vyane-ledger` usage/cost 仍不等于 upstream quota。 | 接入至少一个可选 concrete connector 与 opaque read-only credential reference，并补 polling/retention/notification 的显式治理边界；任何自动动作必须另走 approval。 | P3 |
 
 ### 4.8 Interfaces
