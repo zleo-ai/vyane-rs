@@ -113,8 +113,8 @@ Two consequences:
 | `vyane-router` | `vyane-core` | target selection / routing policy |
 | `vyane-workflow` | `vyane-kernel` | declarative DAG execution, bounded source bundles, atomic journals, and explicit resume |
 | `vyane-service` | `vyane-agent`, `vyane-kernel`, `vyane-config`, `vyane-ledger`, `vyane-message`, `vyane-broker` | shared facade plus principal-derived `OwnerScopedService`, allowlisted run/session views, owner-scoped session control, explicit projection construction, the fresh-sessionless authority bridge, fixed-owner one-shot drivers, a paired in-process backend and its resident library supervisor; ordinary dispatch constructs none of the optional AgentRun components |
-| `vyane-mcp` | `vyane-service`, `vyane-workflow`, `rmcp` 3.3 | six base tools plus an object-safe workflow-control port; it owns no daemon descriptor or credential; stdio dual-era handshake keeps `initialize` on 2025-11-25 and advertises MCP 2026-07-28 through discovery |
-| `vyane-cli` | `vyane-service`, `vyane-workflow`, `vyane-task`, `vyane-goal`, `vyane-mcp`, `axum` | assembler: CLI + bearer-authenticated loopback-only REST API + authenticated local workflow daemon + nine-tool MCP launcher with a verified daemon adapter |
+| `vyane-mcp` | `vyane-service`, `vyane-workflow`, `rmcp` 3.3 | nine base tools plus an object-safe workflow-control port; it owns no daemon descriptor or credential; stdio dual-era handshake keeps `initialize` on 2025-11-25 and advertises MCP 2026-07-28 through discovery |
+| `vyane-cli` | `vyane-service`, `vyane-workflow`, `vyane-task`, `vyane-goal`, `vyane-mcp`, `axum` | assembler: CLI + bearer-authenticated loopback-only REST API + authenticated local workflow daemon + twelve-tool MCP launcher with a verified daemon adapter |
 
 `ChatClient::complete_turn` is an additive typed boundary. Its default fallback
 keeps text-only clients source-compatible but delegates only when the request
@@ -711,9 +711,13 @@ policy remain open.
 
 ## Static MCP diagnostics
 
-The MCP library exposes six base tools. Four execute or query the established
+The MCP library exposes nine base tools. Four execute or query the established
 service surface (`vyane_dispatch`, `vyane_broadcast`, `vyane_history`, and
-`vyane_sessions`). `vyane_route` is a Rust-specific deterministic route
+`vyane_sessions`). `vyane_feedback` records an owner-scoped 1-5 rating for one
+of the caller's runs and `vyane_outcomes` returns read-only grouped outcome
+statistics; neither changes routing. `vyane_workflow_plan` compiles a
+caller-supplied source bundle into a static plan without contacting the daemon
+or executing anything. `vyane_route` is a Rust-specific deterministic route
 preview extension; it is not evidence of a same-name tool or equivalent
 product behavior in the fixed original repository. `vyane_check` is a
 configuration-only diagnostic. It validates bounded provider/profile shapes,
