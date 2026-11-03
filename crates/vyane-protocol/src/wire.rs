@@ -1199,7 +1199,7 @@ pub(crate) mod anthropic_tool_chat {
         pub(crate) messages: Vec<Message>,
         pub(crate) max_tokens: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub(crate) system: Option<String>,
+        pub(crate) system: Option<SystemPrompt>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         pub(crate) tools: Vec<Tool>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1210,6 +1210,22 @@ pub(crate) mod anthropic_tool_chat {
         pub(crate) top_p: Option<f32>,
         #[serde(flatten)]
         pub(crate) extra: Map<String, Value>,
+    }
+
+    /// Anthropic's top-level `system` field: one string, or ordered text
+    /// blocks when the conversation carries several system messages.
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(untagged)]
+    pub(crate) enum SystemPrompt {
+        Text(String),
+        Blocks(Vec<SystemBlock>),
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub(crate) struct SystemBlock {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        text: String,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -1472,13 +1488,31 @@ pub(crate) mod anthropic_tool_chat {
         }
     }
 
-    fn messages_from(messages: &[ToolChatMessage]) -> Result<(Option<String>, Vec<Message>)> {
-        let system = messages.iter().find_map(|message| match message {
-            ToolChatMessage::Text(message) if message.role == Role::System => {
-                Some(message.content.clone())
-            }
-            _ => None,
-        });
+    fn messages_from(messages: &[ToolChatMessage]) -> Result<(Option<SystemPrompt>, Vec<Message>)> {
+        // Anthropic has a single top-level system field, so every system
+        // message is hoisted into it in order; none is dropped.
+        let mut system_texts = messages
+            .iter()
+            .filter_map(|message| match message {
+                ToolChatMessage::Text(message) if message.role == Role::System => {
+                    Some(message.content.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let system = match system_texts.len() {
+            0 => None,
+            1 => system_texts.pop().map(SystemPrompt::Text),
+            _ => Some(SystemPrompt::Blocks(
+                system_texts
+                    .into_iter()
+                    // Anthropic rejects empty text blocks; an empty system
+                    // segment carries nothing to preserve.
+                    .filter(|text| !text.is_empty())
+                    .map(|text| SystemBlock { kind: "text", text })
+                    .collect(),
+            )),
+        };
         let mut out: Vec<Message> = Vec::new();
         for message in messages {
             if matches!(message, ToolChatMessage::Text(text) if text.role == Role::System) {

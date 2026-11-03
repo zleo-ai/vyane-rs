@@ -1683,6 +1683,45 @@ async fn anthropic_tool_chat_accepts_redacted_thinking_and_fails_closed_on_repla
 // or concurrent wire paths stay schedulable under suite load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
+async fn anthropic_tool_chat_hoists_every_system_message_in_order() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_text_turn()))
+        .mount(&server)
+        .await;
+
+    anthropic_client(&server)
+        .complete_turn(anthropic_tool_request(vec![
+            ToolChatMessage::system("sys1"),
+            ToolChatMessage::user("first"),
+            ToolChatMessage::assistant("reply"),
+            ToolChatMessage::system("sys2"),
+            ToolChatMessage::user("second"),
+        ]))
+        .await
+        .unwrap();
+
+    let body: Value = server.received_requests().await.unwrap()[0]
+        .body_json()
+        .unwrap();
+    assert_eq!(
+        body["system"],
+        json!([
+            {"type": "text", "text": "sys1"},
+            {"type": "text", "text": "sys2"}
+        ])
+    );
+    assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(body["messages"][0]["content"], "first");
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][2]["content"], "second");
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
 async fn anthropic_tool_chat_merges_error_tool_results_into_one_user_message() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
