@@ -27,6 +27,12 @@ This is a curated history, not a complete reconstruction of all development.
   Reserved fields in `params.extra` (such as `thinking`, `system` or
   `max_tokens`), a thinking budget not below `max_output_tokens`, and a
   non-default temperature together with `effort` are `Config` errors.
+- A read-only Claude Code dispatch now passes `--permission-mode dontAsk`
+  and denies the Bash, Edit, Write and NotebookEdit tools, so a permissive
+  `.claude/settings.json` in the workspace can no longer let the model edit
+  files. Read-only shell commands such as `git log` are no longer available
+  to it either. Hooks configured in those settings files still run, as in
+  an interactive session.
 
 ### Fixed
 
@@ -42,14 +48,29 @@ This is a curated history, not a complete reconstruction of all development.
   cannot relax it. Files there, such as git hooks or harness settings, run
   or are trusted outside the sandbox.
 - Claude Code dispatch passes the task after a `--` marker, so a task that
-  starts with `-` is no longer parsed as a CLI option. A read-only run now
-  sets `--permission-mode dontAsk` and denies the Bash, Edit, Write and
-  NotebookEdit tools, so a workspace or user settings file can no longer
-  make it writable.
+  starts with `-` is no longer parsed as a CLI option.
 - Environment values injected into a harness child, including an endpoint
   API key, are held as secrets. Debug output of a harness job lists only the
   variable names, and a serialized environment policy omits the injected
   set.
+- A streaming HTTP response splits events at the first blank line even when
+  the endpoint mixes `\r\n\r\n` and `\n\n` delimiters, instead of merging
+  two events into malformed JSON. A single streamed event larger than the
+  8 MiB response cap now fails with a protocol error instead of buffering
+  without limit.
+- Streaming OpenAI Chat runs record their token usage. The usage report
+  arrives after the finish reason, and the stream used to end at the finish
+  reason, so these runs recorded zero tokens.
+- Streaming Anthropic runs record input and cache tokens, which the API
+  reports only at the start of the stream. Output tokens, reported as a
+  running total, are counted once. Streamed and non-streamed runs now
+  report the same usage.
+- A streaming Anthropic or OpenAI Responses run whose connection closes
+  before the stream's end event (`message_stop`, `response.completed` or
+  `response.incomplete`) fails with a transport error instead of being
+  recorded as a success with truncated output. A streaming OpenAI Chat run
+  must report a finish reason before the connection closes; `[DONE]` may
+  still be omitted.
 
 ## 0.1.0 - 2026-10-23
 

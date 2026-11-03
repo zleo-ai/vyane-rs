@@ -63,6 +63,17 @@ pub struct ChatOutcome {
 }
 
 /// Streaming events, normalized across protocols.
+///
+/// A stream yields deltas as they arrive, then at most one [`Usage`]
+/// event carrying the whole stream's total, then exactly one [`Done`] as
+/// its last item. A stream that fails yields one error instead of the
+/// `Done`, and nothing after it. Consumers may therefore stop reading at
+/// the first `Done` or error without losing usage. A protocol's own
+/// "finish reason" marker is not the end of the stream (usage can still
+/// follow it); implementations hold it and report it on `Done`.
+///
+/// [`Usage`]: StreamEvent::Usage
+/// [`Done`]: StreamEvent::Done
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// A fragment of the answer text.
@@ -71,8 +82,11 @@ pub enum StreamEvent {
     /// some relays emit none even when the model reasons — never rely on
     /// reasoning deltas for liveness).
     ReasoningDelta(String),
-    /// Token usage, typically once near the end of the stream.
+    /// Token usage for the whole stream, emitted at most once, immediately
+    /// before `Done`. It is a total, not an increment.
     Usage(Usage),
-    /// Stream finished cleanly.
+    /// The stream ended cleanly. Emitted exactly once, as the last event,
+    /// only after the protocol's end-of-stream marker; `finish_reason` is
+    /// the reason the model reported, if any.
     Done { finish_reason: Option<String> },
 }

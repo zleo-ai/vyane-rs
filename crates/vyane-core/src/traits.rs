@@ -61,7 +61,9 @@ pub trait ChatClient: Send + Sync {
     ///
     /// Implementations must remain live even when a target emits no
     /// reasoning deltas at all — completion is signalled by
-    /// [`StreamEvent::Done`], never by reasoning traffic.
+    /// [`StreamEvent::Done`], never by reasoning traffic. The stream must
+    /// follow the ordering contract on [`StreamEvent`]: `Done` exactly once
+    /// and last, after any usage, and only at the end of the stream.
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<StreamEvent>>> {
         let _ = req;
         Err(crate::error::VyaneError::unsupported(format!(
