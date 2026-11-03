@@ -20,6 +20,13 @@ This is a curated history, not a complete reconstruction of all development.
   two events into malformed JSON. A single streamed event larger than the
   8 MiB response cap now fails with a protocol error instead of buffering
   without limit.
+- Streaming OpenAI Chat runs record their token usage. The usage report
+  arrives after the finish reason, and the stream used to end at the finish
+  reason, so these runs recorded zero tokens.
+- Streaming Anthropic runs record input and cache tokens, which the API
+  reports only at the start of the stream. Output tokens, reported as a
+  running total, are counted once. Streamed and non-streamed runs now
+  report the same usage.
 
 ## 0.1.0 - 2026-10-23
 
