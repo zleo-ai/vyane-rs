@@ -1159,6 +1159,8 @@ async fn anthropic_stream_normalizes_events() {
                 "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\n",
                 "event: message_delta\n",
                 "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":6}}\n\n",
+                "event: message_stop\n",
+                "data: {\"type\":\"message_stop\"}\n\n",
             ),
             "text/event-stream",
         ))
@@ -1212,6 +1214,8 @@ async fn anthropic_stream_normalizes_cached_usage() {
                 "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
                 "event: message_delta\n",
                 "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":4,\"output_tokens\":2,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":5}}\n\n",
+                "event: message_stop\n",
+                "data: {\"type\":\"message_stop\"}\n\n",
             ),
             "text/event-stream",
         ))
@@ -1326,6 +1330,8 @@ async fn responses_stream_normalizes_events_split_across_chunks() {
             concat!(
                 "event: response.output_text.delta\n",
                 "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\n",
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             ),
             "text/event-stream",
         ))
@@ -1343,10 +1349,11 @@ async fn responses_stream_normalizes_events_split_across_chunks() {
         .await;
     let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
 
-    // The frame above arrives whole (chunking across the wire is exercised in
-    // the SSE decoder's own unit test), but the client must still reassemble
-    // it into the normalized event plus a synthesized Done at EOF, proving the
-    // Responses stream never requires reasoning traffic to terminate cleanly.
+    // The frames above arrive whole (chunking across the wire is exercised in
+    // the SSE decoder's own unit tests), but the client must still reassemble
+    // them into the normalized event plus a Done at `response.completed`,
+    // proving the Responses stream never requires reasoning traffic to
+    // terminate cleanly.
     assert_eq!(events.len(), 2);
     assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "hel"));
     assert!(matches!(
@@ -1601,7 +1608,7 @@ async fn responses_stream_failed_event_maps_to_protocol_error() {
 // or concurrent wire paths stay schedulable under suite load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
-async fn responses_stream_eof_without_completed_synthesizes_done() {
+async fn responses_stream_eof_before_completed_is_transport_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
@@ -1621,18 +1628,13 @@ async fn responses_stream_eof_without_completed_synthesizes_done() {
         .unwrap()
         .collect::<Vec<_>>()
         .await;
-    let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
 
     // No `response.completed`/`response.incomplete` ever arrived — the
-    // transport just closed. This must behave exactly like the Chat/Anthropic
-    // clients' EOF handling: synthesize a terminal Done rather than leaving
-    // the stream hanging or silently dropping the last delta.
+    // transport just closed. The delta already received is delivered, then
+    // the truncation surfaces as a transport error instead of a successful
+    // `Done`, and the stream ends.
     assert_eq!(events.len(), 2);
-    assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "cut off"));
-    assert!(matches!(
-        &events[1],
-        StreamEvent::Done {
-            finish_reason: None
-        }
-    ));
+    assert!(matches!(&events[0], Ok(StreamEvent::Delta(text)) if text == "cut off"));
+    let error = events[1].as_ref().unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Transport);
 }

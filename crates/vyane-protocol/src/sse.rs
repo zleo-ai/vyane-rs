@@ -13,8 +13,9 @@
 //! | OpenAI Responses | `response.incomplete` details | `response.completed` / `response.incomplete` | those two events |
 //!
 //! So a finish reason is only recorded when it is seen; `Done` is emitted when
-//! the protocol's end-of-stream marker arrives (or, where the protocol allows
-//! it, at EOF).
+//! the protocol's end-of-stream marker arrives. EOF before that marker is a
+//! transport error (see [`SseDecoder::finish`]), except that an OpenAI Chat
+//! stream that already reported a finish reason may omit `[DONE]`.
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -141,8 +142,21 @@ impl SseDecoder {
         out
     }
 
-    /// Signal EOF: decode any unterminated trailing frame, then close the
-    /// stream with `Done` if it has not ended yet.
+    /// Signal EOF: decode any unterminated trailing frame, then close a
+    /// stream that has not ended yet.
+    ///
+    /// Anthropic and Responses streams always end with an explicit event
+    /// (`message_stop`, `response.completed` / `response.incomplete`), so
+    /// EOF before it means the output was cut off and is an error. OpenAI
+    /// Chat is accepted without `[DONE]` once a `finish_reason` has been
+    /// seen (some compatible servers omit `[DONE]`), but not before.
+    ///
+    /// The error is [`ErrorKind::Transport`]: the connection closed
+    /// mid-response, which at this layer is the same failure as a stream
+    /// dropped by a proxy or upstream (the "broken stream" case that kind
+    /// covers), and a mid-body read error already maps there. `Protocol`
+    /// is kept for an endpoint that answered with malformed or error
+    /// content. Both kinds are retried and fail over alike.
     pub(crate) fn finish(&mut self, protocol: StreamProtocol) -> VecDeque<Result<StreamEvent>> {
         let mut out = VecDeque::new();
         if self.is_closed() {
@@ -153,8 +167,23 @@ impl SseDecoder {
         if !frame.is_empty() {
             self.decode_frame(&frame, protocol, &mut out);
         }
-        if !self.is_closed() {
+        if self.is_closed() {
+            return out;
+        }
+        let complete_at_eof = match protocol {
+            StreamProtocol::OpenAiChat => self.finish_reason.is_some(),
+            StreamProtocol::Anthropic | StreamProtocol::OpenAiResponses => false,
+        };
+        if complete_at_eof {
             self.end(&mut out);
+        } else {
+            self.fail(
+                VyaneError::new(
+                    ErrorKind::Transport,
+                    "stream closed before its end-of-stream event",
+                ),
+                &mut out,
+            );
         }
         out
     }
@@ -1249,19 +1278,11 @@ data: {"type":"message_stop"}
         let error = events.into_iter().next().unwrap().unwrap_err();
         assert_eq!(error.kind, ErrorKind::Protocol);
     }
-}
 
-/// Red-team reproductions. Each test encodes the behavior the decoder
-/// *should* have; they fail on the current implementation.
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod redteam_tests {
-    use super::*;
-
-    /// A stream that ends (clean EOF) before any terminal event is truncated
-    /// output, but `finish` synthesizes a successful `Done`.
+    /// A stream that closes before its end-of-stream event (`message_stop`,
+    /// `response.completed`) is truncated output, not a successful run.
     #[test]
-    fn redteam_eof_before_terminal_event_is_not_success() {
+    fn eof_before_end_of_stream_event_is_transport_error() {
         for (protocol, frame) in [
             (
                 StreamProtocol::Anthropic,
@@ -1279,10 +1300,79 @@ mod redteam_tests {
             let mut decoder = SseDecoder::default();
             let mut events = decoder.push(frame, protocol);
             events.extend(decoder.finish(protocol));
-            assert!(
-                events.iter().any(Result::is_err),
-                "{protocol:?}: EOF without message_stop/response.completed must surface an error"
+            let events: Vec<_> = events.into_iter().collect();
+            assert_eq!(events.len(), 2, "{protocol:?}: {events:?}");
+            assert!(matches!(&events[0], Ok(StreamEvent::Delta(text)) if text == "half"));
+            assert_eq!(
+                events[1].as_ref().unwrap_err().kind,
+                ErrorKind::Transport,
+                "{protocol:?}"
             );
+        }
+    }
+
+    /// The Anthropic stop reason alone does not end the stream; EOF between
+    /// `message_delta` and `message_stop` is still truncation.
+    #[test]
+    fn anthropic_eof_after_stop_reason_without_message_stop_is_transport_error() {
+        let events = decode_in_chunks(
+            concat!(
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+            )
+            .as_bytes(),
+            usize::MAX,
+            StreamProtocol::Anthropic,
+        );
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[1].as_ref().unwrap_err().kind, ErrorKind::Transport);
+    }
+
+    /// OpenAI Chat EOF: accepted without `[DONE]` once a finish reason was
+    /// reported (usage seen so far is still delivered), an error before it.
+    #[test]
+    fn openai_chat_eof_needs_a_finish_reason() {
+        let events = decode_in_chunks(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"length\"}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1}}\n\n",
+            )
+            .as_bytes(),
+            usize::MAX,
+            StreamProtocol::OpenAiChat,
+        );
+        assert_eq!(
+            consume_like_kernel(events.iter().map(|event| match event {
+                Ok(event) => Ok(event.clone()),
+                Err(error) => panic!("{error}"),
+            })),
+            ("hi".into(), 4, 1)
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Done { finish_reason: Some(reason) })) if reason == "length"
+        ));
+
+        let events = decode_in_chunks(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+            usize::MAX,
+            StreamProtocol::OpenAiChat,
+        );
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[1].as_ref().unwrap_err().kind, ErrorKind::Transport);
+    }
+
+    /// An empty body (no events at all) is not a successful empty answer.
+    #[test]
+    fn empty_stream_is_transport_error() {
+        for protocol in [
+            StreamProtocol::OpenAiChat,
+            StreamProtocol::Anthropic,
+            StreamProtocol::OpenAiResponses,
+        ] {
+            let events = decode_in_chunks(b"", 1, protocol);
+            assert_eq!(events.len(), 1, "{protocol:?}");
+            assert_eq!(events[0].as_ref().unwrap_err().kind, ErrorKind::Transport);
         }
     }
 }

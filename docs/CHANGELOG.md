@@ -27,6 +27,12 @@ This is a curated history, not a complete reconstruction of all development.
   reports only at the start of the stream. Output tokens, reported as a
   running total, are counted once. Streamed and non-streamed runs now
   report the same usage.
+- A streaming Anthropic or OpenAI Responses run whose connection closes
+  before the stream's end event (`message_stop`, `response.completed` or
+  `response.incomplete`) fails with a transport error instead of being
+  recorded as a success with truncated output. A streaming OpenAI Chat run
+  must report a finish reason before the connection closes; `[DONE]` may
+  still be omitted.
 
 ## 0.1.0 - 2026-10-23
 
