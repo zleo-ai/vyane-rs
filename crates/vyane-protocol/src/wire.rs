@@ -1313,10 +1313,35 @@ pub(crate) mod anthropic_tool_chat {
                     "typed Anthropic tool-chat params.extra contains a reserved field",
                 ));
             }
+            let max_tokens = req
+                .params
+                .max_output_tokens
+                .unwrap_or(anthropic::DEFAULT_MAX_TOKENS);
             let mut extra = req.params.extra.clone();
             if let Some(effort) = req.params.effort {
-                extra.entry("thinking".to_string()).or_insert(
-                    json!({ "type": "enabled", "budget_tokens": anthropic::effort_budget(effort) }),
+                // Extended thinking requires budget_tokens < max_tokens and
+                // only accepts the default temperature; reject locally what
+                // the API would reject.
+                let budget = anthropic::effort_budget(effort);
+                if budget >= max_tokens {
+                    return Err(VyaneError::new(
+                        ErrorKind::Config,
+                        format!(
+                            "typed Anthropic tool-chat thinking budget ({budget}) must be \
+                             below max_output_tokens ({max_tokens})"
+                        ),
+                    ));
+                }
+                if req.params.temperature.is_some_and(|value| value != 1.0) {
+                    return Err(VyaneError::new(
+                        ErrorKind::Config,
+                        "typed Anthropic tool-chat thinking (effort) requires temperature \
+                         to be unset or 1",
+                    ));
+                }
+                extra.insert(
+                    "thinking".to_string(),
+                    json!({ "type": "enabled", "budget_tokens": budget }),
                 );
             }
 
@@ -1344,10 +1369,7 @@ pub(crate) mod anthropic_tool_chat {
             Ok(Self {
                 model: req.model.as_str().to_string(),
                 messages,
-                max_tokens: req
-                    .params
-                    .max_output_tokens
-                    .unwrap_or(anthropic::DEFAULT_MAX_TOKENS),
+                max_tokens,
                 system,
                 tools,
                 tool_choice,

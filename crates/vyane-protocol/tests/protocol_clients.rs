@@ -938,7 +938,7 @@ async fn anthropic_tool_chat_wires_definitions_choice_and_exact_history() {
         .await;
 
     let client = anthropic_client(&server);
-    let mut req = tool_request(vec![
+    let mut req = anthropic_tool_request(vec![
         ToolChatMessage::system("system prompt"),
         ToolChatMessage::user("inspect"),
         ToolChatMessage::Assistant(AssistantToolTurn {
@@ -984,7 +984,8 @@ async fn anthropic_tool_chat_wires_definitions_choice_and_exact_history() {
     assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "call-1");
     assert_eq!(body["messages"][2]["content"][0]["content"], "file body");
     assert!(body["messages"][2]["content"][0].get("is_error").is_none());
-    assert_eq!(body["max_tokens"], 64);
+    assert_eq!(body["max_tokens"], 4096);
+    assert!(body.get("temperature").is_none());
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["thinking"]["budget_tokens"], 1024);
 }
@@ -1027,7 +1028,9 @@ async fn anthropic_tool_chat_parses_text_thinking_and_multi_calls() {
         .await;
 
     let outcome = anthropic_client(&server)
-        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+            "inspect",
+        )]))
         .await
         .unwrap();
 
@@ -1143,7 +1146,9 @@ async fn anthropic_tool_chat_rejects_missing_duplicate_and_oversized_call_ids() 
             .await;
 
         let error = anthropic_client(&server)
-            .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+            .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+                "inspect",
+            )]))
             .await
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Protocol);
@@ -1157,7 +1162,7 @@ async fn anthropic_tool_chat_rejects_missing_duplicate_and_oversized_call_ids() 
 #[allow(clippy::unwrap_used)]
 async fn anthropic_invalid_tool_conversation_fails_before_any_http_request() {
     let server = MockServer::start().await;
-    let request = tool_request(vec![
+    let request = anthropic_tool_request(vec![
         ToolChatMessage::user("inspect"),
         ToolChatMessage::ToolResult(ToolResultMessage {
             tool_call_id: "orphan".into(),
@@ -1368,7 +1373,9 @@ async fn anthropic_tool_chat_rejects_bounded_sequences_before_normalization() {
             .await;
 
         let error = anthropic_client(&server)
-            .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+            .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+                "inspect",
+            )]))
             .await
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Protocol);
@@ -1404,7 +1411,9 @@ async fn anthropic_tool_chat_rejects_oversized_and_deep_arguments() {
             .await;
 
         let error = anthropic_client(&server)
-            .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+            .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+                "inspect",
+            )]))
             .await
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Protocol);
@@ -1439,7 +1448,9 @@ async fn anthropic_tool_chat_shares_the_argument_node_budget_across_calls() {
         .await;
 
     let error = anthropic_client(&server)
-        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+            "inspect",
+        )]))
         .await
         .unwrap_err();
     assert_eq!(error.kind, ErrorKind::Protocol);
@@ -1452,8 +1463,8 @@ async fn anthropic_tool_chat_shares_the_argument_node_budget_across_calls() {
 #[allow(clippy::unwrap_used)]
 async fn anthropic_tool_chat_reserved_extra_cannot_override_canonical_limits() {
     let server = MockServer::start().await;
-    let mut request = tool_request(vec![ToolChatMessage::user("inspect")]);
-    assert_eq!(request.params.max_output_tokens, Some(64));
+    let mut request = anthropic_tool_request(vec![ToolChatMessage::user("inspect")]);
+    assert_eq!(request.params.max_output_tokens, Some(4096));
     request
         .params
         .extra
@@ -1489,7 +1500,9 @@ async fn anthropic_tool_chat_remote_type_errors_do_not_echo_untrusted_input() {
         .await;
 
     let error = anthropic_client(&server)
-        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+            "inspect",
+        )]))
         .await
         .unwrap_err();
     assert_eq!(error.kind, ErrorKind::Protocol);
@@ -1520,7 +1533,9 @@ async fn anthropic_tool_chat_accepts_compatible_missing_tool_use_type() {
         .await;
 
     let outcome = anthropic_client(&server)
-        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+            "inspect",
+        )]))
         .await
         .unwrap();
     assert_eq!(outcome.assistant.tool_calls.len(), 1);
@@ -1543,7 +1558,9 @@ async fn anthropic_tool_chat_rejects_a_present_non_assistant_role() {
         .await;
 
     let error = anthropic_client(&server)
-        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+            "inspect",
+        )]))
         .await
         .unwrap_err();
     assert_eq!(error.kind, ErrorKind::Protocol);
@@ -1582,7 +1599,9 @@ async fn anthropic_complete_does_not_implicitly_become_complete_turn() {
     let client = anthropic_client(&server);
     let legacy = client.complete(request()).await.unwrap();
     let typed = client
-        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+            "inspect",
+        )]))
         .await
         .unwrap();
 
@@ -1750,6 +1769,45 @@ async fn anthropic_tool_chat_hoists_every_system_message_in_order() {
 // or concurrent wire paths stay schedulable under suite load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
+async fn anthropic_tool_chat_rejects_thinking_requests_the_api_would_reject() {
+    let server = MockServer::start().await;
+    let client = anthropic_client(&server);
+
+    // budget_tokens must be strictly below max_tokens.
+    let mut budget_too_large = anthropic_tool_request(vec![ToolChatMessage::user("inspect")]);
+    budget_too_large.params.effort = Some(Effort::High);
+    budget_too_large.params.max_output_tokens = None;
+    // Thinking only accepts the default temperature.
+    let mut with_temperature = anthropic_tool_request(vec![ToolChatMessage::user("inspect")]);
+    with_temperature.params.temperature = Some(0.2);
+
+    for request in [budget_too_large, with_temperature] {
+        let error = client.complete_turn(request).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Config);
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    // Without effort, temperature is passed through unchanged.
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_text_turn()))
+        .mount(&server)
+        .await;
+    let mut no_thinking = anthropic_tool_request(vec![ToolChatMessage::user("inspect")]);
+    no_thinking.params.effort = None;
+    no_thinking.params.temperature = Some(0.2);
+    client.complete_turn(no_thinking).await.unwrap();
+    let body: Value = server.received_requests().await.unwrap()[0]
+        .body_json()
+        .unwrap();
+    assert!(body.get("thinking").is_none());
+    assert!((body["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
 async fn anthropic_tool_chat_merges_error_tool_results_into_one_user_message() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1759,7 +1817,7 @@ async fn anthropic_tool_chat_merges_error_tool_results_into_one_user_message() {
         .await;
 
     anthropic_client(&server)
-        .complete_turn(tool_request(vec![
+        .complete_turn(anthropic_tool_request(vec![
             ToolChatMessage::user("inspect"),
             ToolChatMessage::Assistant(AssistantToolTurn {
                 text: String::new(),
