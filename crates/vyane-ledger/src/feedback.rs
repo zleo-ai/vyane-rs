@@ -8,7 +8,13 @@
 //!
 //! Each line carries `"schema": 1`. A line with another schema value, a line
 //! that does not parse, or a truncated tail is skipped and counted. It is
-//! never reinterpreted with a newer meaning.
+//! never reinterpreted with a newer meaning. A skipped line that names another
+//! owner is not counted for the caller. An append that finds a truncated tail
+//! starts a fresh line first, so the new rating stays readable.
+//!
+//! On unix the file is created owner-only (`0600`), and an existing entry that
+//! is not a regular file is refused. Owners and ids are checked at this layer
+//! too: blank, oversized or control-character values are rejected.
 //!
 //! The file is append-only. For one `(owner, run_id, source)` triple the last
 //! valid line in file order wins; reads fold earlier lines away. There is no
@@ -20,8 +26,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -32,6 +38,9 @@ use vyane_core::error::{ErrorKind, Result, VyaneError};
 
 /// Line schema version written by this module.
 pub const FEEDBACK_SCHEMA: u32 = 1;
+
+/// Longest accepted owner, run id or feedback id, in bytes.
+pub const MAX_KEY_BYTES: usize = 256;
 
 /// Longest accepted automatic rule name, in bytes.
 pub const AUTO_RULE_MAX_BYTES: usize = 32;
@@ -248,7 +257,8 @@ pub struct FeedbackQuery {
 pub struct FeedbackPage {
     /// Folded records, most recently recorded first.
     pub records: Vec<FeedbackRecord>,
-    /// Non-empty lines skipped as corrupt, truncated, or of an unknown schema.
+    /// Values skipped as corrupt, truncated, or of an unknown schema. Only
+    /// values of this owner, or with no readable owner, are counted.
     pub skipped_lines: u64,
 }
 
@@ -257,7 +267,8 @@ pub struct FeedbackPage {
 pub struct RatingIndex {
     /// One counted rating per run id.
     pub ratings: HashMap<String, Rating>,
-    /// Non-empty lines skipped as corrupt, truncated, or of an unknown schema.
+    /// Values skipped as corrupt, truncated, or of an unknown schema. Only
+    /// values of this owner, or with no readable owner, are counted.
     pub skipped_lines: u64,
 }
 
@@ -280,7 +291,19 @@ impl JsonlFeedbackStore {
     }
 
     /// Append one rating as one locked line.
+    ///
+    /// The owner, run id and feedback id must each be non-blank text of at
+    /// most [`MAX_KEY_BYTES`] bytes without control characters.
     pub async fn append(&self, record: &FeedbackRecord) -> Result<()> {
+        validate_owner(&record.owner)?;
+        validate_key(
+            &record.run_id,
+            "feedback run_id must be non-blank text of at most 256 bytes without control characters",
+        )?;
+        validate_key(
+            &record.feedback_id,
+            "feedback_id must be non-blank text of at most 256 bytes without control characters",
+        )?;
         let path = self.path.clone();
         let line = FeedbackLineV1::from(record);
         tokio::task::spawn_blocking(move || append_blocking(&path, &line))
@@ -293,6 +316,7 @@ impl JsonlFeedbackStore {
     /// For each `(owner, run_id, source)` only the last valid line in file
     /// order is returned.
     pub async fn query(&self, query: FeedbackQuery) -> Result<FeedbackPage> {
+        validate_owner(&query.owner)?;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let (mut records, skipped_lines) = fold_blocking(&path, &query.owner)?;
@@ -318,6 +342,7 @@ impl JsonlFeedbackStore {
     /// human rating uses its most recently recorded automatic rating. Without
     /// it, automatic ratings are ignored.
     pub async fn latest_by_run(&self, owner: &str, include_auto: bool) -> Result<RatingIndex> {
+        validate_owner(owner)?;
         let path = self.path.clone();
         let owner = owner.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -361,23 +386,85 @@ fn append_blocking(path: &Path, line: &FeedbackLineV1) -> Result<()> {
     {
         std::fs::create_dir_all(parent).map_err(io_error("create feedback directory"))?;
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(io_error("open feedback store"))?;
+    let mut file = open_private(path)?;
     file.lock_exclusive()
         .map_err(io_error("lock feedback store"))?;
+    // A writer that crashed mid-line leaves a tail with no newline. Start a
+    // fresh line so this rating is not glued onto that corrupt tail.
+    if !ends_at_line_boundary(&mut file).map_err(io_error("read feedback store"))? {
+        bytes.insert(0, b'\n');
+    }
     file.write_all(&bytes)
         .and_then(|()| file.flush())
         .map_err(io_error("write feedback store"))?;
     Ok(())
 }
 
+/// Open the store for appending, owner-only on unix. An existing entry that
+/// is not a regular file (for example a symlink) is refused.
+fn open_private(path: &Path) -> Result<File> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && !metadata.file_type().is_file()
+    {
+        return Err(VyaneError::new(
+            ErrorKind::Io,
+            "feedback store is not a regular file",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(path)
+        .map_err(io_error("open feedback store"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(io_error("open feedback store"))?;
+    }
+    Ok(file)
+}
+
+/// Whether the file is empty or its last byte is a newline.
+fn ends_at_line_boundary(file: &mut File) -> std::io::Result<bool> {
+    if file.metadata()?.len() == 0 {
+        return Ok(true);
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)?;
+    Ok(last[0] == b'\n')
+}
+
+/// Reject owner and id text that is empty, blank, too long, or holds control
+/// characters. The message is fixed: the value is caller input.
+fn validate_key(value: &str, message: &'static str) -> Result<()> {
+    if value.trim().is_empty() || value.len() > MAX_KEY_BYTES || value.chars().any(char::is_control)
+    {
+        return Err(VyaneError::new(ErrorKind::Config, message));
+    }
+    Ok(())
+}
+
+fn validate_owner(owner: &str) -> Result<()> {
+    validate_key(
+        owner,
+        "feedback owner must be non-blank text of at most 256 bytes without control characters",
+    )
+}
+
 /// Read every valid line for `owner` and fold it by `(run_id, source)`.
 ///
 /// Returns the surviving records ordered by the file position of their winning
-/// line (oldest first), plus the skipped-line count for the whole file.
+/// line (oldest first), plus the number of skipped values that belong to
+/// `owner` or cannot be attributed to any owner. A corrupt value that names
+/// another owner is ignored without being counted, so one owner's count never
+/// depends on another owner's data.
 fn fold_blocking(path: &Path, owner: &str) -> Result<(Vec<FeedbackRecord>, u64)> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -393,13 +480,10 @@ fn fold_blocking(path: &Path, owner: &str) -> Result<(Vec<FeedbackRecord>, u64)>
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let (records, bad) = records_on_line(line);
+        let (records, bad) = records_on_line(line, owner);
         skipped += bad;
         for record in records {
             position += 1;
-            if record.owner != owner {
-                continue;
-            }
             latest.insert(
                 (record.run_id.clone(), record.source.clone()),
                 (position, record),
@@ -414,9 +498,12 @@ fn fold_blocking(path: &Path, owner: &str) -> Result<(Vec<FeedbackRecord>, u64)>
     ))
 }
 
-/// Valid schema-1 records on one physical line, plus how many values (or
-/// unparseable tails) on it were skipped.
-fn records_on_line(line: &[u8]) -> (Vec<FeedbackRecord>, u64) {
+/// Valid schema-1 records for `owner` on one physical line, plus how many
+/// values (or unparseable tails) on it were skipped.
+///
+/// A value whose `owner` field is a string naming someone else is ignored and
+/// not counted, whatever its schema or validity.
+fn records_on_line(line: &[u8], owner: &str) -> (Vec<FeedbackRecord>, u64) {
     let mut records = Vec::new();
     let mut skipped = 0u64;
     let mut parsed_any = false;
@@ -426,6 +513,13 @@ fn records_on_line(line: &[u8]) -> (Vec<FeedbackRecord>, u64) {
             break;
         };
         parsed_any = true;
+        if value
+            .get("owner")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|line_owner| line_owner != owner)
+        {
+            continue;
+        }
         let schema = value.get("schema").and_then(serde_json::Value::as_u64);
         if schema != Some(u64::from(FEEDBACK_SCHEMA)) {
             skipped += 1;
@@ -674,13 +768,9 @@ mod tests {
         assert_eq!(index.skipped_lines, 5);
         assert_eq!(index.ratings["r1"].get(), 3);
 
-        // A later valid append after a truncated tail still parses because
-        // the tail stays on its own (corrupt) line.
-        std::fs::write(
-            store.path(),
-            format!("{}\n", std::fs::read_to_string(store.path()).unwrap()),
-        )
-        .unwrap();
+        // A crashed writer leaves the truncated tail with no newline. A later
+        // append must start its own line instead of joining that tail.
+        assert!(!std::fs::read(store.path()).unwrap().ends_with(b"\n"));
         store
             .append(&record("local", "r1", 5, "human"))
             .await
@@ -694,6 +784,161 @@ mod tests {
             .unwrap();
         assert_eq!(page.records[0].rating.get(), 5);
         assert_eq!(page.skipped_lines, 5);
+    }
+
+    #[tokio::test]
+    async fn another_owners_corrupt_lines_are_not_counted() {
+        let (_directory, store) = store();
+        store
+            .append(&record("local", "r1", 3, "human"))
+            .await
+            .unwrap();
+        let valid = std::fs::read_to_string(store.path()).unwrap();
+        let mut foreign_range: serde_json::Value = serde_json::from_str(valid.trim()).unwrap();
+        foreign_range["owner"] = serde_json::json!("tenant-b");
+        foreign_range["rating"] = serde_json::json!(9);
+        let mut foreign_schema = foreign_range.clone();
+        foreign_schema["schema"] = serde_json::json!(2);
+        let mut own_range: serde_json::Value = serde_json::from_str(valid.trim()).unwrap();
+        own_range["rating"] = serde_json::json!(9);
+        let mut no_owner: serde_json::Value = serde_json::from_str(valid.trim()).unwrap();
+        no_owner.as_object_mut().unwrap().remove("owner");
+        std::fs::write(
+            store.path(),
+            format!("{valid}{foreign_range}\n{foreign_schema}\n"),
+        )
+        .unwrap();
+
+        let page = store
+            .query(FeedbackQuery {
+                owner: "local".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.skipped_lines, 0);
+        assert_eq!(
+            store
+                .latest_by_run("local", true)
+                .await
+                .unwrap()
+                .skipped_lines,
+            0
+        );
+        // The foreign owner still sees its own corrupt lines.
+        let foreign = store
+            .query(FeedbackQuery {
+                owner: "tenant-b".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(foreign.records.is_empty());
+        assert_eq!(foreign.skipped_lines, 2);
+
+        // The caller's own corrupt line, and one with no owner, still count.
+        std::fs::write(
+            store.path(),
+            format!("{valid}{foreign_range}\n{own_range}\n{no_owner}\nnot json\n"),
+        )
+        .unwrap();
+        let page = store
+            .query(FeedbackQuery {
+                owner: "local".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.skipped_lines, 3);
+    }
+
+    #[tokio::test]
+    async fn blank_oversized_and_control_owner_or_ids_are_rejected() {
+        let (_directory, store) = store();
+        let long = "a".repeat(MAX_KEY_BYTES + 1);
+        for bad in ["", "   ", "lo\0cal", "lo\ncal", "\u{7}", long.as_str()] {
+            let error = store
+                .append(&record(bad, "r1", 3, "human"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Config, "{bad:?}");
+            assert!(bad.trim().is_empty() || !error.to_string().contains(bad));
+            let error = store
+                .append(&record("local", bad, 3, "human"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Config, "{bad:?}");
+            let mut bad_id = record("local", "r1", 3, "human");
+            bad_id.feedback_id = bad.into();
+            assert_eq!(
+                store.append(&bad_id).await.unwrap_err().kind,
+                ErrorKind::Config
+            );
+            let error = store
+                .query(FeedbackQuery {
+                    owner: bad.into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Config);
+            let error = store.latest_by_run(bad, false).await.unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Config);
+        }
+        assert_eq!(
+            store
+                .query(FeedbackQuery::default())
+                .await
+                .unwrap_err()
+                .kind,
+            ErrorKind::Config
+        );
+        assert!(!store.path().exists(), "rejected appends write nothing");
+        let max = "a".repeat(MAX_KEY_BYTES);
+        store.append(&record(&max, &max, 3, "human")).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn store_file_is_owner_only_and_symlinks_are_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (directory, store) = store();
+        store
+            .append(&record("local", "r1", 3, "human"))
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // A pre-existing world-readable file is tightened on the next append.
+        std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        store
+            .append(&record("local", "r1", 4, "human"))
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        let target = directory.path().join("target.jsonl");
+        std::fs::write(&target, "").unwrap();
+        let linked = JsonlFeedbackStore::new(directory.path().join("linked.jsonl"));
+        std::os::unix::fs::symlink(&target, linked.path()).unwrap();
+        let error = linked
+            .append(&record("local", "r1", 3, "human"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Io);
+        assert!(!error.to_string().contains("linked.jsonl"));
+        assert!(std::fs::read(&target).unwrap().is_empty());
     }
 
     #[tokio::test]
