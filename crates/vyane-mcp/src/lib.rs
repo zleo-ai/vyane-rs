@@ -4,12 +4,12 @@
 //! history, session, and static diagnostic operations as callable tools.
 //!
 //! The server is transport-agnostic: it wraps a [`vyane_service::VyaneService`]
-//! and registers seven base tools (`vyane_dispatch`, `vyane_broadcast`,
-//! `vyane_history`, `vyane_sessions`, `vyane_route`, `vyane_check`, and
-//! `vyane_workflow_plan`). An
+//! and registers nine base tools (`vyane_dispatch`, `vyane_broadcast`,
+//! `vyane_history`, `vyane_sessions`, `vyane_route`, `vyane_check`,
+//! `vyane_workflow_plan`, `vyane_feedback`, and `vyane_outcomes`). An
 //! embedding process may inject an authenticated [`WorkflowControl`] port to
 //! add workflow submit/status/cancel without giving this crate daemon discovery
-//! or credentials. The `vyane mcp` CLI injects that port and exposes ten tools.
+//! or credentials. The `vyane mcp` CLI injects that port and exposes twelve tools.
 //!
 //! ## Tool result contract
 //!
@@ -48,8 +48,9 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use vyane_core::{ErrorKind, RunStatus, VyaneError};
 use vyane_service::{
-    BroadcastParams, DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError, DiagnosticErrorKind,
-    DispatchParams, HistoryFilter, RoutePreviewParams, RunView, VyaneService,
+    BroadcastParams, DEFAULT_OUTCOME_GROUP_BY, DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError,
+    DiagnosticErrorKind, DispatchParams, HistoryFilter, RoutePreviewParams, RunView, VyaneService,
+    parse_outcome_group_by,
 };
 use vyane_workflow::{
     WORKFLOW_PLAN_MAX_PROMPT_BYTES, WORKFLOW_PLAN_MAX_ROUTE_VALUES, WORKFLOW_PLAN_MAX_SYSTEM_BYTES,
@@ -64,11 +65,12 @@ const BASE_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch server. \
     vyane_broadcast to fan one task out to several targets concurrently, \
     vyane_history to query the run ledger, vyane_sessions to list saved sessions, \
     vyane_route to preview deterministic routing, and vyane_check for a static-only redacted config check. \
+    Use vyane_feedback to rate one of your runs from 1 to 5 and vyane_outcomes for grouped success, failover, cost and rating statistics; ratings never change routing. \
     Use vyane_workflow_plan to compile caller-supplied workflow sources without execution; its payload includes the supplied prompts, system text, and workdirs. \
     A result with operation_status=completed is final even when detail_omitted=true; use its run receipt and never retry it as an execution failure.";
 
 const WORKFLOW_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch and durable workflow server. \
-    The execution, history, session, route, and check tools retain their base contracts. \
+    The execution, history, session, route, check, feedback, and outcomes tools retain their base contracts. \
     Use vyane_workflow_plan for static compilation without execution; it returns supplied prompts, system text, and workdirs. \
     Use vyane_workflow_submit with a caller-owned canonical UUIDv7 and bounded source bundle; \
     use workflow status before retrying an outcome_unknown submission, and workflow cancel for idempotent cancellation. \
@@ -367,6 +369,51 @@ pub struct HistoryArgs {
     pub until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Arguments for `vyane_feedback`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackArgs {
+    /// Id of one of your runs.
+    #[schemars(length(min = 1, max = 256))]
+    pub run_id: String,
+    /// Rating from 1 (worst) to 5 (best).
+    #[schemars(range(min = 1, max = 5))]
+    pub rating: u8,
+    /// `human` (default) or `auto:<rule>` with a lowercase rule name.
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 64))]
+    pub source: Option<String>,
+}
+
+/// Arguments for `vyane_outcomes`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomesArgs {
+    /// Comma-separated 1-4 distinct dimensions from provider, protocol,
+    /// harness, model, effort, profile, status. Defaults to
+    /// `provider,harness,model,effort`.
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 256))]
+    pub group_by: Option<String>,
+    /// Filter by provider id.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Filter by run status: `success`, `error`, `timeout`, or `cancelled`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Include runs started at or after this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Include runs started at or before this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Count `auto:<rule>` ratings for runs without a human rating.
+    #[serde(default)]
+    pub include_auto_ratings: bool,
+}
+
 /// One bounded route tag or candidate profile name.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(transparent)]
@@ -489,6 +536,8 @@ impl Default for HistoryArgs {
 }
 
 const MAX_HISTORY_LIMIT: usize = 1_000;
+const MAX_FEEDBACK_RUN_ID_BYTES: usize = 256;
+const MAX_FEEDBACK_SOURCE_BYTES: usize = 64;
 const MAX_BROADCAST_TARGETS: usize = 64;
 const MAX_BROADCAST_TARGETS_BYTES: usize = 64 * 1024;
 const MAX_WORKFLOW_TOML_BYTES: usize = WORKFLOW_SOURCE_MAX_TOML_BYTES;
@@ -673,6 +722,17 @@ impl SafeToolError {
             code: PublicErrorCode::LimitExceeded,
             message: "diagnostic safety limit exceeded",
         }
+    }
+
+    const fn run_not_found() -> Self {
+        Self {
+            code: PublicErrorCode::NotFound,
+            message: "run was not found",
+        }
+    }
+
+    const fn invalid_feedback_source() -> Self {
+        Self::invalid_argument("source must be human or auto:<rule> with a lowercase rule name")
     }
 
     const fn output_limit() -> Self {
@@ -914,6 +974,101 @@ impl VyaneMcpServer {
         match self.service.history_views(filter).await {
             Ok(records) => Ok(success_json(&ToolItems { items: records })),
             Err(error) => Ok(error_json(classify_service_error(&error))),
+        }
+    }
+
+    /// Record a 1-5 rating for one of the caller's runs.
+    #[tool(
+        description = "Rate one of your runs from 1 (worst) to 5 (best). source is human (default) or auto:<rule>. The latest rating per run and source wins; no comment is stored. A run that does not exist or belongs to someone else returns not_found. Ratings never change routing.",
+        input_schema = rmcp::handler::server::tool::schema_for_type::<FeedbackArgs>()
+    )]
+    async fn vyane_feedback(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        let args: FeedbackArgs = match parse_arguments(arguments) {
+            Ok(args) => args,
+            Err(error) => return Ok(error_json(error)),
+        };
+        if !(1..=5).contains(&args.rating) {
+            return Ok(error_json(SafeToolError::invalid_argument(
+                "rating must be an integer from 1 to 5",
+            )));
+        }
+        if args.run_id.is_empty() || args.run_id.len() > MAX_FEEDBACK_RUN_ID_BYTES {
+            return Ok(error_json(SafeToolError::run_not_found()));
+        }
+        if args
+            .source
+            .as_ref()
+            .is_some_and(|source| source.len() > MAX_FEEDBACK_SOURCE_BYTES)
+        {
+            return Ok(error_json(SafeToolError::invalid_feedback_source()));
+        }
+        match self
+            .service
+            .record_feedback(&args.run_id, args.rating, args.source.as_deref())
+            .await
+        {
+            Ok(view) => Ok(success_json(&view)),
+            Err(error) => Ok(error_json(classify_feedback_error(
+                &error,
+                SafeToolError::invalid_feedback_source(),
+            ))),
+        }
+    }
+
+    /// Group the caller's runs and report outcome statistics.
+    #[tool(
+        description = "Group your runs by provider, protocol, harness, model, effort, profile or status (1-4 dimensions) and return success, failover, duration, token, cost and average rating per group. Only human ratings count unless include_auto_ratings=true. Read-only; routing never reads it.",
+        input_schema = rmcp::handler::server::tool::schema_for_type::<OutcomesArgs>()
+    )]
+    async fn vyane_outcomes(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        let args: OutcomesArgs = match parse_arguments(arguments) {
+            Ok(args) => args,
+            Err(error) => return Ok(error_json(error)),
+        };
+        let group_by = match args.group_by.as_deref() {
+            None => DEFAULT_OUTCOME_GROUP_BY.to_vec(),
+            Some(raw) => match parse_outcome_group_by(raw) {
+                Ok(group_by) => group_by,
+                Err(_) => {
+                    return Ok(error_json(SafeToolError::invalid_argument(
+                        "group_by must name 1 to 4 distinct dimensions: provider, protocol, harness, model, effort, profile or status",
+                    )));
+                }
+            },
+        };
+        if args
+            .since
+            .zip(args.until)
+            .is_some_and(|(since, until)| since > until)
+        {
+            return Ok(error_json(SafeToolError::invalid_argument(
+                "since must not be later than until",
+            )));
+        }
+        let status = match args.status.as_deref() {
+            None => None,
+            Some(status) => match parse_status(status) {
+                Ok(status) => Some(status),
+                Err(message) => return Ok(error_json(SafeToolError::invalid_argument(message))),
+            },
+        };
+        let filter = HistoryFilter {
+            limit: None,
+            status,
+            provider: args.provider,
+            since: args.since,
+            until: args.until,
+        };
+        match self
+            .service
+            .outcomes(filter, group_by, args.include_auto_ratings)
+            .await
+        {
+            Ok(report) => Ok(success_json(&report)),
+            Err(error) => Ok(error_json(classify_feedback_error(
+                &error,
+                SafeToolError::invalid_argument("request contains an invalid argument"),
+            ))),
         }
     }
 
@@ -1558,6 +1713,21 @@ fn classify_service_error(error: &anyhow::Error) -> SafeToolError {
         || SafeToolError::from_kind(ErrorKind::Other),
         SafeToolError::from_kind,
     )
+}
+
+/// Map a feedback/outcome service error to a closed public error. A missing
+/// and a foreign run share one `not_found` result; a caller-input error uses
+/// `on_config`; anything else is an internal failure without detail.
+fn classify_feedback_error(error: &anyhow::Error, on_config: SafeToolError) -> SafeToolError {
+    let kind = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<VyaneError>())
+        .map(|error| error.kind);
+    match kind {
+        Some(ErrorKind::NotFound) => SafeToolError::run_not_found(),
+        Some(ErrorKind::Config) => on_config,
+        _ => SafeToolError::from_kind(ErrorKind::Other),
+    }
 }
 
 fn broadcast_error_item(selector: String, error: &anyhow::Error) -> BroadcastToolItem {
@@ -2494,7 +2664,7 @@ mod tests {
             <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
 
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 9);
         for tool in &tools {
             let expected = match tool.name.as_ref() {
                 "vyane_dispatch" => rmcp::handler::server::tool::schema_for_type::<
@@ -2518,10 +2688,54 @@ mod tests {
                 "vyane_workflow_plan" => rmcp::handler::server::tool::schema_for_type::<
                     rmcp::handler::server::wrapper::Parameters<WorkflowPlanArgs>,
                 >(),
+                "vyane_feedback" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<FeedbackArgs>,
+                >(),
+                "vyane_outcomes" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<OutcomesArgs>,
+                >(),
                 other => panic!("unexpected tool {other}"),
             };
             assert_eq!(tool.input_schema.as_ref(), expected.as_ref());
             assert!(tool.description.is_some());
+            if tool.name.as_ref() == "vyane_feedback" {
+                assert_eq!(
+                    tool.input_schema.get("additionalProperties"),
+                    Some(&serde_json::json!(false))
+                );
+                assert_eq!(
+                    tool.input_schema["required"],
+                    serde_json::json!(["run_id", "rating"])
+                );
+                let properties = tool.input_schema["properties"].as_object().unwrap();
+                assert_eq!(properties["rating"]["minimum"], 1);
+                assert_eq!(properties["rating"]["maximum"], 5);
+                assert_eq!(properties["run_id"]["maxLength"], 256);
+                let mut names: Vec<_> = properties.keys().cloned().collect();
+                names.sort();
+                assert_eq!(names, ["rating", "run_id", "source"]);
+            }
+            if tool.name.as_ref() == "vyane_outcomes" {
+                assert_eq!(
+                    tool.input_schema.get("additionalProperties"),
+                    Some(&serde_json::json!(false))
+                );
+                assert!(tool.input_schema.get("required").is_none());
+                let properties = tool.input_schema["properties"].as_object().unwrap();
+                let mut names: Vec<_> = properties.keys().cloned().collect();
+                names.sort();
+                assert_eq!(
+                    names,
+                    [
+                        "group_by",
+                        "include_auto_ratings",
+                        "provider",
+                        "since",
+                        "status",
+                        "until"
+                    ]
+                );
+            }
             if tool.name.as_ref() == "vyane_route" {
                 assert_eq!(
                     tool.input_schema.get("additionalProperties"),

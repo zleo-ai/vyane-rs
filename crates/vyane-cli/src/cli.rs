@@ -32,6 +32,9 @@ pub enum Command {
     Broadcast(BroadcastArgs),
     /// Show recent run ledger records.
     History(HistoryArgs),
+    /// Rate your runs from 1 to 5 and list the ratings.
+    #[command(subcommand)]
+    Feedback(FeedbackCommand),
     /// List saved session records.
     Sessions(SessionsArgs),
     /// Inspect and safely reset local continuity sessions.
@@ -68,6 +71,46 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct CheckArgs {
     /// Emit static configuration diagnostics as JSON without probing harnesses.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FeedbackCommand {
+    /// Record a 1-5 rating for one of your runs (`rate <RUN_ID> <RATING>` or `rate --last <RATING>`).
+    Rate(FeedbackRateArgs),
+    /// List your ratings, most recent first.
+    List(FeedbackListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct FeedbackRateArgs {
+    /// Run id to rate; omit it when using --last.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: Option<String>,
+    /// Rating from 1 (worst) to 5 (best).
+    #[arg(value_name = "RATING")]
+    pub rating: Option<String>,
+    /// Rate your most recently recorded run; pass only RATING.
+    #[arg(long)]
+    pub last: bool,
+    /// Who produced the rating: human (default) or auto:<rule>.
+    #[arg(long, value_name = "SOURCE")]
+    pub source: Option<String>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FeedbackListArgs {
+    /// Only ratings for this run id.
+    #[arg(long = "run", value_name = "RUN_ID")]
+    pub run_id: Option<String>,
+    /// Maximum number of ratings to show; zero returns none.
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+    /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -825,6 +868,24 @@ pub struct HistoryArgs {
     /// Count all matching runs by provider and status, instead of listing them.
     #[arg(long, conflicts_with = "limit")]
     pub stats: bool,
+    /// Group all matching runs and report success, failover, duration, tokens, cost and rating.
+    #[arg(
+        long,
+        conflicts_with_all = ["stats", "limit", "session", "labels"]
+    )]
+    pub outcomes: bool,
+    /// Outcome grouping, 1-4 distinct dimensions (default: provider,harness,model,effort).
+    #[arg(
+        long = "group-by",
+        value_enum,
+        value_delimiter = ',',
+        value_name = "DIM,...",
+        requires = "outcomes"
+    )]
+    pub group_by: Vec<OutcomeDimensionArg>,
+    /// Count machine (auto:<rule>) ratings when a run has no human rating.
+    #[arg(long, requires = "outcomes")]
+    pub include_auto_ratings: bool,
     /// Maximum number of records to show; zero returns no records.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
@@ -1051,6 +1112,31 @@ impl From<SandboxArg> for Sandbox {
             SandboxArg::ReadOnly => Sandbox::ReadOnly,
             SandboxArg::Write => Sandbox::Write,
             SandboxArg::Full => Sandbox::Full,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutcomeDimensionArg {
+    Provider,
+    Protocol,
+    Harness,
+    Model,
+    Effort,
+    Profile,
+    Status,
+}
+
+impl From<OutcomeDimensionArg> for vyane_service::OutcomeDimension {
+    fn from(value: OutcomeDimensionArg) -> Self {
+        match value {
+            OutcomeDimensionArg::Provider => Self::Provider,
+            OutcomeDimensionArg::Protocol => Self::Protocol,
+            OutcomeDimensionArg::Harness => Self::Harness,
+            OutcomeDimensionArg::Model => Self::Model,
+            OutcomeDimensionArg::Effort => Self::Effort,
+            OutcomeDimensionArg::Profile => Self::Profile,
+            OutcomeDimensionArg::Status => Self::Status,
         }
     }
 }
