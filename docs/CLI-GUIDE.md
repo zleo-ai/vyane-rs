@@ -672,14 +672,18 @@ settled:
   without `--force`) and the branch is deleted only if it still points at the
   base commit;
 - otherwise it is kept with its branch: `dirty` for files, `committed` for new
-  commits, `unknown_state` when any check fails;
+  commits (including commits made on a detached `HEAD` that only the
+  worktree's `HEAD` reflog still reaches), `unknown_state` when any check
+  fails;
 - a removal that does not finish is reported as `cleanup_failed`.
 
 When in doubt the worktree is kept; no check failure leads to a removal.
 Settlement runs every check against the git directory recorded when the
 worktree was created and keeps the tree (`unknown_state`) if its `.git` file
 was changed. It never runs git inside a nested repository: a worktree whose
-index holds a submodule (gitlink) is kept as `unknown_state`. If preparing a
+index holds a submodule (gitlink) is kept as `unknown_state`, and so is one
+whose branch was turned into a symbolic ref; the branch is deleted with
+`--no-deref`, never through a link to another branch. If preparing a
 new worktree fails after `git worktree add` (for example the step `workdir`
 is a file or a symlink at the base commit), the worktree and branch are
 removed again; if that removal fails too, the entry is recorded as

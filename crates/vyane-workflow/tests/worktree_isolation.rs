@@ -533,6 +533,43 @@ async fn detached_commit_with_branch_at_base_is_kept() {
     assert!(repo.branch_exists(&worktree.branch));
 }
 
+/// A target commits on a detached HEAD and then checks its branch out again.
+/// HEAD and the branch are both back at the base and the tree is clean, but
+/// the commit is reachable only from the worktree's HEAD reflog, so the tree
+/// is kept.
+#[tokio::test]
+async fn detached_commit_abandoned_by_returning_to_the_branch_is_kept() {
+    let repo = Repo::new();
+    let provisioner = repo.provisioner();
+    let run_id = WorkflowRunId::generate();
+    let worktree = provision(&provisioner, &run_id, &repo.repo, "HEAD")
+        .await
+        .unwrap();
+    git(&worktree.root, &["checkout", "-q", "--detach"]);
+    std::fs::write(worktree.root.join("feature.txt"), "done").unwrap();
+    git(&worktree.root, &["add", "feature.txt"]);
+    git(&worktree.root, &["commit", "-q", "-m", "detached work"]);
+    let detached = git(&worktree.root, &["rev-parse", "HEAD"]);
+    git(&worktree.root, &["checkout", "-q", &worktree.branch]);
+    assert_eq!(
+        git(&worktree.root, &["rev-parse", "HEAD"]),
+        worktree.base_sha
+    );
+    assert!(git(&worktree.root, &["status", "--porcelain"]).is_empty());
+
+    let settlement = provisioner.settle(&worktree).await;
+    assert_eq!(settlement.disposition, WorktreeDisposition::Kept);
+    assert_eq!(settlement.kept_reason, Some(WorktreeKeptReason::Committed));
+    assert!(worktree.root.exists());
+    assert!(repo.branch_exists(&worktree.branch));
+    assert!(
+        git(&worktree.root, &["reflog", "show", "--format=%H", "HEAD"])
+            .lines()
+            .any(|entry| entry == detached),
+        "the detached commit stays reachable from the worktree reflog"
+    );
+}
+
 #[tokio::test]
 async fn branch_moved_away_from_base_is_kept_even_with_head_at_base() {
     let repo = Repo::new();
@@ -601,6 +638,52 @@ async fn branch_moved_during_settle_survives_compare_and_delete() {
         git(&repo.repo, &["rev-parse", &format!("refs/heads/{branch}")]),
         other
     );
+}
+
+/// A target turns its own branch into a symbolic ref to another branch that
+/// sits at the base. Every check passes through the link, so deleting the
+/// branch must not follow it: the other branch survives and the tree is kept.
+#[tokio::test]
+async fn symbolic_branch_never_deletes_the_branch_it_names() {
+    let repo = Repo::new();
+    git(&repo.repo, &["branch", "keepme"]);
+    let provisioner = repo.provisioner();
+    let run_id = WorkflowRunId::generate();
+    let worktree = provision(&provisioner, &run_id, &repo.repo, "HEAD")
+        .await
+        .unwrap();
+    git(
+        &worktree.root,
+        &[
+            "symbolic-ref",
+            &format!("refs/heads/{}", worktree.branch),
+            "refs/heads/keepme",
+        ],
+    );
+    assert_eq!(
+        git(
+            &repo.repo,
+            &["rev-parse", &format!("refs/heads/{}", worktree.branch)]
+        ),
+        worktree.base_sha,
+        "the link resolves to the base"
+    );
+
+    let settlement = provisioner.settle(&worktree).await;
+    assert_eq!(settlement.disposition, WorktreeDisposition::Kept);
+    assert_eq!(
+        settlement.kept_reason,
+        Some(WorktreeKeptReason::UnknownState)
+    );
+    assert!(
+        repo.branch_exists("keepme"),
+        "settle deleted another branch"
+    );
+    assert_eq!(
+        git(&repo.repo, &["rev-parse", "refs/heads/keepme"]),
+        worktree.base_sha
+    );
+    assert!(worktree.root.exists());
 }
 
 #[tokio::test]
