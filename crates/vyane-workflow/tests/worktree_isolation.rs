@@ -498,6 +498,41 @@ async fn committed_work_in_a_clean_tree_is_kept() {
     assert!(repo.branch_exists(&worktree.branch));
 }
 
+/// A target that detaches HEAD before committing leaves the branch at the
+/// base. Only the HEAD comparison sees that work; without it the tree would be
+/// removed and the commits lost with the worktree's reflog.
+#[tokio::test]
+async fn detached_commit_with_branch_at_base_is_kept() {
+    let repo = Repo::new();
+    let provisioner = repo.provisioner();
+    let run_id = WorkflowRunId::generate();
+    let worktree = provision(&provisioner, &run_id, &repo.repo, "HEAD")
+        .await
+        .unwrap();
+    git(&worktree.root, &["checkout", "-q", "--detach"]);
+    std::fs::write(worktree.root.join("feature.txt"), "done").unwrap();
+    git(&worktree.root, &["add", "feature.txt"]);
+    git(&worktree.root, &["commit", "-q", "-m", "detached work"]);
+    assert!(git(&worktree.root, &["status", "--porcelain"]).is_empty());
+    assert_eq!(
+        git(
+            &repo.repo,
+            &["rev-parse", &format!("refs/heads/{}", worktree.branch)]
+        ),
+        worktree.base_sha,
+        "the branch itself never moved"
+    );
+
+    let settlement = provisioner.settle(&worktree).await;
+    assert_eq!(settlement.disposition, WorktreeDisposition::Kept);
+    assert_eq!(settlement.kept_reason, Some(WorktreeKeptReason::Committed));
+    let head = settlement.head_sha.clone().unwrap();
+    assert_ne!(head, worktree.base_sha);
+    assert_eq!(head, git(&worktree.root, &["rev-parse", "HEAD"]));
+    assert!(worktree.root.join("feature.txt").is_file());
+    assert!(repo.branch_exists(&worktree.branch));
+}
+
 #[tokio::test]
 async fn branch_moved_away_from_base_is_kept_even_with_head_at_base() {
     let repo = Repo::new();
