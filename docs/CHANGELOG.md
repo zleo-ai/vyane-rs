@@ -123,6 +123,21 @@ This is a curated history, not a complete reconstruction of all development.
   carries at most 128 labels. A label error names the label's position,
   not its text. MCP `session` and `labels` now have schema length limits.
 
+### Missed in the 0.1.0 notes
+
+These changes shipped in 0.1.0 but were not listed in its section.
+
+- A config file that sets `schema_version` to anything other than the
+  integer `1` is rejected while it is parsed, before any layer is merged.
+  Omitting `schema_version` still loads the file as version 1. Earlier
+  builds ignored the key, so a config that carried another value now fails
+  to load. ([#248](https://github.com/zleo-ai/vyane-rs/pull/248))
+- Every dispatch that records a run also appends one `dispatch.terminal`
+  event (run id and status only) to the run owner's event log. The data
+  directory therefore gains `events/<owner digest>/dispatch.jsonl` and a
+  lock file beside it. A failed event append is logged and does not fail
+  the dispatch. ([#242](https://github.com/zleo-ai/vyane-rs/pull/242))
+
 ## 0.1.0 - 2026-10-23
 
 Source snapshot `v0.1.0`. The tag is created on the `main` commit that
