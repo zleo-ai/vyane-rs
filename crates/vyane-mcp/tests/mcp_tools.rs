@@ -790,7 +790,9 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
             "vyane_broadcast",
             "vyane_check",
             "vyane_dispatch",
+            "vyane_feedback",
             "vyane_history",
+            "vyane_outcomes",
             "vyane_route",
             "vyane_sessions",
             "vyane_workflow_plan",
@@ -1622,4 +1624,159 @@ impl Drop for RestoreMode {
                 std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
         }
     }
+}
+
+fn feedback_ledger_line(run_id: &str, owner: &str, provider: &str, attempts: usize) -> String {
+    let attempt = serde_json::json!({
+        "target": {"provider": provider, "protocol": "openai_chat", "model": "m"},
+        "transport": "direct_http",
+        "started_at": "2026-01-01T00:00:00Z",
+        "duration_ms": 1000,
+        "outcome": {"result": "ok"}
+    });
+    serde_json::json!({
+        "run_id": run_id, "owner": owner,
+        "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:00:01Z",
+        "task_digest": "d", "sandbox": "read-only",
+        "target": {"provider": provider, "protocol": "openai_chat", "model": "m"},
+        "transport": "direct_http",
+        "attempts": vec![attempt; attempts],
+        "status": "success"
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn feedback_and_outcomes_mcp_tools_are_strict_owner_scoped_and_read_only_for_routing()
+-> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let ledger = root.path().join("ledger.jsonl");
+    std::fs::write(
+        &ledger,
+        [
+            feedback_ledger_line("run-1", "local", "p", 1),
+            feedback_ledger_line("run-2", "local", "q", 2),
+            feedback_ledger_line("run-foreign", "someone-else", "p", 1),
+        ]
+        .join("\n")
+            + "\n",
+    )?;
+    let service = vyane_service::VyaneService::from_local_storage(
+        vyane_service::StoragePaths::from_data_dir(root.path()),
+    )?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let handle = tokio::spawn(async move {
+        VyaneMcpServer::new(service)
+            .serve(server_transport)
+            .await?
+            .waiting()
+            .await?;
+        anyhow::Ok(())
+    });
+    let client = <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
+
+    let rated = call_json(
+        &client,
+        "vyane_feedback",
+        serde_json::json!({"run_id": "run-1", "rating": 4}),
+    )
+    .await?;
+    assert_eq!(rated["run_id"], "run-1");
+    assert_eq!(rated["rating"], 4);
+    assert_eq!(rated["source"], "human");
+    assert!(rated.get("owner").is_none());
+    call_json(
+        &client,
+        "vyane_feedback",
+        serde_json::json!({"run_id": "run-2", "rating": 2, "source": "auto:tests"}),
+    )
+    .await?;
+
+    let not_found = serde_json::json!({
+        "status": "error",
+        "error": {"code": "not_found", "message": "run was not found"}
+    });
+    for run_id in ["run-foreign", "run-absent"] {
+        let body = call_json(
+            &client,
+            "vyane_feedback",
+            serde_json::json!({"run_id": run_id, "rating": 1}),
+        )
+        .await?;
+        assert_eq!(body, not_found, "{run_id}");
+    }
+    for (arguments, message) in [
+        (
+            serde_json::json!({"run_id": "run-1", "rating": 9}),
+            "rating must be an integer from 1 to 5",
+        ),
+        (
+            serde_json::json!({"run_id": "run-1", "rating": 3, "source": "ROBOT_CANARY"}),
+            "source must be human or auto:<rule> with a lowercase rule name",
+        ),
+        (
+            serde_json::json!({"run_id": "run-1", "rating": 3, "comment": "FIELD_CANARY"}),
+            "arguments do not match the tool schema",
+        ),
+        (
+            serde_json::json!({"run_id": "run-1", "rating": 300}),
+            "arguments do not match the tool schema",
+        ),
+    ] {
+        let body = call_json(&client, "vyane_feedback", arguments.clone()).await?;
+        assert_eq!(body["error"]["code"], "invalid_argument", "{arguments}");
+        assert_eq!(body["error"]["message"], message, "{arguments}");
+        assert!(!body.to_string().contains("CANARY"));
+    }
+
+    let report = call_json(
+        &client,
+        "vyane_outcomes",
+        serde_json::json!({"group_by": "provider"}),
+    )
+    .await?;
+    assert_eq!(report["group_by"], serde_json::json!(["provider"]));
+    assert_eq!(report["total_runs"], 2);
+    let groups = report["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["key"], serde_json::json!({"provider": "p"}));
+    assert_eq!(groups[0]["rating_count"], 1);
+    assert_eq!(groups[0]["average_rating"], 4.0);
+    assert_eq!(groups[1]["key"], serde_json::json!({"provider": "q"}));
+    assert_eq!(groups[1]["failover_count"], 1);
+    assert_eq!(groups[1]["failover_rate"], 100.0);
+    assert_eq!(groups[1]["rating_count"], 0);
+    let with_auto = call_json(
+        &client,
+        "vyane_outcomes",
+        serde_json::json!({"group_by": "provider", "include_auto_ratings": true}),
+    )
+    .await?;
+    assert_eq!(with_auto["groups"][1]["rating_count"], 1);
+    let defaults = call_json(&client, "vyane_outcomes", serde_json::json!({})).await?;
+    assert_eq!(
+        defaults["group_by"],
+        serde_json::json!(["provider", "harness", "model", "effort"])
+    );
+    assert_eq!(
+        defaults["groups"][0]["key"],
+        serde_json::json!({"provider": "p", "harness": "direct", "model": "m", "effort": "unknown"})
+    );
+    for arguments in [
+        serde_json::json!({"group_by": "vendor"}),
+        serde_json::json!({"group_by": "provider,provider"}),
+        serde_json::json!({"group_by": "provider,protocol,harness,model,effort"}),
+        serde_json::json!({"status": "nope"}),
+        serde_json::json!({"since": "2026-01-02T00:00:00Z", "until": "2026-01-01T00:00:00Z"}),
+        serde_json::json!({"limit": 3}),
+    ] {
+        let body = call_json(&client, "vyane_outcomes", arguments.clone()).await?;
+        assert_eq!(body["error"]["code"], "invalid_argument", "{arguments}");
+    }
+    client.cancel().await?;
+    handle.await??;
+    let feedback = std::fs::read_to_string(root.path().join("feedback.jsonl"))?;
+    assert_eq!(feedback.lines().count(), 2);
+    assert!(!feedback.contains("run-foreign"));
+    Ok(())
 }
