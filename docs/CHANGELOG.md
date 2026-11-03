@@ -18,6 +18,11 @@ This is a curated history, not a complete reconstruction of all development.
 - Adding token usage together saturates at the largest count instead of
   panicking in debug builds or wrapping to a small count in release builds
   when an endpoint reports an extreme value.
+- Kernel-store owners and effect ids, and message-store owners, ids,
+  routes, consumers and idempotency keys, reject surrounding whitespace and
+  control characters (NUL included), the same rule the agent store and
+  owner resolution already apply. An id with an internal space stays valid.
+  Message-store errors name the field, not the value.
 
 ## 0.1.0 - 2026-10-23
 

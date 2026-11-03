@@ -10,6 +10,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+vyane-core = { workspace = true }
 chrono = { workspace = true }
 getrandom = { workspace = true }
 fs4 = { workspace = true }

@@ -94,7 +94,7 @@ pub struct EndpointRef {
 }
 
 impl EndpointRef {
-    pub(crate) fn validate(&self, field: &str) -> Result<()> {
+    pub(crate) fn validate(&self, field: &'static str) -> Result<()> {
         validate_text(field, &self.id, 512)
     }
 }
@@ -985,16 +985,20 @@ pub(crate) fn validate_limit(limit: usize, field: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_text(field: &str, value: &str, max: usize) -> Result<()> {
-    if value.trim().is_empty() || value.len() > max || value.contains('\0') {
-        return Err(MessageStoreError::InvalidInput(format!(
-            "{field} is empty, oversized, or contains NUL"
-        )));
-    }
-    Ok(())
+/// Every caller-supplied identifier in this store (owner, ids, routes, keys,
+/// consumers) follows the shared rule from `vyane-core`: non-blank, bounded,
+/// no surrounding whitespace, no control characters. The error names the
+/// field and the reason, never the value.
+pub(crate) fn validate_text(field: &'static str, value: &str, max: usize) -> Result<()> {
+    vyane_core::validate_identifier(field, value, max)
+        .map_err(|error| MessageStoreError::InvalidInput(error.to_string()))
 }
 
-pub(crate) fn validate_optional_text(field: &str, value: Option<&str>, max: usize) -> Result<()> {
+pub(crate) fn validate_optional_text(
+    field: &'static str,
+    value: Option<&str>,
+    max: usize,
+) -> Result<()> {
     value.map_or(Ok(()), |value| validate_text(field, value, max))
 }
 
@@ -1079,10 +1083,13 @@ fn is_lower_hex_byte(byte: u8) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
-        DeliveryStatus, EndpointKind, MessageDirection, MessageEventKind, MessagePublicationStatus,
+        DeliveryStatus, EndpointKind, EndpointRef, IdempotencyKey, MessageDirection,
+        MessageEventKind, MessagePublicationStatus, validate_owner, validate_text,
     };
+    use crate::MessageStoreError;
 
     #[test]
     fn message_string_enum_tokens_are_public_snake_case() {
@@ -1097,21 +1104,20 @@ mod tests {
         assert_eq!(MessagePublicationStatus::Staged.as_str(), "staged");
         assert_eq!(MessagePublicationStatus::Published.to_string(), "published");
     }
-}
 
-/// Red-team reproduction; fails on the current implementation.
-#[cfg(test)]
-mod redteam_tests {
-    use super::*;
-
-    /// The message store's `validate_text` (owner, mailbox route, endpoint
-    /// id, idempotency key) only refuses blank/oversized/NUL. The agent store
-    /// and `OwnerContext` refuse surrounding whitespace and every control
-    /// character, so the same owner/endpoint string is legal in one store and
-    /// illegal in its neighbour.
+    /// Owners, routes, endpoint ids and idempotency keys follow the same
+    /// identifier rule as `OwnerContext` and the agent store, so a value is
+    /// legal in this store exactly when it is legal in its neighbours.
     #[test]
-    fn redteam_message_identifiers_reject_control_and_padding() {
-        for value in ["local\n", " local", "lo\u{1b}cal", "local\t"] {
+    fn message_identifiers_reject_control_characters_and_padding() {
+        for value in [
+            "local\n",
+            " local",
+            "local ",
+            "lo\u{1b}cal",
+            "local\t",
+            "lo\0cal",
+        ] {
             assert!(
                 validate_owner(value).is_err(),
                 "message store accepted owner {value:?}"
@@ -1120,6 +1126,30 @@ mod redteam_tests {
                 validate_text("delivery mailbox route", value, 256).is_err(),
                 "message store accepted route {value:?}"
             );
+            let endpoint = EndpointRef {
+                kind: EndpointKind::Agent,
+                id: value.to_string(),
+            };
+            assert!(endpoint.validate("endpoint id").is_err(), "{value:?}");
+            let key = IdempotencyKey {
+                producer: "producer".into(),
+                key: value.to_string(),
+            };
+            assert!(key.validate().is_err(), "{value:?}");
         }
+        validate_owner("local user").unwrap();
+        validate_text("delivery mailbox route", "inbox/main", 256).unwrap();
+    }
+
+    #[test]
+    fn message_identifier_errors_name_the_field_not_the_value() {
+        const CANARY: &str = "MESSAGE_ID_CANARY";
+        let Err(MessageStoreError::InvalidInput(error)) =
+            validate_text("delivery route", &format!("{CANARY}\n"), 256)
+        else {
+            panic!("padded route was accepted");
+        };
+        assert!(error.starts_with("delivery route "), "{error}");
+        assert!(!error.contains(CANARY), "{error}");
     }
 }
