@@ -60,6 +60,7 @@ pub struct GitWorktreeProvisioner {
 
 struct GitOutput {
     success: bool,
+    code: Option<i32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
@@ -110,6 +111,7 @@ impl GitWorktreeProvisioner {
             .ok()?;
         Some(GitOutput {
             success: output.status.success(),
+            code: output.status.code(),
             stdout: output.stdout,
             stderr: output.stderr,
         })
@@ -265,7 +267,13 @@ impl GitWorktreeProvisioner {
         let branch_ref = format!("refs/heads/{branch}");
         self.git(
             source_root,
-            ["update-ref", "-d", branch_ref.as_str(), base_sha],
+            [
+                "update-ref",
+                "--no-deref",
+                "-d",
+                branch_ref.as_str(),
+                base_sha,
+            ],
         )
         .await
         .is_some_and(|output| output.success)
@@ -299,6 +307,19 @@ impl GitWorktreeProvisioner {
         tokio::fs::canonicalize(absolute)
             .await
             .is_ok_and(|resolved| resolved == worktree.git_dir)
+    }
+
+    /// Whether `reference` is a symbolic ref. `None` when the probe failed.
+    async fn is_symbolic_ref(&self, cwd: &Path, reference: &str) -> Option<bool> {
+        let output = self
+            .git(cwd, ["symbolic-ref", "--quiet", reference])
+            .await?;
+        match output.code {
+            Some(0) => Some(true),
+            // `--quiet` exits 1 without output for a ref that is not symbolic.
+            Some(1) => Some(false),
+            _ => None,
+        }
     }
 
     /// Whether the worktree index holds a gitlink. `None` when the probe
@@ -517,6 +538,16 @@ impl WorktreeProvisioner for GitWorktreeProvisioner {
         if tip != worktree.base_sha {
             return WorktreeSettlement::kept(WorktreeKeptReason::Committed, Some(head));
         }
+        // The target can turn its branch into a symbolic ref to another
+        // branch at the base. Deleting through that link would remove the
+        // other branch, so a symbolic branch keeps the tree.
+        match self
+            .is_symbolic_ref(&worktree.source_root, &branch_ref)
+            .await
+        {
+            Some(false) => {}
+            Some(true) | None => return unknown(Some(head)),
+        }
 
         // No `--force`: git refuses to remove a tree it considers unclean.
         let mut remove: Vec<OsString> = vec!["worktree".into(), "remove".into()];
@@ -526,11 +557,13 @@ impl WorktreeProvisioner for GitWorktreeProvisioner {
             Some(_) | None => return WorktreeSettlement::cleanup_failed(Some(head)),
         }
         // Compare-and-delete: a branch that moved since the checks is kept.
+        // `--no-deref` deletes the branch ref itself, never a ref it names.
         match self
             .git(
                 &worktree.source_root,
                 [
                     "update-ref",
+                    "--no-deref",
                     "-d",
                     branch_ref.as_str(),
                     worktree.base_sha.as_str(),

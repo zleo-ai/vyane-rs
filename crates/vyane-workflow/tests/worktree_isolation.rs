@@ -603,6 +603,52 @@ async fn branch_moved_during_settle_survives_compare_and_delete() {
     );
 }
 
+/// A target turns its own branch into a symbolic ref to another branch that
+/// sits at the base. Every check passes through the link, so deleting the
+/// branch must not follow it: the other branch survives and the tree is kept.
+#[tokio::test]
+async fn symbolic_branch_never_deletes_the_branch_it_names() {
+    let repo = Repo::new();
+    git(&repo.repo, &["branch", "keepme"]);
+    let provisioner = repo.provisioner();
+    let run_id = WorkflowRunId::generate();
+    let worktree = provision(&provisioner, &run_id, &repo.repo, "HEAD")
+        .await
+        .unwrap();
+    git(
+        &worktree.root,
+        &[
+            "symbolic-ref",
+            &format!("refs/heads/{}", worktree.branch),
+            "refs/heads/keepme",
+        ],
+    );
+    assert_eq!(
+        git(
+            &repo.repo,
+            &["rev-parse", &format!("refs/heads/{}", worktree.branch)]
+        ),
+        worktree.base_sha,
+        "the link resolves to the base"
+    );
+
+    let settlement = provisioner.settle(&worktree).await;
+    assert_eq!(settlement.disposition, WorktreeDisposition::Kept);
+    assert_eq!(
+        settlement.kept_reason,
+        Some(WorktreeKeptReason::UnknownState)
+    );
+    assert!(
+        repo.branch_exists("keepme"),
+        "settle deleted another branch"
+    );
+    assert_eq!(
+        git(&repo.repo, &["rev-parse", "refs/heads/keepme"]),
+        worktree.base_sha
+    );
+    assert!(worktree.root.exists());
+}
+
 #[tokio::test]
 async fn subdirectory_workdir_maps_into_the_worktree() {
     let repo = Repo::new();
