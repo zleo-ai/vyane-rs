@@ -17,6 +17,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::target::Secret;
+
 /// Parent variables that survive scrubbing. Everything a well-behaved CLI
 /// needs to start, nothing that redirects model traffic.
 pub const BASELINE_ENV: &[&str] = &[
@@ -63,7 +65,12 @@ impl fmt::Display for InheritMode {
 }
 
 /// Policy for building a child process environment.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Injected values can carry credentials (an endpoint API key), so they are
+/// held as [`Secret`]s: `Debug` lists only the injected variable names, and
+/// serialization skips the injection set entirely. Only [`EnvPolicy::build`]
+/// exposes the values, when the concrete child environment is assembled.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct EnvPolicy {
     #[serde(default)]
     pub mode: InheritMode,
@@ -71,9 +78,20 @@ pub struct EnvPolicy {
     #[serde(default)]
     pub allow: Vec<String>,
     /// Variables injected for this run (auth, base URL, model overrides).
-    /// Injection always wins over inherited values.
-    #[serde(default)]
-    pub inject: BTreeMap<String, String>,
+    /// Injection always wins over inherited values. Never serialized.
+    #[serde(skip)]
+    pub inject: BTreeMap<String, Secret>,
+}
+
+impl fmt::Debug for EnvPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnvPolicy")
+            .field("mode", &self.mode)
+            .field("allow", &self.allow)
+            .field("inject", &self.inject.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl EnvPolicy {
@@ -82,9 +100,9 @@ impl EnvPolicy {
         Self::default()
     }
 
-    /// Add an injected variable.
+    /// Add an injected variable. The value is held as a [`Secret`].
     pub fn inject(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.inject.insert(key.into(), value.into());
+        self.inject.insert(key.into(), Secret::new(value));
         self
     }
 
@@ -116,7 +134,7 @@ impl EnvPolicy {
             }
         }
         for (k, v) in &self.inject {
-            out.insert(k.clone(), v.clone());
+            out.insert(k.clone(), v.expose().to_string());
         }
         out
     }
@@ -165,7 +183,7 @@ mod tests {
         };
         policy
             .inject
-            .insert("SOME_API_KEY".into(), "child-secret".into());
+            .insert("SOME_API_KEY".into(), Secret::new("child-secret"));
         let env = policy.build(parent());
         assert_eq!(
             env.get("SOME_API_KEY").map(String::as_str),
@@ -185,26 +203,26 @@ mod tests {
         assert_eq!(InheritMode::Scrub.as_str(), "scrub");
         assert_eq!(InheritMode::Full.to_string(), "full");
     }
-}
 
-/// Red-team reproduction; fails on the current implementation.
-#[cfg(test)]
-mod redteam_tests {
-    use super::*;
-
-    /// `Provider::env_injections` copies the endpoint's raw API key
-    /// (`Secret::expose`) into `EnvPolicy::inject`, a plain
-    /// `BTreeMap<String, String>`. `EnvPolicy` (and the `HarnessJob` that
-    /// carries it) derives `Debug` and `Serialize`, so one `{job:?}` log line
-    /// or a serialized job snapshot writes the credential in clear text,
-    /// defeating the "Secret is never Serialize, Debug is redacted" promise.
+    /// Injected values can be an endpoint API key, and `EnvPolicy` travels
+    /// inside `HarnessJob`, so neither a `{job:?}` log line nor a serialized
+    /// snapshot may carry an injected value. `Debug` keeps the variable names.
     #[test]
-    fn redteam_injected_credentials_are_redacted_in_debug_and_serde() {
-        const CANARY: &str = "sk-REDTEAM-CANARY-NOT-A-REAL-KEY";
+    fn injected_values_are_redacted_in_debug_and_never_serialized() {
+        const CANARY: &str = "sk-CANARY-NOT-A-REAL-KEY";
         let policy = EnvPolicy::scrubbed().inject("ANTHROPIC_API_KEY", CANARY);
         let debug = format!("{policy:?}");
         let json = serde_json::to_string(&policy).unwrap_or_default();
         assert!(!debug.contains(CANARY), "Debug leaks the key: {debug}");
+        assert!(debug.contains("ANTHROPIC_API_KEY"), "{debug}");
         assert!(!json.contains(CANARY), "Serialize leaks the key: {json}");
+        assert!(!json.contains("inject"), "{json}");
+        assert_eq!(
+            policy
+                .build(parent())
+                .get("ANTHROPIC_API_KEY")
+                .map(String::as_str),
+            Some(CANARY)
+        );
     }
 }

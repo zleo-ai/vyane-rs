@@ -25,6 +25,10 @@ This is a curated history, not a complete reconstruction of all development.
   sets `--permission-mode dontAsk` and denies the Bash, Edit, Write and
   NotebookEdit tools, so a workspace or user settings file can no longer
   make it writable.
+- Environment values injected into a harness child, including an endpoint
+  API key, are held as secrets. Debug output of a harness job lists only the
+  variable names, and a serialized environment policy omits the injected
+  set.
 
 ## 0.1.0 - 2026-10-23
 

@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use vyane_core::error::{ErrorKind, Result, VyaneError};
-use vyane_core::target::{AuthStyle, Endpoint, HarnessKind, Sandbox};
+use vyane_core::target::{AuthStyle, Endpoint, HarnessKind, Sandbox, Secret};
 use vyane_core::traits::{
     Harness, HarnessExecutionContext, HarnessJob, HarnessOutcome, HarnessStreamEvent,
 };
@@ -99,7 +99,7 @@ impl ClaudeCodeHarness {
             policy
                 .inject
                 .entry(ENV_MODEL.into())
-                .or_insert_with(|| job.model.as_str().to_string());
+                .or_insert_with(|| Secret::new(job.model.as_str()));
         }
         let parent_env = self.parent_env.clone().unwrap_or_else(parent_env_snapshot);
         materialize_env(&policy, parent_env)
@@ -383,20 +383,20 @@ fn parse_stream_line(line: &str) -> Vec<HarnessStreamEvent> {
 /// When `endpoint` is `None` the harness authenticates natively — we inject
 /// nothing for auth (an empty list). Auth style picks the variable name:
 /// `Bearer` → auth-token var, `XApiKey` → api-key var.
-pub(crate) fn endpoint_injections(endpoint: Option<&Endpoint>) -> Vec<(String, String)> {
+pub(crate) fn endpoint_injections(endpoint: Option<&Endpoint>) -> Vec<(String, Secret)> {
     let mut out = Vec::new();
     let Some(ep) = endpoint else {
         return out;
     };
     if !ep.base_url.is_empty() {
-        out.push((ENV_BASE_URL.into(), ep.base_url.clone()));
+        out.push((ENV_BASE_URL.into(), Secret::new(ep.base_url.clone())));
     }
     if let Some(auth) = &ep.auth {
         let var = match auth.style {
             AuthStyle::Bearer => ENV_AUTH_TOKEN,
             AuthStyle::XApiKey => ENV_API_KEY,
         };
-        out.push((var.into(), auth.secret.expose().to_string()));
+        out.push((var.into(), auth.secret.clone()));
     }
     out
 }
@@ -782,8 +782,8 @@ mod tests {
             }),
         };
         let inj = endpoint_injections(Some(&ep));
-        assert!(inj.contains(&(ENV_BASE_URL.into(), "https://relay.example/v1".into())));
-        assert!(inj.contains(&(ENV_AUTH_TOKEN.into(), "test-bearer-token".into())));
+        assert!(inj.contains(&(ENV_BASE_URL.into(), Secret::new("https://relay.example/v1"))));
+        assert!(inj.contains(&(ENV_AUTH_TOKEN.into(), Secret::new("test-bearer-token"))));
         assert!(!inj.iter().any(|(k, _)| k == ENV_API_KEY));
     }
 
@@ -797,7 +797,7 @@ mod tests {
             }),
         };
         let inj = endpoint_injections(Some(&ep));
-        assert!(inj.contains(&(ENV_API_KEY.into(), "test-x-api-key".into())));
+        assert!(inj.contains(&(ENV_API_KEY.into(), Secret::new("test-x-api-key"))));
         assert!(!inj.iter().any(|(k, _)| k == ENV_AUTH_TOKEN));
     }
 

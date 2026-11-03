@@ -490,8 +490,10 @@ So harnesses spawn **scrubbed by default**. `EnvPolicy` is a pure function of
 - `mode: InheritMode` — `Scrub` (default) starts from `BASELINE_ENV` only;
   `Full` inherits the whole parent environment (opt-in).
 - `allow: Vec<String>` — extra parent variables let through when scrubbing.
-- `inject: BTreeMap<String, String>` — variables set for this run (auth, base
-  URL, model). **Injection always wins**, even in `Full` mode.
+- `inject: BTreeMap<String, Secret>` — variables set for this run (auth, base
+  URL, model). **Injection always wins**, even in `Full` mode. Values are
+  `Secret`s: `EnvPolicy`'s `Debug` lists only the variable names, the set is
+  never serialized, and only `EnvPolicy::build` exposes the values.
 
 `BASELINE_ENV` is the minimal set a well-behaved CLI needs to start (`PATH`,
 `HOME`, `USER`, `SHELL`, `TERM`, locale vars, `TMPDIR`, `TZ`, the `XDG_*`
