@@ -412,14 +412,19 @@ of the run's provider or model. Ratings are append-only in
 the previous one when read. There is no edit or delete command: rate again.
 `feedback list` returns `{"items": [...], "skipped_lines": N}`, where each item
 has `view_schema`, `feedback_id`, `run_id`, `rating`, `source` and
-`recorded_at`. `skipped_lines` counts unreadable or unknown-schema lines.
+`recorded_at`. `skipped_lines` counts your own unreadable or unknown-schema
+lines and lines whose owner cannot be read; a line that names another owner is
+never counted. An append after a torn final line starts a new line, so the new
+rating stays readable. On unix the file is created owner-only (`0600`).
 
 A run that does not exist and a run that belongs to another owner give the same
 not-found error (CLI exit 1, REST `404 {"error":"run not found"}`, MCP
-`not_found`). A rating outside 1–5, an invalid source, an invalid grouping,
-`--outcomes` with `--stats`, `--limit`, `--session` or `--label`, and `since`
+`not_found`). A rating outside 1–5, an invalid source, an invalid grouping, an
+unknown status, `--outcomes` with `--stats`, `--limit`, `--session` or `--label`, and `since`
 later than `until` are caller errors (CLI exit 2, REST `400`, MCP
-`invalid_argument`). Error messages never echo the rejected source or grouping.
+`invalid_argument`). Error messages never echo the rejected source, grouping or
+status. The status filter accepts `success`, `error`, `timeout` and
+`cancelled` (also spelled `canceled`) on the CLI, REST and MCP alike.
 
 `history --outcomes` groups every matching run by 1–4 distinct dimensions:
 `provider`, `protocol`, `harness`, `model`, `effort`, `profile`, `status`
