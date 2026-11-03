@@ -60,24 +60,31 @@ record even by accident.
 
 ## Crate map and dependency edges
 
+Arrows read "depends on". Only normal `[dependencies]` between workspace
+crates are listed; dev-dependencies are omitted.
+
 ```
-                         vyane-core
- (types · traits · errors · env policy · workdir pin; no orchestration runtime)
-        ▲     ▲        ▲         ▲          ▲        ▲
-        │     │        │         │          │        │
- vyane-config │  vyane-protocol  │    vyane-harness  │
-   │          │        │         │          │        │
- vyane-provider        │      vyane-ledger   │   vyane-kernel
-        │              │         │           │   (traits only)
-        └──────┬───────┴─────────┴───────────┴────────┘
-               ▼
-        vyane-service   ── (shared facade: config loading, selector
-                             resolution, dispatch/broadcast/history/sessions)
-          ▲           ▲
-          │           │
-   vyane-mcp     vyane-cli      (front-ends: MCP server, REST API,
-   (rmcp tools)  (+ axum API)    CLI — all consume vyane-service)
-                 (+ vyane-router)
+ leaves     vyane-core      (types · traits · errors · env policy · workdir pin;
+                             no orchestration runtime)
+            vyane-agent  ·  vyane-goal  ·  vyane-router  ·  vyane-quota
+                            (no workspace dependency)
+
+ core only  vyane-provider · vyane-protocol · vyane-harness · vyane-ledger
+            vyane-message  · vyane-task · vyane-kernel (traits only)
+                            (each ──▶ core and nothing else)
+
+ mid        vyane-config   ──▶ provider                               (+ core)
+            vyane-workflow ──▶ kernel                                 (+ core)
+            vyane-broker   ──▶ agent · message · ledger               (+ core)
+
+ facade     vyane-service  ──▶ agent · broker · config · goal · harness · kernel
+                               · ledger · message · protocol · router (+ core)
+                (config loading, selector resolution,
+                 dispatch/broadcast/history/sessions/feedback/outcomes)
+
+ front-end  vyane-mcp      ──▶ service · workflow                     (+ core)
+            vyane-cli      ──▶ every crate above except provider
+                (assembler: CLI, REST API, workflow daemon, MCP launcher)
 ```
 
 The load-bearing rule: **the kernel depends only on `vyane-core` traits.** It
@@ -106,15 +113,16 @@ Two consequences:
 | `vyane-kernel` | — (traits only) | early execution identity, whole-chain capability admission, prepared dispatch, dispatch / broadcast / failover state machine |
 | `vyane-ledger` | — | JSONL `Ledger`, filesystem `SessionStore` with strict revisioned native-session snapshots/CAS transitions, cost table |
 | `vyane-task` | — | owner-qualified SQLite task lifecycle snapshots/events, revision + executor-epoch CAS, transactional schema migration |
+| `vyane-quota` | — (independent leaf crate) | bounded, platform-neutral upstream quota snapshots through optional `QuotaConnector` adapters; no provider endpoint, credential loader, background task or routing action; connector error detail truncated to 1024 bytes |
 | `vyane-goal` | — (independent leaf crate) | owner-scoped SQLite goal snapshots plus immutable lifecycle/progress events; acceptance descriptors are data, not executable checks |
 | `vyane-agent` | — (independent leaf crate) | owner-scoped SQLite AgentRun queue and worker-topology truth, fenced two-stage recovery admission, non-serializable active permits and native execution scopes with atomic durable revalidation, bounded tree cancellation, and body-free outbox |
 | `vyane-message` | — (leaf crate; `vyane-core` only for the shared identifier rule) | owner-scoped SQLite message/delivery truth, fenced leases, external receipts, per-projector body-free outbox |
 | `vyane-broker` | `vyane-agent`, `vyane-message`, `vyane-ledger` | bounded owner-bound delivery pump, replay-safe adapter boundary, maintenance, body-free message/AgentRun EventLog projectors, and an explicit unwired resident library driver |
-| `vyane-router` | `vyane-core` | target selection / routing policy |
+| `vyane-router` | — (independent leaf crate; `serde` only) | target selection / routing policy |
 | `vyane-workflow` | `vyane-kernel` | declarative DAG execution, bounded source bundles, atomic journals, and explicit resume |
-| `vyane-service` | `vyane-agent`, `vyane-kernel`, `vyane-config`, `vyane-ledger`, `vyane-message`, `vyane-broker` | shared facade plus principal-derived `OwnerScopedService`, allowlisted run/session views, owner-scoped session control, explicit projection construction, the fresh-sessionless authority bridge, fixed-owner one-shot drivers, a paired in-process backend and its resident library supervisor; ordinary dispatch constructs none of the optional AgentRun components |
+| `vyane-service` | `vyane-agent`, `vyane-broker`, `vyane-config`, `vyane-goal`, `vyane-harness`, `vyane-kernel`, `vyane-ledger`, `vyane-message`, `vyane-protocol`, `vyane-router` | shared facade plus principal-derived `OwnerScopedService`, allowlisted run/session views, owner-scoped session control, explicit projection construction, the fresh-sessionless authority bridge, fixed-owner one-shot drivers, a paired in-process backend and its resident library supervisor; ordinary dispatch constructs none of the optional AgentRun components |
 | `vyane-mcp` | `vyane-service`, `vyane-workflow`, `rmcp` 3.3 | nine base tools plus an object-safe workflow-control port; it owns no daemon descriptor or credential; stdio dual-era handshake keeps `initialize` on 2025-11-25 and advertises MCP 2026-07-28 through discovery |
-| `vyane-cli` | `vyane-service`, `vyane-workflow`, `vyane-task`, `vyane-goal`, `vyane-mcp`, `axum` | assembler: CLI + bearer-authenticated loopback-only REST API + authenticated local workflow daemon + twelve-tool MCP launcher with a verified daemon adapter |
+| `vyane-cli` | every other workspace crate except `vyane-provider` (reached through `vyane-config`), plus `axum` | assembler: CLI + bearer-authenticated loopback-only REST API + authenticated local workflow daemon + twelve-tool MCP launcher with a verified daemon adapter |
 
 `ChatClient::complete_turn` is an additive typed boundary. Its default fallback
 keeps text-only clients source-compatible but delegates only when the request
