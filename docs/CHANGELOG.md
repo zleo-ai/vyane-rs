@@ -13,18 +13,25 @@ This is a curated history, not a complete reconstruction of all development.
   `isolation_base`) to run each write-capable target in its own git worktree
   under the Vyane data directory. A worktree with no changes is removed; one
   with uncommitted changes or new commits is kept and its branch, path and
-  base/head commits are recorded in the journal and printed. Read-only steps
-  and the resident daemon reject the option instead of ignoring it. Default
-  behavior is unchanged.
+  base/head commits are recorded in the journal and printed. A worktree whose
+  index holds a submodule is kept as `unknown_state`; settlement never runs
+  git inside a nested repository. If a run stops on an internal error (for
+  example a failed journal write) while isolated steps are still running,
+  their worktrees stay `active` in the journal and a later `resume` reports
+  them as kept. Read-only steps and the resident daemon reject the option
+  instead of ignoring it. Default behavior is unchanged.
 
 ### Changed
 
 - Rust embedders: `JournalStep` gains `worktrees`, `WorkflowPlanStep` and
   `WorkflowStep` gain `isolation` and `isolation_base`, `StoragePaths` gains
-  `worktrees_dir`, and `vyane_mcp::WorkflowControlError` gains
+  `worktrees_dir`, `vyane_workflow::WorkflowError` gains
+  `IsolationUnsupported`, and `vyane_mcp::WorkflowControlError` gains
   `IsolationUnsupported` (public MCP code `isolation_unsupported`). Struct
-  literals and exhaustive matches on these types need the new member. Plans
-  and journals without isolation keep their serialized form.
+  literals and exhaustive matches on these types need the new member.
+  `WorkflowPlanFeature` gains `WorktreeIsolation`; it is `#[non_exhaustive]`,
+  so matches on it are unaffected. Plans and journals without isolation keep
+  their serialized form.
 
 ### Fixed
 

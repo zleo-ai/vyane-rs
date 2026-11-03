@@ -611,12 +611,24 @@ settled:
 - a removal that does not finish is reported as `cleanup_failed`.
 
 When in doubt the worktree is kept; no check failure leads to a removal.
+Settlement runs every check against the git directory recorded when the
+worktree was created and keeps the tree (`unknown_state`) if its `.git` file
+was changed. It never runs git inside a nested repository: a worktree whose
+index holds a submodule (gitlink) is kept as `unknown_state`. If preparing a
+new worktree fails after `git worktree add` (for example the step `workdir`
+is a file or a symlink at the base commit), the worktree and branch are
+removed again; if that removal fails too, the entry is recorded as
+`cleanup_failed`.
 `vyane workflow run`, `resume` and `replay` print one line per isolated target,
 for example `impl/claude: worktree kept: vyane/wt/<run>/0-0-0 <path> (base
 1a2b3c4 → head 5d6e7f8, committed)`; `--json` carries the same data in the
 journal step's `worktrees` array. A resumed run never removes a worktree left
 `active` by a crash: it becomes `kept` (`unknown_state`) and the retry uses the
-next attempt number and a new path. Merging, pushing and deleting kept
+next attempt number and a new path. The same applies when a run stops on an
+internal error, such as a failed journal write, while isolated steps are still
+running: their worktrees are not settled and stay `active` until `resume`. If
+the journal write that records new worktrees fails, they are settled before
+the error is returned, since nothing ran in them. Merging, pushing and deleting kept
 worktrees stay manual (`git worktree list`, `git worktree remove`,
 `git branch -D`).
 
