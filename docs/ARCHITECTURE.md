@@ -282,6 +282,10 @@ device/inode evidence; loss of the live handle fails closed.
 Write tools use a second frozen policy axis and are assembled only when both
 the outer sandbox ceiling permits writes and the submission explicitly
 supplies `filesystem_write`. Read authority never implies write authority.
+Independently of any write exclusion, a write or edit target with a `.git`,
+`.vyane`, `.codex` or `.claude` component (ASCII case-insensitive, at any
+depth) is refused, the same floor command writable roots apply, because
+host tools execute or trust those files outside the sandbox.
 New files are staged under the exact opened parent, their complete content is
 synced, and they are then published with `RENAME_NOREPLACE`. Existing-file
 edits compose the pure guarded text
@@ -494,8 +498,10 @@ So harnesses spawn **scrubbed by default**. `EnvPolicy` is a pure function of
 - `mode: InheritMode` — `Scrub` (default) starts from `BASELINE_ENV` only;
   `Full` inherits the whole parent environment (opt-in).
 - `allow: Vec<String>` — extra parent variables let through when scrubbing.
-- `inject: BTreeMap<String, String>` — variables set for this run (auth, base
-  URL, model). **Injection always wins**, even in `Full` mode.
+- `inject: BTreeMap<String, Secret>` — variables set for this run (auth, base
+  URL, model). **Injection always wins**, even in `Full` mode. Values are
+  `Secret`s: `EnvPolicy`'s `Debug` lists only the variable names, the set is
+  never serialized, and only `EnvPolicy::build` exposes the values.
 
 `BASELINE_ENV` is the minimal set a well-behaved CLI needs to start (`PATH`,
 `HOME`, `USER`, `SHELL`, `TERM`, locale vars, `TMPDIR`, `TZ`, the `XDG_*`

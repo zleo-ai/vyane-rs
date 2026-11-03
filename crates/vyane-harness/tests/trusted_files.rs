@@ -10,10 +10,11 @@ use vyane_core::{
     ErrorKind, NativeExecutionAuthority, NativeSideEffect, PinnedWorkdir, VyaneError,
 };
 use vyane_harness::native::{
-    NativeReadPolicy, NativeWritePolicy, PermissionEffect, PermissionPolicy, ToolCall, ToolContext,
-    ToolInvocationStatus, read_only_permission_policy, read_only_tool_definitions,
-    read_only_tool_registry, read_only_tool_registry_with_policy, validate_read_only_host,
-    workspace_permission_policy, workspace_tool_definitions, workspace_tool_registry_with_policy,
+    NativeCommandPolicy, NativeReadPolicy, NativeWritePolicy, PermissionEffect, PermissionPolicy,
+    ToolCall, ToolContext, ToolInvocationStatus, read_only_permission_policy,
+    read_only_tool_definitions, read_only_tool_registry, read_only_tool_registry_with_policy,
+    validate_read_only_host, workspace_permission_policy, workspace_tool_definitions,
+    workspace_tool_registry_with_policy,
 };
 
 #[derive(Default)]
@@ -1218,4 +1219,137 @@ async fn write_tools_reject_traversal_absolute_and_symlink_parent_paths() {
         assert_eq!(invocation.status, ToolInvocationStatus::ToolError);
     }
     assert!(!outside.path().join("linked.txt").exists());
+}
+
+/// Command writable roots refuse `.git`, `.vyane`, `.codex` and `.claude`
+/// because host tools execute or trust what lives there (git hooks,
+/// `core.fsmonitor`, harness settings and hooks). The file tools must apply
+/// the same floor at any depth and in any ASCII case, regardless of the
+/// configured write exclusions, or a model could plant code that later runs
+/// unsandboxed on the host.
+#[tokio::test]
+async fn write_and_edit_refuse_host_control_directories_at_any_depth_and_case() {
+    for control in [".git", ".claude", ".codex", ".vyane", "sub/.GIT"] {
+        let policy: NativeCommandPolicy = serde_json::from_value(json!({
+            "allow": [{"program": "true"}],
+            "writable_roots": [control],
+        }))
+        .expect("command policy shape");
+        assert!(policy.validate().is_err(), "{control} must be refused");
+    }
+
+    for write_policy in [
+        NativeWritePolicy::workspace(),
+        NativeWritePolicy::excluding(vec!["unrelated/**".into()]),
+    ] {
+        let registry =
+            workspace_tool_registry_with_policy(NativeReadPolicy::workspace(), Some(write_policy))
+                .expect("registry");
+        let policy = workspace_permission_policy(true).expect("policy");
+
+        for (sequence, target) in [
+            ".git/hooks/pre-commit",
+            ".claude/settings.json",
+            ".codex/config.toml",
+            ".vyane/config.toml",
+            ".GIT/hooks/pre-commit",
+            ".Claude/settings.local.json",
+            "./.git/hooks/post-checkout",
+            "vendor/lib/.git/hooks/pre-commit",
+            ".git",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = tempdir().expect("root");
+            if let Some(parent) = std::path::Path::new(target).parent() {
+                std::fs::create_dir_all(root.path().join(parent)).expect("control dir");
+            }
+            let outcome = registry
+                .execute_authorized(
+                    call(
+                        "write_file",
+                        args(&[
+                            ("path", json!(target)),
+                            ("content", json!("#!/bin/sh\necho planted\n")),
+                        ]),
+                    ),
+                    &context(root.path()),
+                    &policy,
+                    &RecordingAuthority::default(),
+                    15,
+                    u32::try_from(sequence).unwrap_or(0) + 1,
+                )
+                .await
+                .expect("tool outcome");
+            assert_eq!(outcome.status, ToolInvocationStatus::ToolError, "{target}");
+            assert!(!root.path().join(target).exists(), "{target} was created");
+        }
+
+        for (sequence, target) in [
+            ".git/config",
+            ".GIT/config",
+            "vendor/lib/.git/config",
+            ".codex/config.toml",
+            ".claude/settings.json",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = tempdir().expect("root");
+            let path = root.path().join(target);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("control dir");
+            std::fs::write(&path, "[core]\n\tbare = false\n").expect("seed");
+            let outcome = registry
+                .execute_authorized(
+                    call(
+                        "edit_file",
+                        args(&[
+                            ("path", json!(target)),
+                            ("old_string", json!("bare = false")),
+                            ("new_string", json!("fsmonitor = ./planted")),
+                        ]),
+                    ),
+                    &context(root.path()),
+                    &policy,
+                    &RecordingAuthority::default(),
+                    16,
+                    u32::try_from(sequence).unwrap_or(0) + 1,
+                )
+                .await
+                .expect("tool outcome");
+            assert_eq!(outcome.status, ToolInvocationStatus::ToolError, "{target}");
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("preserved"),
+                "[core]\n\tbare = false\n",
+                "{target} was edited"
+            );
+        }
+
+        // Look-alike names that are not control directories stay writable.
+        let root = tempdir().expect("root");
+        for (sequence, target) in [".github/workflows/ci.yml", ".gitignore", "git/notes.txt"]
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(parent) = std::path::Path::new(target).parent() {
+                std::fs::create_dir_all(root.path().join(parent)).expect("dir");
+            }
+            let outcome = registry
+                .execute_authorized(
+                    call(
+                        "write_file",
+                        args(&[("path", json!(target)), ("content", json!("ok\n"))]),
+                    ),
+                    &context(root.path()),
+                    &policy,
+                    &RecordingAuthority::default(),
+                    17,
+                    u32::try_from(sequence).unwrap_or(0) + 1,
+                )
+                .await
+                .expect("tool outcome");
+            assert_eq!(outcome.status, ToolInvocationStatus::Executed, "{target}");
+        }
+    }
 }

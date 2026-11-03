@@ -113,6 +113,12 @@ impl NativeReadHostError {
 
 /// Explicit, independently configurable write boundary inside the admitted
 /// workspace. Merely granting read access never constructs this policy.
+///
+/// `exclude` only narrows the boundary. Independently of it, writes and
+/// edits beneath any [`vyane_core::HOST_CONTROL_COMPONENTS`] directory
+/// (for example `.git/hooks/` or `.claude/settings.json`, in any ASCII case
+/// and at any depth) are always refused, because host tools execute or trust
+/// those files outside the sandbox.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeWritePolicy {
@@ -763,7 +769,7 @@ impl NativeTool for WriteFileTool {
             Ok(_) => return Ok(Err(ToolError::new("file content exceeds the write limit"))),
             Err(error) => return Ok(Err(error)),
         };
-        let components = match checked_components(path, false) {
+        let components = match checked_write_components(path) {
             Ok(components) if self.policy.allows(&components) => components,
             Ok(_) => {
                 return Ok(Err(ToolError::new(
@@ -839,7 +845,7 @@ impl NativeTool for EditFileTool {
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
         };
-        let components = match checked_components(path, false) {
+        let components = match checked_write_components(path) {
             Ok(components)
                 if self.read_policy.allows(&components)
                     && self.write_policy.allows(&components) =>
@@ -1005,6 +1011,27 @@ fn checked_components(path: &str, allow_root: bool) -> Result<Vec<OsString>, Too
         return Err(ToolError::new("path exceeds the component limit"));
     }
     Ok(components)
+}
+
+/// [`checked_components`] for a mutation target, plus the host-control floor:
+/// no write or edit may land beneath a [`vyane_core::HOST_CONTROL_COMPONENTS`]
+/// directory at any depth. Policy exclusions cannot relax this.
+fn checked_write_components(path: &str) -> Result<Vec<OsString>, ToolError> {
+    let components = checked_components(path, false)?;
+    reject_host_control_components(&components)?;
+    Ok(components)
+}
+
+fn reject_host_control_components(components: &[OsString]) -> Result<(), ToolError> {
+    if components
+        .iter()
+        .any(|component| vyane_core::is_host_control_component(component))
+    {
+        return Err(ToolError::new(
+            "writes beneath host control directories are not allowed",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1210,6 +1237,9 @@ async fn write_new_file(
     authority: &dyn NativeExecutionAuthority,
     effect: NativeSideEffect,
 ) -> VyaneResult<Result<String, ToolError>> {
+    if let Err(error) = reject_host_control_components(components) {
+        return Ok(Err(error));
+    }
     let Some((name, parents)) = components.split_last() else {
         return Ok(Err(ToolError::new("file path must not be empty")));
     };
@@ -1273,6 +1303,9 @@ async fn edit_existing_file(
     authority: &dyn NativeExecutionAuthority,
     effect: NativeSideEffect,
 ) -> VyaneResult<Result<String, ToolError>> {
+    if let Err(error) = reject_host_control_components(components) {
+        return Ok(Err(error));
+    }
     let Some((name, parents)) = components.split_last() else {
         return Ok(Err(ToolError::new("file path must not be empty")));
     };

@@ -75,7 +75,9 @@ pub use traits::{
 };
 pub use web_fetch::{WebFetchOutcome, WebFetchRequest};
 pub use web_search::{WebSearchContextSize, WebSearchOutcome, WebSearchRequest, WebSearchSource};
-pub use workdir::{PinnedWorkdir, WorkdirIdentity};
+pub use workdir::{
+    HOST_CONTROL_COMPONENTS, PinnedWorkdir, WorkdirIdentity, is_host_control_component,
+};
 
 /// Re-exported so downstream crates use the same cancellation primitive.
 pub use tokio_util::sync::CancellationToken;

@@ -162,16 +162,16 @@ impl Provider {
     /// resolved field supplies its value. A rule requesting the API key when
     /// the endpoint carries no auth material is skipped (native-auth
     /// harnesses have nothing to inject there).
-    pub fn env_injections(&self, endpoint: &Endpoint, model: &ModelId) -> BTreeMap<String, String> {
+    ///
+    /// Every value is returned as a [`Secret`] so the API key is never held
+    /// as a plain string on its way into the child environment.
+    pub fn env_injections(&self, endpoint: &Endpoint, model: &ModelId) -> BTreeMap<String, Secret> {
         let mut out = BTreeMap::new();
         for (var_name, source) in &self.env_inject {
             let value = match source {
-                EnvInjectSource::BaseUrl => Some(endpoint.base_url.clone()),
-                EnvInjectSource::ApiKey => endpoint
-                    .auth
-                    .as_ref()
-                    .map(|auth| auth.secret.expose().to_string()),
-                EnvInjectSource::Model => Some(model.as_str().to_string()),
+                EnvInjectSource::BaseUrl => Some(Secret::new(endpoint.base_url.clone())),
+                EnvInjectSource::ApiKey => endpoint.auth.as_ref().map(|auth| auth.secret.clone()),
+                EnvInjectSource::Model => Some(Secret::new(model.as_str())),
             };
             if let Some(value) = value {
                 out.insert(var_name.clone(), value);
@@ -429,15 +429,15 @@ mod tests {
         let injections = provider.env_injections(&endpoint, &model);
 
         assert_eq!(
-            injections.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            injections.get("ANTHROPIC_BASE_URL").map(Secret::expose),
             Some("https://api.anthropic.example")
         );
         assert_eq!(
-            injections.get("ANTHROPIC_API_KEY").map(String::as_str),
+            injections.get("ANTHROPIC_API_KEY").map(Secret::expose),
             Some("sk-test")
         );
         assert_eq!(
-            injections.get("ANTHROPIC_MODEL").map(String::as_str),
+            injections.get("ANTHROPIC_MODEL").map(Secret::expose),
             Some("a-capable-anthropic-model")
         );
     }
