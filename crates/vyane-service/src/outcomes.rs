@@ -15,7 +15,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
-use vyane_core::{ErrorKind, RunRecord, VyaneError};
+use vyane_core::{ErrorKind, RunRecord, RunStatus, VyaneError};
 use vyane_ledger::{FeedbackRecord, Rating};
 
 use crate::history_stats::{HistoryCosts, HistoryDurations, HistoryUsage, RunCounts};
@@ -217,6 +217,24 @@ pub fn parse_outcome_group_by(raw: &str) -> Result<Vec<OutcomeDimension>, VyaneE
         .collect::<Result<Vec<OutcomeDimension>, _>>()?;
     validate_outcome_group_by(&group_by)?;
     Ok(group_by)
+}
+
+/// Fixed message for a rejected run-status filter.
+pub const RUN_STATUS_FILTER_ERROR: &str =
+    "status must be one of success, error, timeout, or cancelled";
+
+/// Parse a run-status filter shared by the CLI, REST and MCP surfaces.
+///
+/// Accepts `success`, `error`, `timeout` and `cancelled` (also spelled
+/// `canceled`). The error message is fixed and never echoes the input.
+pub fn parse_run_status_filter(raw: &str) -> Result<RunStatus, VyaneError> {
+    match raw {
+        "success" => Ok(RunStatus::Success),
+        "error" => Ok(RunStatus::Error),
+        "timeout" => Ok(RunStatus::Timeout),
+        "cancelled" | "canceled" => Ok(RunStatus::Cancelled),
+        _ => Err(VyaneError::new(ErrorKind::Config, RUN_STATUS_FILTER_ERROR)),
+    }
 }
 
 /// Statistics for the runs that share one grouping key.
@@ -594,5 +612,26 @@ mod tests {
             assert_eq!(dimension.to_string(), dimension.as_str());
         }
         validate_outcome_group_by(&DEFAULT_OUTCOME_GROUP_BY).unwrap();
+    }
+
+    #[test]
+    fn run_status_filter_accepts_known_tokens_and_never_echoes() {
+        for status in [
+            RunStatus::Success,
+            RunStatus::Error,
+            RunStatus::Timeout,
+            RunStatus::Cancelled,
+        ] {
+            assert_eq!(parse_run_status_filter(status.as_str()).unwrap(), status);
+        }
+        assert_eq!(
+            parse_run_status_filter("canceled").unwrap(),
+            RunStatus::Cancelled
+        );
+        for raw in ["", "nope", "Success", "STATUS_CANARY", "success\u{7}"] {
+            let error = parse_run_status_filter(raw).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Config);
+            assert_eq!(error.message, RUN_STATUS_FILTER_ERROR);
+        }
     }
 }

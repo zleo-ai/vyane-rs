@@ -455,6 +455,23 @@ async fn history_outcomes_groups_real_runs_and_rejects_conflicting_modes() {
         .code(2)
         .stderr(predicate::str::contains("group_by accepts provider"))
         .stderr(predicate::str::contains("GROUP_CANARY").not());
+    // So are rejected statuses, in every history mode; `canceled` is the
+    // same alias REST and MCP accept.
+    for mode in [&["--outcomes"][..], &["--stats"][..], &[][..]] {
+        fixture
+            .cmd()
+            .arg("history")
+            .args(mode)
+            .args(["--status", "STATUS_CANARY"])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(
+                "status must be one of success, error, timeout, or cancelled",
+            ))
+            .stderr(predicate::str::contains("STATUS_CANARY").not());
+    }
+    let canceled = fixture.json(&["history", "--outcomes", "--status", "canceled", "--json"]);
+    assert_eq!(canceled["total_runs"], 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

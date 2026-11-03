@@ -2742,18 +2742,11 @@ fn parse_sandbox(raw: Option<&str>) -> Result<Sandbox, ApiError> {
     }
 }
 
-/// Parse a run-status filter string. Matches the `snake_case` serialization of
-/// [`RunStatus`].
+/// Parse a run-status filter string with the shared service parser. A
+/// rejected value gets a fixed message and is never echoed.
 fn parse_run_status(raw: &str) -> Result<RunStatus, ApiError> {
-    match raw {
-        "success" => Ok(RunStatus::Success),
-        "error" => Ok(RunStatus::Error),
-        "timeout" => Ok(RunStatus::Timeout),
-        "cancelled" => Ok(RunStatus::Cancelled),
-        _ => Err(ApiError::bad_request(format!(
-            "unknown status `{raw}` (expected success, error, timeout, or cancelled)"
-        ))),
-    }
+    vyane_service::parse_run_status_filter(raw)
+        .map_err(|error| ApiError::bad_request(error.message))
 }
 
 #[cfg(test)]
@@ -3944,6 +3937,28 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
         }
+        // A rejected status gets the shared fixed message, never an echo.
+        let response = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/outcomes?status=STATUS_CANARY",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"], vyane_service::RUN_STATUS_FILTER_ERROR);
+        assert!(!body.to_string().contains("CANARY"));
+        let response = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/outcomes?status=canceled",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         let denied = app
             .oneshot(goal_request("/v1/outcomes", None))
             .await
@@ -4663,13 +4678,15 @@ mod tests {
         assert_eq!(parse_run_status("error").unwrap(), RunStatus::Error);
         assert_eq!(parse_run_status("timeout").unwrap(), RunStatus::Timeout);
         assert_eq!(parse_run_status("cancelled").unwrap(), RunStatus::Cancelled);
+        assert_eq!(parse_run_status("canceled").unwrap(), RunStatus::Cancelled);
     }
 
     #[test]
     fn run_status_unknown_errors() {
         let err = parse_run_status("pending").unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert!(err.message.contains("pending"));
+        assert_eq!(err.message, vyane_service::RUN_STATUS_FILTER_ERROR);
+        assert!(!err.message.contains("pending"));
     }
 
     // --- Error response formatting ----------------------------------------

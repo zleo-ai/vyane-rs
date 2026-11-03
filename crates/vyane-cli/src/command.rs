@@ -2689,13 +2689,18 @@ async fn run_history_outcomes(args: HistoryArgs) -> Result<ExitCode> {
             None => vyane_service::DEFAULT_OUTCOME_GROUP_BY.to_vec(),
             Some(raw) => vyane_service::parse_outcome_group_by(raw)?,
         };
+        let status = args
+            .status
+            .as_deref()
+            .map(vyane_service::parse_run_status_filter)
+            .transpose()?;
         let service = VyaneService::from_local_storage(StoragePaths::resolve()?)?;
         service
             .outcomes(
                 vyane_service::HistoryFilter {
                     limit: None,
                     provider: args.provider,
-                    status: args.status.map(Into::into),
+                    status,
                     since: args.since,
                     until: args.until,
                 },
@@ -2721,6 +2726,19 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
     if args.outcomes {
         return run_history_outcomes(args).await;
     }
+    // Parsed here rather than by clap so a rejected value is never echoed.
+    let status = match args
+        .status
+        .as_deref()
+        .map(vyane_service::parse_run_status_filter)
+        .transpose()
+    {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("{}", crate::output::format_error_line(&error.message));
+            return Ok(ExitCode::from(2));
+        }
+    };
     if args
         .since
         .zip(args.until)
@@ -2763,7 +2781,7 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
             .history(vyane_service::HistoryFilter {
                 limit: Some(usize::MAX),
                 provider: args.provider,
-                status: args.status.map(Into::into),
+                status,
                 since: args.since,
                 until: args.until,
             })
@@ -2855,7 +2873,7 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
         .query(RunQuery {
             owner: Some("local".to_string()),
             provider: args.provider.map(ProviderId::new),
-            status: args.status.map(Into::into),
+            status,
             since: args.since,
             until: args.until,
             limit: Some(if has_local_filters {

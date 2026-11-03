@@ -1415,14 +1415,10 @@ pub fn parse_sandbox(s: Option<&str>) -> Result<vyane_core::Sandbox, &'static st
 
 /// Parse an explicit history status. Unknown values are rejected rather than
 /// being widened into an unfiltered query.
+/// Uses the shared service parser, so MCP, REST and the CLI accept the same
+/// values and report the same fixed message.
 pub fn parse_status(s: &str) -> Result<RunStatus, &'static str> {
-    match s {
-        "success" => Ok(RunStatus::Success),
-        "error" => Ok(RunStatus::Error),
-        "timeout" => Ok(RunStatus::Timeout),
-        "cancelled" | "canceled" => Ok(RunStatus::Cancelled),
-        _ => Err("status must be one of success, error, timeout, cancelled, or canceled"),
-    }
+    vyane_service::parse_run_status_filter(s).map_err(|_| vyane_service::RUN_STATUS_FILTER_ERROR)
 }
 
 fn history_filter(args: HistoryArgs) -> std::result::Result<HistoryFilter, SafeToolError> {

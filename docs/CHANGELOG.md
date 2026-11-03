@@ -21,6 +21,11 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Fixed
 
+- The run-status filter of `vyane history`, REST `GET /v1/history` and
+  `GET /v1/outcomes`, and MCP `vyane_history` and `vyane_outcomes` uses one
+  parser. A rejected status gets a fixed message that does not echo it (the
+  CLI still exits 2), and `canceled` is accepted as a spelling of `cancelled`
+  everywhere.
 - A workflow variable key that contains a control character is rejected.
   The error names the position, not the key. A key with an internal space
   stays valid, and a value may still contain a newline.

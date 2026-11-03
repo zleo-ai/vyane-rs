@@ -1773,6 +1773,26 @@ async fn feedback_and_outcomes_mcp_tools_are_strict_owner_scoped_and_read_only_f
         let body = call_json(&client, "vyane_outcomes", arguments.clone()).await?;
         assert_eq!(body["error"]["code"], "invalid_argument", "{arguments}");
     }
+    // The status filter shares one parser with REST and the CLI: a fixed
+    // message that never echoes the input, and the `canceled` spelling.
+    let body = call_json(
+        &client,
+        "vyane_outcomes",
+        serde_json::json!({"status": "STATUS_CANARY"}),
+    )
+    .await?;
+    assert_eq!(
+        body["error"]["message"],
+        "status must be one of success, error, timeout, or cancelled"
+    );
+    assert!(!body.to_string().contains("CANARY"));
+    let canceled = call_json(
+        &client,
+        "vyane_outcomes",
+        serde_json::json!({"status": "canceled"}),
+    )
+    .await?;
+    assert_eq!(canceled["total_runs"], 0);
     client.cancel().await?;
     handle.await??;
     let feedback = std::fs::read_to_string(root.path().join("feedback.jsonl"))?;

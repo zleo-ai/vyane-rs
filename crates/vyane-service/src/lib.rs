@@ -156,8 +156,8 @@ pub use native_permissions::{NativePermissionSet, NativePermissionSetError, Nati
 pub use outcomes::{
     DEFAULT_OUTCOME_GROUP_BY, FEEDBACK_VIEW_SCHEMA, FeedbackList, FeedbackView,
     MAX_OUTCOME_DIMENSIONS, OUTCOME_DIRECT_HARNESS, OUTCOME_UNKNOWN, OutcomeDimension,
-    OutcomeGroup, OutcomeReport, parse_outcome_group_by, summarize_outcomes,
-    validate_outcome_group_by,
+    OutcomeGroup, OutcomeReport, RUN_STATUS_FILTER_ERROR, parse_outcome_group_by,
+    parse_run_status_filter, summarize_outcomes, validate_outcome_group_by,
 };
 pub use owner::{
     AuthenticatedPrincipal, OwnerContext, OwnerContextError, OwnerContextFactory,

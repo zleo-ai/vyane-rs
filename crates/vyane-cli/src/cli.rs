@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use vyane_core::{RunStatus, Sandbox};
+use vyane_core::Sandbox;
 use vyane_goal::{GoalContinuitySignalKind, GoalStatus, TakeoverDecision};
 use vyane_workflow::WorkflowRunId;
 
@@ -883,9 +883,9 @@ pub struct HistoryArgs {
     /// Maximum number of records to show; zero returns no records.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
-    /// Filter by run status.
-    #[arg(long, value_enum)]
-    pub status: Option<RunStatusArg>,
+    /// Filter by run status: success, error, timeout, or cancelled.
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
     /// Filter by provider id.
     #[arg(long, value_name = "PROVIDER")]
     pub provider: Option<String>,
@@ -1110,31 +1110,6 @@ impl From<SandboxArg> for Sandbox {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum RunStatusArg {
-    Success,
-    Error,
-    Timeout,
-    Cancelled,
-}
-
-impl From<RunStatusArg> for RunStatus {
-    fn from(value: RunStatusArg) -> Self {
-        match value {
-            RunStatusArg::Success => RunStatus::Success,
-            RunStatusArg::Error => RunStatus::Error,
-            RunStatusArg::Timeout => RunStatus::Timeout,
-            RunStatusArg::Cancelled => RunStatus::Cancelled,
-        }
-    }
-}
-
-impl std::fmt::Display for RunStatusArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(RunStatus::from(*self).as_str())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -1149,17 +1124,6 @@ mod tests {
         assert_eq!(SandboxArg::ReadOnly.to_string(), "read-only");
         assert_eq!(SandboxArg::Write.to_string(), Sandbox::Write.as_str());
         assert_eq!(SandboxArg::Full.to_string(), "full");
-    }
-
-    #[test]
-    fn run_status_arg_display_uses_domain_run_status_tokens() {
-        assert_eq!(RunStatusArg::Success.to_string(), "success");
-        assert_eq!(
-            RunStatusArg::Timeout.to_string(),
-            RunStatus::Timeout.as_str()
-        );
-        assert_eq!(RunStatusArg::Cancelled.to_string(), "cancelled");
-        assert_eq!(RunStatusArg::Error.to_string(), "error");
     }
 
     #[test]
