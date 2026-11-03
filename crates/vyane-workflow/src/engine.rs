@@ -552,7 +552,15 @@ impl WorkflowEngine {
                     } else {
                         None
                     };
-                    write_journal_atomic(&self.journal_dir, &mut journal)?;
+                    if let Err(error) = write_journal_atomic(&self.journal_dir, &mut journal) {
+                        // The new worktrees are not in any persisted journal.
+                        // Nothing was dispatched into them, so settle them
+                        // now: an untouched tree is removed instead of leaked.
+                        if let Some(targets) = isolated {
+                            settle_isolated(self.worktree_provisioner.clone(), targets).await;
+                        }
+                        return Err(error);
+                    }
                     self.emit(StepEvent::Started {
                         step_id: step_id.clone(),
                     });

@@ -1123,6 +1123,9 @@ struct FakeProvisioner {
     /// Journal file to inspect at settle time, when set.
     journal: Mutex<Option<PathBuf>>,
     seen_at_settle: Mutex<Vec<String>>,
+    /// Journal file to replace with a directory while provisioning, so the
+    /// engine's next journal write fails.
+    break_journal: Mutex<Option<PathBuf>>,
     /// Target index whose worktree is created but reported as left in place.
     leave_in_place: Mutex<Option<u32>>,
 }
@@ -1135,6 +1138,7 @@ impl FakeProvisioner {
             settles: AtomicUsize::new(0),
             journal: Mutex::new(None),
             seen_at_settle: Mutex::new(Vec::new()),
+            break_journal: Mutex::new(None),
             leave_in_place: Mutex::new(None),
         }
     }
@@ -1156,6 +1160,10 @@ impl WorktreeProvisioner for FakeProvisioner {
             return Err(WorktreeError::PathExists);
         }
         std::fs::create_dir_all(&root).unwrap();
+        if let Some(journal) = self.break_journal.lock().unwrap().take() {
+            std::fs::remove_file(&journal).unwrap();
+            std::fs::create_dir(&journal).unwrap();
+        }
         if *self.leave_in_place.lock().unwrap() == Some(request.target_index) {
             return Err(WorktreeError::LeftInPlace {
                 cause: Box::new(WorktreeError::PathEscape),
@@ -1495,4 +1503,33 @@ async fn worktree_left_in_place_by_provisioning_is_journaled() {
     assert_eq!(provisioner.settles.load(Ordering::SeqCst), 1);
     let persisted = read_journal(&journal_dir, outcome.wf_run_id.as_str()).unwrap();
     assert_eq!(persisted.steps["impl"].worktrees, step.worktrees);
+}
+
+/// The journal write that records new worktrees fails. Nothing was
+/// dispatched, so the worktrees are settled before the error is returned.
+#[tokio::test]
+async fn failed_journal_write_after_provisioning_settles_the_new_worktrees() {
+    let directory = TempDir::new().unwrap();
+    let journal_dir = directory.path().join("journals");
+    let provisioner = Arc::new(FakeProvisioner::new(directory.path()));
+    let run_id = WorkflowRunId::generate();
+    *provisioner.break_journal.lock().unwrap() =
+        Some(journal_dir.join(format!("{}.json", run_id.as_str())));
+    let (engine, probe) = engine_with(Arc::clone(&provisioner), &journal_dir);
+    let error = engine
+        .run_with_id(
+            run_id,
+            &write_fan_out(),
+            BTreeMap::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, WorkflowError::WriteJournal { .. }),
+        "{error}"
+    );
+    assert_eq!(provisioner.requests.lock().unwrap().len(), 2);
+    assert_eq!(provisioner.settles.load(Ordering::SeqCst), 2);
+    assert!(probe.workdirs.lock().unwrap().is_empty(), "nothing ran");
 }
