@@ -1,7 +1,9 @@
 //! # vyane-protocol
 //!
 //! Wire-protocol chat clients implementing [`vyane_core::ChatClient`]: OpenAI
-//! Chat Completions, Anthropic Messages, and OpenAI Responses.
+//! Chat Completions, Anthropic Messages, and OpenAI Responses. OpenAI Chat and
+//! Anthropic Messages also implement non-streaming typed tool turns and a
+//! separate [`vyane_core::AuthorizedToolChatClient`] path.
 
 pub mod anthropic_messages;
 pub mod openai_chat;
