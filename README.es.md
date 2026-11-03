@@ -72,7 +72,7 @@ La ejecución residente, los flujos persistentes y los objetivos locales siguen 
 <details>
 <summary>Resumen de la evidencia</summary>
 
-La [matriz pública de capacidades](docs/parity/ORIGINAL-VYANE-PARITY.md) sigue 53 capacidades en 8 áreas: 7 implementadas, 23 parciales, 12 ausentes, 9 deliberadamente diferentes o pendientes de decisión y 2 planificadas. El [manifiesto sin datos sensibles](docs/parity/fixtures/v1/manifest.json) contiene 44 casos en 5 conjuntos: 30 coincidencias tras normalización y 14 diferencias abiertas. Estas comprobaciones acotadas no son un porcentaje de paridad de todo el sistema.
+La [matriz pública de capacidades](docs/parity/ORIGINAL-VYANE-PARITY.md) sigue 53 capacidades en 8 áreas: 7 implementadas, 24 parciales, 11 ausentes, 9 deliberadamente diferentes o pendientes de decisión y 2 planificadas. El [manifiesto sin datos sensibles](docs/parity/fixtures/v1/manifest.json) contiene 44 casos en 5 conjuntos: 30 coincidencias tras normalización y 14 diferencias abiertas. Estas comprobaciones acotadas no son un porcentaje de paridad de todo el sistema.
 
 </details>
 

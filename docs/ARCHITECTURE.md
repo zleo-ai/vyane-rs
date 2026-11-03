@@ -749,6 +749,30 @@ Each `Attempt` records its own `target`, `transport`, `started_at`,
 failed_over }` where `failed_over` says whether *this* error moved the kernel to
 the next target).
 
+### Run feedback lines
+
+`vyane-ledger::feedback::JsonlFeedbackStore` keeps owner-scoped run ratings in
+`<data_dir>/feedback.jsonl`, separate from the run ledger. Each line is one
+schema-1 object with exactly these fields:
+
+```json
+{"schema":1,"feedback_id":"<uuidv7>","owner":"local","run_id":"<uuidv7>","rating":4,"source":"human","recorded_at":"2026-11-03T08:00:00Z"}
+```
+
+`rating` is an integer from 1 to 5. `source` is `human` or `auto:<rule>` with a
+rule name matching `[a-z0-9][a-z0-9_-]{0,31}`. Writes use the run ledger's
+discipline: serialize outside the lock, take an advisory exclusive `fs4` lock,
+write the line with one `write_all`. Reads take no lock. A line with another
+schema value, an unknown field, an out-of-range value, or invalid JSON is
+skipped and counted, never reinterpreted. The file is append-only; for one
+`(owner, run_id, source)` the last valid line in file order wins.
+
+A rating does not copy provider, protocol, harness or model. Outcome statistics
+join ratings to `RunRecord`s by `(owner, run_id)`, so the run ledger stays the
+only source of those facts. The service checks that the run exists for the
+caller's owner before it appends a rating; a foreign run is reported exactly
+like an absent one. Routing never reads this file.
+
 `ExecutionScope`, `AttemptScope`, capability evidence and detached capability
 snapshots are separate audit/control types. The current `RunRecord` schema does
 not persist a rejected-target admission trail, so `attempts` must not be

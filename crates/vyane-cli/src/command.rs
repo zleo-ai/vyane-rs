@@ -26,11 +26,12 @@ use vyane_workflow::{
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{
-    BroadcastArgs, CheckArgs, Cli, Command, DaemonCommand, DispatchArgs, HistoryArgs, ReviewArgs,
-    RouteArgs, ServeArgs, SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs,
-    TaskCancelArgs, TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCancelArgs,
-    WorkflowCommand, WorkflowPlanArgs, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs,
-    WorkflowStatusArgs, WorkflowSubmitArgs,
+    BroadcastArgs, CheckArgs, Cli, Command, DaemonCommand, DispatchArgs, FeedbackCommand,
+    FeedbackListArgs, FeedbackRateArgs, HistoryArgs, ReviewArgs, RouteArgs, ServeArgs,
+    SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs, TaskCancelArgs,
+    TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCancelArgs, WorkflowCommand,
+    WorkflowPlanArgs, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs, WorkflowStatusArgs,
+    WorkflowSubmitArgs,
 };
 use crate::daemon_client::DaemonWorkflowClient;
 use crate::output::{BroadcastJson, BroadcastRow, DurableTaskStatusJson, RunJson, TaskRow};
@@ -71,6 +72,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Dispatch(args) => run_dispatch(cli.config, args).await,
         Command::Broadcast(args) => run_broadcast(cli.config, args).await,
         Command::History(args) => run_history(args).await,
+        Command::Feedback(command) => run_feedback(command).await,
         Command::Sessions(args) => run_sessions(args).await,
         Command::Session(command) => run_session(command).await,
         Command::Workflow(command) => match command {
@@ -2556,7 +2558,187 @@ async fn harness_available(kind: HarnessKind) -> bool {
     }
 }
 
+/// Print one feedback/outcome failure and return its exit code.
+///
+/// Caller-input errors (`Config`) exit 2; a missing or foreign run and storage
+/// failures exit 1. Only fixed service messages are printed: no path, no raw
+/// I/O error, and no echo of the rejected input.
+fn print_feedback_error(error: &anyhow::Error, json: bool) -> ExitCode {
+    let found = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<VyaneError>());
+    let kind = found.map_or(ErrorKind::Other, |error| error.kind);
+    let message = match (kind, found) {
+        (ErrorKind::Config | ErrorKind::NotFound, Some(error)) => error.message.clone(),
+        _ => {
+            tracing::warn!(error_kind = kind.as_str(), "feedback storage failure");
+            "feedback storage unavailable".to_owned()
+        }
+    };
+    if json {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "status": "error",
+                "error": { "kind": kind.as_str(), "message": message },
+            })
+        );
+    } else {
+        eprintln!("{}", crate::output::format_error_line(&message));
+    }
+    ExitCode::from(if kind == ErrorKind::Config { 2 } else { 1 })
+}
+
+fn feedback_config_error(message: &'static str) -> anyhow::Error {
+    VyaneError::new(ErrorKind::Config, message).into()
+}
+
+async fn run_feedback(command: FeedbackCommand) -> Result<ExitCode> {
+    let json = match &command {
+        FeedbackCommand::Rate(args) => args.json,
+        FeedbackCommand::List(args) => args.json,
+    };
+    let service = match StoragePaths::resolve().and_then(VyaneService::from_local_storage) {
+        Ok(service) => service,
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "open feedback storage");
+            let error = anyhow::Error::from(VyaneError::new(ErrorKind::Io, "open storage"));
+            return Ok(print_feedback_error(&error, json));
+        }
+    };
+    let result = match command {
+        FeedbackCommand::Rate(args) => run_feedback_rate(&service, args).await,
+        FeedbackCommand::List(args) => run_feedback_list(&service, args).await,
+    };
+    Ok(result.unwrap_or_else(|error| print_feedback_error(&error, json)))
+}
+
+async fn run_feedback_rate(service: &VyaneService, args: FeedbackRateArgs) -> Result<ExitCode> {
+    let (run_id, raw_rating) = match (args.last, args.run_id, args.rating) {
+        (false, Some(run_id), Some(rating)) => (Some(run_id), rating),
+        (true, Some(rating), None) => (None, rating),
+        (true, _, _) => {
+            return Err(feedback_config_error(
+                "with --last, pass only RATING (feedback rate --last <RATING>)",
+            ));
+        }
+        (false, _, _) => {
+            return Err(feedback_config_error(
+                "expected RUN_ID and RATING (feedback rate <RUN_ID> <RATING>)",
+            ));
+        }
+    };
+    let rating = raw_rating
+        .parse::<u8>()
+        .map_err(|_| feedback_config_error("rating must be an integer from 1 to 5"))
+        .and_then(|value| {
+            vyane_ledger::Rating::try_from(value)
+                .map(vyane_ledger::Rating::get)
+                .map_err(anyhow::Error::from)
+        })?;
+    if let Some(source) = args.source.as_deref() {
+        source.parse::<vyane_ledger::FeedbackSource>()?;
+    }
+    let run_id = match run_id {
+        Some(run_id) => run_id,
+        None => service.last_run_id().await?,
+    };
+    let view = service
+        .record_feedback(&run_id, rating, args.source.as_deref())
+        .await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        println!("{}", crate::output::format_feedback_line(&view));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_feedback_list(service: &VyaneService, args: FeedbackListArgs) -> Result<ExitCode> {
+    let list = service
+        .feedback(args.run_id.as_deref(), Some(args.limit))
+        .await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+    } else {
+        for view in &list.items {
+            println!("{}", crate::output::format_feedback_line(view));
+        }
+        if list.skipped_lines > 0 {
+            eprintln!(
+                "{}",
+                crate::output::format_feedback_skipped_line(list.skipped_lines)
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_history_outcomes(args: HistoryArgs) -> Result<ExitCode> {
+    let json = args.json;
+    let result = async {
+        if args
+            .since
+            .zip(args.until)
+            .is_some_and(|(since, until)| since > until)
+        {
+            return Err(feedback_config_error("since must not be later than until"));
+        }
+        // Parsed here rather than by clap so a rejected value is never echoed.
+        let group_by = match args.group_by.as_deref() {
+            None => vyane_service::DEFAULT_OUTCOME_GROUP_BY.to_vec(),
+            Some(raw) => vyane_service::parse_outcome_group_by(raw)?,
+        };
+        let status = args
+            .status
+            .as_deref()
+            .map(vyane_service::parse_run_status_filter)
+            .transpose()?;
+        let service = VyaneService::from_local_storage(StoragePaths::resolve()?)?;
+        service
+            .outcomes(
+                vyane_service::HistoryFilter {
+                    limit: None,
+                    provider: args.provider,
+                    status,
+                    since: args.since,
+                    until: args.until,
+                },
+                group_by,
+                args.include_auto_ratings,
+            )
+            .await
+    }
+    .await;
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => return Ok(print_feedback_error(&error, json)),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        crate::output::print_outcome_report(&report);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
+    if args.outcomes {
+        return run_history_outcomes(args).await;
+    }
+    // Parsed here rather than by clap so a rejected value is never echoed.
+    let status = match args
+        .status
+        .as_deref()
+        .map(vyane_service::parse_run_status_filter)
+        .transpose()
+    {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("{}", crate::output::format_error_line(&error.message));
+            return Ok(ExitCode::from(2));
+        }
+    };
     if args
         .since
         .zip(args.until)
@@ -2599,7 +2781,7 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
             .history(vyane_service::HistoryFilter {
                 limit: Some(usize::MAX),
                 provider: args.provider,
-                status: args.status.map(Into::into),
+                status,
                 since: args.since,
                 until: args.until,
             })
@@ -2691,7 +2873,7 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
         .query(RunQuery {
             owner: Some("local".to_string()),
             provider: args.provider.map(ProviderId::new),
-            status: args.status.map(Into::into),
+            status,
             since: args.since,
             until: args.until,
             limit: Some(if has_local_filters {

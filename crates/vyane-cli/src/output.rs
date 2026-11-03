@@ -131,6 +131,81 @@ pub fn format_record_line(record: &RunRecord) -> String {
     )
 }
 
+/// One human-readable rating row.
+pub fn format_feedback_line(view: &vyane_service::FeedbackView) -> String {
+    format!(
+        "{}  run {}  rating {}  source {}  recorded {}",
+        view.feedback_id,
+        view.run_id,
+        view.rating,
+        view.source,
+        view.recorded_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    )
+}
+
+/// Warning for feedback lines that could not be read.
+pub fn format_feedback_skipped_line(skipped: u64) -> String {
+    format!("warning: skipped {skipped} unreadable feedback line(s)")
+}
+
+fn optional_metric(value: Option<f64>, suffix: &str) -> String {
+    value.map_or_else(|| "n/a".to_owned(), |value| format!("{value}{suffix}"))
+}
+
+/// Human-readable outcome table: one tab-separated row per group.
+pub fn print_outcome_report(report: &vyane_service::OutcomeReport) {
+    let mut header: Vec<String> = report
+        .group_by
+        .iter()
+        .map(|dimension| dimension.as_str().to_ascii_uppercase())
+        .collect();
+    header.extend(
+        [
+            "TOTAL",
+            "SUCCESS RATE",
+            "FAILOVER RATE",
+            "MEAN DURATION",
+            "KNOWN COST USD",
+            "RATINGS",
+            "AVG RATING",
+        ]
+        .map(str::to_owned),
+    );
+    println!("{}", header.join("\t"));
+    for group in &report.groups {
+        let mut row: Vec<String> = report
+            .group_by
+            .iter()
+            .map(|dimension| group.key.get(dimension).cloned().unwrap_or_default())
+            .collect();
+        row.push(group.counts.total.to_string());
+        row.push(optional_metric(group.counts.success_rate(), "%"));
+        row.push(optional_metric(group.failover_rate(), "%"));
+        row.push(optional_metric(group.duration.mean_ms(), " ms"));
+        row.push(optional_metric(group.cost.known_total_usd(), ""));
+        row.push(group.rating_count.to_string());
+        row.push(optional_metric(group.average_rating(), ""));
+        println!("{}", row.join("\t"));
+    }
+    println!(
+        "Runs: {} in {} group(s); ratings: {}",
+        report.total_runs,
+        report.groups.len(),
+        if report.include_auto_ratings {
+            "human, then auto"
+        } else {
+            "human only"
+        }
+    );
+    if report.feedback_skipped_lines > 0 {
+        eprintln!(
+            "{}",
+            format_feedback_skipped_line(report.feedback_skipped_lines)
+        );
+    }
+}
+
 pub fn print_record_line(record: &RunRecord) {
     // Kind-only pure run status on history/record print (WP-438).
     tracing::info!(

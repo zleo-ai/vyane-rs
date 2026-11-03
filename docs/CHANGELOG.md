@@ -19,6 +19,16 @@ This is a curated history, not a complete reconstruction of all development.
   with a `Config` error, which makes multi-turn tool loops with `effort` set
   unsupported for now. Ordinary `complete` stays text-only.
 
+- `vyane feedback rate|list`, REST `POST /v1/runs/{run_id}/feedback` /
+  `GET /v1/feedback`, and MCP `vyane_feedback` record an owner-scoped 1–5
+  rating for one of your runs. Ratings are append-only; the latest rating per
+  run and source wins. No free-text comment is stored.
+- `vyane history --outcomes`, REST `GET /v1/outcomes`, and MCP
+  `vyane_outcomes` group your runs by provider, protocol, harness, model,
+  effort, profile or status and report success, failover, duration, token,
+  cost and average human rating. Machine-derived ratings are excluded unless
+  requested. Routing decisions do not read ratings.
+
 ### Changed
 
 - `ChatClient::complete_turn` on the Anthropic Messages client no longer falls
@@ -36,6 +46,11 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Fixed
 
+- The run-status filter of `vyane history`, REST `GET /v1/history` and
+  `GET /v1/outcomes`, and MCP `vyane_history` and `vyane_outcomes` uses one
+  parser. A rejected status gets a fixed message that does not echo it (the
+  CLI still exits 2), and `canceled` is accepted as a spelling of `cancelled`
+  everywhere.
 - A workflow variable key that contains a control character is rejected.
   The error names the position, not the key. A key with an internal space
   stays valid, and a value may still contain a newline.

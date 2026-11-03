@@ -5,7 +5,7 @@
       "--help"
     ],
     "exit_code": 0,
-    "stdout": "Vyane assembles configured providers, protocols, CLI harnesses, the dispatch kernel, and local storage into one command-line tool.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check      Validate configuration and show local readiness\n  dispatch   Run one task against a profile, provider/model, or auto-routed target\n  broadcast  Run one task against several targets concurrently\n  history    Show recent run ledger records\n  sessions   List saved session records\n  session    Inspect and safely reset local continuity sessions\n  workflow   Run, resume, and list declarative workflows\n  review     Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route      Show what the router would pick for a task (dry-run, no dispatch)\n  task       Inspect and manage detached background runs\n  serve      Start the bearer-authenticated loopback HTTP API server\n  daemon     Run and control the authenticated local workflow daemon\n  a2a        Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  goal       Create, inspect, and advance owner-scoped local goals\n  mcp        Run the MCP server over stdio (for use as an MCP tool server)\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n  -h, --help\n          Print help (see a summary with '-h')\n\n  -V, --version\n          Print version\n",
+    "stdout": "Vyane assembles configured providers, protocols, CLI harnesses, the dispatch kernel, and local storage into one command-line tool.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check      Validate configuration and show local readiness\n  dispatch   Run one task against a profile, provider/model, or auto-routed target\n  broadcast  Run one task against several targets concurrently\n  history    Show recent run ledger records\n  feedback   Rate your runs from 1 to 5 and list the ratings\n  sessions   List saved session records\n  session    Inspect and safely reset local continuity sessions\n  workflow   Run, resume, and list declarative workflows\n  review     Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route      Show what the router would pick for a task (dry-run, no dispatch)\n  task       Inspect and manage detached background runs\n  serve      Start the bearer-authenticated loopback HTTP API server\n  daemon     Run and control the authenticated local workflow daemon\n  a2a        Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  goal       Create, inspect, and advance owner-scoped local goals\n  mcp        Run the MCP server over stdio (for use as an MCP tool server)\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n  -h, --help\n          Print help (see a summary with '-h')\n\n  -V, --version\n          Print version\n",
     "stderr": ""
   },
   {
@@ -14,7 +14,7 @@
       "-h"
     ],
     "exit_code": 0,
-    "stdout": "Run configured AI targets with failover and a local run ledger.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check      Validate configuration and show local readiness\n  dispatch   Run one task against a profile, provider/model, or auto-routed target\n  broadcast  Run one task against several targets concurrently\n  history    Show recent run ledger records\n  sessions   List saved session records\n  session    Inspect and safely reset local continuity sessions\n  workflow   Run, resume, and list declarative workflows\n  review     Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route      Show what the router would pick for a task (dry-run, no dispatch)\n  task       Inspect and manage detached background runs\n  serve      Start the bearer-authenticated loopback HTTP API server\n  daemon     Run and control the authenticated local workflow daemon\n  a2a        Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  goal       Create, inspect, and advance owner-scoped local goals\n  mcp        Run the MCP server over stdio (for use as an MCP tool server)\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help (see more with '--help')\n  -V, --version        Print version\n",
+    "stdout": "Run configured AI targets with failover and a local run ledger.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check      Validate configuration and show local readiness\n  dispatch   Run one task against a profile, provider/model, or auto-routed target\n  broadcast  Run one task against several targets concurrently\n  history    Show recent run ledger records\n  feedback   Rate your runs from 1 to 5 and list the ratings\n  sessions   List saved session records\n  session    Inspect and safely reset local continuity sessions\n  workflow   Run, resume, and list declarative workflows\n  review     Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route      Show what the router would pick for a task (dry-run, no dispatch)\n  task       Inspect and manage detached background runs\n  serve      Start the bearer-authenticated loopback HTTP API server\n  daemon     Run and control the authenticated local workflow daemon\n  a2a        Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  goal       Create, inspect, and advance owner-scoped local goals\n  mcp        Run the MCP server over stdio (for use as an MCP tool server)\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help (see more with '--help')\n  -V, --version        Print version\n",
     "stderr": ""
   },
   {
@@ -54,7 +54,17 @@
       "--help"
     ],
     "exit_code": 0,
-    "stdout": "Show recent run ledger records\n\nUsage: vyane history [OPTIONS]\n\nOptions:\n      --config <PATH>        Config file to load instead of the default user + project files\n      --stats                Count all matching runs by provider and status, instead of listing them\n      --limit <LIMIT>        Maximum number of records to show; zero returns no records [default: 20]\n      --status <STATUS>      Filter by run status [possible values: success, error, timeout, cancelled]\n      --provider <PROVIDER>  Filter by provider id\n      --since <TIMESTAMP>    Include runs started at or after this RFC 3339 timestamp (with timezone)\n      --until <TIMESTAMP>    Include runs started at or before this RFC 3339 timestamp (with timezone)\n      --session <SESSION>    Exact session id in the existing local owner's records (local CLI only)\n      --label <KEY=VALUE>    Exact label KEY=VALUE; repeat for AND matching (local CLI only)\n      --json                 Emit machine-readable JSON\n  -h, --help                 Print help\n",
+    "stdout": "Show recent run ledger records\n\nUsage: vyane history [OPTIONS]\n\nOptions:\n      --config <PATH>         Config file to load instead of the default user + project files\n      --stats                 Count all matching runs by provider and status, instead of listing them\n      --outcomes              Group all matching runs and report success, failover, duration, tokens, cost and rating\n      --group-by <DIM,...>    Outcome grouping: 1-4 distinct dimensions from provider, protocol, harness, model, effort, profile, status (default: provider,harness,model,effort)\n      --include-auto-ratings  Count machine (auto:<rule>) ratings when a run has no human rating\n      --limit <LIMIT>         Maximum number of records to show; zero returns no records [default: 20]\n      --status <STATUS>       Filter by run status: success, error, timeout, or cancelled\n      --provider <PROVIDER>   Filter by provider id\n      --since <TIMESTAMP>     Include runs started at or after this RFC 3339 timestamp (with timezone)\n      --until <TIMESTAMP>     Include runs started at or before this RFC 3339 timestamp (with timezone)\n      --session <SESSION>     Exact session id in the existing local owner's records (local CLI only)\n      --label <KEY=VALUE>     Exact label KEY=VALUE; repeat for AND matching (local CLI only)\n      --json                  Emit machine-readable JSON\n  -h, --help                  Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "feedback-help",
+    "args": [
+      "feedback",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Rate your runs from 1 to 5 and list the ratings\n\nUsage: vyane feedback [OPTIONS] <COMMAND>\n\nCommands:\n  rate  Record a 1-5 rating for one of your runs (`rate <RUN_ID> <RATING>` or `rate --last <RATING>`)\n  list  List your ratings, most recent first\n  help  Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
     "stderr": ""
   },
   {
@@ -652,11 +662,33 @@
     "stderr": ""
   },
   {
+    "name": "feedback-rate-help",
+    "args": [
+      "feedback",
+      "rate",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Record a 1-5 rating for one of your runs (`rate <RUN_ID> <RATING>` or `rate --last <RATING>`)\n\nUsage: vyane feedback rate [OPTIONS] [RUN_ID] [RATING]\n\nArguments:\n  [RUN_ID]  Run id to rate; omit it when using --last\n  [RATING]  Rating from 1 (worst) to 5 (best)\n\nOptions:\n      --config <PATH>    Config file to load instead of the default user + project files\n      --last             Rate your most recently recorded run; pass only RATING\n      --source <SOURCE>  Who produced the rating: human (default) or auto:<rule>\n      --json             Emit machine-readable JSON\n  -h, --help             Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "feedback-list-help",
+    "args": [
+      "feedback",
+      "list",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "List your ratings, most recent first\n\nUsage: vyane feedback list [OPTIONS]\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n      --run <RUN_ID>   Only ratings for this run id\n      --limit <LIMIT>  Maximum number of ratings to show; zero returns none [default: 20]\n      --json           Emit machine-readable JSON\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
     "name": "missing-command",
     "args": [],
     "exit_code": 2,
     "stdout": "",
-    "stderr": "error: 'vyane' requires a subcommand but one was not provided\n  [subcommands: check, dispatch, broadcast, history, sessions, session, workflow, review, route, task, serve, daemon, a2a, goal, mcp, __worker, help]\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+    "stderr": "error: 'vyane' requires a subcommand but one was not provided\n  [subcommands: check, dispatch, broadcast, history, feedback, sessions, session, workflow, review, route, task, serve, daemon, a2a, goal, mcp, __worker, help]\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
   },
   {
     "name": "unknown-command",
@@ -714,7 +746,7 @@
     ],
     "exit_code": 2,
     "stdout": "",
-    "stderr": "error: invalid value 'not-a-status' for '--status <STATUS>'\n  [possible values: success, error, timeout, cancelled]\n\nFor more information, try '--help'.\n"
+    "stderr": "error: status must be one of success, error, timeout, or cancelled\n"
   },
   {
     "name": "invalid-history-timestamp",
@@ -738,6 +770,17 @@
     "exit_code": 2,
     "stdout": "",
     "stderr": "error: the argument '--stats' cannot be used with '--limit <LIMIT>'\n\nUsage: vyane history --stats\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "conflicting-history-outcomes-options",
+    "args": [
+      "history",
+      "--outcomes",
+      "--stats"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: the argument '--outcomes' cannot be used with '--stats'\n\nUsage: vyane history --outcomes\n\nFor more information, try '--help'.\n"
   },
   {
     "name": "history-zero-json",
