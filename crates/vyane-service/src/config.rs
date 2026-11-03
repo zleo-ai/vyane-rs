@@ -197,6 +197,9 @@ pub struct StoragePaths {
     pub ledger_path: PathBuf,
     pub sessions_dir: PathBuf,
     pub workflows_dir: PathBuf,
+    /// Root for per-target worktrees created by `isolation = "worktree"`
+    /// workflow steps: `<data_dir>/worktrees/<run>/<order>-<index>-<attempt>`.
+    pub worktrees_dir: PathBuf,
 }
 
 impl StoragePaths {
@@ -212,6 +215,7 @@ impl StoragePaths {
             ledger_path: data_dir.join("ledger.jsonl"),
             sessions_dir: data_dir.join("sessions"),
             workflows_dir: data_dir.join("workflows"),
+            worktrees_dir: data_dir.join("worktrees"),
             data_dir,
         }
     }
@@ -284,6 +288,10 @@ mod tests {
         assert_eq!(
             paths.workflows_dir,
             PathBuf::from("/tmp/vyane-explicit-path-test/workflows")
+        );
+        assert_eq!(
+            paths.worktrees_dir,
+            PathBuf::from("/tmp/vyane-explicit-path-test/worktrees")
         );
         assert_eq!(
             paths.task_metadata_db_path(),

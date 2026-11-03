@@ -2209,7 +2209,46 @@ pub fn format_workflow_summary(outcome: &WorkflowOutcome) -> String {
             first_line(output)
         );
     }
+    for (id, step) in &outcome.journal.steps {
+        for worktree in &step.worktrees {
+            let _ = writeln!(out, "{}", format_worktree_line(id, worktree));
+        }
+    }
     out
+}
+
+/// One human line per isolated target: what was kept, or that it was removed.
+pub fn format_worktree_line(step_id: &str, worktree: &vyane_workflow::JournalWorktree) -> String {
+    use vyane_workflow::WorktreeDisposition;
+
+    let short = |sha: &str| sha.chars().take(7).collect::<String>();
+    let head = worktree
+        .head_sha
+        .as_deref()
+        .map_or_else(|| "?".to_string(), short);
+    let commits = format!("base {} → head {head}", short(&worktree.base_sha));
+    let prefix = format!("{step_id}/{}", worktree.target);
+    match worktree.disposition {
+        WorktreeDisposition::Removed => {
+            format!("{prefix}: worktree removed: {}", worktree.branch)
+        }
+        WorktreeDisposition::Kept => format!(
+            "{prefix}: worktree kept: {} {} ({commits}, {})",
+            worktree.branch,
+            worktree.path,
+            worktree
+                .kept_reason
+                .map_or("unknown_state", |reason| reason.as_str())
+        ),
+        WorktreeDisposition::CleanupFailed => format!(
+            "{prefix}: worktree cleanup failed, inspect manually: {} {} ({commits})",
+            worktree.branch, worktree.path
+        ),
+        WorktreeDisposition::Active => format!(
+            "{prefix}: worktree active (not settled): {} {} ({commits})",
+            worktree.branch, worktree.path
+        ),
+    }
 }
 
 pub fn print_workflow_summary(outcome: &WorkflowOutcome) {
@@ -3234,6 +3273,7 @@ mod tests {
                 output: Some("found it\nsecond".into()),
                 outputs: None,
                 error: None,
+                worktrees: Vec::new(),
             },
         );
         steps.insert(
@@ -3244,6 +3284,7 @@ mod tests {
                 output: None,
                 outputs: None,
                 error: Some("synth boom".into()),
+                worktrees: Vec::new(),
             },
         );
         let source: WorkflowRunId = "01890f3e-7b7d-7cc2-98d2-3f9a2b6c7d8e"
@@ -3312,6 +3353,54 @@ mod tests {
         );
         assert!(
             text.contains(workflow_status_name(WorkflowRunStatus::Completed)),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn human_workflow_summary_reports_each_worktree_disposition() {
+        use vyane_workflow::{JournalWorktree, WorktreeDisposition, WorktreeKeptReason};
+
+        let mut outcome = sample_workflow_outcome(WorkflowRunStatus::Completed, false);
+        let entry = |target: &str,
+                     disposition: WorktreeDisposition,
+                     kept_reason: Option<WorktreeKeptReason>| JournalWorktree {
+            target: target.into(),
+            attempt: 0,
+            branch: format!("vyane/wt/run/0-{target}-0"),
+            path: format!("/data/worktrees/run/0-{target}-0"),
+            base_sha: "a".repeat(40),
+            head_sha: Some("b".repeat(40)),
+            disposition,
+            kept_reason,
+        };
+        outcome
+            .journal
+            .steps
+            .get_mut("finder")
+            .expect("sample has a finder step")
+            .worktrees = vec![
+            entry("x", WorktreeDisposition::Removed, None),
+            entry(
+                "y",
+                WorktreeDisposition::Kept,
+                Some(WorktreeKeptReason::Committed),
+            ),
+            entry("z", WorktreeDisposition::CleanupFailed, None),
+        ];
+        let text = format_workflow_summary(&outcome);
+        assert!(
+            text.contains("finder/x: worktree removed: vyane/wt/run/0-x-0"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "finder/y: worktree kept: vyane/wt/run/0-y-0 /data/worktrees/run/0-y-0 (base aaaaaaa → head bbbbbbb, committed)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("finder/z: worktree cleanup failed, inspect manually"),
             "{text}"
         );
     }

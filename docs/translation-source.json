@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source": "README.md",
-  "source_sha256": "a12cfd17023e2c56831fff6fbab17b91d70856535650163090887cd004e90459",
+  "source_sha256": "967a14d3f460b1ac19fd4e2de1530d46d98eb43f894ceb2984a8db95fdd2b834",
   "implementation_baseline": "fe4394190c0cc0497b916337e7c4b404cd162b51",
   "workspace_version": "0.1.0",
   "updated": "2026-10-15",
@@ -10,37 +10,37 @@
     "README.de.md": {
       "status": "machine_assisted_draft",
       "native_human_review": "pending",
-      "source_sha256": "a12cfd17023e2c56831fff6fbab17b91d70856535650163090887cd004e90459"
+      "source_sha256": "967a14d3f460b1ac19fd4e2de1530d46d98eb43f894ceb2984a8db95fdd2b834"
     },
     "README.es.md": {
       "status": "machine_assisted_draft",
       "native_human_review": "pending",
-      "source_sha256": "a12cfd17023e2c56831fff6fbab17b91d70856535650163090887cd004e90459"
+      "source_sha256": "967a14d3f460b1ac19fd4e2de1530d46d98eb43f894ceb2984a8db95fdd2b834"
     },
     "README.fr.md": {
       "status": "machine_assisted_draft",
       "native_human_review": "pending",
-      "source_sha256": "a12cfd17023e2c56831fff6fbab17b91d70856535650163090887cd004e90459"
+      "source_sha256": "967a14d3f460b1ac19fd4e2de1530d46d98eb43f894ceb2984a8db95fdd2b834"
     },
     "README.ja.md": {
       "status": "machine_assisted_draft",
       "native_human_review": "pending",
-      "source_sha256": "a12cfd17023e2c56831fff6fbab17b91d70856535650163090887cd004e90459"
+      "source_sha256": "967a14d3f460b1ac19fd4e2de1530d46d98eb43f894ceb2984a8db95fdd2b834"
     },
     "README.ko.md": {
       "status": "machine_assisted_draft",
       "native_human_review": "pending",
-      "source_sha256": "a12cfd17023e2c56831fff6fbab17b91d70856535650163090887cd004e90459"
+      "source_sha256": "967a14d3f460b1ac19fd4e2de1530d46d98eb43f894ceb2984a8db95fdd2b834"
     },
     "README.pt-BR.md": {
       "status": "machine_assisted_draft",
       "native_human_review": "pending",
-      "source_sha256": "a12cfd17023e2c56831fff6fbab17b91d70856535650163090887cd004e90459"
+      "source_sha256": "967a14d3f460b1ac19fd4e2de1530d46d98eb43f894ceb2984a8db95fdd2b834"
     },
     "README.zh-CN.md": {
       "status": "machine_assisted_draft",
       "native_human_review": "pending",
-      "source_sha256": "a12cfd17023e2c56831fff6fbab17b91d70856535650163090887cd004e90459"
+      "source_sha256": "967a14d3f460b1ac19fd4e2de1530d46d98eb43f894ceb2984a8db95fdd2b834"
     }
   },
   "meaning": "Hashes detect source drift only. They do not certify semantic accuracy or native-speaker review."

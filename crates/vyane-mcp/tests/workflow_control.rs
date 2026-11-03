@@ -210,6 +210,10 @@ async fn optional_workflow_port_preserves_nine_tool_default_and_enables_strict_c
         (WorkflowControlError::Unavailable, "unavailable"),
         (WorkflowControlError::OutcomeUnknown, "outcome_unknown"),
         (WorkflowControlError::Internal, "internal"),
+        (
+            WorkflowControlError::IsolationUnsupported,
+            "isolation_unsupported",
+        ),
     ] {
         *fake.status_error.lock().unwrap() = Some(error);
         let failed = call(

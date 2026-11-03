@@ -72,7 +72,7 @@ L’exécution résidente, les workflows persistants et les objectifs locaux év
 <details>
 <summary>État des preuves</summary>
 
-La [matrice publique des capacités](docs/parity/ORIGINAL-VYANE-PARITY.md) suit 53 capacités dans 8 domaines : 7 implémentées, 24 partielles, 11 absentes, 9 volontairement différentes ou en attente de décision et 2 planifiées. Le [manifeste expurgé](docs/parity/fixtures/v1/manifest.json) contient 44 cas dans 5 suites : 30 correspondances après normalisation et 14 différences ouvertes. Ces vérifications limitées ne représentent pas un pourcentage de parité du système entier.
+La [matrice publique des capacités](docs/parity/ORIGINAL-VYANE-PARITY.md) suit 53 capacités dans 8 domaines : 7 implémentées, 25 partielles, 10 absentes, 9 volontairement différentes ou en attente de décision et 2 planifiées. Le [manifeste expurgé](docs/parity/fixtures/v1/manifest.json) contient 44 cas dans 5 suites : 30 correspondances après normalisation et 14 différences ouvertes. Ces vérifications limitées ne représentent pas un pourcentage de parité du système entier.
 
 </details>
 

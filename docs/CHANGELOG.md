@@ -18,7 +18,6 @@ This is a curated history, not a complete reconstruction of all development.
   are not kept, so replaying an assistant turn that carried thinking fails
   with a `Config` error, which makes multi-turn tool loops with `effort` set
   unsupported for now. Ordinary `complete` stays text-only.
-
 - `vyane feedback rate|list`, REST `POST /v1/runs/{run_id}/feedback` /
   `GET /v1/feedback`, and MCP `vyane_feedback` record an owner-scoped 1–5
   rating for one of your runs. Ratings are append-only; the latest rating per
@@ -28,6 +27,17 @@ This is a curated history, not a complete reconstruction of all development.
   effort, profile or status and report success, failover, duration, token,
   cost and average human rating. Machine-derived ratings are excluded unless
   requested. Routing decisions do not read ratings.
+- A workflow step can set `isolation = "worktree"` (with optional
+  `isolation_base`) to run each write-capable target in its own git worktree
+  under the Vyane data directory. A worktree with no changes is removed; one
+  with uncommitted changes or new commits is kept and its branch, path and
+  base/head commits are recorded in the journal and printed. A worktree whose
+  index holds a submodule is kept as `unknown_state`; settlement never runs
+  git inside a nested repository. If a run stops on an internal error (for
+  example a failed journal write) while isolated steps are still running,
+  their worktrees stay `active` in the journal and a later `resume` reports
+  them as kept. Read-only steps and the resident daemon reject the option
+  instead of ignoring it. Default behavior is unchanged.
 
 ### Changed
 
@@ -43,6 +53,15 @@ This is a curated history, not a complete reconstruction of all development.
   files. Read-only shell commands such as `git log` are no longer available
   to it either. Hooks configured in those settings files still run, as in
   an interactive session.
+- Rust embedders: `JournalStep` gains `worktrees`, `WorkflowPlanStep` and
+  `WorkflowStep` gain `isolation` and `isolation_base`, `StoragePaths` gains
+  `worktrees_dir`, `vyane_workflow::WorkflowError` gains
+  `IsolationUnsupported`, and `vyane_mcp::WorkflowControlError` gains
+  `IsolationUnsupported` (public MCP code `isolation_unsupported`). Struct
+  literals and exhaustive matches on these types need the new member.
+  `WorkflowPlanFeature` gains `WorktreeIsolation`; it is `#[non_exhaustive]`,
+  so matches on it are unaffected. Plans and journals without isolation keep
+  their serialized form.
 
 ### Fixed
 

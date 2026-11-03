@@ -72,7 +72,7 @@ VYANE="$PWD/target/install/bin/vyane"
 <details>
 <summary>検証状況のスナップショット</summary>
 
-[公開機能一覧](docs/parity/ORIGINAL-VYANE-PARITY.md)は 8 分野の 53 機能を追跡しています。実装済み 7、部分実装 24、未実装 11、意図的な差異または判断待ち 9、計画中 2 です。[機密情報を除いたマニフェスト](docs/parity/fixtures/v1/manifest.json)には 5 スイート、44 ケースがあり、正規化後の一致が 30、未解決の差異が 14 あります。限定的な検証であり、システム全体の互換性の割合ではありません。
+[公開機能一覧](docs/parity/ORIGINAL-VYANE-PARITY.md)は 8 分野の 53 機能を追跡しています。実装済み 7、部分実装 25、未実装 10、意図的な差異または判断待ち 9、計画中 2 です。[機密情報を除いたマニフェスト](docs/parity/fixtures/v1/manifest.json)には 5 スイート、44 ケースがあり、正規化後の一致が 30、未解決の差異が 14 あります。限定的な検証であり、システム全体の互換性の割合ではありません。
 
 </details>
 

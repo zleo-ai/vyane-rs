@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use vyane_core::{Effort, Sandbox};
 
 use crate::journal::{WorkflowJournal, WorkflowRunId};
+use crate::worktree::WorkflowIsolation;
 
 #[derive(Debug, Clone)]
 pub struct Workflow {
@@ -33,9 +34,22 @@ pub struct WorkflowStep {
     pub system: Option<String>,
     pub workdir: Option<PathBuf>,
     pub sandbox: Sandbox,
+    /// Per-target isolation. The default shares the workdir.
+    pub isolation: WorkflowIsolation,
+    /// Commit-ish a worktree branches from; `None` means `HEAD`.
+    pub isolation_base: Option<String>,
     pub timeout: Option<Duration>,
     pub on_error: OnError,
     pub route: WorkflowRouteHints,
+}
+
+impl WorkflowStep {
+    /// Whether this step asks for any isolation setting. Surfaces that cannot
+    /// isolate reject such a step instead of ignoring the setting.
+    #[must_use]
+    pub fn requests_isolation(&self) -> bool {
+        !self.isolation.is_none() || self.isolation_base.is_some()
+    }
 }
 
 /// Optional routing hints used when a resolver supports deferred/automatic

@@ -42,9 +42,15 @@ pub use source::{
     WORKFLOW_SOURCE_MAX_ENTRIES, WORKFLOW_SOURCE_MAX_PATH_BYTES, WORKFLOW_SOURCE_MAX_PROMPT_BYTES,
     WORKFLOW_SOURCE_MAX_TOML_BYTES, WORKFLOW_SOURCE_MAX_TOTAL_BYTES, WorkflowSourceBundle,
     WorkflowSourceEntry, WorkflowSourcePath, WorkflowSourcePathError,
+    workflow_file_requests_isolation,
 };
 pub use template::{RenderedStepOutputs, render_template};
 pub use validate::{
     MAX_TEMPLATE_ANCESTOR_RELATIONS, TargetResolver, ValidatedWorkflow, validate_plan,
     validate_workflow,
+};
+pub use worktree::{
+    GitWorktreeProvisioner, JournalWorktree, ProvisionedWorktree, WorkflowIsolation,
+    WorktreeDisposition, WorktreeError, WorktreeKeptReason, WorktreeProvisioner, WorktreeRequest,
+    WorktreeSettlement,
 };

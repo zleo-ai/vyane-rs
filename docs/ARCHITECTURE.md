@@ -672,6 +672,38 @@ copies its dependency-closed, journal-recorded all-success prefix and then
 executes the remaining suffix live. This is explicit foreground continuation, never daemon
 restart replay.
 
+### Worktree isolation (opt-in)
+
+A step may set `isolation = "worktree"` (optional `isolation_base`). The plan
+carries both fields only when set, so plans without isolation keep their
+canonical bytes and digest; older binaries reject an isolated plan through
+`deny_unknown_fields`. The engine depends only on the
+`vyane_workflow::WorktreeProvisioner` port. `WorkflowEngine` without a
+provisioner fails closed for such a plan before any journal exists; the CLI
+injects `GitWorktreeProvisioner` rooted at `StoragePaths::worktrees_dir`
+(`<data_dir>/worktrees`) for foreground `workflow run/resume/replay` only.
+
+Per isolated step the engine provisions one worktree per target, writes the
+entries to the journal as `active`, then dispatches one `TaskSpec` per target
+(own workdir, bounded by `DEFAULT_BROADCAST_CONCURRENCY`, results in input
+order) instead of the shared-task broadcast. Settlement always follows
+dispatch, including cancellation and errors, and the disposition is written
+with the step result. Provisioning and settlement run on spawned tasks behind
+one lock so they progress while the engine loop is not polling. The git
+provisioner scrubs the environment of all `GIT_*` variables, disables hooks
+and fsmonitor, verifies that paths stay below its root, and removes a tree only
+when status is empty (including ignored files) and both `HEAD` and the branch
+equal the base commit, using `git worktree remove` without `--force` and a
+compare-and-delete of the branch. Every failed probe keeps the tree. This
+deliberately differs from the reference implementation, which inspected only
+`status --porcelain` and could delete committed work. Resume converts a
+crash-left `active` entry into `kept` and never removes it.
+
+The resident daemon, its HTTP API and MCP workflow submit do not isolate and
+reject an isolation request with `isolation_unsupported` before task creation.
+Default isolation, garbage collection and merge helpers are not implemented;
+making isolation a default needs its own decision.
+
 Dynamic control flow, nested workflows, shared budgets, a compatibility
 frontend, changed-plan call matching, public CLI/REST/MCP plan transport, sanitized
 cross-implementation route fixtures, and a production-complete model-tier

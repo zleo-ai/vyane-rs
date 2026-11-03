@@ -16,6 +16,7 @@ use uuid::{Uuid, Variant};
 use crate::error::{WorkflowError, WorkflowResult};
 use crate::model::{Workflow, WorkflowRunStatus};
 use crate::plan::WorkflowPlan;
+use crate::worktree::JournalWorktree;
 
 const RUN_ID_EXPECTATION: &str = "a canonical lowercase hyphenated UUIDv7";
 
@@ -182,6 +183,9 @@ pub struct JournalStep {
     pub outputs: Option<Vec<JournalTargetOutput>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Worktrees created for this step's isolated targets, in creation order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktrees: Vec<JournalWorktree>,
 }
 
 impl JournalStep {
@@ -192,14 +196,36 @@ impl JournalStep {
             output: None,
             outputs: None,
             error: None,
+            worktrees: Vec::new(),
         }
     }
 
+    /// Reset a non-successful step for another attempt.
+    ///
+    /// Worktree entries that may still hold work on disk are retained, and an
+    /// unsettled (`active`) entry left by a crash becomes `kept`: nothing is
+    /// ever removed automatically on resume. Removed entries are dropped.
     pub fn reset_for_rerun(&mut self) {
         if self.status == JournalStepStatus::Success {
             return;
         }
+        let mut worktrees = std::mem::take(&mut self.worktrees);
+        worktrees.retain(JournalWorktree::may_hold_work);
+        for worktree in &mut worktrees {
+            worktree.keep_if_active();
+        }
         *self = JournalStep::pending();
+        self.worktrees = worktrees;
+    }
+
+    /// Attempt number for the next isolated execution of this step.
+    #[must_use]
+    pub fn next_worktree_attempt(&self) -> u32 {
+        self.worktrees
+            .iter()
+            .map(|worktree| worktree.attempt.saturating_add(1))
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -701,6 +727,7 @@ mod tests {
             output: output.map(str::to_string),
             outputs: None,
             error: None,
+            worktrees: Vec::new(),
         }
     }
 
@@ -744,6 +771,7 @@ mod tests {
                     output: Some("fan-answer".into()),
                 }]),
                 error: Some("/private/path boom".into()),
+                worktrees: Vec::new(),
             },
         );
         let projection = project_workflow_view_output(&completed_journal_with_steps(fan));

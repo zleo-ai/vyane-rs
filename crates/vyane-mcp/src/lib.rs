@@ -210,6 +210,9 @@ impl std::fmt::Display for WorkflowFailureCode {
     }
 }
 
+const ISOLATION_UNSUPPORTED_MESSAGE: &str =
+    "worktree isolation is not supported by the resident daemon";
+
 /// Closed error taxonomy. Source messages cannot cross this boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowControlError {
@@ -219,6 +222,9 @@ pub enum WorkflowControlError {
     Unavailable,
     OutcomeUnknown,
     Internal,
+    /// The request asks for worktree isolation, which the resident daemon
+    /// does not provide. Nothing was submitted.
+    IsolationUnsupported,
 }
 
 impl WorkflowControlError {
@@ -232,6 +238,7 @@ impl WorkflowControlError {
             Self::Unavailable => "unavailable",
             Self::OutcomeUnknown => "outcome_unknown",
             Self::Internal => "internal",
+            Self::IsolationUnsupported => "isolation_unsupported",
         }
     }
 }
@@ -245,6 +252,7 @@ impl std::fmt::Display for WorkflowControlError {
             Self::Unavailable => "workflow control is unavailable",
             Self::OutcomeUnknown => "workflow submission outcome is unknown",
             Self::Internal => "workflow operation failed",
+            Self::IsolationUnsupported => ISOLATION_UNSUPPORTED_MESSAGE,
         })
     }
 }
@@ -586,6 +594,7 @@ enum PublicErrorCode {
     Unavailable,
     OutcomeUnknown,
     Internal,
+    IsolationUnsupported,
 }
 
 /// Safe failure information allowed to cross the MCP boundary.
@@ -784,6 +793,10 @@ impl SafeToolError {
             WorkflowControlError::Internal => Self {
                 code: PublicErrorCode::Internal,
                 message: "workflow operation failed",
+            },
+            WorkflowControlError::IsolationUnsupported => Self {
+                code: PublicErrorCode::IsolationUnsupported,
+                message: ISOLATION_UNSUPPORTED_MESSAGE,
             },
         }
     }

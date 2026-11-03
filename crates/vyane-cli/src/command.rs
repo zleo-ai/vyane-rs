@@ -3070,6 +3070,21 @@ async fn submit_daemon_workflow(args: WorkflowSubmitArgs) -> Result<ExitCode> {
         }
     };
 
+    // The resident daemon cannot isolate steps in worktrees. Fail closed on
+    // the bounded TOML alone, before contacting the daemon or reading prompt
+    // files. A file that cannot be read or parsed here falls through to the
+    // established path, which reports it after authentication.
+    if matches!(
+        vyane_workflow::workflow_file_requests_isolation(&file),
+        Ok(true)
+    ) {
+        let error = WorkflowError::IsolationUnsupported {
+            reason: ISOLATION_UNSUPPORTED_BY_DAEMON,
+        };
+        print_workflow_error(&error);
+        return Ok(workflow_error_exit(&error));
+    }
+
     // Submission is daemon-only. Authenticate the exact resident daemon before
     // reading and packaging a potentially large local source tree; there is no
     // foreground fallback on any control or transport failure.
@@ -3189,8 +3204,13 @@ fn plan_workflow(args: WorkflowPlanArgs) -> Result<ExitCode> {
             plan.capability_manifest.maximum_sandbox.as_str()
         );
         for step in &plan.steps {
+            let isolation = if step.isolation.is_none() {
+                String::new()
+            } else {
+                format!(" | isolation={}", step.isolation.as_str())
+            };
             println!(
-                "  {} | needs: [{}] | targets: [{}] | requested sandbox: {}",
+                "  {} | needs: [{}] | targets: [{}] | requested sandbox: {}{isolation}",
                 step.id,
                 step.needs.join(", "),
                 step.targets.target_names().join(", "),
@@ -3235,7 +3255,8 @@ async fn run_workflow(config_path: Option<PathBuf>, args: WorkflowRunArgs) -> Re
         Arc::new(runtime.dispatcher.clone()),
         resolver,
         paths.workflows_dir.clone(),
-    );
+    )
+    .with_worktree_provisioner(foreground_worktree_provisioner(&paths));
     if !args.json {
         engine = engine.with_observer(Arc::new(CliWorkflowObserver));
     }
@@ -3294,7 +3315,8 @@ async fn resume_workflow(
         Arc::new(runtime.dispatcher.clone()),
         resolver,
         paths.workflows_dir.clone(),
-    );
+    )
+    .with_worktree_provisioner(foreground_worktree_provisioner(&paths));
     if !args.json {
         engine = engine.with_observer(Arc::new(CliWorkflowObserver));
     }
@@ -3356,7 +3378,8 @@ async fn replay_workflow(
         Arc::new(runtime.dispatcher.clone()),
         resolver,
         paths.workflows_dir.clone(),
-    );
+    )
+    .with_worktree_provisioner(foreground_worktree_provisioner(&paths));
     if !args.json {
         engine = engine.with_observer(Arc::new(CliWorkflowObserver));
     }
@@ -3694,6 +3717,20 @@ fn print_workflow_error(error: &WorkflowError) {
             &error.to_string()
         )
     );
+}
+
+/// Reason shown when a resident-daemon surface receives an isolation request.
+pub(crate) const ISOLATION_UNSUPPORTED_BY_DAEMON: &str =
+    "worktree isolation is not supported by the resident daemon; use `vyane workflow run`";
+
+/// Worktree provisioner for foreground `workflow run/resume/replay`. Worktrees
+/// live below the current owner's data directory, next to the journals.
+fn foreground_worktree_provisioner(
+    paths: &StoragePaths,
+) -> Arc<dyn vyane_workflow::WorktreeProvisioner> {
+    Arc::new(vyane_workflow::GitWorktreeProvisioner::new(
+        paths.worktrees_dir.clone(),
+    ))
 }
 
 fn workflow_error_exit(error: &WorkflowError) -> ExitCode {
