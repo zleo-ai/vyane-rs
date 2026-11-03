@@ -11,9 +11,22 @@ This is a curated history, not a complete reconstruction of all development.
 
 - The Anthropic Messages client implements non-streaming typed tool turns
   (`complete_turn`) and a separately authorized turn path
-  (`AuthorizedToolChatClient`), matching the OpenAI Chat contract for tool
-  calls and results, thinking, refusal and stop reasons, and resource limits.
-  Ordinary `complete` stays text-only.
+  (`AuthorizedToolChatClient`). They keep tool calls and results, thinking
+  text, `stop_reason: "refusal"` (as a structured refusal), every system
+  message and the shared resource limits. This is not full parity with the
+  OpenAI Chat typed turn: thinking signatures and `redacted_thinking` data
+  are not kept, so replaying an assistant turn that carried thinking fails
+  with a `Config` error, which makes multi-turn tool loops with `effort` set
+  unsupported for now. Ordinary `complete` stays text-only.
+
+### Changed
+
+- `ChatClient::complete_turn` on the Anthropic Messages client no longer falls
+  back to the text `complete` path, even for a tool-free request. Unknown
+  content blocks and a malformed `tool_use` input are `Protocol` errors.
+  Reserved fields in `params.extra` (such as `thinking`, `system` or
+  `max_tokens`), a thinking budget not below `max_output_tokens`, and a
+  non-default temperature together with `effort` are `Config` errors.
 
 ### Fixed
 

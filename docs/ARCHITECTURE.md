@@ -119,10 +119,16 @@ Two consequences:
 `ChatClient::complete_turn` is an additive typed boundary. Its default fallback
 keeps text-only clients source-compatible but delegates only when the request
 is lossless legacy text; request-side tool calls/results, reasoning and refusal
-signals are never flattened. The non-streaming OpenAI Chat and Anthropic
-Messages overrides also preserve response-side tool, reasoning/thinking and
-refusal/stop signals. OpenAI Responses typed turns, streaming tool envelopes
-and provider-specific quirk profiles remain open. This transport contract is a
+signals are never flattened. The non-streaming OpenAI Chat override also
+preserves response-side tool, reasoning and refusal signals. The Anthropic
+Messages override is a separate typed wire path and never falls back to text
+`complete`: it keeps tool calls/results and thinking text, maps
+`stop_reason: "refusal"` to the structured refusal, and replays refusals as
+text. It cannot keep thinking signatures or `redacted_thinking` data, so
+replaying a turn that carried thinking fails closed with a `Config` error;
+until that is representable it is not equivalent to the OpenAI Chat path.
+OpenAI Responses typed turns, streaming tool envelopes and provider-specific
+quirk profiles remain open. This transport contract is a
 prerequisite for a native model loop; it is not itself a `NativeHarness`
 implementation.
 
