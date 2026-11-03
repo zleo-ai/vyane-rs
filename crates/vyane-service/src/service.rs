@@ -19,10 +19,13 @@ use vyane_core::{
     AdapterTransport, AttemptOutcome, BoundTarget, CancellationToken, ErrorKind,
     HarnessLifecycleReporter, HarnessSpawnAuthority, NativeSessionState, NativeSessionTransition,
     ProviderId, RunQuery, RunRecord, RunStatus, Sandbox, SessionRef, SessionSnapshot, Target,
-    TaskSpec, Usage,
+    TaskSpec, Usage, VyaneError,
 };
 use vyane_kernel::{DispatchOutcome, PreparedDispatch, StreamDispatchEvent};
-use vyane_ledger::{EventLog, EventRecord};
+use vyane_ledger::{
+    EventLog, EventRecord, FeedbackQuery, FeedbackRecord, FeedbackSource, JsonlFeedbackStore,
+    Rating,
+};
 
 use crate::HistoryStats;
 use crate::agent::AgentProjectionComponents;
@@ -32,6 +35,10 @@ use crate::diagnostics::{
 };
 use crate::dispatch_event::read_terminal_dispatch_events;
 use crate::message::MessageComponents;
+use crate::outcomes::{
+    FeedbackList, FeedbackView, OutcomeDimension, OutcomeReport, summarize_outcomes,
+    validate_outcome_group_by,
+};
 use crate::owner::OwnerContext;
 use crate::routing::{DispatchPlan, plan_dispatch};
 use crate::selector::{resolve_target_chain, split_targets};
@@ -839,6 +846,49 @@ impl VyaneService {
             .await
     }
 
+    /// Record a 1–5 rating for one local run. See
+    /// [`OwnerScopedService::record_feedback`].
+    pub async fn record_feedback(
+        &self,
+        run_id: &str,
+        rating: u8,
+        source: Option<&str>,
+    ) -> Result<FeedbackView> {
+        self.scope(OwnerContext::single_user_local())
+            .record_feedback(run_id, rating, source)
+            .await
+    }
+
+    /// The most recently recorded local run id.
+    pub async fn last_run_id(&self) -> Result<String> {
+        self.scope(OwnerContext::single_user_local())
+            .last_run_id()
+            .await
+    }
+
+    /// List folded local ratings, most recent first.
+    pub async fn feedback(
+        &self,
+        run_id: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<FeedbackList> {
+        self.scope(OwnerContext::single_user_local())
+            .feedback(run_id, limit)
+            .await
+    }
+
+    /// Group local runs and report outcome statistics. Read-only.
+    pub async fn outcomes(
+        &self,
+        filter: HistoryFilter,
+        group_by: Vec<OutcomeDimension>,
+        include_auto_ratings: bool,
+    ) -> Result<OutcomeReport> {
+        self.scope(OwnerContext::single_user_local())
+            .outcomes(filter, group_by, include_auto_ratings)
+            .await
+    }
+
     /// Replay terminal dispatch events already stored for one local run.
     ///
     /// This reads the existing owner-scoped dispatch stream. It does not
@@ -1123,6 +1173,140 @@ impl OwnerScopedService {
         // RunQuery::None permits a backend default. Request every match explicitly.
         filter.limit = Some(filter.limit.unwrap_or(usize::MAX));
         Ok(HistoryStats::from_records(&self.history(filter).await?))
+    }
+
+    fn feedback_store(&self) -> JsonlFeedbackStore {
+        JsonlFeedbackStore::new(self.service.storage_paths().feedback_path())
+    }
+
+    /// Record a 1–5 rating for one of this owner's runs.
+    ///
+    /// `source` defaults to `human`; `auto:<rule>` marks a machine rating.
+    /// A run that does not exist and a run stored for another owner give the
+    /// same `NotFound` error. Ratings are append-only: a new rating for the
+    /// same run and source replaces the previous one on read. Routing never
+    /// reads ratings.
+    pub async fn record_feedback(
+        &self,
+        run_id: &str,
+        rating: u8,
+        source: Option<&str>,
+    ) -> Result<FeedbackView> {
+        let rating = Rating::try_from(rating)?;
+        let source = match source {
+            None => FeedbackSource::Human,
+            Some(raw) => raw.parse::<FeedbackSource>()?,
+        };
+        self.require_owned_run(run_id).await?;
+        let record = FeedbackRecord {
+            feedback_id: uuid::Uuid::now_v7().to_string(),
+            owner: self.owner.to_string(),
+            run_id: run_id.to_owned(),
+            rating,
+            source,
+            recorded_at: Utc::now(),
+        };
+        self.feedback_store().append(&record).await?;
+        Ok(FeedbackView::from(&record))
+    }
+
+    /// The id of this owner's most recently recorded run.
+    pub async fn last_run_id(&self) -> Result<String> {
+        let records = self
+            .service
+            .runtime
+            .ledger
+            .query(RunQuery {
+                owner: Some(self.owner.to_string()),
+                limit: Some(1),
+                ..RunQuery::default()
+            })
+            .await?;
+        records
+            .into_iter()
+            .next()
+            .map(|record| record.run_id)
+            .ok_or_else(|| VyaneError::new(ErrorKind::NotFound, "no runs recorded").into())
+    }
+
+    async fn require_owned_run(&self, run_id: &str) -> Result<()> {
+        let absent =
+            || -> anyhow::Error { VyaneError::new(ErrorKind::NotFound, "run not found").into() };
+        if run_id.is_empty() || run_id.chars().any(char::is_control) {
+            return Err(absent());
+        }
+        let records = self
+            .service
+            .runtime
+            .ledger
+            .query(RunQuery {
+                owner: Some(self.owner.to_string()),
+                limit: Some(usize::MAX),
+                ..RunQuery::default()
+            })
+            .await?;
+        if records.iter().any(|record| record.run_id == run_id) {
+            Ok(())
+        } else {
+            Err(absent())
+        }
+    }
+
+    /// List this owner's folded ratings, most recently recorded first.
+    pub async fn feedback(
+        &self,
+        run_id: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<FeedbackList> {
+        let page = self
+            .feedback_store()
+            .query(FeedbackQuery {
+                owner: self.owner.to_string(),
+                run_id: run_id.map(str::to_owned),
+                limit,
+            })
+            .await?;
+        Ok(FeedbackList::new(
+            page.records.iter().map(FeedbackView::from).collect(),
+            page.skipped_lines,
+        ))
+    }
+
+    /// Group this owner's matching runs and report outcome statistics.
+    ///
+    /// Ratings are joined by `(owner, run_id)`. Only human ratings count
+    /// unless `include_auto_ratings` is set. This is read-only, and routing
+    /// does not read it.
+    pub async fn outcomes(
+        &self,
+        mut filter: HistoryFilter,
+        group_by: Vec<OutcomeDimension>,
+        include_auto_ratings: bool,
+    ) -> Result<OutcomeReport> {
+        validate_outcome_group_by(&group_by)?;
+        if filter
+            .since
+            .zip(filter.until)
+            .is_some_and(|(since, until)| since > until)
+        {
+            return Err(
+                VyaneError::new(ErrorKind::Config, "since must not be later than until").into(),
+            );
+        }
+        filter.limit = Some(filter.limit.unwrap_or(usize::MAX));
+        let records = self.history(filter).await?;
+        let index = self
+            .feedback_store()
+            .latest_by_run(&self.owner, include_auto_ratings)
+            .await?;
+        let groups = summarize_outcomes(&records, &index.ratings, &group_by);
+        Ok(OutcomeReport::new(
+            group_by,
+            include_auto_ratings,
+            records.len(),
+            groups,
+            index.skipped_lines,
+        ))
     }
 
     /// List only this owner's legacy session records.
@@ -1640,6 +1824,151 @@ mod tests {
         assert_eq!(a_shared[0].owner, "tenant-a");
         assert_eq!(b_shared.len(), 1);
         assert_eq!(b_shared[0].owner, "tenant-b");
+    }
+
+    fn rated_record(run_id: &str, owner: &str, provider: &str) -> RunRecord {
+        let now = Utc::now();
+        RunRecord {
+            run_id: run_id.into(),
+            owner: owner.into(),
+            started_at: now,
+            finished_at: now,
+            task_digest: "d".into(),
+            task_preview: None,
+            workdir: None,
+            sandbox: Sandbox::ReadOnly,
+            target: Target {
+                provider: ProviderId::new(provider),
+                ..target()
+            },
+            transport: AdapterTransport::DirectHttp,
+            attempts: Vec::new(),
+            status: RunStatus::Success,
+            usage: None,
+            cost_usd: None,
+            session_id: None,
+            output_chars: None,
+            error: None,
+            labels: BTreeMap::new(),
+        }
+    }
+
+    fn error_kind(error: &anyhow::Error) -> ErrorKind {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<VyaneError>())
+            .map(|error| error.kind)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn feedback_treats_foreign_runs_as_absent_and_outcomes_join_only_own_ratings() {
+        let directory = crate::test_support::private_tempdir();
+        let service = service(&directory);
+        for record in [
+            rated_record("run-a1", "tenant-alice", "p1"),
+            rated_record("run-a2", "tenant-alice", "p2"),
+            rated_record("run-b1", "tenant-bob", "p1"),
+        ] {
+            service.runtime().ledger.append(&record).await.unwrap();
+        }
+        let alice = service.scope(owner_context("alice"));
+        let bob = service.scope(owner_context("bob"));
+
+        let view = alice.record_feedback("run-a1", 4, None).await.unwrap();
+        assert_eq!(view.run_id, "run-a1");
+        assert_eq!(view.rating, 4);
+        assert_eq!(view.source, "human");
+        let body = serde_json::to_value(&view).unwrap();
+        assert!(body.get("owner").is_none());
+
+        // A foreign run and an absent run produce the same NotFound shape.
+        let foreign = alice.record_feedback("run-b1", 1, None).await.unwrap_err();
+        let absent = alice.record_feedback("run-zz", 1, None).await.unwrap_err();
+        assert_eq!(error_kind(&foreign), ErrorKind::NotFound);
+        assert_eq!(foreign.to_string(), absent.to_string());
+        for (rating, source) in [(0, None), (6, None), (3, Some("robot")), (3, Some("auto:"))] {
+            let error = alice
+                .record_feedback("run-a1", rating, source)
+                .await
+                .unwrap_err();
+            assert_eq!(error_kind(&error), ErrorKind::Config);
+        }
+
+        bob.record_feedback("run-b1", 1, None).await.unwrap();
+        bob.record_feedback("run-b1", 2, Some("auto:tests"))
+            .await
+            .unwrap();
+        alice
+            .record_feedback("run-a2", 2, Some("auto:tests"))
+            .await
+            .unwrap();
+        let alice_list = alice.feedback(None, None).await.unwrap();
+        assert_eq!(alice_list.items.len(), 2);
+        assert!(
+            alice_list
+                .items
+                .iter()
+                .all(|item| item.run_id.starts_with("run-a"))
+        );
+        assert!(
+            alice
+                .feedback(Some("run-b1"), None)
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(bob.feedback(None, None).await.unwrap().items.len(), 2);
+
+        assert_eq!(alice.last_run_id().await.unwrap(), "run-a2");
+        let nobody = service.scope(owner_context("carol"));
+        assert_eq!(
+            error_kind(&nobody.last_run_id().await.unwrap_err()),
+            ErrorKind::NotFound
+        );
+
+        let report = alice
+            .outcomes(
+                HistoryFilter::default(),
+                vec![OutcomeDimension::Provider],
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.total_runs, 2);
+        assert_eq!(report.groups.len(), 2);
+        assert_eq!(report.groups[0].rating_count, 1);
+        assert_eq!(report.groups[0].average_rating(), Some(4.0));
+        assert_eq!(report.groups[1].rating_count, 0);
+        let with_auto = alice
+            .outcomes(
+                HistoryFilter::default(),
+                vec![OutcomeDimension::Provider],
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(with_auto.groups[1].rating_count, 1);
+        assert_eq!(with_auto.groups[1].average_rating(), Some(2.0));
+        for (group_by, filter) in [
+            (Vec::new(), HistoryFilter::default()),
+            (
+                vec![OutcomeDimension::Model, OutcomeDimension::Model],
+                HistoryFilter::default(),
+            ),
+            (
+                vec![OutcomeDimension::Model],
+                HistoryFilter {
+                    since: Some(Utc::now()),
+                    until: Some(Utc::now() - chrono::Duration::hours(1)),
+                    ..HistoryFilter::default()
+                },
+            ),
+        ] {
+            let error = alice.outcomes(filter, group_by, false).await.unwrap_err();
+            assert_eq!(error_kind(&error), ErrorKind::Config);
+        }
     }
 
     #[tokio::test]

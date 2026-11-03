@@ -18,7 +18,9 @@
 //! 4. **Explicit optional components** — owner-bound message delivery and
 //!    AgentRun lifecycle projection remain opt-in and do not start resident
 //!    work during ordinary dispatch.
-//! 5. **Safe diagnostics** — [`VyaneService::route_preview`] and
+//! 5. **Run ratings and outcome statistics** — owner-scoped 1–5 ratings and
+//!    read-only grouped outcome statistics. Routing never reads them.
+//! 6. **Safe diagnostics** — [`VyaneService::route_preview`] and
 //!    [`VyaneService::check_config`], which expose bounded, static-only DTOs
 //!    without serializing paths, endpoints, credentials, prompts, or raw errors.
 //!
@@ -48,6 +50,7 @@ mod kernel_store;
 mod message;
 mod native_authority;
 mod native_permissions;
+mod outcomes;
 mod owner;
 mod routing;
 mod selector;
@@ -150,6 +153,12 @@ pub use message::{
 };
 pub use native_authority::AgentRunModelToolAuthority;
 pub use native_permissions::{NativePermissionSet, NativePermissionSetError, NativeWebSearchGrant};
+pub use outcomes::{
+    DEFAULT_OUTCOME_GROUP_BY, FEEDBACK_VIEW_SCHEMA, FeedbackList, FeedbackView,
+    MAX_OUTCOME_DIMENSIONS, OUTCOME_DIRECT_HARNESS, OUTCOME_UNKNOWN, OutcomeDimension,
+    OutcomeGroup, OutcomeReport, parse_outcome_group_by, summarize_outcomes,
+    validate_outcome_group_by,
+};
 pub use owner::{
     AuthenticatedPrincipal, OwnerContext, OwnerContextError, OwnerContextFactory,
     PrincipalAuthenticator, PrincipalOwnerResolver,

@@ -26,6 +26,7 @@ const AGENT_METADATA_DB_FILE: &str = "agent-runs.sqlite3";
 const MESSAGE_DB_FILE: &str = "messages.sqlite3";
 const GOAL_DB_FILE: &str = "goals.sqlite3";
 const EVENT_LOG_DIR: &str = "events";
+const FEEDBACK_FILE: &str = "feedback.jsonl";
 const MANAGED_PERMISSION_CONFIG_ENV: &str = "VYANE_MANAGED_PERMISSION_CONFIG";
 const MANAGED_NATIVE_CONFIG_ENV: &str = "VYANE_MANAGED_NATIVE_CONFIG";
 
@@ -254,6 +255,12 @@ impl StoragePaths {
     pub fn event_log_dir(&self) -> PathBuf {
         self.data_dir.join(EVENT_LOG_DIR)
     }
+
+    /// Append-only JSONL file of owner-scoped run ratings.
+    #[must_use]
+    pub fn feedback_path(&self) -> PathBuf {
+        self.data_dir.join(FEEDBACK_FILE)
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +304,10 @@ mod tests {
         assert_eq!(
             paths.event_log_dir(),
             PathBuf::from("/tmp/vyane-explicit-path-test/events")
+        );
+        assert_eq!(
+            paths.feedback_path(),
+            PathBuf::from("/tmp/vyane-explicit-path-test/feedback.jsonl")
         );
     }
 
