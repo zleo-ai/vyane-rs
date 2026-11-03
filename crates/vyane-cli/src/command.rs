@@ -324,7 +324,7 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
     let phase = load_config(config_path.as_deref()).and_then(|loaded| {
         // Build once so auto-routing sees the exact labels/task that the kernel
         // will record. Explicit selectors pass through the same plan boundary.
-        let mut task = task_base(
+        let mut task = vyane_service::build_task_spec(
             args.task.clone(),
             args.workdir.clone(),
             args.sandbox.into(),
@@ -2366,7 +2366,7 @@ async fn wait_until(
 /// Build a `TaskSpec` from a frozen [`JobSpec`], reusing the shared task
 /// assembly so a detached run and an online run are constructed identically.
 fn task_from_job(job: &JobSpec) -> Result<TaskSpec> {
-    let mut task = task_base(
+    let mut task = vyane_service::build_task_spec(
         job.task.clone(),
         job.workdir.clone(),
         job.sandbox.into(),
@@ -3385,7 +3385,7 @@ async fn list_workflows(args: crate::cli::WorkflowListArgs) -> Result<ExitCode> 
 }
 
 fn task_from_broadcast(args: BroadcastArgs) -> Result<TaskSpec> {
-    task_base(
+    vyane_service::build_task_spec(
         args.task,
         args.workdir,
         args.sandbox.into(),
@@ -3393,36 +3393,6 @@ fn task_from_broadcast(args: BroadcastArgs) -> Result<TaskSpec> {
         args.timeout,
         args.label,
     )
-}
-
-fn task_base(
-    prompt: String,
-    workdir: Option<PathBuf>,
-    sandbox: vyane_core::Sandbox,
-    system: Option<String>,
-    timeout_secs: Option<u64>,
-    labels: Vec<String>,
-) -> Result<TaskSpec> {
-    let mut task = TaskSpec::new(prompt).with_sandbox(sandbox);
-    task.workdir = workdir;
-    task.system = system;
-    task.timeout = timeout_secs.map(Duration::from_secs);
-    task.labels = parse_labels(labels)?;
-    Ok(task)
-}
-
-fn parse_labels(raw: Vec<String>) -> Result<BTreeMap<String, String>> {
-    let mut labels = BTreeMap::new();
-    for label in raw {
-        let (key, value) = label
-            .split_once('=')
-            .ok_or_else(|| anyhow!("label `{label}` must be in key=value form"))?;
-        if key.is_empty() {
-            bail!("label `{label}` has an empty key");
-        }
-        labels.insert(key.to_string(), value.to_string());
-    }
-    Ok(labels)
 }
 
 fn parse_vars(raw: Vec<String>) -> Result<BTreeMap<String, String>> {
