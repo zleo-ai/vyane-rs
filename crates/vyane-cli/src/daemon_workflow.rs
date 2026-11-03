@@ -390,6 +390,18 @@ impl DaemonWorkflowSupervisor {
         // the tracked initializer avoids detaching untracked blocking work if
         // shutdown has to abort this task.
         let mut workflow = bundle.materialize()?;
+        // The daemon has no worktree provisioner. Reject an isolation request
+        // before any idempotency lookup, task creation or journal.
+        if workflow
+            .steps
+            .iter()
+            .any(vyane_workflow::WorkflowStep::requests_isolation)
+        {
+            return Err(vyane_workflow::WorkflowError::IsolationUnsupported {
+                reason: crate::command::ISOLATION_UNSUPPORTED_BY_DAEMON,
+            }
+            .into());
+        }
         validate_workflow_vars(&vars)?;
         validate_execution_cwd_wire(&execution_cwd)?;
         let submission_digest = submission_digest(&workflow, &vars, &execution_cwd);
@@ -2014,6 +2026,15 @@ impl DaemonWorkflowApiError {
     }
 
     fn from_anyhow(error: anyhow::Error) -> Self {
+        if let Some(workflow_error @ vyane_workflow::WorkflowError::IsolationUnsupported { .. }) =
+            error.downcast_ref::<vyane_workflow::WorkflowError>()
+        {
+            return Self::new(
+                StatusCode::BAD_REQUEST,
+                "isolation_unsupported",
+                workflow_error.to_string(),
+            );
+        }
         if error
             .downcast_ref::<vyane_workflow::WorkflowError>()
             .is_some_and(vyane_workflow::WorkflowError::is_validation_or_config)
@@ -2335,6 +2356,46 @@ prompt = "run"
         assert_eq!(conflict.status, StatusCode::CONFLICT);
         assert_eq!(conflict.message, "workflow task already exists");
         assert!(!conflict.message.contains("caller-controlled-id"));
+    }
+
+    #[tokio::test]
+    async fn worktree_isolation_is_rejected_before_durable_creation() {
+        let directory = crate::test_support::private_tempdir();
+        let supervisor = test_supervisor(directory.path()).await;
+        for extra in [
+            "sandbox = \"write\"\nisolation = \"worktree\"",
+            "isolation_base = \"HEAD\"",
+        ] {
+            let run_id = WorkflowRunId::generate();
+            let request = WorkflowSubmitRequest {
+                run_id: run_id.clone(),
+                execution_cwd: std::fs::canonicalize(directory.path()).unwrap(),
+                bundle: WorkflowSourceBundle {
+                    workflow_toml: format!(
+                        "[workflow]\nname = \"isolated\"\n\n[[step]]\nid = \"only\"\ntarget = \"missing-current-config\"\nprompt = \"run\"\n{extra}\n"
+                    ),
+                    prompt_files: Vec::new(),
+                },
+                vars: BTreeMap::new(),
+            };
+
+            let error = supervisor.submit(request).await.unwrap_err();
+            assert!(
+                error.to_string().contains("isolation_unsupported"),
+                "{error}"
+            );
+            let api = DaemonWorkflowApiError::from_anyhow(error);
+            assert_eq!(api.status, StatusCode::BAD_REQUEST);
+            assert_eq!(api.code, "isolation_unsupported");
+            assert!(supervisor.get(run_id.as_str()).await.unwrap().is_none());
+        }
+        assert!(
+            !directory.path().join("workflows").exists()
+                || std::fs::read_dir(directory.path().join("workflows"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+        );
     }
 
     #[tokio::test]

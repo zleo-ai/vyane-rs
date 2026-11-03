@@ -94,9 +94,21 @@ impl WorkflowControl for AuthenticatedWorkflowControl {
 }
 
 fn validate_submission_policy(bundle: &WorkflowSourceBundle) -> Result<(), WorkflowControlError> {
+    // Checked on the TOML first, so even a bundle that fails to materialize
+    // gets the explicit code when it asks for isolation.
+    if bundle.requests_isolation().unwrap_or(false) {
+        return Err(WorkflowControlError::IsolationUnsupported);
+    }
     let workflow = bundle
         .materialize()
         .map_err(|_| WorkflowControlError::InvalidRequest)?;
+    if workflow
+        .steps
+        .iter()
+        .any(vyane_workflow::WorkflowStep::requests_isolation)
+    {
+        return Err(WorkflowControlError::IsolationUnsupported);
+    }
     if workflow
         .steps
         .iter()
@@ -125,6 +137,7 @@ fn map_submit_error(error: WorkflowSubmitError) -> WorkflowControlError {
             "invalid_request" => WorkflowControlError::InvalidRequest,
             "not_found" => WorkflowControlError::NotFound,
             "conflict" => WorkflowControlError::Conflict,
+            "isolation_unsupported" => WorkflowControlError::IsolationUnsupported,
             _ => WorkflowControlError::Unavailable,
         },
     };
@@ -248,6 +261,31 @@ prompt = "hello"
             Err(WorkflowControlError::InvalidRequest)
         );
         assert!(validate_submission_policy(&bundle("")).is_ok());
+    }
+
+    #[test]
+    fn isolation_requests_fail_closed_with_an_explicit_code() {
+        for extra in [
+            "sandbox = \"write\"\nisolation = \"worktree\"",
+            "isolation = \"worktree\"",
+            "isolation_base = \"HEAD\"",
+            "isolation = \"unknown\"",
+        ] {
+            assert_eq!(
+                validate_submission_policy(&bundle(extra)),
+                Err(WorkflowControlError::IsolationUnsupported),
+                "{extra}"
+            );
+        }
+        assert!(validate_submission_policy(&bundle("isolation = \"none\"")).is_ok());
+        assert_eq!(
+            map_submit_error(WorkflowSubmitError::Rejected {
+                run_id: WorkflowRunId::generate(),
+                status: 400,
+                code: "isolation_unsupported",
+            }),
+            WorkflowControlError::IsolationUnsupported
+        );
     }
 
     #[test]
