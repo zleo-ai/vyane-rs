@@ -629,13 +629,10 @@ fn validate_controller(controller: &ControllerRef) -> bool {
             .is_none_or(|value| validate_canonical_text(value, MAX_REFERENCE_BYTES).is_ok())
 }
 
+/// Shared identifier rule from `vyane-core`: non-blank, bounded, no
+/// surrounding whitespace, no control characters.
 fn validate_canonical_text(value: &str, max: usize) -> Result<(), ()> {
-    if value.is_empty()
-        || value.len() > max
-        || value.contains('\0')
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
+    if vyane_core::identifier_problem(value, max).is_some() {
         return Err(());
     }
     Ok(())
