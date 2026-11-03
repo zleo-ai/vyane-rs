@@ -1684,43 +1684,36 @@ pub(crate) mod anthropic_tool_chat {
     }
 
     fn tool_call_from(block: ContentBlock, budget: &mut StrictJsonBudget) -> Result<ModelToolCall> {
-        let arguments = match block.input {
-            Some(Value::Object(values)) => {
-                let raw = serde_json::to_string(&values).map_err(|error| {
-                    VyaneError::with_source(
-                        ErrorKind::Protocol,
-                        "could not reserialize Anthropic tool-use input",
-                        error,
-                    )
-                })?;
-                match parse_object_arguments(&raw, budget) {
-                    Ok(arguments) => ToolCallArguments::Object(arguments),
-                    Err(ArgumentParseError::Invalid) => ToolCallArguments::InvalidJson { raw },
-                    Err(ArgumentParseError::Limit) => {
-                        return Err(VyaneError::new(
-                            ErrorKind::Protocol,
-                            "Anthropic tool-chat arguments exceeded structural limits",
-                        ));
-                    }
-                }
+        // Anthropic requires `tool_use.input` to be a JSON object. Reject any
+        // other shape in this turn: accepting it as `InvalidJson` would only
+        // defer the failure to the next turn's replay.
+        let Some(Value::Object(values)) = block.input else {
+            return Err(VyaneError::new(
+                ErrorKind::Protocol,
+                "Anthropic tool_use input was missing or not a JSON object",
+            ));
+        };
+        let raw = serde_json::to_string(&values).map_err(|error| {
+            VyaneError::with_source(
+                ErrorKind::Protocol,
+                "could not reserialize Anthropic tool-use input",
+                error,
+            )
+        })?;
+        let arguments = match parse_object_arguments(&raw, budget) {
+            Ok(arguments) => ToolCallArguments::Object(arguments),
+            Err(ArgumentParseError::Invalid) => {
+                return Err(VyaneError::new(
+                    ErrorKind::Protocol,
+                    "Anthropic tool_use input was not a valid JSON object",
+                ));
             }
-            Some(other) => {
-                let raw = serde_json::to_string(&other).map_err(|error| {
-                    VyaneError::with_source(
-                        ErrorKind::Protocol,
-                        "could not reserialize Anthropic tool-use input",
-                        error,
-                    )
-                })?;
-                if raw.len() > ToolChatLimits::ARGUMENT_BYTES {
-                    return Err(VyaneError::new(
-                        ErrorKind::Protocol,
-                        "Anthropic tool-chat arguments exceeded structural limits",
-                    ));
-                }
-                ToolCallArguments::InvalidJson { raw }
+            Err(ArgumentParseError::Limit) => {
+                return Err(VyaneError::new(
+                    ErrorKind::Protocol,
+                    "Anthropic tool-chat arguments exceeded structural limits",
+                ));
             }
-            None => ToolCallArguments::InvalidJson { raw: String::new() },
         };
         Ok(ModelToolCall {
             id: block.id.unwrap_or_default(),
