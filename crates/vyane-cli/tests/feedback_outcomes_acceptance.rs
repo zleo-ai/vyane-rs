@@ -447,6 +447,14 @@ async fn history_outcomes_groups_real_runs_and_rejects_conflicting_modes() {
     ] {
         fixture.cmd().args(&args).assert().code(2);
     }
+    // Rejected groupings are reported with a fixed message, never echoed.
+    fixture
+        .cmd()
+        .args(["history", "--outcomes", "--group-by", "GROUP_CANARY"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("group_by accepts provider"))
+        .stderr(predicate::str::contains("GROUP_CANARY").not());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

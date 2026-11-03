@@ -2684,12 +2684,11 @@ async fn run_history_outcomes(args: HistoryArgs) -> Result<ExitCode> {
         {
             return Err(feedback_config_error("since must not be later than until"));
         }
-        let group_by: Vec<vyane_service::OutcomeDimension> = if args.group_by.is_empty() {
-            vyane_service::DEFAULT_OUTCOME_GROUP_BY.to_vec()
-        } else {
-            args.group_by.iter().copied().map(Into::into).collect()
+        // Parsed here rather than by clap so a rejected value is never echoed.
+        let group_by = match args.group_by.as_deref() {
+            None => vyane_service::DEFAULT_OUTCOME_GROUP_BY.to_vec(),
+            Some(raw) => vyane_service::parse_outcome_group_by(raw)?,
         };
-        vyane_service::validate_outcome_group_by(&group_by)?;
         let service = VyaneService::from_local_storage(StoragePaths::resolve()?)?;
         service
             .outcomes(

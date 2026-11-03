@@ -874,15 +874,9 @@ pub struct HistoryArgs {
         conflicts_with_all = ["stats", "limit", "session", "labels"]
     )]
     pub outcomes: bool,
-    /// Outcome grouping, 1-4 distinct dimensions (default: provider,harness,model,effort).
-    #[arg(
-        long = "group-by",
-        value_enum,
-        value_delimiter = ',',
-        value_name = "DIM,...",
-        requires = "outcomes"
-    )]
-    pub group_by: Vec<OutcomeDimensionArg>,
+    /// Outcome grouping: 1-4 distinct dimensions from provider, protocol, harness, model, effort, profile, status (default: provider,harness,model,effort).
+    #[arg(long = "group-by", value_name = "DIM,...", requires = "outcomes")]
+    pub group_by: Option<String>,
     /// Count machine (auto:<rule>) ratings when a run has no human rating.
     #[arg(long, requires = "outcomes")]
     pub include_auto_ratings: bool,
@@ -1112,31 +1106,6 @@ impl From<SandboxArg> for Sandbox {
             SandboxArg::ReadOnly => Sandbox::ReadOnly,
             SandboxArg::Write => Sandbox::Write,
             SandboxArg::Full => Sandbox::Full,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum OutcomeDimensionArg {
-    Provider,
-    Protocol,
-    Harness,
-    Model,
-    Effort,
-    Profile,
-    Status,
-}
-
-impl From<OutcomeDimensionArg> for vyane_service::OutcomeDimension {
-    fn from(value: OutcomeDimensionArg) -> Self {
-        match value {
-            OutcomeDimensionArg::Provider => Self::Provider,
-            OutcomeDimensionArg::Protocol => Self::Protocol,
-            OutcomeDimensionArg::Harness => Self::Harness,
-            OutcomeDimensionArg::Model => Self::Model,
-            OutcomeDimensionArg::Effort => Self::Effort,
-            OutcomeDimensionArg::Profile => Self::Profile,
-            OutcomeDimensionArg::Status => Self::Status,
         }
     }
 }
