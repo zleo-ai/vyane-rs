@@ -80,7 +80,7 @@ interchangeable operations:
 | protocol | command | new code location |
 |----------|---------|-------------------|
 | CLI | `vyane dispatch/broadcast/review/route/task/workflow/a2a/goal` | `vyane-cli/src/command.rs` |
-| REST API | `vyane serve` (axum, 10 endpoints + SSE) | `vyane-cli/src/api.rs` |
+| REST API | `vyane serve` (axum, 13 JSON method routes + `/v1/dispatch/stream` SSE + read-only goal continuity GET) | `vyane-cli/src/api.rs` |
 | MCP | `vyane mcp` (rmcp 3.3, 9 base tools; 12 with the CLI-injected workflow daemon adapter, over stdio) | `vyane-mcp/src/lib.rs` |
 
 When adding a shared operation, implement it in `vyane-service` and expose it
