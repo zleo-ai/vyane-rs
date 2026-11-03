@@ -597,3 +597,152 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
         ));
     }
 }
+
+/// Red-team reproductions. Each test encodes the behavior the decoder
+/// *should* have; they fail on the current implementation.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod redteam_tests {
+    use super::*;
+
+    /// Mirror of the kernel's stream loop (`vyane-kernel` dispatch): consume
+    /// events, sum usage, and stop at the first `Done`.
+    fn kernel_view(events: impl IntoIterator<Item = Result<StreamEvent>>) -> (String, u64, u64) {
+        let mut text = String::new();
+        let (mut input, mut output) = (0, 0);
+        for event in events {
+            match event.unwrap() {
+                StreamEvent::Delta(d) => text.push_str(&d),
+                StreamEvent::Usage(u) => {
+                    input += u.input_tokens;
+                    output += u.output_tokens;
+                }
+                StreamEvent::Done { .. } => break,
+                StreamEvent::ReasoningDelta(_) => {}
+            }
+        }
+        (text, input, output)
+    }
+
+    /// OpenAI Chat with `stream_options.include_usage` (which the client
+    /// always requests) sends the `finish_reason` chunk first and the usage
+    /// chunk (`choices: []`) after it. The decoder emits `Done` on
+    /// `finish_reason`, and the kernel breaks there, so usage is dropped.
+    #[test]
+    fn redteam_openai_chat_usage_trailer_survives_finish_reason() {
+        let mut decoder = SseDecoder::default();
+        let mut events = decoder.push(
+            br#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}
+
+data: [DONE]
+
+"#,
+            StreamProtocol::OpenAiChat,
+        );
+        events.extend(decoder.finish(StreamProtocol::OpenAiChat));
+        let (text, input, output) = kernel_view(events);
+        assert_eq!(text, "hi");
+        assert_eq!(
+            (input, output),
+            (11, 3),
+            "usage trailer after finish_reason must be observed before Done"
+        );
+    }
+
+    /// Anthropic Messages streams report input tokens in `message_start`;
+    /// `message_delta` carries only the (cumulative) output tokens. The
+    /// decoder ignores `message_start`, so streamed input tokens are lost.
+    #[test]
+    fn redteam_anthropic_message_start_input_tokens_are_counted() {
+        let mut decoder = SseDecoder::default();
+        let mut events = decoder.push(
+            br#"event: message_start
+data: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"x","usage":{"input_tokens":25,"output_tokens":1}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+            StreamProtocol::Anthropic,
+        );
+        events.extend(decoder.finish(StreamProtocol::Anthropic));
+        let (text, input, output) = kernel_view(events);
+        assert_eq!(text, "ok");
+        assert_eq!(output, 2);
+        assert_eq!(input, 25, "message_start input tokens must be reported");
+    }
+
+    /// A peer that never sends a frame delimiter makes the decoder buffer
+    /// grow without bound (the 8 MiB cap only covers non-streaming JSON).
+    #[test]
+    fn redteam_unterminated_sse_frame_is_bounded() {
+        let mut decoder = SseDecoder::default();
+        let chunk = vec![b'a'; 1024 * 1024];
+        let mut saw_error = false;
+        for _ in 0..9 {
+            let events = decoder.push(&chunk, StreamProtocol::OpenAiChat);
+            if events.iter().any(Result::is_err) {
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(
+            saw_error,
+            "a single SSE frame larger than the response cap must be rejected; buffered {} bytes",
+            decoder.buffer.len()
+        );
+    }
+
+    /// A stream that ends (clean EOF) before any terminal event is truncated
+    /// output, but `finish` synthesizes a successful `Done`.
+    #[test]
+    fn redteam_eof_before_terminal_event_is_not_success() {
+        for (protocol, frame) in [
+            (
+                StreamProtocol::Anthropic,
+                &br#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"half"}}
+
+"#[..],
+            ),
+            (
+                StreamProtocol::OpenAiResponses,
+                &br#"data: {"type":"response.output_text.delta","delta":"half"}
+
+"#[..],
+            ),
+        ] {
+            let mut decoder = SseDecoder::default();
+            let mut events = decoder.push(frame, protocol);
+            events.extend(decoder.finish(protocol));
+            assert!(
+                events.iter().any(Result::is_err),
+                "{protocol:?}: EOF without message_stop/response.completed must surface an error"
+            );
+        }
+    }
+
+    /// The decoder looks for the first `\n\n` anywhere before considering
+    /// `\r\n\r\n`, so a CRLF-delimited frame followed by an LF-delimited one
+    /// is merged into a single frame and becomes malformed JSON.
+    #[test]
+    fn redteam_mixed_frame_delimiters_are_split_in_order() {
+        let mut decoder = SseDecoder::default();
+        let events = decoder.push(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n",
+            StreamProtocol::OpenAiChat,
+        );
+        let events: Vec<_> = events.into_iter().collect();
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        assert_eq!(events.len(), 2);
+    }
+}
