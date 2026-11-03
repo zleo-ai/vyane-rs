@@ -389,9 +389,18 @@ impl DaemonWorkflowSupervisor {
         // The wire bundle is already bounded. Keeping materialization inside
         // the tracked initializer avoids detaching untracked blocking work if
         // shutdown has to abort this task.
-        let mut workflow = bundle.materialize()?;
+        //
         // The daemon has no worktree provisioner. Reject an isolation request
-        // before any idempotency lookup, task creation or journal.
+        // before any idempotency lookup, task creation or journal. The raw
+        // TOML is checked first, as CLI and MCP submit do, so an unknown
+        // isolation value gets the same code instead of a validation error.
+        if bundle.requests_isolation().unwrap_or(false) {
+            return Err(vyane_workflow::WorkflowError::IsolationUnsupported {
+                reason: crate::command::ISOLATION_UNSUPPORTED_BY_DAEMON,
+            }
+            .into());
+        }
+        let mut workflow = bundle.materialize()?;
         if workflow
             .steps
             .iter()
@@ -2365,6 +2374,9 @@ prompt = "run"
         for extra in [
             "sandbox = \"write\"\nisolation = \"worktree\"",
             "isolation_base = \"HEAD\"",
+            // Unknown value: the same code as CLI and MCP submit, not a
+            // validation error from materialization.
+            "sandbox = \"write\"\nisolation = \"container\"",
         ] {
             let run_id = WorkflowRunId::generate();
             let request = WorkflowSubmitRequest {
