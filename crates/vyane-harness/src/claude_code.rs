@@ -3,13 +3,18 @@
 //! Command shape (verified against `claude --help`, CLI 2.1.x):
 //!
 //! ```text
-//! claude -p <prompt> --output-format json [--model M] [--effort E]
-//!        [--permission-mode acceptEdits | --dangerously-skip-permissions]
-//!        [--add-dir <workdir>] [--resume <session-id>]
+//! claude -p --output-format json [--model M] [--effort E]
+//!        [--permission-mode dontAsk --disallowedTools Bash,Edit,Write,NotebookEdit
+//!         | --permission-mode acceptEdits | --dangerously-skip-permissions]
+//!        [--add-dir <workdir>] [--resume <session-id>] -- <prompt>
 //! ```
 //!
 //! * `-p/--print` runs non-interactively and exits — the workspace-trust dialog
 //!   is skipped, so it never blocks on a prompt.
+//! * The prompt is the positional argument and always follows a `--`
+//!   end-of-options marker, so task text that starts with `-` can never be
+//!   parsed as a CLI option (for example a task reading
+//!   `--dangerously-skip-permissions`).
 //! * `--output-format json` yields a single JSON result object we parse for the
 //!   answer text, native session id, and usage ([`crate::parse`]).
 //! * Sandbox mapping (`Sandbox` → permission flags): see [`sandbox_args`].
@@ -157,17 +162,29 @@ impl Default for ClaudeCodeHarness {
     }
 }
 
+/// Built-in Claude Code tools that change files or run commands; denied for
+/// [`Sandbox::ReadOnly`]. A single comma-separated value, so the variadic
+/// `--disallowedTools` option cannot absorb a following argument.
+const READ_ONLY_DENIED_TOOLS: &str = "Bash,Edit,Write,NotebookEdit";
+
 /// Map a [`Sandbox`] level onto Claude Code permission flags.
 ///
 /// Rationale (mirrors what the upstream Python adapter proved works headlessly,
 /// verified against the real `--permission-mode` choices
 /// acceptEdits/auto/bypassPermissions/manual/dontAsk/plan):
 ///
-/// * **`ReadOnly`** → no permission flag. Under `-p` the default permission
-///   mode lets Claude read and analyze the workspace but denies the mutating
-///   tools (Edit/Write/Bash), which is exactly "read-only". We deliberately do
+/// * **`ReadOnly`** → `--permission-mode dontAsk --disallowedTools
+///   Bash,Edit,Write,NotebookEdit`. Both are explicit on purpose: command-line
+///   flags take precedence over settings files, so a workspace
+///   `.claude/settings.json` with `defaultMode: bypassPermissions` or with
+///   `allow` rules for `Bash`/`Write` cannot widen a read-only run. `dontAsk`
+///   denies anything not pre-approved instead of prompting, and the deny list
+///   wins over any `allow` rule. Reading and searching stay available. We do
 ///   NOT use `--permission-mode plan`: plan mode is built for interactive
 ///   planning and can yield a plan instead of an answer in print mode.
+///   Project settings are still loaded (`--setting-sources` is not narrowed),
+///   because doing so would also drop the project's `CLAUDE.md`; settings
+///   hooks therefore still run as they do for an interactive session.
 /// * **`Write`** → `--permission-mode acceptEdits`. Auto-approves file edits
 ///   without prompting — the minimum real write capability. (Note: Claude Code
 ///   has no workspace-scoped *command-exec* sandbox like Codex's
@@ -180,7 +197,12 @@ impl Default for ClaudeCodeHarness {
 /// Every arm runs without an interactive prompt — the point of headless use.
 fn sandbox_args(sandbox: Sandbox) -> Vec<String> {
     match sandbox {
-        Sandbox::ReadOnly => vec![],
+        Sandbox::ReadOnly => vec![
+            "--permission-mode".into(),
+            "dontAsk".into(),
+            "--disallowedTools".into(),
+            READ_ONLY_DENIED_TOOLS.into(),
+        ],
         Sandbox::Write => vec!["--permission-mode".into(), "acceptEdits".into()],
         Sandbox::Full => vec!["--dangerously-skip-permissions".into()],
     }
@@ -195,13 +217,9 @@ pub(crate) fn build_argv(job: &HarnessJob) -> Vec<String> {
 }
 
 fn build_argv_scoped(job: &HarnessJob, pinned_workdir: Option<&PinnedWorkdir>) -> Vec<String> {
-    // Non-interactive print mode + machine-readable output.
-    let mut args: Vec<String> = vec![
-        "-p".into(),
-        job.prompt.clone(),
-        "--output-format".into(),
-        "json".into(),
-    ];
+    // Non-interactive print mode + machine-readable output. The prompt is
+    // appended last, after `--` (see `push_prompt`).
+    let mut args: Vec<String> = vec!["-p".into(), "--output-format".into(), "json".into()];
 
     // Model selection (empty model id ⇒ let the CLI/endpoint decide).
     if !job.model.as_str().is_empty() {
@@ -238,7 +256,16 @@ fn build_argv_scoped(job: &HarnessJob, pinned_workdir: Option<&PinnedWorkdir>) -
         args.push(id.clone());
     }
 
+    push_prompt(&mut args, &job.prompt);
     args
+}
+
+/// Append the prompt as the final positional argument behind a `--`
+/// end-of-options marker. `-p/--print` is a boolean flag, so without the
+/// marker a prompt starting with `-` would reach the CLI option parser.
+fn push_prompt(args: &mut Vec<String>, prompt: &str) {
+    args.push("--".into());
+    args.push(prompt.to_string());
 }
 
 /// Build argv for streaming mode: identical to [`build_argv`] but uses
@@ -255,7 +282,6 @@ fn build_stream_argv_scoped(
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-p".into(),
-        job.prompt.clone(),
         "--output-format".into(),
         "stream-json".into(),
         // Claude Code requires verbose mode for stream-json in print mode.
@@ -291,6 +317,7 @@ fn build_stream_argv_scoped(
         args.push(id.clone());
     }
 
+    push_prompt(&mut args, &job.prompt);
     args
 }
 
@@ -570,7 +597,68 @@ mod tests {
     fn argv_read_only_minimal() {
         let j = job("hello");
         let a = build_argv(&j);
-        assert_eq!(a, vec!["-p", "hello", "--output-format", "json"]);
+        assert_eq!(
+            a,
+            vec![
+                "-p",
+                "--output-format",
+                "json",
+                "--permission-mode",
+                "dontAsk",
+                "--disallowedTools",
+                "Bash,Edit,Write,NotebookEdit",
+                "--",
+                "hello",
+            ]
+        );
+    }
+
+    /// A read-only run must not inherit a looser default from workspace
+    /// settings, so the mode and the mutating-tool deny list are explicit on
+    /// both the one-shot and the streaming argv.
+    #[test]
+    fn argv_read_only_pins_mode_and_denies_mutating_tools() {
+        for build in [build_argv, build_stream_argv] {
+            let a = build(&job("hello"));
+            assert!(a.windows(2).any(|w| w == ["--permission-mode", "dontAsk"]));
+            assert!(
+                a.windows(2)
+                    .any(|w| w == ["--disallowedTools", "Bash,Edit,Write,NotebookEdit"])
+            );
+            assert!(!a.iter().any(|x| x == "--dangerously-skip-permissions"));
+            assert!(!a.iter().any(|x| x == "acceptEdits"));
+        }
+    }
+
+    /// `-p/--print` is a boolean flag and the prompt is positional, so the
+    /// prompt must follow a `--` end-of-options marker as the last argument.
+    /// Otherwise a task such as `--dangerously-skip-permissions` would turn
+    /// that option on, and a markdown bullet task `- fix x` would fail as an
+    /// unknown option.
+    #[test]
+    fn argv_prompt_follows_end_of_options_marker() {
+        for build in [build_argv_scoped, build_stream_argv_scoped] {
+            for prompt in ["--dangerously-skip-permissions", "- fix x", "-p", "--"] {
+                let mut j = job(prompt);
+                j.resume = Some("session-1".into());
+                j.workdir = Some("/tmp/work".into());
+                let args = build(&j, None);
+                let (last, rest) = args.split_last().unwrap();
+                assert_eq!(last, prompt);
+                assert_eq!(rest.last().map(String::as_str), Some("--"), "{args:?}");
+                assert_eq!(
+                    rest.iter().filter(|arg| *arg == "--").count(),
+                    1,
+                    "{args:?}"
+                );
+                assert!(
+                    !rest
+                        .iter()
+                        .any(|arg| arg == "--dangerously-skip-permissions"),
+                    "{args:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -716,51 +804,5 @@ mod tests {
     #[test]
     fn endpoint_none_injects_nothing() {
         assert!(endpoint_injections(None).is_empty());
-    }
-}
-
-/// Red-team reproductions; these fail on the current implementation.
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod redteam_tests {
-    use super::*;
-    use vyane_core::env::EnvPolicy;
-    use vyane_core::target::ModelId;
-    use vyane_core::task::GenParams;
-
-    fn job(prompt: &str) -> HarnessJob {
-        HarnessJob {
-            prompt: prompt.into(),
-            model: ModelId::new(""),
-            protocol: vyane_core::target::Protocol::AnthropicMessages,
-            endpoint: None,
-            params: GenParams::default(),
-            workdir: None,
-            sandbox: Sandbox::ReadOnly,
-            resume: None,
-            env: EnvPolicy::scrubbed(),
-            timeout: None,
-            harness_lifecycle_reporter: None,
-        }
-    }
-
-    /// Claude Code's `-p/--print` is a boolean flag; the prompt is a
-    /// positional argument. Without a `--` end-of-options marker a task text
-    /// that starts with `-` is parsed as a CLI option (e.g. a read-only
-    /// dispatch whose task is `--dangerously-skip-permissions` turns the flag
-    /// on; a markdown bullet task `- fix x` fails as an unknown option). The
-    /// Codex harness already guards its prompt with `--`.
-    #[test]
-    fn redteam_claude_prompt_is_guarded_by_end_of_options() {
-        for build in [build_argv_scoped, build_stream_argv_scoped] {
-            let prompt = "--dangerously-skip-permissions";
-            let args = build(&job(prompt), None);
-            let prompt_at = args.iter().rposition(|arg| arg == prompt).unwrap();
-            let separator_at = args.iter().position(|arg| arg == "--");
-            assert!(
-                separator_at.is_some_and(|at| at < prompt_at),
-                "prompt reaches the CLI option parser unguarded: {args:?}"
-            );
-        }
     }
 }

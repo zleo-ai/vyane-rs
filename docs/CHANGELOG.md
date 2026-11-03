@@ -20,6 +20,11 @@ This is a curated history, not a complete reconstruction of all development.
   case, matching the rule for command writable roots. Write exclusions
   cannot relax it. Files there, such as git hooks or harness settings, run
   or are trusted outside the sandbox.
+- Claude Code dispatch passes the task after a `--` marker, so a task that
+  starts with `-` is no longer parsed as a CLI option. A read-only run now
+  sets `--permission-mode dontAsk` and denies the Bash, Edit, Write and
+  NotebookEdit tools, so a workspace or user settings file can no longer
+  make it writable.
 
 ## 0.1.0 - 2026-10-23
 

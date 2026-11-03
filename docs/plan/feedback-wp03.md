@@ -20,10 +20,15 @@ adapter-delegated controls, not a host security boundary:
   smoke tests verify that the supported CLI version accepts the flag in
   headless mode. Compatibility with a newly installed CLI version must be
   rechecked before relying on it operationally.
-- `Sandbox::ReadOnly` intentionally passes no permission flag. The supported
-  default configuration denies mutating tool calls without hanging, but a
-  permissive user-level CLI setting can change that behavior. The harness
-  cannot reliably restore an upstream factory default through argv alone.
+- `Sandbox::ReadOnly` passes `--permission-mode dontAsk` and
+  `--disallowedTools Bash,Edit,Write,NotebookEdit`. Command-line flags take
+  precedence over settings files, so a user or workspace `defaultMode` or
+  `allow` rule cannot widen a read-only run, and anything not pre-approved is
+  denied instead of prompting. Settings files are still loaded, so settings
+  hooks still run; narrowing `--setting-sources` would also drop the project
+  `CLAUDE.md`.
+- The prompt is always the last argument, behind a `--` end-of-options
+  marker, so task text that starts with `-` is never parsed as an option.
 
 Therefore `Sandbox::ReadOnly` on this adapter must not be described as OS-level
 filesystem confinement. Callers that require a security boundary need the
