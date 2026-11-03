@@ -35,6 +35,18 @@ The workspace Cargo config caps libtest at four threads because process-control
 acceptance tests create and signal real child groups; unbounded host-core
 parallelism can make those tests interfere on large development machines.
 
+A local `cargo test --workspace` is not the same run as CI. The `test` job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the workspace
+without `vyane-broker`, `vyane-service` and `vyane-cli`, then runs each of
+those three crates in its own invocation with `--test-threads=1`, and moves a
+list of fixtures that stall under suite load into separate `--exact`
+processes. Read that step for the exact split when a local run disagrees with
+CI. On Linux, the native command sandbox tests need `bubblewrap` and
+`keyutils` installed (CI installs them with `apt-get` before testing);
+without them those tests fail. Tests that rely on file permissions, such as
+a ledger made unreadable with mode `0o000`, fail when the suite runs as
+root, because root ignores those permissions.
+
 CI also runs `cargo check --workspace --all-targets --locked` on the exact
 workspace MSRV (`1.88.0`). Local stable-only checks do not prove MSRV
 compatibility.
