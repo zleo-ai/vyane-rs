@@ -1808,6 +1808,120 @@ async fn anthropic_tool_chat_rejects_thinking_requests_the_api_would_reject() {
 // or concurrent wire paths stay schedulable under suite load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
+async fn anthropic_tool_chat_rejects_malformed_and_oversized_json_bodies() {
+    // Just over the 8 MiB non-stream body cap, as a syntactically valid body.
+    let oversized = format!(
+        r#"{{"role":"assistant","content":[{{"type":"text","text":"{}"}}]}}"#,
+        "x".repeat(8 * 1024 * 1024)
+    );
+    for (body, expected) in [
+        ("{not-json".to_string(), "malformed JSON response body"),
+        (oversized, "JSON response body exceeds"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let error = anthropic_client(&server)
+            .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+                "inspect",
+            )]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        assert!(error.message.contains(expected), "{}", error.message);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
+async fn anthropic_tool_chat_maps_non_success_statuses_to_error_kinds() {
+    for (status, kind) in [
+        (400, ErrorKind::Protocol),
+        (401, ErrorKind::Auth),
+        (403, ErrorKind::Auth),
+        (429, ErrorKind::RateLimited),
+        (500, ErrorKind::Protocol),
+        (529, ErrorKind::Protocol),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                "type": "error",
+                "error": {"type": "api_error", "message": "upstream said no"}
+            })))
+            .mount(&server)
+            .await;
+
+        let error = anthropic_client(&server)
+            .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+                "inspect",
+            )]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, kind, "status {status}");
+        // client_options(1) means a single attempt even for retryable kinds.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
+async fn anthropic_tool_chat_accepts_empty_content_and_passes_stop_reasons_through() {
+    for (stop_reason, refused) in [
+        ("end_turn", false),
+        ("max_tokens", false),
+        ("tool_use", false),
+        ("stop_sequence", false),
+        ("refusal", true),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "model": "anthropic-echo",
+                "role": "assistant",
+                "content": [],
+                "stop_reason": stop_reason
+            })))
+            .mount(&server)
+            .await;
+
+        let outcome = anthropic_client(&server)
+            .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+                "inspect",
+            )]))
+            .await
+            .unwrap();
+        assert_eq!(outcome.finish_reason.as_deref(), Some(stop_reason));
+        assert_eq!(outcome.assistant.text, "");
+        assert!(outcome.assistant.content_parts.is_empty());
+        assert!(outcome.assistant.tool_calls.is_empty());
+        assert!(outcome.assistant.reasoning.is_none());
+        assert_eq!(outcome.assistant.has_refusal(), refused, "{stop_reason}");
+        if refused {
+            assert_eq!(outcome.assistant.refusal.as_deref(), Some(""));
+        }
+    }
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
 async fn anthropic_tool_chat_merges_error_tool_results_into_one_user_message() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
