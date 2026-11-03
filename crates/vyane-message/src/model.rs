@@ -1098,3 +1098,28 @@ mod tests {
         assert_eq!(MessagePublicationStatus::Published.to_string(), "published");
     }
 }
+
+/// Red-team reproduction; fails on the current implementation.
+#[cfg(test)]
+mod redteam_tests {
+    use super::*;
+
+    /// The message store's `validate_text` (owner, mailbox route, endpoint
+    /// id, idempotency key) only refuses blank/oversized/NUL. The agent store
+    /// and `OwnerContext` refuse surrounding whitespace and every control
+    /// character, so the same owner/endpoint string is legal in one store and
+    /// illegal in its neighbour.
+    #[test]
+    fn redteam_message_identifiers_reject_control_and_padding() {
+        for value in ["local\n", " local", "lo\u{1b}cal", "local\t"] {
+            assert!(
+                validate_owner(value).is_err(),
+                "message store accepted owner {value:?}"
+            );
+            assert!(
+                validate_text("delivery mailbox route", value, 256).is_err(),
+                "message store accepted route {value:?}"
+            );
+        }
+    }
+}

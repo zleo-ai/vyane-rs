@@ -3679,3 +3679,35 @@ mod tests {
         assert!(!json.contains("\"actual_micro_units\":0"));
     }
 }
+
+/// Red-team reproductions; these fail on the current implementation.
+#[cfg(test)]
+mod redteam_tests {
+    use super::*;
+
+    /// `OwnerContext` (and the agent store) refuse an owner with surrounding
+    /// whitespace or any control character; the kernel store only refuses an
+    /// all-whitespace owner (#277), so `"local\n"` / `" local"` become
+    /// distinct, invisible-looking owner namespaces at this layer.
+    #[test]
+    fn redteam_kernel_owner_matches_owner_context_identity_rules() {
+        for owner in ["local\n", " local", "local ", "lo\u{1b}cal", "lo\0cal"] {
+            assert!(
+                validate_owner(owner).is_err(),
+                "kernel store accepted non-canonical owner {owner:?}"
+            );
+        }
+    }
+
+    /// Kernel ids (effect ids etc.) accept whitespace-only, NUL and control
+    /// characters — the exact class patched elsewhere in #269–#283.
+    #[test]
+    fn redteam_kernel_ids_reject_blank_and_control_characters() {
+        for id in [" ", "\t", "effect\n", "eff\0ect", "eff\u{1b}[2Ject"] {
+            assert!(
+                validate_id("effect_id", id).is_err(),
+                "kernel store accepted id {id:?}"
+            );
+        }
+    }
+}

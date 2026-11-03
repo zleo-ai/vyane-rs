@@ -102,3 +102,37 @@ mod tests {
         assert!(validate_user_routing_labels(&future_reserved).is_err());
     }
 }
+
+/// Red-team reproductions; these fail on the current implementation.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod redteam_tests {
+    use super::*;
+
+    /// The same class #283 fixed for workflow variable keys: dispatch label
+    /// keys accept control characters (newline, ESC, NUL) on every entry
+    /// (CLI `--label`, REST `labels`, MCP `labels`), and they land verbatim
+    /// in the run ledger.
+    #[test]
+    fn redteam_label_keys_reject_control_characters() {
+        for raw in ["team\n=ops", "te\u{1b}[2Jam=ops", "te\0am=ops", "team\t=ops"] {
+            assert!(
+                parse_labels(vec![raw.into()]).is_err(),
+                "label key with a control character was accepted: {raw:?}"
+            );
+        }
+    }
+
+    /// A malformed label is echoed whole in the error, which the REST
+    /// handlers print to the daemon's stderr (`format_dispatch_label_error_line`).
+    /// That echoes caller-supplied bytes (including newlines/ANSI) into the
+    /// operator log and repeats a value the caller may have pasted by mistake.
+    #[test]
+    fn redteam_label_errors_do_not_echo_input() {
+        const CANARY: &str = "LABEL_CANARY_MUST_NOT_BE_ECHOED";
+        for raw in [CANARY.to_string(), format!("={CANARY}")] {
+            let error = format!("{:#}", parse_labels(vec![raw]).unwrap_err());
+            assert!(!error.contains(CANARY), "{error}");
+        }
+    }
+}
