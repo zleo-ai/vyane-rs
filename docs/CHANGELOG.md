@@ -7,6 +7,14 @@ This is a curated history, not a complete reconstruction of all development.
 
 ## Unreleased
 
+### Added
+
+- The Anthropic Messages client implements non-streaming typed tool turns
+  (`complete_turn`) and a separately authorized turn path
+  (`AuthorizedToolChatClient`), matching the OpenAI Chat contract for tool
+  calls and results, thinking, refusal and stop reasons, and resource limits.
+  Ordinary `complete` stays text-only.
+
 ### Fixed
 
 - A workflow variable key that contains a control character is rejected.
