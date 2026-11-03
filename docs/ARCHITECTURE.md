@@ -679,7 +679,8 @@ one lock so they progress while the engine loop is not polling. The git
 provisioner scrubs the environment of all `GIT_*` variables, disables hooks
 and fsmonitor, verifies that paths stay below its root, and removes a tree only
 when status is empty (including ignored files) and both `HEAD` and the branch
-equal the base commit, using `git worktree remove` without `--force` and a
+equal the base commit and the worktree's `HEAD` reflog names no other commit,
+using `git worktree remove` without `--force` and a
 compare-and-delete of the branch. Every failed probe keeps the tree. This
 deliberately differs from the reference implementation, which inspected only
 `status --porcelain` and could delete committed work. Resume converts a

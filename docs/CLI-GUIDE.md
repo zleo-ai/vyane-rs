@@ -607,7 +607,9 @@ settled:
   without `--force`) and the branch is deleted only if it still points at the
   base commit;
 - otherwise it is kept with its branch: `dirty` for files, `committed` for new
-  commits, `unknown_state` when any check fails;
+  commits (including commits made on a detached `HEAD` that only the
+  worktree's `HEAD` reflog still reaches), `unknown_state` when any check
+  fails;
 - a removal that does not finish is reported as `cleanup_failed`.
 
 When in doubt the worktree is kept; no check failure leads to a removal.

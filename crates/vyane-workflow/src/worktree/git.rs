@@ -538,6 +538,22 @@ impl WorktreeProvisioner for GitWorktreeProvisioner {
         if tip != worktree.base_sha {
             return WorktreeSettlement::kept(WorktreeKeptReason::Committed, Some(head));
         }
+        // A target that committed on a detached HEAD and then returned to
+        // its branch leaves HEAD and the branch at the base. Those commits
+        // are reachable only from this worktree's HEAD reflog, which removal
+        // deletes, so any reflog entry other than the base keeps the tree.
+        let Some(reflog) = self
+            .worktree_probe(worktree, &["reflog", "show", "--format=%H", "HEAD"])
+            .await
+        else {
+            return unknown(Some(head));
+        };
+        if reflog
+            .lines()
+            .any(|entry| !entry.is_empty() && entry != worktree.base_sha)
+        {
+            return WorktreeSettlement::kept(WorktreeKeptReason::Committed, Some(head));
+        }
         // The target can turn its branch into a symbolic ref to another
         // branch at the base. Deleting through that link would remove the
         // other branch, so a symbolic branch keeps the tree.
