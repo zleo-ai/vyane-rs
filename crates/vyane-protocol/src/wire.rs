@@ -1231,9 +1231,6 @@ pub(crate) mod anthropic_tool_chat {
         Text {
             text: String,
         },
-        Thinking {
-            thinking: String,
-        },
         ToolUse {
             id: String,
             name: String,
@@ -1369,6 +1366,7 @@ pub(crate) mod anthropic_tool_chat {
             let mut text = String::new();
             let mut content_parts = Vec::new();
             let mut reasoning_parts = Vec::new();
+            let mut redacted_thinking = 0usize;
             let mut tool_calls = Vec::new();
             let mut argument_budget = StrictJsonBudget::default();
 
@@ -1399,6 +1397,12 @@ pub(crate) mod anthropic_tool_chat {
                         }
                         reasoning_parts.push(thinking);
                     }
+                    // Encrypted thinking produced when a safety system flags the
+                    // reasoning. Its opaque `data` has no slot in the typed
+                    // turn, so it is skipped here and the turn is marked as
+                    // carrying thinking state (see `reasoning` below), which
+                    // makes a later replay fail closed instead of dropping it.
+                    "redacted_thinking" => redacted_thinking += 1,
                     "tool_use" => {
                         tool_calls.push(tool_call_from(block, &mut argument_budget)?);
                     }
@@ -1413,6 +1417,13 @@ pub(crate) mod anthropic_tool_chat {
                     ErrorKind::Protocol,
                     "Anthropic tool-chat response exceeded the tool-call limit",
                 ));
+            }
+            if redacted_thinking > 0 {
+                tracing::warn!(
+                    blocks = redacted_thinking,
+                    "Anthropic redacted_thinking blocks are not representable in a typed turn; \
+                     the turn cannot be replayed"
+                );
             }
 
             // Anthropic has no refusal content block: a refusal is signalled by
@@ -1439,7 +1450,7 @@ pub(crate) mod anthropic_tool_chat {
                 assistant: AssistantToolTurn {
                     text,
                     content_parts,
-                    reasoning: if reasoning_parts.is_empty() {
+                    reasoning: if reasoning_parts.is_empty() && redacted_thinking == 0 {
                         None
                     } else {
                         Some(reasoning_parts.join(""))
@@ -1513,16 +1524,18 @@ pub(crate) mod anthropic_tool_chat {
     }
 
     fn assistant_content(turn: &AssistantToolTurn) -> Result<MessageContent> {
-        let mut blocks = Vec::new();
-        if let Some(reasoning) = turn
-            .reasoning
-            .as_deref()
-            .filter(|reasoning| !reasoning.is_empty())
-        {
-            blocks.push(ContentBlockRequest::Thinking {
-                thinking: reasoning.to_string(),
-            });
+        // Anthropic only accepts prior thinking back verbatim with its
+        // `signature` (or as the opaque `redacted_thinking` data). The typed
+        // turn keeps neither, so replaying reasoning without it would either
+        // be rejected by the API or silently drop thinking state.
+        if turn.reasoning.is_some() {
+            return Err(VyaneError::new(
+                ErrorKind::Config,
+                "typed Anthropic tool-chat: thinking signature unavailable; \
+                 multi-turn replay unsupported",
+            ));
         }
+        let mut blocks = Vec::new();
         if !turn.content_parts.is_empty() {
             for part in &turn.content_parts {
                 match part {
@@ -1619,6 +1632,7 @@ pub(crate) mod anthropic_tool_chat {
         match block.kind.as_deref() {
             Some("text") => Ok("text"),
             Some("thinking") => Ok("thinking"),
+            Some("redacted_thinking") => Ok("redacted_thinking"),
             Some("tool_use") => Ok("tool_use"),
             Some(_) => Err(unsupported_content_block()),
             None => {

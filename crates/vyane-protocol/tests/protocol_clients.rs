@@ -944,7 +944,7 @@ async fn anthropic_tool_chat_wires_definitions_choice_and_exact_history() {
         ToolChatMessage::Assistant(AssistantToolTurn {
             text: String::new(),
             content_parts: Vec::new(),
-            reasoning: Some("need the file".into()),
+            reasoning: None,
             refusal: None,
             tool_calls: vec![prior_tool_call("call-1")],
         }),
@@ -972,16 +972,11 @@ async fn anthropic_tool_chat_wires_definitions_choice_and_exact_history() {
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["messages"][0]["content"], "inspect");
     assert_eq!(body["messages"][1]["role"], "assistant");
-    assert_eq!(body["messages"][1]["content"][0]["type"], "thinking");
+    assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+    assert_eq!(body["messages"][1]["content"][0]["id"], "call-1");
+    assert_eq!(body["messages"][1]["content"][0]["name"], "read_file");
     assert_eq!(
-        body["messages"][1]["content"][0]["thinking"],
-        "need the file"
-    );
-    assert_eq!(body["messages"][1]["content"][1]["type"], "tool_use");
-    assert_eq!(body["messages"][1]["content"][1]["id"], "call-1");
-    assert_eq!(body["messages"][1]["content"][1]["name"], "read_file");
-    assert_eq!(
-        body["messages"][1]["content"][1]["input"],
+        body["messages"][1]["content"][0]["input"],
         json!({"path": "README.md"})
     );
     assert_eq!(body["messages"][2]["role"], "user");
@@ -1573,6 +1568,115 @@ async fn anthropic_complete_does_not_implicitly_become_complete_turn() {
     assert_eq!(typed.assistant.tool_calls.len(), 1);
     assert_eq!(typed.assistant.tool_calls[0].id, "call-1");
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
+async fn anthropic_tool_chat_thinking_round_trip_fails_closed_without_signature() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "anthropic-echo",
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "need the file", "signature": "sig-opaque"},
+                {
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "read_file",
+                    "input": {"path": "README.md"}
+                }
+            ],
+            "stop_reason": "tool_use"
+        })))
+        .mount(&server)
+        .await;
+    let client = anthropic_client(&server);
+
+    let outcome = client
+        .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+            "inspect",
+        )]))
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.assistant.reasoning.as_deref(),
+        Some("need the file")
+    );
+    assert_eq!(outcome.assistant.tool_calls.len(), 1);
+
+    // The typed turn cannot carry the signature, so the second turn of the
+    // tool loop must fail locally rather than send unsigned thinking (which
+    // the API rejects) or silently drop the thinking block.
+    let error = client
+        .complete_turn(anthropic_tool_request(vec![
+            ToolChatMessage::user("inspect"),
+            ToolChatMessage::Assistant(outcome.assistant),
+            ToolChatMessage::ToolResult(ToolResultMessage {
+                tool_call_id: "call-1".into(),
+                content: "file body".into(),
+                is_error: false,
+            }),
+        ]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert!(
+        error
+            .message
+            .contains("thinking signature unavailable; multi-turn replay unsupported")
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
+async fn anthropic_tool_chat_accepts_redacted_thinking_and_fails_closed_on_replay() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "anthropic-echo",
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "EmwKAhgBEgy3va3pzix/LafPsn4a"},
+                {"type": "text", "text": "ok"}
+            ],
+            "stop_reason": "end_turn"
+        })))
+        .mount(&server)
+        .await;
+    let client = anthropic_client(&server);
+
+    let outcome = client
+        .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+            "inspect",
+        )]))
+        .await
+        .unwrap();
+    assert_eq!(outcome.assistant.text, "ok");
+    assert!(!outcome.assistant.has_refusal());
+    // Redacted thinking has no readable text, but the turn is marked as
+    // carrying thinking state so it is never replayed without it.
+    assert_eq!(outcome.assistant.reasoning.as_deref(), Some(""));
+    assert!(!format!("{:?}", outcome.assistant).contains("EmwKAhgB"));
+
+    let error = client
+        .complete_turn(anthropic_tool_request(vec![
+            ToolChatMessage::user("inspect"),
+            ToolChatMessage::Assistant(outcome.assistant),
+            ToolChatMessage::user("continue"),
+        ]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert!(error.message.contains("thinking signature unavailable"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 // MockServer-backed protocol client fixtures use two workers so delayed
