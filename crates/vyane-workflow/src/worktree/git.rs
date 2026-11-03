@@ -2,7 +2,10 @@
 //!
 //! Every command runs with a scrubbed environment (no `GIT_*` variable
 //! survives), repository hooks disabled through `core.hooksPath=/dev/null`,
-//! and `core.fsmonitor=false` so repository config cannot start a helper.
+//! and the fsmonitor hook disabled through `core.fsmonitor=false`. The source
+//! repository's own config and attributes are trusted: a clean filter defined
+//! there still runs during `git status`, as it would for the user's own git
+//! commands.
 //! Paths are checked to stay below the configured worktree root before any
 //! git call that creates or removes a worktree. Settlement keeps the tree
 //! whenever a probe fails or reports anything but "identical to base".
@@ -10,8 +13,8 @@
 //! The worktree content is controlled by the target that ran in it, so
 //! settlement never lets the tree choose the repository: every probe names
 //! the per-worktree git directory recorded at creation explicitly, and
-//! submodules are never inspected (a nested repository's config could
-//! otherwise run commands through `git status`).
+//! submodules are never inspected (a nested repository's config, which the
+//! target can write, could otherwise run commands through `git status`).
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
