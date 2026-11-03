@@ -186,3 +186,25 @@ mod tests {
         assert_eq!(InheritMode::Full.to_string(), "full");
     }
 }
+
+/// Red-team reproduction; fails on the current implementation.
+#[cfg(test)]
+mod redteam_tests {
+    use super::*;
+
+    /// `Provider::env_injections` copies the endpoint's raw API key
+    /// (`Secret::expose`) into `EnvPolicy::inject`, a plain
+    /// `BTreeMap<String, String>`. `EnvPolicy` (and the `HarnessJob` that
+    /// carries it) derives `Debug` and `Serialize`, so one `{job:?}` log line
+    /// or a serialized job snapshot writes the credential in clear text,
+    /// defeating the "Secret is never Serialize, Debug is redacted" promise.
+    #[test]
+    fn redteam_injected_credentials_are_redacted_in_debug_and_serde() {
+        const CANARY: &str = "sk-REDTEAM-CANARY-NOT-A-REAL-KEY";
+        let policy = EnvPolicy::scrubbed().inject("ANTHROPIC_API_KEY", CANARY);
+        let debug = format!("{policy:?}");
+        let json = serde_json::to_string(&policy).unwrap_or_default();
+        assert!(!debug.contains(CANARY), "Debug leaks the key: {debug}");
+        assert!(!json.contains(CANARY), "Serialize leaks the key: {json}");
+    }
+}

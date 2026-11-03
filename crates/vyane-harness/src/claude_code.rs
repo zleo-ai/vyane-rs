@@ -718,3 +718,49 @@ mod tests {
         assert!(endpoint_injections(None).is_empty());
     }
 }
+
+/// Red-team reproductions; these fail on the current implementation.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod redteam_tests {
+    use super::*;
+    use vyane_core::env::EnvPolicy;
+    use vyane_core::target::ModelId;
+    use vyane_core::task::GenParams;
+
+    fn job(prompt: &str) -> HarnessJob {
+        HarnessJob {
+            prompt: prompt.into(),
+            model: ModelId::new(""),
+            protocol: vyane_core::target::Protocol::AnthropicMessages,
+            endpoint: None,
+            params: GenParams::default(),
+            workdir: None,
+            sandbox: Sandbox::ReadOnly,
+            resume: None,
+            env: EnvPolicy::scrubbed(),
+            timeout: None,
+            harness_lifecycle_reporter: None,
+        }
+    }
+
+    /// Claude Code's `-p/--print` is a boolean flag; the prompt is a
+    /// positional argument. Without a `--` end-of-options marker a task text
+    /// that starts with `-` is parsed as a CLI option (e.g. a read-only
+    /// dispatch whose task is `--dangerously-skip-permissions` turns the flag
+    /// on; a markdown bullet task `- fix x` fails as an unknown option). The
+    /// Codex harness already guards its prompt with `--`.
+    #[test]
+    fn redteam_claude_prompt_is_guarded_by_end_of_options() {
+        for build in [build_argv_scoped, build_stream_argv_scoped] {
+            let prompt = "--dangerously-skip-permissions";
+            let args = build(&job(prompt), None);
+            let prompt_at = args.iter().rposition(|arg| arg == prompt).unwrap();
+            let separator_at = args.iter().position(|arg| arg == "--");
+            assert!(
+                separator_at.is_some_and(|at| at < prompt_at),
+                "prompt reaches the CLI option parser unguarded: {args:?}"
+            );
+        }
+    }
+}
