@@ -15,6 +15,9 @@ This is a curated history, not a complete reconstruction of all development.
 - A goal observation whose goal id contains a control character is rejected
   before it is recorded. The receipt omits the id. An id with an internal
   space still reaches lookup.
+- Adding token usage together saturates at the largest count instead of
+  panicking in debug builds or wrapping to a small count in release builds
+  when an endpoint reports an extreme value.
 
 ## 0.1.0 - 2026-10-23
 
