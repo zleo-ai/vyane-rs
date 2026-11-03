@@ -1056,7 +1056,8 @@ async fn anthropic_tool_chat_parses_text_thinking_multi_calls_and_invalid_json()
     assert_eq!(
         outcome.usage,
         Some(Usage {
-            input_tokens: 11,
+            // Normalized input total includes the 2 cache-read tokens.
+            input_tokens: 13,
             output_tokens: 7,
             reasoning_tokens: None,
             cached_input_tokens: Some(2),
