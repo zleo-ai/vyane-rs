@@ -3,11 +3,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::join_all;
 use futures::stream::{FuturesUnordered, StreamExt};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
-use vyane_core::{CancellationToken, HarnessLifecycleReporter, RunStatus, TaskSpec};
-use vyane_kernel::Dispatcher;
+use vyane_core::{
+    CancellationToken, ErrorKind, HarnessLifecycleReporter, RunStatus, TaskSpec, VyaneError,
+};
+use vyane_kernel::{DEFAULT_BROADCAST_CONCURRENCY, DispatchOutcome, Dispatcher};
 
 use crate::error::{WorkflowError, WorkflowResult};
 use crate::journal::{
@@ -18,6 +21,10 @@ use crate::model::{OnError, Workflow, WorkflowOutcome, WorkflowRouteHints, Workf
 use crate::plan::{WorkflowPlan, WorkflowPlanStep};
 use crate::template::render_template_inner;
 use crate::validate::{ResolvedStepTargets, TargetResolver, ValidatedWorkflow, validate_plan};
+use crate::worktree::{
+    JournalWorktree, ProvisionedWorktree, WORKTREE_DEFAULT_BASE, WorkflowIsolation, WorktreeError,
+    WorktreeKeptReason, WorktreeProvisioner, WorktreeRequest, WorktreeSettlement,
+};
 
 #[derive(Debug, Clone)]
 pub enum StepEvent {
@@ -54,6 +61,7 @@ pub struct WorkflowEngine {
     journal_dir: PathBuf,
     observer: Option<Arc<dyn WorkflowObserver>>,
     harness_lifecycle_reporter: Option<HarnessLifecycleReporter>,
+    worktree_provisioner: Option<Arc<dyn WorktreeProvisioner>>,
 }
 
 impl WorkflowEngine {
@@ -68,7 +76,24 @@ impl WorkflowEngine {
             journal_dir,
             observer: None,
             harness_lifecycle_reporter: None,
+            worktree_provisioner: None,
         }
+    }
+
+    /// Enable `isolation = "worktree"` steps. Without a provisioner, a plan
+    /// that asks for isolation is rejected before any journal is created.
+    pub fn with_worktree_provisioner(mut self, provisioner: Arc<dyn WorktreeProvisioner>) -> Self {
+        self.worktree_provisioner = Some(provisioner);
+        self
+    }
+
+    fn require_isolation_support(&self, plan: &WorkflowPlan) -> WorkflowResult<()> {
+        if plan.requests_isolation() && self.worktree_provisioner.is_none() {
+            return Err(WorkflowError::IsolationUnsupported {
+                reason: "worktree isolation is not available in this execution surface",
+            });
+        }
+        Ok(())
     }
 
     pub fn with_observer(mut self, observer: Arc<dyn WorkflowObserver>) -> Self {
@@ -174,6 +199,7 @@ impl WorkflowEngine {
         vars: &BTreeMap<String, String>,
     ) -> WorkflowResult<ValidatedWorkflow> {
         let validated = validate_plan(plan, vars, self.resolver.as_ref())?;
+        self.require_isolation_support(plan)?;
         self.validate_resolved_admission(plan, &validated, |_| true)?;
         Ok(validated)
     }
@@ -282,6 +308,7 @@ impl WorkflowEngine {
                     && step.output.is_none()
                     && step.outputs.is_none()
                     && step.error.is_none()
+                    && step.worktrees.is_empty()
             });
         if !pristine {
             return Err(WorkflowError::validation(vec![format!(
@@ -382,6 +409,7 @@ impl WorkflowEngine {
         // Resolve the complete plan before publishing the new identity. Digest
         // and source failures above therefore remain free of resolver effects.
         let validated = validate_plan(plan, &source.vars, self.resolver.as_ref())?;
+        self.require_isolation_support(plan)?;
         let mut journal = WorkflowJournal::new_with_plan(new_wf_run_id, plan, source.vars.clone());
         let reused_step_ids = copy_replay_prefix(&source, plan, &validated, &mut journal)?;
         let reused = reused_step_ids
@@ -407,6 +435,7 @@ impl WorkflowEngine {
         cancel: CancellationToken,
     ) -> WorkflowResult<WorkflowOutcome> {
         let validated = validate_plan(plan, &journal.vars, self.resolver.as_ref())?;
+        self.require_isolation_support(plan)?;
         self.validate_resolved_admission(plan, &validated, |step_id| {
             journal
                 .steps
@@ -515,6 +544,14 @@ impl WorkflowEngine {
                         state.status = JournalStepStatus::Running;
                         state.error = None;
                     }
+                    // Worktrees are created before this journal write and
+                    // recorded as `active`, so a crash after creation never
+                    // loses track of them. Dispatch starts only afterwards.
+                    let isolated = if step.isolation == WorkflowIsolation::Worktree {
+                        Some(self.provision_step(step, &resolved, &mut journal).await)
+                    } else {
+                        None
+                    };
                     write_journal_atomic(&self.journal_dir, &mut journal)?;
                     self.emit(StepEvent::Started {
                         step_id: step_id.clone(),
@@ -523,17 +560,33 @@ impl WorkflowEngine {
 
                     let dispatcher = Arc::clone(&self.dispatcher);
                     let resolver = Arc::clone(&self.resolver);
+                    let provisioner = self.worktree_provisioner.clone();
                     let cancel = cancel.clone();
                     let task = task_for_step(step, prompt, self.harness_lifecycle_reporter.clone());
                     futures.push(async move {
                         let _permit = permit;
                         let started = std::time::Instant::now();
-                        let result =
-                            run_step_dispatch(dispatcher, resolver, task, resolved, cancel).await;
+                        let (result, settlements) = match isolated {
+                            None => (
+                                run_step_dispatch(dispatcher, resolver, task, resolved, cancel)
+                                    .await,
+                                Vec::new(),
+                            ),
+                            Some(targets) => {
+                                let result = run_isolated_dispatch(
+                                    dispatcher, resolver, task, resolved, &targets, cancel,
+                                )
+                                .await;
+                                // Settlement runs after every dispatch outcome,
+                                // including cancellation and errors.
+                                (result, settle_isolated(provisioner, targets).await)
+                            }
+                        };
                         FinishedStep {
                             step_id,
                             duration: started.elapsed(),
                             result,
+                            settlements,
                         }
                     });
                 }
@@ -547,6 +600,13 @@ impl WorkflowEngine {
                 break;
             };
             running.remove(&finished.step_id);
+            if let Some(state) = journal.steps.get_mut(&finished.step_id) {
+                for (entry, settlement) in &finished.settlements {
+                    if let Some(worktree) = state.worktrees.get_mut(*entry) {
+                        worktree.apply(settlement);
+                    }
+                }
+            }
 
             match finished.result {
                 StepDispatchResult::Succeeded {
@@ -909,6 +969,226 @@ struct FinishedStep {
     step_id: String,
     duration: Duration,
     result: StepDispatchResult,
+    /// Journal worktree entry index and its settlement.
+    settlements: Vec<(usize, WorktreeSettlement)>,
+}
+
+/// One fan-out position of an isolated step.
+enum IsolatedTarget {
+    Ready {
+        worktree: ProvisionedWorktree,
+        /// Index into the step's journal `worktrees`.
+        entry: usize,
+    },
+    Failed(String),
+}
+
+/// How many existing paths a provisioning attempt may skip. A path can exist
+/// without a journal entry only after a crash between creation and the
+/// journal write; that tree is left alone and a later attempt number is used.
+const MAX_WORKTREE_ATTEMPT_SKIPS: u32 = 8;
+
+impl WorkflowEngine {
+    async fn provision_step(
+        &self,
+        step: &WorkflowPlanStep,
+        resolved: &ResolvedStepTargets,
+        journal: &mut WorkflowJournal,
+    ) -> Vec<IsolatedTarget> {
+        let names = match resolved {
+            ResolvedStepTargets::Single { target, .. } => vec![target.clone()],
+            ResolvedStepTargets::FanOut { targets, .. } => targets.clone(),
+        };
+        let failed = |message: &str| {
+            names
+                .iter()
+                .map(|_| IsolatedTarget::Failed(message.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let Some(provisioner) = self.worktree_provisioner.clone() else {
+            return failed("worktree isolation failed: no worktree provisioner is configured");
+        };
+        let Ok(current_dir) = std::env::current_dir() else {
+            return failed(
+                "worktree isolation failed [not_a_repository]: current directory is unavailable",
+            );
+        };
+        let source = match step.workdir.as_deref() {
+            Some(workdir) => current_dir.join(workdir),
+            None => current_dir,
+        };
+        let wf_run_id = journal.wf_run_id.clone();
+        let Some(state) = journal.steps.get_mut(&step.id) else {
+            return failed("worktree isolation failed: step is missing from the journal");
+        };
+        let first_attempt = state.next_worktree_attempt();
+        let mut base = step
+            .isolation_base
+            .clone()
+            .unwrap_or_else(|| WORKTREE_DEFAULT_BASE.to_string());
+        let mut targets = Vec::with_capacity(names.len());
+        for (index, name) in names.iter().enumerate() {
+            let outcome = provision_one(
+                Arc::clone(&provisioner),
+                wf_run_id.clone(),
+                step.order,
+                u32::try_from(index).unwrap_or(u32::MAX),
+                first_attempt,
+                source.clone(),
+                base.clone(),
+            )
+            .await;
+            match outcome {
+                Ok((attempt, worktree)) => {
+                    // Resolve the base once per step: later targets branch
+                    // from the exact commit the first one used.
+                    base.clone_from(&worktree.base_sha);
+                    state
+                        .worktrees
+                        .push(JournalWorktree::active(name.clone(), attempt, &worktree));
+                    targets.push(IsolatedTarget::Ready {
+                        worktree,
+                        entry: state.worktrees.len() - 1,
+                    });
+                }
+                Err(message) => targets.push(IsolatedTarget::Failed(message)),
+            }
+        }
+        targets
+    }
+}
+
+/// Provision on a spawned task so it progresses even while the engine loop
+/// is not polling other step futures that may hold the provisioner's lock.
+async fn provision_one(
+    provisioner: Arc<dyn WorktreeProvisioner>,
+    wf_run_id: WorkflowRunId,
+    step_order: u32,
+    target_index: u32,
+    first_attempt: u32,
+    source: PathBuf,
+    base: String,
+) -> Result<(u32, ProvisionedWorktree), String> {
+    let handle = tokio::spawn(async move {
+        let mut attempt = first_attempt;
+        loop {
+            let request = WorktreeRequest {
+                wf_run_id: &wf_run_id,
+                step_order,
+                target_index,
+                attempt,
+                source_workdir: &source,
+                base: &base,
+            };
+            match provisioner.provision(request).await {
+                Ok(worktree) => return Ok((attempt, worktree)),
+                Err(WorktreeError::PathExists)
+                    if attempt < first_attempt.saturating_add(MAX_WORKTREE_ATTEMPT_SKIPS) =>
+                {
+                    attempt = attempt.saturating_add(1);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "worktree isolation failed [{}]: {error}",
+                        error.as_str()
+                    ));
+                }
+            }
+        }
+    });
+    handle.await.unwrap_or_else(|_| {
+        Err("worktree isolation failed [add_failed]: provisioner task ended unexpectedly".into())
+    })
+}
+
+/// Settle every created worktree. A missing provisioner or a failed settle
+/// task keeps the tree.
+async fn settle_isolated(
+    provisioner: Option<Arc<dyn WorktreeProvisioner>>,
+    targets: Vec<IsolatedTarget>,
+) -> Vec<(usize, WorktreeSettlement)> {
+    let mut settlements = Vec::new();
+    for target in targets {
+        let IsolatedTarget::Ready { worktree, entry } = target else {
+            continue;
+        };
+        let unknown = WorktreeSettlement::kept(WorktreeKeptReason::UnknownState, None);
+        let settlement = match provisioner.clone() {
+            // Spawned for the same reason as provisioning: it must finish and
+            // release the provisioner lock even when this future is idle.
+            Some(provisioner) => tokio::spawn(async move { provisioner.settle(&worktree).await })
+                .await
+                .unwrap_or(unknown),
+            None => unknown,
+        };
+        settlements.push((entry, settlement));
+    }
+    settlements
+}
+
+async fn run_isolated_dispatch(
+    dispatcher: Arc<Dispatcher>,
+    resolver: Arc<dyn TargetResolver>,
+    task: TaskSpec,
+    resolved: ResolvedStepTargets,
+    targets: &[IsolatedTarget],
+    cancel: CancellationToken,
+) -> StepDispatchResult {
+    let mismatch = || StepDispatchResult::Failed {
+        run_ids: Vec::new(),
+        output: None,
+        outputs: None,
+        error: "worktree isolation produced an unexpected target count".into(),
+        cancelled: false,
+    };
+    match resolved {
+        ResolvedStepTargets::Single { .. } => match targets {
+            [IsolatedTarget::Ready { worktree, .. }] => {
+                let mut task = task;
+                task.workdir = Some(worktree.path.clone());
+                run_step_dispatch(dispatcher, resolver, task, resolved, cancel).await
+            }
+            [IsolatedTarget::Failed(message)] => StepDispatchResult::Failed {
+                run_ids: Vec::new(),
+                output: None,
+                outputs: None,
+                error: message.clone(),
+                cancelled: false,
+            },
+            _ => mismatch(),
+        },
+        ResolvedStepTargets::FanOut {
+            targets: names,
+            chains,
+        } => {
+            if chains.len() != targets.len() || names.len() != targets.len() {
+                return mismatch();
+            }
+            // One task per target: each carries its own workdir, so the
+            // shared-task broadcast cannot be used here. Results stay aligned
+            // with the input order.
+            let permits = Arc::new(Semaphore::new(DEFAULT_BROADCAST_CONCURRENCY));
+            let dispatches = chains.into_iter().zip(targets).map(|(chain, target)| {
+                let dispatcher = Arc::clone(&dispatcher);
+                let permits = Arc::clone(&permits);
+                let cancel = cancel.clone();
+                let mut task = task.clone();
+                let workdir = match target {
+                    IsolatedTarget::Ready { worktree, .. } => Ok(worktree.path.clone()),
+                    IsolatedTarget::Failed(message) => Err(message.clone()),
+                };
+                async move {
+                    let workdir =
+                        workdir.map_err(|message| VyaneError::new(ErrorKind::Io, message))?;
+                    task.workdir = Some(workdir);
+                    let _permit = permits.acquire().await.ok();
+                    dispatcher.dispatch(&task, chain, cancel).await
+                }
+            });
+            let results = join_all(dispatches).await;
+            fan_out_result(names, results)
+        }
+    }
 }
 
 enum StepDispatchResult {
@@ -987,66 +1267,73 @@ async fn run_step_dispatch(
         }
         ResolvedStepTargets::FanOut { targets, chains } => {
             let results = dispatcher.broadcast(&task, chains, cancel).await;
-            let mut run_ids = Vec::new();
-            let mut outputs = Vec::with_capacity(results.len());
-            let mut success_count = 0usize;
-            let mut errors = Vec::new();
-            let mut cancelled = false;
-            for (target, result) in targets.into_iter().zip(results) {
-                match result {
-                    Ok(outcome) => {
-                        run_ids.push(outcome.record.run_id.clone());
-                        let ok = outcome.record.status == RunStatus::Success;
-                        if ok {
-                            success_count += 1;
-                        }
-                        if outcome.record.status == RunStatus::Cancelled {
-                            cancelled = true;
-                        }
-                        if !ok {
-                            errors.push(format!(
-                                "{target}: {}",
-                                outcome.record.error.as_deref().unwrap_or("dispatch failed")
-                            ));
-                        }
-                        outputs.push(JournalTargetOutput {
-                            target,
-                            ok,
-                            output: ok.then_some(outcome.output).flatten(),
-                        });
-                    }
-                    Err(error) => {
-                        if error.kind == vyane_core::ErrorKind::Cancelled {
-                            cancelled = true;
-                        }
-                        errors.push(format!("{target}: {error}"));
-                        outputs.push(JournalTargetOutput {
-                            target,
-                            ok: false,
-                            output: None,
-                        });
-                    }
+            fan_out_result(targets, results)
+        }
+    }
+}
+
+fn fan_out_result(
+    targets: Vec<String>,
+    results: Vec<vyane_core::Result<DispatchOutcome>>,
+) -> StepDispatchResult {
+    let mut run_ids = Vec::new();
+    let mut outputs = Vec::with_capacity(results.len());
+    let mut success_count = 0usize;
+    let mut errors = Vec::new();
+    let mut cancelled = false;
+    for (target, result) in targets.into_iter().zip(results) {
+        match result {
+            Ok(outcome) => {
+                run_ids.push(outcome.record.run_id.clone());
+                let ok = outcome.record.status == RunStatus::Success;
+                if ok {
+                    success_count += 1;
                 }
+                if outcome.record.status == RunStatus::Cancelled {
+                    cancelled = true;
+                }
+                if !ok {
+                    errors.push(format!(
+                        "{target}: {}",
+                        outcome.record.error.as_deref().unwrap_or("dispatch failed")
+                    ));
+                }
+                outputs.push(JournalTargetOutput {
+                    target,
+                    ok,
+                    output: ok.then_some(outcome.output).flatten(),
+                });
             }
-            if success_count > 0 {
-                StepDispatchResult::Succeeded {
-                    run_ids,
-                    output: None,
-                    outputs: Some(outputs),
+            Err(error) => {
+                if error.kind == vyane_core::ErrorKind::Cancelled {
+                    cancelled = true;
                 }
+                errors.push(format!("{target}: {error}"));
+                outputs.push(JournalTargetOutput {
+                    target,
+                    ok: false,
+                    output: None,
+                });
+            }
+        }
+    }
+    if success_count > 0 {
+        StepDispatchResult::Succeeded {
+            run_ids,
+            output: None,
+            outputs: Some(outputs),
+        }
+    } else {
+        StepDispatchResult::Failed {
+            run_ids,
+            output: None,
+            outputs: Some(outputs),
+            error: if errors.is_empty() {
+                "fan_out produced no successful targets".to_string()
             } else {
-                StepDispatchResult::Failed {
-                    run_ids,
-                    output: None,
-                    outputs: Some(outputs),
-                    error: if errors.is_empty() {
-                        "fan_out produced no successful targets".to_string()
-                    } else {
-                        errors.join("; ")
-                    },
-                    cancelled,
-                }
-            }
+                errors.join("; ")
+            },
+            cancelled,
         }
     }
 }
