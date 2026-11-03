@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use vyane_core::{ErrorKind, Result, StreamEvent, VyaneError};
 
-use crate::http::reqwest_error_kind;
+use crate::http::{MAX_JSON_RESPONSE_BYTES, reqwest_error_kind};
 use crate::wire;
 
 #[derive(Debug, Clone, Copy)]
@@ -33,10 +33,21 @@ pub(crate) fn response_to_stream(
     SseStream::new(bytes, protocol).boxed()
 }
 
+/// Incremental SSE decoder for one response stream.
+///
+/// Frames are split at the first blank line, whichever of the `\n` / `\r\n`
+/// line endings the peer uses (and in whatever mix). A single frame may not
+/// exceed [`MAX_JSON_RESPONSE_BYTES`], the same cap the non-streaming path
+/// applies to a whole JSON body; a peer that never sends a frame delimiter
+/// therefore cannot grow the buffer without bound.
 #[derive(Default)]
 pub(crate) struct SseDecoder {
     buffer: Vec<u8>,
+    /// Offset into `buffer` where the next boundary scan resumes, so each
+    /// pushed byte is scanned once instead of rescanning the whole buffer.
+    scan_from: usize,
     done_emitted: bool,
+    failed: bool,
 }
 
 impl SseDecoder {
@@ -45,33 +56,70 @@ impl SseDecoder {
         chunk: &[u8],
         protocol: StreamProtocol,
     ) -> VecDeque<Result<StreamEvent>> {
-        self.buffer.extend_from_slice(chunk);
         let mut out = VecDeque::new();
+        if self.failed {
+            return out;
+        }
+        let mut buffer = std::mem::take(&mut self.buffer);
+        buffer.extend_from_slice(chunk);
 
-        while let Some(index) = frame_boundary(&self.buffer) {
-            let frame = self.buffer.drain(..index).collect::<Vec<_>>();
-            let delimiter_len = if self.buffer.starts_with(b"\r\n\r\n") {
-                4
-            } else {
-                2
-            };
-            self.buffer.drain(..delimiter_len);
-            self.decode_frame(&frame, protocol, &mut out);
+        let mut start = 0;
+        let mut scan = self.scan_from;
+        while !self.failed {
+            match next_frame_boundary(&buffer, scan) {
+                FrameBoundary::Found { frame_end, next } => {
+                    let frame = &buffer[start..frame_end];
+                    if frame.len() > MAX_JSON_RESPONSE_BYTES {
+                        self.fail(frame_too_large(), &mut out);
+                        break;
+                    }
+                    self.decode_frame(frame, protocol, &mut out);
+                    start = next;
+                    scan = next;
+                }
+                FrameBoundary::NeedMore { resume } => {
+                    scan = resume;
+                    break;
+                }
+            }
+        }
+        if self.failed {
+            return out;
         }
 
+        buffer.drain(..start);
+        if buffer.len() > MAX_JSON_RESPONSE_BYTES {
+            self.fail(frame_too_large(), &mut out);
+            return out;
+        }
+        self.scan_from = scan - start;
+        self.buffer = buffer;
         out
     }
 
     pub(crate) fn finish(&mut self, protocol: StreamProtocol) -> VecDeque<Result<StreamEvent>> {
         let mut out = VecDeque::new();
-        if !self.buffer.is_empty() {
-            let frame = std::mem::take(&mut self.buffer);
+        if self.failed {
+            return out;
+        }
+        let frame = std::mem::take(&mut self.buffer);
+        self.scan_from = 0;
+        if !frame.is_empty() {
             self.decode_frame(&frame, protocol, &mut out);
         }
         if !self.done_emitted && !out.iter().any(Result::is_err) {
             self.push_done(None, &mut out);
         }
         out
+    }
+
+    /// Record a fatal decode error. Nothing is decoded after it, and the
+    /// buffered bytes are released.
+    fn fail(&mut self, error: VyaneError, out: &mut VecDeque<Result<StreamEvent>>) {
+        self.failed = true;
+        self.buffer = Vec::new();
+        self.scan_from = 0;
+        out.push_back(Err(error));
     }
 
     fn decode_frame(
@@ -182,11 +230,58 @@ impl Stream for SseStream {
     }
 }
 
-fn frame_boundary(buffer: &[u8]) -> Option<usize> {
-    buffer
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .or_else(|| buffer.windows(4).position(|window| window == b"\r\n\r\n"))
+enum FrameBoundary {
+    /// A frame ends at `frame_end` (exclusive); the next frame starts at
+    /// `next`, after the blank-line delimiter.
+    Found { frame_end: usize, next: usize },
+    /// No complete delimiter yet; resume scanning at `resume` once more bytes
+    /// arrive (a `\n` that may start a delimiter is not skipped past).
+    NeedMore { resume: usize },
+}
+
+/// Find the earliest blank line at or after `from`.
+///
+/// A blank line is a line terminator (`\n` or `\r\n`) directly followed by
+/// another one, so `\n\n`, `\r\n\r\n`, `\r\n\n` and `\n\r\n` all end a frame
+/// and whichever occurs first wins.
+fn next_frame_boundary(buffer: &[u8], from: usize) -> FrameBoundary {
+    let mut index = from;
+    while let Some(offset) = buffer
+        .get(index..)
+        .and_then(|rest| rest.iter().position(|byte| *byte == b'\n'))
+    {
+        let newline = index + offset;
+        match buffer.get(newline + 1) {
+            None => return FrameBoundary::NeedMore { resume: newline },
+            Some(b'\n') => {
+                return FrameBoundary::Found {
+                    frame_end: newline,
+                    next: newline + 2,
+                };
+            }
+            Some(b'\r') => match buffer.get(newline + 2) {
+                None => return FrameBoundary::NeedMore { resume: newline },
+                Some(b'\n') => {
+                    return FrameBoundary::Found {
+                        frame_end: newline,
+                        next: newline + 3,
+                    };
+                }
+                Some(_) => index = newline + 1,
+            },
+            Some(_) => index = newline + 1,
+        }
+    }
+    FrameBoundary::NeedMore {
+        resume: buffer.len(),
+    }
+}
+
+fn frame_too_large() -> VyaneError {
+    VyaneError::new(
+        ErrorKind::Protocol,
+        format!("SSE frame exceeds {MAX_JSON_RESPONSE_BYTES} bytes"),
+    )
 }
 
 fn collect_data_lines(frame: &str) -> String {
@@ -596,6 +691,91 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
             } if reason == "end_turn"
         ));
     }
+
+    /// A CRLF-delimited frame followed by an LF-delimited one is split at the
+    /// earliest blank line, so neither frame swallows the other.
+    #[test]
+    fn mixed_crlf_and_lf_delimiters_split_frames_in_order() {
+        let mut decoder = SseDecoder::default();
+        let events = decoder.push(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n",
+            StreamProtocol::OpenAiChat,
+        );
+        let events: Vec<_> = events.into_iter().collect();
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], Ok(StreamEvent::Delta(text)) if text == "a"));
+        assert!(matches!(&events[1], Ok(StreamEvent::Delta(text)) if text == "b"));
+    }
+
+    /// A peer that never sends a frame delimiter cannot grow the buffer past
+    /// the response size cap: the decoder reports a protocol error instead.
+    #[test]
+    fn unterminated_frame_over_size_cap_is_protocol_error() {
+        let mut decoder = SseDecoder::default();
+        let chunk = vec![b'a'; 1024 * 1024];
+        let mut error = None;
+        for _ in 0..9 {
+            let events = decoder.push(&chunk, StreamProtocol::OpenAiChat);
+            if let Some(Err(e)) = events.into_iter().find(Result::is_err) {
+                error = Some(e);
+                break;
+            }
+        }
+        let error = error.unwrap_or_else(|| {
+            panic!(
+                "a single SSE frame larger than the response cap must be rejected; buffered {} bytes",
+                decoder.buffer.len()
+            )
+        });
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        assert!(decoder.buffer.is_empty(), "rejected bytes are released");
+        // The decoder stays failed: later bytes and EOF add nothing.
+        assert!(decoder.push(b"\n\n", StreamProtocol::OpenAiChat).is_empty());
+        assert!(decoder.finish(StreamProtocol::OpenAiChat).is_empty());
+    }
+
+    /// A complete frame over the cap is rejected even when its delimiter
+    /// arrives in the same chunk.
+    #[test]
+    fn delimited_frame_over_size_cap_is_protocol_error() {
+        let mut decoder = SseDecoder::default();
+        let mut chunk = vec![b'a'; MAX_JSON_RESPONSE_BYTES + 1];
+        chunk.extend_from_slice(b"\n\n");
+        let events: Vec<_> = decoder
+            .push(&chunk, StreamProtocol::OpenAiChat)
+            .into_iter()
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].as_ref().unwrap_err().kind, ErrorKind::Protocol);
+    }
+
+    /// A blank-line delimiter split across chunks (`\n` | `\r\n` and
+    /// `\r\n` | `\r` | `\n`) is still recognized once the rest arrives.
+    #[test]
+    fn delimiter_split_across_chunks_is_recognized() {
+        let mut decoder = SseDecoder::default();
+        let protocol = StreamProtocol::OpenAiChat;
+        let mut events = decoder.push(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n",
+            protocol,
+        );
+        assert!(events.is_empty());
+        events.extend(decoder.push(b"\r\n", protocol));
+        assert_eq!(events.len(), 1);
+        events.extend(decoder.push(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\r\n",
+            protocol,
+        ));
+        events.extend(decoder.push(b"\r", protocol));
+        assert_eq!(events.len(), 1);
+        events.extend(decoder.push(b"\n", protocol));
+        let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], StreamEvent::Delta(text) if text == "a"));
+        assert!(matches!(&events[1], StreamEvent::Delta(text) if text == "b"));
+        assert!(decoder.buffer.is_empty());
+    }
 }
 
 /// Red-team reproductions. Each test encodes the behavior the decoder
@@ -682,27 +862,6 @@ data: {"type":"message_stop"}
         assert_eq!(input, 25, "message_start input tokens must be reported");
     }
 
-    /// A peer that never sends a frame delimiter makes the decoder buffer
-    /// grow without bound (the 8 MiB cap only covers non-streaming JSON).
-    #[test]
-    fn redteam_unterminated_sse_frame_is_bounded() {
-        let mut decoder = SseDecoder::default();
-        let chunk = vec![b'a'; 1024 * 1024];
-        let mut saw_error = false;
-        for _ in 0..9 {
-            let events = decoder.push(&chunk, StreamProtocol::OpenAiChat);
-            if events.iter().any(Result::is_err) {
-                saw_error = true;
-                break;
-            }
-        }
-        assert!(
-            saw_error,
-            "a single SSE frame larger than the response cap must be rejected; buffered {} bytes",
-            decoder.buffer.len()
-        );
-    }
-
     /// A stream that ends (clean EOF) before any terminal event is truncated
     /// output, but `finish` synthesizes a successful `Done`.
     #[test]
@@ -729,20 +888,5 @@ data: {"type":"message_stop"}
                 "{protocol:?}: EOF without message_stop/response.completed must surface an error"
             );
         }
-    }
-
-    /// The decoder looks for the first `\n\n` anywhere before considering
-    /// `\r\n\r\n`, so a CRLF-delimited frame followed by an LF-delimited one
-    /// is merged into a single frame and becomes malformed JSON.
-    #[test]
-    fn redteam_mixed_frame_delimiters_are_split_in_order() {
-        let mut decoder = SseDecoder::default();
-        let events = decoder.push(
-            b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n",
-            StreamProtocol::OpenAiChat,
-        );
-        let events: Vec<_> = events.into_iter().collect();
-        assert!(events.iter().all(Result::is_ok), "{events:?}");
-        assert_eq!(events.len(), 2);
     }
 }

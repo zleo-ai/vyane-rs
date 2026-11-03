@@ -15,6 +15,11 @@ This is a curated history, not a complete reconstruction of all development.
 - A goal observation whose goal id contains a control character is rejected
   before it is recorded. The receipt omits the id. An id with an internal
   space still reaches lookup.
+- A streaming HTTP response splits events at the first blank line even when
+  the endpoint mixes `\r\n\r\n` and `\n\n` delimiters, instead of merging
+  two events into malformed JSON. A single streamed event larger than the
+  8 MiB response cap now fails with a protocol error instead of buffering
+  without limit.
 
 ## 0.1.0 - 2026-10-23
 
