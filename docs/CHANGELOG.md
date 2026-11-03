@@ -15,6 +15,11 @@ This is a curated history, not a complete reconstruction of all development.
 - A goal observation whose goal id contains a control character is rejected
   before it is recorded. The receipt omits the id. An id with an internal
   space still reaches lookup.
+- Native `write_file` and `edit_file` refuse any path with a `.git`,
+  `.vyane`, `.codex` or `.claude` component, at any depth and in any ASCII
+  case, matching the rule for command writable roots. Write exclusions
+  cannot relax it. Files there, such as git hooks or harness settings, run
+  or are trusted outside the sandbox.
 
 ## 0.1.0 - 2026-10-23
 

@@ -943,7 +943,6 @@ fn validate_args(args: &[String]) -> Result<(), NativeCommandPolicyError> {
 fn validate_writable_root(root: &str) -> Result<(), NativeCommandPolicyError> {
     use std::path::{Component, Path};
 
-    const CONTROL_COMPONENTS: [&str; 4] = [".git", ".vyane", ".codex", ".claude"];
     if root.is_empty()
         || root.len() > MAX_ARG_BYTES
         || root.contains('\0')
@@ -956,11 +955,9 @@ fn validate_writable_root(root: &str) -> Result<(), NativeCommandPolicyError> {
         || Path::new(root)
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
-        || root.split('/').any(|component| {
-            CONTROL_COMPONENTS
-                .iter()
-                .any(|control| component.eq_ignore_ascii_case(control))
-        })
+        || root
+            .split('/')
+            .any(|component| vyane_core::is_host_control_component(component.as_ref()))
     {
         return Err(NativeCommandPolicyError::InvalidWritableRoot);
     }
