@@ -3299,7 +3299,12 @@ mod tests {
             disposition,
             kept_reason,
         };
-        outcome.journal.steps.get_mut("finder").unwrap().worktrees = vec![
+        outcome
+            .journal
+            .steps
+            .get_mut("finder")
+            .expect("sample has a finder step")
+            .worktrees = vec![
             entry("x", WorktreeDisposition::Removed, None),
             entry(
                 "y",
