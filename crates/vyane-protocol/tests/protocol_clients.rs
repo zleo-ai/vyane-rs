@@ -905,6 +905,15 @@ fn anthropic_client(server: &MockServer) -> AnthropicMessagesClient {
         .unwrap()
 }
 
+/// Typed Anthropic request fixture. Extended thinking (enabled by `effort`)
+/// requires `budget_tokens < max_tokens` and no non-default temperature.
+fn anthropic_tool_request(messages: Vec<ToolChatMessage>) -> ToolChatRequest {
+    let mut request = tool_request(messages);
+    request.params.temperature = None;
+    request.params.max_output_tokens = Some(4096);
+    request
+}
+
 fn anthropic_text_turn() -> Value {
     json!({
         "model": "anthropic-echo",
@@ -1146,17 +1155,18 @@ async fn anthropic_invalid_tool_conversation_fails_before_any_http_request() {
 // or concurrent wire paths stay schedulable under suite load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::unwrap_used)]
-async fn anthropic_tool_chat_preserves_and_replays_structured_refusals() {
+async fn anthropic_tool_chat_maps_stop_reason_refusal_to_structured_refusal() {
     let server = MockServer::start().await;
+    // Real Anthropic shape: ordinary text blocks plus `stop_reason: "refusal"`.
+    // The Messages API has no `refusal` content block.
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "model": "anthropic-echo",
             "role": "assistant",
             "content": [
-                {"type": "text", "text": "cannot "},
-                {"type": "refusal", "refusal": "policy block"},
-                {"type": "text", "text": "comply"}
+                {"type": "text", "text": "I can't "},
+                {"type": "text", "text": "help with that"}
             ],
             "stop_reason": "refusal"
         })))
@@ -1165,31 +1175,23 @@ async fn anthropic_tool_chat_preserves_and_replays_structured_refusals() {
 
     let client = anthropic_client(&server);
     let outcome = client
-        .complete_turn(tool_request(vec![ToolChatMessage::user("inspect")]))
+        .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+            "inspect",
+        )]))
         .await
         .unwrap();
 
-    assert_eq!(outcome.assistant.text, "cannot comply");
-    assert_eq!(
-        outcome.assistant.content_parts,
-        vec![
-            AssistantContentPart::Text {
-                text: "cannot ".into()
-            },
-            AssistantContentPart::Refusal {
-                refusal: "policy block".into()
-            },
-            AssistantContentPart::Text {
-                text: "comply".into()
-            }
-        ]
-    );
-    assert!(outcome.assistant.refusal.is_none());
     assert!(outcome.assistant.has_refusal());
+    assert_eq!(
+        outcome.assistant.refusal.as_deref(),
+        Some("I can't help with that")
+    );
+    assert_eq!(outcome.assistant.text, "");
+    assert!(outcome.assistant.content_parts.is_empty());
     assert_eq!(outcome.finish_reason.as_deref(), Some("refusal"));
 
     client
-        .complete_turn(tool_request(vec![
+        .complete_turn(anthropic_tool_request(vec![
             ToolChatMessage::user("inspect"),
             ToolChatMessage::Assistant(outcome.assistant),
             ToolChatMessage::user("continue"),
@@ -1200,18 +1202,116 @@ async fn anthropic_tool_chat_preserves_and_replays_structured_refusals() {
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
     let replay: Value = requests[1].body_json().unwrap();
-    assert_eq!(
-        replay["messages"][1]["content"],
-        json!([
-            {"type": "text", "text": "cannot "},
-            {"type": "refusal", "refusal": "policy block"},
-            {"type": "text", "text": "comply"}
-        ])
-    );
     assert_eq!(replay["messages"][0]["role"], "user");
     assert_eq!(replay["messages"][1]["role"], "assistant");
+    assert_eq!(replay["messages"][1]["content"], "I can't help with that");
     assert_eq!(replay["messages"][2]["role"], "user");
     assert_eq!(replay["messages"][2]["content"], "continue");
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
+async fn anthropic_tool_chat_rejects_a_nonexistent_refusal_content_block() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "role": "assistant",
+            "content": [{"type": "refusal", "refusal": "policy block"}],
+            "stop_reason": "refusal"
+        })))
+        .mount(&server)
+        .await;
+
+    let error = anthropic_client(&server)
+        .complete_turn(anthropic_tool_request(vec![ToolChatMessage::user(
+            "inspect",
+        )]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Protocol);
+}
+
+// MockServer-backed protocol client fixtures use two workers so delayed
+// or concurrent wire paths stay schedulable under suite load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::unwrap_used)]
+async fn anthropic_tool_chat_replays_foreign_refusals_as_text_never_refusal_blocks() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_text_turn()))
+        .mount(&server)
+        .await;
+    let client = anthropic_client(&server);
+
+    // OpenAI-shaped history: refusal content part plus a distinct top-level
+    // refusal, and a refusal-only turn whose text is empty.
+    client
+        .complete_turn(anthropic_tool_request(vec![
+            ToolChatMessage::user("first"),
+            ToolChatMessage::Assistant(AssistantToolTurn {
+                text: "cannot ".into(),
+                content_parts: vec![
+                    AssistantContentPart::Text {
+                        text: "cannot ".into(),
+                    },
+                    AssistantContentPart::Refusal {
+                        refusal: "policy block".into(),
+                    },
+                ],
+                reasoning: None,
+                refusal: Some("top-level refusal".into()),
+                tool_calls: Vec::new(),
+            }),
+            ToolChatMessage::user("second"),
+            ToolChatMessage::Assistant(AssistantToolTurn {
+                text: String::new(),
+                content_parts: Vec::new(),
+                reasoning: None,
+                refusal: Some("nope".into()),
+                tool_calls: Vec::new(),
+            }),
+            ToolChatMessage::user("third"),
+        ]))
+        .await
+        .unwrap();
+
+    let body: Value = server.received_requests().await.unwrap()[0]
+        .body_json()
+        .unwrap();
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([
+            {"type": "text", "text": "cannot "},
+            {"type": "text", "text": "policy block"},
+            {"type": "text", "text": "top-level refusal"}
+        ])
+    );
+    assert_eq!(body["messages"][3]["role"], "assistant");
+    assert_eq!(body["messages"][3]["content"], "nope");
+    assert!(!body.to_string().contains(r#""type":"refusal""#));
+
+    // An assistant turn with nothing replayable is rejected locally instead
+    // of being sent as an empty assistant message.
+    let error = client
+        .complete_turn(anthropic_tool_request(vec![
+            ToolChatMessage::user("first"),
+            ToolChatMessage::Assistant(AssistantToolTurn {
+                text: String::new(),
+                content_parts: Vec::new(),
+                reasoning: None,
+                refusal: Some(String::new()),
+                tool_calls: Vec::new(),
+            }),
+            ToolChatMessage::user("second"),
+        ]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Config);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 // MockServer-backed protocol client fixtures use two workers so delayed

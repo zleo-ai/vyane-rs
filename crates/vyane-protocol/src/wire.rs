@@ -1234,9 +1234,6 @@ pub(crate) mod anthropic_tool_chat {
         Thinking {
             thinking: String,
         },
-        Refusal {
-            refusal: String,
-        },
         ToolUse {
             id: String,
             name: String,
@@ -1272,7 +1269,6 @@ pub(crate) mod anthropic_tool_chat {
         #[serde(rename = "type")]
         pub(crate) kind: Option<String>,
         pub(crate) text: Option<String>,
-        pub(crate) refusal: Option<String>,
         pub(crate) thinking: Option<String>,
         pub(crate) id: Option<String>,
         pub(crate) name: Option<String>,
@@ -1389,21 +1385,6 @@ pub(crate) mod anthropic_tool_chat {
                         text.push_str(&value);
                         content_parts.push(AssistantContentPart::Text { text: value });
                     }
-                    "refusal" => {
-                        let refusal = block.refusal.or(block.text).ok_or_else(|| {
-                            VyaneError::new(
-                                ErrorKind::Protocol,
-                                "Anthropic refusal content block had no refusal text",
-                            )
-                        })?;
-                        if refusal.len() > ToolChatLimits::CONTENT_BYTES {
-                            return Err(VyaneError::new(
-                                ErrorKind::Protocol,
-                                "Anthropic refusal content exceeded the content limit",
-                            ));
-                        }
-                        content_parts.push(AssistantContentPart::Refusal { refusal });
-                    }
                     "thinking" => {
                         let thinking = block.thinking.unwrap_or_default();
                         if thinking.len()
@@ -1434,6 +1415,17 @@ pub(crate) mod anthropic_tool_chat {
                 ));
             }
 
+            // Anthropic has no refusal content block: a refusal is signalled by
+            // `stop_reason: "refusal"` with zero or more ordinary text blocks.
+            // Move that text into the structured refusal field (the OpenAI
+            // typed-turn shape) so it is never mistaken for a normal answer.
+            let refusal = if response.stop_reason.as_deref() == Some("refusal") {
+                content_parts.clear();
+                Some(std::mem::take(&mut text))
+            } else {
+                None
+            };
+
             // A lone text block is stored as `text` only so a text-only turn
             // round-trips as a string, matching the OpenAI typed-turn contract.
             if content_parts.len() == 1
@@ -1452,7 +1444,7 @@ pub(crate) mod anthropic_tool_chat {
                     } else {
                         Some(reasoning_parts.join(""))
                     },
-                    refusal: None,
+                    refusal,
                     tool_calls,
                 },
                 usage: response.usage.map(anthropic::usage_from_response),
@@ -1537,16 +1529,29 @@ pub(crate) mod anthropic_tool_chat {
                     AssistantContentPart::Text { text } => {
                         blocks.push(ContentBlockRequest::Text { text: text.clone() });
                     }
-                    AssistantContentPart::Refusal { refusal } => {
-                        blocks.push(ContentBlockRequest::Refusal {
-                            refusal: refusal.clone(),
+                    // Anthropic has no refusal block; a refusal is plain
+                    // assistant text, so replay it as text rather than drop it.
+                    AssistantContentPart::Refusal { refusal } if !refusal.is_empty() => {
+                        blocks.push(ContentBlockRequest::Text {
+                            text: refusal.clone(),
                         });
                     }
+                    AssistantContentPart::Refusal { .. } => {}
                 }
             }
         } else if !turn.text.is_empty() {
             blocks.push(ContentBlockRequest::Text {
                 text: turn.text.clone(),
+            });
+        }
+        if let Some(refusal) = turn.refusal.as_deref().filter(|refusal| {
+            !refusal.is_empty()
+                && !turn.content_parts.iter().any(|part| {
+                    matches!(part, AssistantContentPart::Refusal { refusal: same } if same == refusal)
+                })
+        }) {
+            blocks.push(ContentBlockRequest::Text {
+                text: refusal.to_string(),
             });
         }
         for call in &turn.tool_calls {
@@ -1557,7 +1562,13 @@ pub(crate) mod anthropic_tool_chat {
             });
         }
         Ok(match blocks.as_slice() {
-            [] => MessageContent::Text(String::new()),
+            // Anthropic rejects an empty assistant message; never send one.
+            [] => {
+                return Err(VyaneError::new(
+                    ErrorKind::Config,
+                    "typed Anthropic tool-chat cannot replay an assistant turn with no content",
+                ));
+            }
             [ContentBlockRequest::Text { text }] => MessageContent::Text(text.clone()),
             _ => MessageContent::Blocks(blocks),
         })
@@ -1607,20 +1618,17 @@ pub(crate) mod anthropic_tool_chat {
     fn classify_block(block: &ContentBlock) -> Result<&'static str> {
         match block.kind.as_deref() {
             Some("text") => Ok("text"),
-            Some("refusal") => Ok("refusal"),
             Some("thinking") => Ok("thinking"),
             Some("tool_use") => Ok("tool_use"),
             Some(_) => Err(unsupported_content_block()),
             None => {
                 let has_tool = block.name.is_some() || block.input.is_some();
                 let has_thinking = block.thinking.is_some();
-                let has_refusal = block.refusal.is_some();
                 let has_text = block.text.is_some();
-                match (has_tool, has_thinking, has_refusal, has_text) {
-                    (true, false, false, false) => Ok("tool_use"),
-                    (false, true, false, false) => Ok("thinking"),
-                    (false, false, true, false) => Ok("refusal"),
-                    (false, false, false, _) => Ok("text"),
+                match (has_tool, has_thinking, has_text) {
+                    (true, false, false) => Ok("tool_use"),
+                    (false, true, false) => Ok("thinking"),
+                    (false, false, _) => Ok("text"),
                     _ => Err(unsupported_content_block()),
                 }
             }
