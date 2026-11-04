@@ -1788,10 +1788,20 @@ mod tests {
             ".GIT",
             "src/.codex",
             "src/.CoDeX",
+            ".mcp.json",
+            "src/.mcp.json",
+            "src/.MCP.json",
         ] {
             let mut invalid = policy();
             invalid.writable_roots = vec![root.into()];
             assert!(invalid.validate().is_err(), "{root}");
+        }
+        // Look-alike names stay valid roots; a directory called `mcp.json`
+        // is not Claude Code's project MCP configuration.
+        for root in ["mcp.json", "src/mcp.json", "src/.mcp.json.d"] {
+            let mut valid = policy();
+            valid.writable_roots = vec![root.into()];
+            assert_eq!(valid.validate(), Ok(()), "{root}");
         }
         let mut duplicate = policy();
         duplicate.writable_roots = vec!["src".into(), "src".into()];

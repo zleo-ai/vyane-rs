@@ -291,9 +291,11 @@ Write tools use a second frozen policy axis and are assembled only when both
 the outer sandbox ceiling permits writes and the submission explicitly
 supplies `filesystem_write`. Read authority never implies write authority.
 Independently of any write exclusion, a write or edit target with a `.git`,
-`.vyane`, `.codex` or `.claude` component (ASCII case-insensitive, at any
-depth) is refused, the same floor command writable roots apply, because
-host tools execute or trust those files outside the sandbox.
+`.vyane`, `.codex`, `.claude` or `.mcp.json` component (ASCII
+case-insensitive, at any depth) is refused, the same floor command writable
+roots apply, because host tools execute or trust those files outside the
+sandbox. Claude Code, for example, starts the approved MCP servers listed in
+a workspace `.mcp.json` on the host.
 New files are staged under the exact opened parent, their complete content is
 synced, and they are then published with `RENAME_NOREPLACE`. Existing-file
 edits compose the pure guarded text
