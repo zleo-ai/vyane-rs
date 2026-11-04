@@ -1972,7 +1972,10 @@ fn get_transport_receipts(
             .map(|record| record.external_id.clone())
             .collect(),
     };
-    if request.canonical_digest()?.as_str() != digest {
+    // Stored rows are re-checked under the stored-row text rule: the write
+    // rule has tightened since earlier releases, and a batch they wrote must
+    // keep matching its own digest or the store will not open.
+    if request.stored_canonical_digest()?.as_str() != digest {
         return Err(MessageStoreError::CorruptData(
             "transport receipt batch digest does not match its identities".into(),
         ));

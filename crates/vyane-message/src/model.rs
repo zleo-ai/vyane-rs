@@ -603,8 +603,24 @@ impl NewTransportReceipt {
         Ok(())
     }
 
+    /// Digest of a receipt a caller is about to write. Applies the strict
+    /// input rule first, so the write path never stores a digest over text
+    /// it would not accept.
     pub(crate) fn canonical_digest(&self) -> Result<String> {
         self.validate()?;
+        self.digest()
+    }
+
+    /// Digest of a receipt rebuilt from stored rows. Applies the stored-row
+    /// rule, so a batch an earlier release wrote with padded text still
+    /// re-derives the digest it was stored with instead of failing as
+    /// corrupt. Only stored-row checks may use it.
+    pub(crate) fn stored_canonical_digest(&self) -> Result<String> {
+        self.validate_stored()?;
+        self.digest()
+    }
+
+    fn digest(&self) -> Result<String> {
         let mut hasher = Sha256::new();
         hasher.update(b"vyane-transport-receipt-v1\0");
         for value in [

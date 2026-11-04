@@ -2177,6 +2177,120 @@ fn legacy_text_rows_stay_readable_after_the_write_rule_tightened() {
     ));
 }
 
+/// The digest an earlier release stored with a transport receipt batch,
+/// computed from the fields alone. Mirrors the store's canonical digest so
+/// the test can rewrite a batch exactly as that release would have written it.
+fn legacy_receipt_digest(
+    transport: &str,
+    account_scope: &str,
+    destination_scope: &str,
+    external_ids: &[&str],
+) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"vyane-transport-receipt-v1\0");
+    for value in [transport, account_scope, destination_scope]
+        .into_iter()
+        .chain(external_ids.iter().copied())
+    {
+        hasher.update(u64::try_from(value.len()).unwrap().to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// A transport receipt batch is re-derived from its stored rows and compared
+/// with its stored digest both on read and in the open-time relational audit.
+/// A batch an earlier release wrote with padded scope text must still
+/// re-derive its own digest; otherwise one legacy receipt keeps the whole
+/// store from opening.
+#[test]
+fn legacy_transport_receipt_rows_stay_readable_after_the_write_rule_tightened() {
+    let directory = common::private_tempdir();
+    let path = directory.path().join("messages.sqlite3");
+    let store = SqliteMessageStore::open(&path).unwrap();
+    store
+        .enqueue("alice", &message("legacy-receipt", "body", "worker-a"))
+        .unwrap();
+    let leased = claim_one(&store, "alice", "worker-a", "consumer-a", 30);
+    let mut receipt = transport_receipt("legacy-external-id");
+    receipt.external_ids.push("legacy-external-id-2".into());
+    store
+        .mark_transport_delivered("alice", &mailbox("worker-a"), &leased.receipt, &receipt)
+        .unwrap();
+    drop(store);
+
+    let legacy_scope = " account-secret ";
+    let legacy_digest = legacy_receipt_digest(
+        "test-adapter",
+        legacy_scope,
+        "destination-secret",
+        &["legacy-external-id", "legacy-external-id-2"],
+    );
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER delivery_transport_receipts_immutable_update;")
+        .unwrap();
+    let rewritten = connection
+        .execute(
+            "UPDATE delivery_transport_receipts \
+             SET account_scope = ?1, receipt_digest = ?2 \
+             WHERE owner = 'alice' AND delivery_id = ?3",
+            rusqlite::params![legacy_scope, legacy_digest, leased.delivery.id],
+        )
+        .unwrap();
+    assert_eq!(rewritten, 2);
+    connection
+        .execute_batch(
+            "CREATE TRIGGER delivery_transport_receipts_immutable_update \
+             BEFORE UPDATE ON delivery_transport_receipts \
+             BEGIN SELECT RAISE(ABORT, 'transport receipts are immutable'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = SqliteMessageStore::open(&path).unwrap();
+    store.audit_integrity().unwrap();
+    let receipts = store
+        .transport_receipts("alice", &leased.delivery.id)
+        .unwrap();
+    assert_eq!(receipts.len(), 2);
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| receipt.account_scope == legacy_scope)
+    );
+    // Known trade-off: the legacy batch reads back, but a lookup keyed by its
+    // padded scope goes through the strict input rule and is rejected rather
+    // than matched. Reading stays possible; addressing it by key does not.
+    assert!(matches!(
+        store.resolve_transport_receipt(
+            "alice",
+            "test-adapter",
+            legacy_scope,
+            "destination-secret",
+            "legacy-external-id-2",
+        ),
+        Err(MessageStoreError::InvalidInput(_))
+    ));
+
+    // The tightened rule still governs new receipts.
+    store
+        .enqueue("alice", &message("padded-receipt", "body", "worker-a"))
+        .unwrap();
+    let leased = claim_one(&store, "alice", "worker-a", "consumer-a", 30);
+    let mut padded = transport_receipt("padded-external-id");
+    padded.account_scope = legacy_scope.into();
+    assert!(matches!(
+        store.mark_transport_delivered("alice", &mailbox("worker-a"), &leased.receipt, &padded),
+        Err(MessageStoreError::InvalidInput(_))
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn database_files_are_private_without_mutating_existing_parent() {

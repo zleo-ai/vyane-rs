@@ -113,9 +113,15 @@ This is a curated history, not a complete reconstruction of all development.
   control characters (NUL included), the same character rule the agent
   store and owner resolution already apply. Length limits are unchanged, so
   a kernel-store owner is still limited to 128 bytes. An id with an internal
-  space stays valid. Message-store errors name the field, not the value. A
-  row written by an earlier build with such an id or owner is rejected when
-  a read path re-validates it.
+  space stays valid. Message-store errors name the field, not the value.
+  Rows an earlier build wrote under its looser rule (padded or
+  control-character text, including transport receipt batches whose digest
+  covers that text) still open, audit and read back; only new writes are
+  held to the tightened rule. Known trade-off: such a row is readable but
+  cannot be addressed by its own value through an input that now applies
+  the strict rule (for example a conversation listing or a transport
+  receipt lookup keyed by a padded scope), which is rejected as invalid
+  input rather than matched.
 - Dispatch labels from CLI `--label`, REST `labels` and MCP `labels` share
   one parser. A key must be non-blank, at most 256 bytes, without
   surrounding whitespace or control characters; a value is a single line
