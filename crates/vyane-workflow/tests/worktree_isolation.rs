@@ -823,6 +823,65 @@ async fn unfinished_worktree_that_cannot_be_removed_is_reported() {
     assert_eq!(PathBuf::from(&entry.path), *root);
 }
 
+/// `git worktree add -b` creates the branch before the checkout. A checkout
+/// that fails (here a required smudge filter) removes the directory but keeps
+/// the branch; provisioning deletes it again, so retrying the same attempt
+/// on resume succeeds instead of failing on "branch already exists".
+#[tokio::test]
+async fn failed_checkout_removes_the_new_branch_so_the_attempt_can_be_retried() {
+    let repo = Repo::new();
+    std::fs::write(repo.repo.join(".gitattributes"), "*.bin filter=bad\n").unwrap();
+    std::fs::write(repo.repo.join("data.bin"), "data\n").unwrap();
+    git(&repo.repo, &["add", "."]);
+    git(&repo.repo, &["commit", "-q", "-m", "filtered file"]);
+    git(&repo.repo, &["config", "filter.bad.smudge", "false"]);
+    git(&repo.repo, &["config", "filter.bad.required", "true"]);
+    let base = repo.head();
+    let provisioner = repo.provisioner();
+    let run_id = WorkflowRunId::generate();
+
+    let error = provision(&provisioner, &run_id, &repo.repo, &base)
+        .await
+        .unwrap_err();
+    assert_eq!(error.as_str(), "add_failed", "{error}");
+    assert!(
+        !matches!(error, WorktreeError::LeftInPlace { .. }),
+        "{error:?}"
+    );
+    assert_no_worktree_left(&repo, &run_id);
+
+    git(&repo.repo, &["config", "--unset", "filter.bad.required"]);
+    git(&repo.repo, &["config", "--unset", "filter.bad.smudge"]);
+    let worktree = provision(&provisioner, &run_id, &repo.repo, &base)
+        .await
+        .unwrap();
+    assert_eq!(worktree.branch, format!("vyane/wt/{run_id}/0-0-0"));
+    let settlement = provisioner.settle(&worktree).await;
+    assert_eq!(settlement.disposition, WorktreeDisposition::Removed);
+    assert_no_worktree_left(&repo, &run_id);
+}
+
+/// A branch with the generated name that provisioning did not create is
+/// never touched: the attempt is skipped like an existing path.
+#[tokio::test]
+async fn existing_generated_branch_is_skipped_and_never_touched() {
+    let repo = Repo::new();
+    let base = repo.head();
+    let run_id = WorkflowRunId::generate();
+    let branch = format!("vyane/wt/{run_id}/0-0-0");
+    git(&repo.repo, &["branch", &branch, &base]);
+
+    let error = provision(&repo.provisioner(), &run_id, &repo.repo, &base)
+        .await
+        .unwrap_err();
+    assert_eq!(error.as_str(), "path_exists", "{error}");
+    assert_eq!(
+        git(&repo.repo, &["rev-parse", &format!("refs/heads/{branch}")]),
+        base
+    );
+    assert_eq!(repo.worktree_count(), 1);
+}
+
 #[tokio::test]
 async fn provisioning_errors_are_closed_codes_and_never_dispatch_paths() {
     let repo = Repo::new();
