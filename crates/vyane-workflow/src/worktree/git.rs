@@ -251,6 +251,9 @@ impl GitWorktreeProvisioner {
     /// Undo a worktree whose provisioning did not finish. Nothing has run in
     /// it, so the same conservative removal as settlement applies: no
     /// `--force`, and the branch is deleted only while it is still at base.
+    /// The path must still be the real directory this provisioner planned;
+    /// a symlink planted there would make `git worktree remove` act on its
+    /// target, so such a path is left for the caller to report.
     async fn discard_new_worktree(
         &self,
         source_root: &Path,
@@ -258,6 +261,9 @@ impl GitWorktreeProvisioner {
         branch: &str,
         base_sha: &str,
     ) -> bool {
+        if !self.is_owned_worktree_path(root).await {
+            return false;
+        }
         let mut remove: Vec<OsString> = vec!["worktree".into(), "remove".into()];
         remove.push(root.as_os_str().to_os_string());
         if !self
@@ -280,6 +286,109 @@ impl GitWorktreeProvisioner {
         )
         .await
         .is_some_and(|output| output.success)
+    }
+
+    /// Undo what a failed `git worktree add -b` left behind. Git creates the
+    /// branch before checking out, and a failed checkout removes the
+    /// directory but keeps the branch, which would make every retry of the
+    /// same attempt fail. The branch did not exist before this call, so it is
+    /// deleted while it still points at base. Returns `cause`, or
+    /// [`WorktreeError::LeftInPlace`] when the leftovers could not be removed.
+    async fn discard_failed_add(
+        &self,
+        source_root: &Path,
+        root: &Path,
+        branch: &str,
+        base_sha: &str,
+        cause: WorktreeError,
+    ) -> WorktreeError {
+        let branch_ref = format!("refs/heads/{branch}");
+        let removed = match self.branch_exists(source_root, &branch_ref).await {
+            Some(false) => return cause,
+            None => false,
+            Some(true) => match tokio::fs::symlink_metadata(root).await {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // Clears a registration git may have kept for the missing
+                    // directory; fails harmlessly when there is none.
+                    let mut remove: Vec<OsString> = vec!["worktree".into(), "remove".into()];
+                    remove.push(root.as_os_str().to_os_string());
+                    let unregistered = self
+                        .git(source_root, &remove)
+                        .await
+                        .is_some_and(|output| output.success);
+                    // A registration that survives the removal (git killed
+                    // while it still held the "initializing" lock) makes
+                    // every `git worktree add` at this path fail again. Only
+                    // deleting the branch would leave the attempt stuck, so
+                    // the leftovers are reported instead.
+                    if !unregistered
+                        && self.worktree_registered(source_root, root).await != Some(false)
+                    {
+                        false
+                    } else {
+                        self.git(
+                            source_root,
+                            [
+                                "update-ref",
+                                "--no-deref",
+                                "-d",
+                                branch_ref.as_str(),
+                                base_sha,
+                            ],
+                        )
+                        .await
+                        .is_some_and(|output| output.success)
+                    }
+                }
+                Ok(_) => {
+                    self.discard_new_worktree(source_root, root, branch, base_sha)
+                        .await
+                }
+                Err(_) => false,
+            },
+        };
+        if removed {
+            cause
+        } else {
+            WorktreeError::LeftInPlace {
+                cause: Box::new(cause),
+                branch: branch.to_string(),
+                root: root.to_path_buf(),
+                base_sha: base_sha.to_string(),
+            }
+        }
+    }
+
+    /// Whether the local branch `branch_ref` exists. `None` when the probe
+    /// failed.
+    async fn branch_exists(&self, cwd: &Path, branch_ref: &str) -> Option<bool> {
+        let output = self
+            .git(cwd, ["show-ref", "--verify", "--quiet", branch_ref])
+            .await?;
+        match output.code {
+            Some(0) => Some(true),
+            // `--verify --quiet` exits 1 without output for a missing ref.
+            Some(1) => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Whether `root` is still registered as a worktree of the repository at
+    /// `cwd`, whether or not its directory exists. `None` when the probe
+    /// failed.
+    async fn worktree_registered(&self, cwd: &Path, root: &Path) -> Option<bool> {
+        let output = self
+            .git(cwd, ["worktree", "list", "--porcelain", "-z"])
+            .await?;
+        if !output.success {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        Some(
+            text.split('\0')
+                .filter_map(|entry| entry.strip_prefix("worktree "))
+                .any(|path| Path::new(path) == root),
+        )
     }
 
     /// Whether the worktree's `.git` file still points at `git_dir`.
@@ -411,6 +520,19 @@ impl WorktreeProvisioner for GitWorktreeProvisioner {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Ok(_) | Err(_) => return Err(WorktreeError::PathExists),
         }
+        // A branch of this name that already exists was not created by this
+        // call. It is never touched; the caller moves to the next attempt as
+        // for an existing path, so a resume cannot fail on it forever.
+        let branch_ref = format!("refs/heads/{branch}");
+        match self.branch_exists(&source_root, &branch_ref).await {
+            Some(false) => {}
+            Some(true) => return Err(WorktreeError::PathExists),
+            None => {
+                return Err(WorktreeError::AddFailed {
+                    detail: "could not inspect the generated branch".into(),
+                });
+            }
+        }
 
         let mut args: Vec<OsString> = vec![
             "worktree".into(),
@@ -420,16 +542,19 @@ impl WorktreeProvisioner for GitWorktreeProvisioner {
         ];
         args.push(path.clone().into_os_string());
         args.push(base_sha.clone().into());
-        let output =
-            self.git(&source_root, &args)
-                .await
-                .ok_or_else(|| WorktreeError::AddFailed {
-                    detail: "git could not be run".into(),
-                })?;
-        if !output.success {
-            return Err(WorktreeError::AddFailed {
+        let cause = match self.git(&source_root, &args).await {
+            Some(output) if output.success => None,
+            Some(output) => Some(WorktreeError::AddFailed {
                 detail: sanitize_detail(&output.stderr),
-            });
+            }),
+            None => Some(WorktreeError::AddFailed {
+                detail: "git could not be run".into(),
+            }),
+        };
+        if let Some(cause) = cause {
+            return Err(self
+                .discard_failed_add(&source_root, &path, &branch, &base_sha, cause)
+                .await);
         }
 
         // From here on the worktree and its branch exist. Every failure

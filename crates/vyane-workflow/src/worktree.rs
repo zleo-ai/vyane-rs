@@ -343,15 +343,17 @@ pub enum WorktreeError {
     NotARepository,
     #[error("isolation base does not name a commit")]
     BaseUnresolved,
-    #[error("worktree path already exists")]
+    /// The worktree path, or the branch generated for it, already exists.
+    /// The caller moves on to the next attempt.
+    #[error("worktree path or its generated branch already exists")]
     PathExists,
     #[error("git worktree add failed: {detail}")]
     AddFailed { detail: String },
     #[error("worktree path is outside the worktree root")]
     PathEscape,
-    /// `git worktree add` succeeded, a later step failed with `cause`, and
-    /// removing the new worktree did not finish either. The caller must
-    /// record the worktree; it is never left unreported.
+    /// Provisioning created a worktree or its branch, a step failed with
+    /// `cause`, and removing what was created did not finish either. The
+    /// caller must record the worktree; it is never left unreported.
     #[error("{cause}; the new worktree could not be removed and was left in place")]
     LeftInPlace {
         cause: Box<WorktreeError>,

@@ -823,6 +823,197 @@ async fn unfinished_worktree_that_cannot_be_removed_is_reported() {
     assert_eq!(PathBuf::from(&entry.path), *root);
 }
 
+/// `git worktree add -b` creates the branch before the checkout. A checkout
+/// that fails (here a required smudge filter) removes the directory but keeps
+/// the branch; provisioning deletes it again, so retrying the same attempt
+/// on resume succeeds instead of failing on "branch already exists".
+#[tokio::test]
+async fn failed_checkout_removes_the_new_branch_so_the_attempt_can_be_retried() {
+    let repo = Repo::new();
+    std::fs::write(repo.repo.join(".gitattributes"), "*.bin filter=bad\n").unwrap();
+    std::fs::write(repo.repo.join("data.bin"), "data\n").unwrap();
+    git(&repo.repo, &["add", "."]);
+    git(&repo.repo, &["commit", "-q", "-m", "filtered file"]);
+    git(&repo.repo, &["config", "filter.bad.smudge", "false"]);
+    git(&repo.repo, &["config", "filter.bad.required", "true"]);
+    let base = repo.head();
+    let provisioner = repo.provisioner();
+    let run_id = WorkflowRunId::generate();
+
+    let error = provision(&provisioner, &run_id, &repo.repo, &base)
+        .await
+        .unwrap_err();
+    assert_eq!(error.as_str(), "add_failed", "{error}");
+    assert!(
+        !matches!(error, WorktreeError::LeftInPlace { .. }),
+        "{error:?}"
+    );
+    assert_no_worktree_left(&repo, &run_id);
+
+    git(&repo.repo, &["config", "--unset", "filter.bad.required"]);
+    git(&repo.repo, &["config", "--unset", "filter.bad.smudge"]);
+    let worktree = provision(&provisioner, &run_id, &repo.repo, &base)
+        .await
+        .unwrap();
+    assert_eq!(worktree.branch, format!("vyane/wt/{run_id}/0-0-0"));
+    let settlement = provisioner.settle(&worktree).await;
+    assert_eq!(settlement.disposition, WorktreeDisposition::Removed);
+    assert_no_worktree_left(&repo, &run_id);
+}
+
+/// A branch with the generated name that provisioning did not create is
+/// never touched: the attempt is skipped like an existing path.
+#[tokio::test]
+async fn existing_generated_branch_is_skipped_and_never_touched() {
+    let repo = Repo::new();
+    let base = repo.head();
+    let run_id = WorkflowRunId::generate();
+    let branch = format!("vyane/wt/{run_id}/0-0-0");
+    git(&repo.repo, &["branch", &branch, &base]);
+
+    let error = provision(&repo.provisioner(), &run_id, &repo.repo, &base)
+        .await
+        .unwrap_err();
+    assert_eq!(error.as_str(), "path_exists", "{error}");
+    assert_eq!(
+        error.to_string(),
+        "worktree path or its generated branch already exists"
+    );
+    assert_eq!(
+        git(&repo.repo, &["rev-parse", &format!("refs/heads/{branch}")]),
+        base
+    );
+    assert_eq!(repo.worktree_count(), 1);
+}
+
+/// Git killed during `git worktree add` can leave the path registered and
+/// locked ("initializing") while its directory is gone. `git worktree
+/// remove` refuses the locked registration and `git worktree add` fails on
+/// it again, so deleting only the branch would leave the attempt stuck
+/// forever. The leftovers are reported instead, so the engine records them
+/// and moves to the next attempt.
+#[tokio::test]
+async fn locked_registration_without_a_directory_is_reported_not_retried() {
+    let repo = Repo::new();
+    let base = repo.head();
+    let run_id = WorkflowRunId::generate();
+    let branch = format!("vyane/wt/{run_id}/0-0-0");
+    let run_dir = repo.worktrees.join(run_id.as_str());
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let leaf = std::fs::canonicalize(&run_dir).unwrap().join("0-0-0");
+    let leaf_str = leaf.to_str().unwrap();
+    git(
+        &repo.repo,
+        &["worktree", "add", "-q", "--detach", leaf_str, &base],
+    );
+    git(
+        &repo.repo,
+        &["worktree", "lock", "--reason", "initializing", leaf_str],
+    );
+    std::fs::remove_dir_all(&leaf).unwrap();
+    assert!(!repo.branch_exists(&branch));
+    assert_eq!(repo.worktree_count(), 2);
+
+    let error = provision(&repo.provisioner(), &run_id, &repo.repo, &base)
+        .await
+        .unwrap_err();
+    assert_eq!(error.as_str(), "add_failed", "{error}");
+    let WorktreeError::LeftInPlace {
+        branch: left_branch,
+        root,
+        base_sha,
+        ..
+    } = &error
+    else {
+        panic!("expected a left-in-place error, got {error:?}");
+    };
+    assert_eq!(left_branch, &branch);
+    assert_eq!(*root, leaf);
+    assert_eq!(base_sha, &base);
+    // Nothing was removed behind the report: the locked registration and
+    // the branch git created are both still there for the user to clear.
+    assert_eq!(repo.worktree_count(), 2);
+    assert!(repo.branch_exists(&branch));
+    let entry = vyane_workflow::JournalWorktree::left_in_place("alpha", 0, &error).unwrap();
+    assert_eq!(PathBuf::from(&entry.path), leaf);
+}
+
+/// Between the pre-check and a failed `git worktree add`, something else
+/// can plant a symlink at the planned path. `git worktree remove` resolves
+/// its argument, so handing it that path would remove the symlink's target
+/// (here a worktree of the user's). The path is left in place and reported.
+#[tokio::test]
+async fn symlink_planted_at_the_path_after_a_failed_add_is_never_removed_through() {
+    let repo = Repo::new();
+    let base = repo.head();
+    let user_worktree = repo._temp.path().join("user-wt");
+    git(
+        &repo.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            user_worktree.to_str().unwrap(),
+            &base,
+        ],
+    );
+    let user_worktree = std::fs::canonicalize(&user_worktree).unwrap();
+    assert!(user_worktree.join("README.md").exists());
+
+    // On `worktree add`, create the branch as git would, plant the symlink
+    // where the worktree directory was planned, and fail.
+    let tools = repo._temp.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    let wrapper = tools.join("symlink-git");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"worktree\" ] && [ \"$arg\" = \"add\" ]; then\n    eval \"branch=\\${{$(($#-2))}}\"\n    eval \"path=\\${{$(($#-1))}}\"\n    eval \"base=\\${{$#}}\"\n    git branch \"$branch\" \"$base\" || exit 3\n    ln -s {} \"$path\" || exit 3\n    exit 1\n  fi\n  prev=\"$arg\"\ndone\nexec git \"$@\"\n",
+            user_worktree.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run_id = WorkflowRunId::generate();
+    let branch = format!("vyane/wt/{run_id}/0-0-0");
+
+    let error = provision(
+        &repo.provisioner().with_git_program(&wrapper),
+        &run_id,
+        &repo.repo,
+        &base,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.as_str(), "add_failed", "{error}");
+    let leaf = std::fs::canonicalize(repo.worktrees.join(run_id.as_str()))
+        .unwrap()
+        .join("0-0-0");
+    assert!(
+        std::fs::symlink_metadata(&leaf)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the planted symlink stays where it was"
+    );
+    let WorktreeError::LeftInPlace {
+        branch: left_branch,
+        root,
+        ..
+    } = &error
+    else {
+        panic!("expected a left-in-place error, got {error:?}");
+    };
+    assert_eq!(left_branch, &branch);
+    assert_eq!(*root, leaf);
+    assert!(repo.branch_exists(&branch));
+    // The user's worktree behind the symlink is untouched and still
+    // registered.
+    assert!(user_worktree.join("README.md").exists());
+    assert_eq!(repo.worktree_count(), 2);
+}
+
 #[tokio::test]
 async fn provisioning_errors_are_closed_codes_and_never_dispatch_paths() {
     let repo = Repo::new();
