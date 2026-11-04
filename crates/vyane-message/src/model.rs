@@ -561,7 +561,18 @@ impl fmt::Debug for NewTransportReceipt {
 
 impl NewTransportReceipt {
     pub(crate) fn validate(&self) -> Result<()> {
-        validate_text("transport receipt transport", &self.transport, 64)?;
+        self.validate_with(validate_text)
+    }
+
+    /// Re-checks a receipt rebuilt from a stored row. Text fields use the
+    /// legacy stored-text rule so rows written before the shared identifier
+    /// rule stay readable; the structural checks are unchanged.
+    pub(crate) fn validate_stored(&self) -> Result<()> {
+        self.validate_with(validate_stored_text)
+    }
+
+    fn validate_with(&self, text_rule: fn(&'static str, &str, usize) -> Result<()>) -> Result<()> {
+        text_rule("transport receipt transport", &self.transport, 64)?;
         if !self.transport.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         }) {
@@ -569,8 +580,8 @@ impl NewTransportReceipt {
                 "transport receipt transport must use lowercase ASCII identity characters".into(),
             ));
         }
-        validate_text("transport receipt account scope", &self.account_scope, 512)?;
-        validate_text(
+        text_rule("transport receipt account scope", &self.account_scope, 512)?;
+        text_rule(
             "transport receipt destination scope",
             &self.destination_scope,
             512,
@@ -582,7 +593,7 @@ impl NewTransportReceipt {
         }
         let mut external_ids = HashSet::with_capacity(self.external_ids.len());
         for external_id in &self.external_ids {
-            validate_text("transport receipt external id", external_id, 512)?;
+            text_rule("transport receipt external id", external_id, 512)?;
             if !external_ids.insert(external_id) {
                 return Err(MessageStoreError::InvalidInput(
                     "transport receipt contains a duplicate external id".into(),
@@ -1000,6 +1011,27 @@ pub(crate) fn validate_optional_text(
     max: usize,
 ) -> Result<()> {
     value.map_or(Ok(()), |value| validate_text(field, value, max))
+}
+
+/// The rule for text read back from the store. It is the rule every earlier
+/// release enforced on write (non-blank, bounded, no NUL), so rows those
+/// releases accepted keep decoding after the write rule tightened. Only
+/// stored-row checks may use it; caller input goes through [`validate_text`].
+pub(crate) fn validate_stored_text(field: &str, value: &str, max: usize) -> Result<()> {
+    if value.trim().is_empty() || value.len() > max || value.contains('\0') {
+        return Err(MessageStoreError::InvalidInput(format!(
+            "{field} is empty, oversized, or contains NUL"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_optional_stored_text(
+    field: &str,
+    value: Option<&str>,
+    max: usize,
+) -> Result<()> {
+    value.map_or(Ok(()), |value| validate_stored_text(field, value, max))
 }
 
 pub(crate) fn normalize_timestamp(value: DateTime<Utc>) -> Result<DateTime<Utc>> {

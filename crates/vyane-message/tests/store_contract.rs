@@ -2095,6 +2095,88 @@ fn publication_audit_rejects_initial_enqueue_time_drift() {
     ));
 }
 
+/// Earlier releases accepted any non-blank, bounded, NUL-free text on write.
+/// Rows they stored must keep decoding after the write rule tightened to the
+/// shared identifier rule (no padding, no control characters): one legacy row
+/// must neither fail the open audit nor take the rest of a page down with it.
+#[test]
+fn legacy_text_rows_stay_readable_after_the_write_rule_tightened() {
+    let directory = common::private_tempdir();
+    let path = directory.path().join("messages.sqlite3");
+    let store = SqliteMessageStore::open(&path).unwrap();
+    let legacy = store
+        .enqueue("alice", &message("legacy-text", "legacy body", "worker-a"))
+        .unwrap();
+    let ordinary = store
+        .enqueue(
+            "alice",
+            &message("ordinary-text", "ordinary body", "worker-a"),
+        )
+        .unwrap();
+    drop(store);
+
+    let legacy_trace = " trace-legacy ";
+    let legacy_correlation = "correlation\u{1b}legacy";
+    let legacy_kind = "message\u{7}";
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER messages_immutable_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE messages SET trace_id = ?1, correlation_id = ?2, kind = ?3 \
+             WHERE owner = 'alice' AND id = ?4",
+            rusqlite::params![
+                legacy_trace,
+                legacy_correlation,
+                legacy_kind,
+                legacy.bundle.message.id
+            ],
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER messages_immutable_update BEFORE UPDATE ON messages \
+             BEGIN SELECT RAISE(ABORT, 'messages are immutable'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = SqliteMessageStore::open(&path).unwrap();
+    store.audit_integrity().unwrap();
+    let stored = store
+        .get("alice", &legacy.bundle.message.id)
+        .unwrap()
+        .unwrap()
+        .message;
+    assert_eq!(stored.trace_id.as_deref(), Some(legacy_trace));
+    assert_eq!(stored.correlation_id.as_deref(), Some(legacy_correlation));
+    assert_eq!(stored.kind, legacy_kind);
+    let page = store
+        .list_conversation("alice", "conversation-1", None, 10)
+        .unwrap();
+    let ids = page
+        .items
+        .iter()
+        .map(|bundle| bundle.message.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            legacy.bundle.message.id.as_str(),
+            ordinary.bundle.message.id.as_str()
+        ]
+    );
+
+    // The tightened rule still governs new writes.
+    let mut padded = message("padded-text", "body", "worker-a");
+    padded.trace_id = Some(legacy_trace.into());
+    assert!(matches!(
+        store.enqueue("alice", &padded),
+        Err(MessageStoreError::InvalidInput(_))
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn database_files_are_private_without_mutating_existing_parent() {

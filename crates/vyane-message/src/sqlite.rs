@@ -21,8 +21,8 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::model::{
-    hex_lower, normalize_timestamp, validate_limit, validate_optional_text, validate_owner,
-    validate_payload, validate_text,
+    hex_lower, normalize_timestamp, validate_limit, validate_optional_stored_text, validate_owner,
+    validate_payload, validate_stored_text, validate_text,
 };
 use crate::{
     ClaimQuery, DeliveryMailbox, DeliveryRecord, DeliveryStatus, EndpointKind, EndpointRef,
@@ -3055,16 +3055,16 @@ fn row_to_transport_receipt(row: &Row<'_>) -> rusqlite::Result<(TransportReceipt
 
 fn validate_stored_message(record: &MessageRecord) -> Result<()> {
     validate_uuid_v7("message id", &record.id)?;
-    validate_owner(&record.owner)?;
-    validate_text("conversation id", &record.conversation_id, 256)?;
+    validate_stored_text("owner", &record.owner, 256)?;
+    validate_stored_text("conversation id", &record.conversation_id, 256)?;
     if record.conversation_sequence == 0 {
         return Err(MessageStoreError::CorruptData(
             "conversation sequence is zero".into(),
         ));
     }
-    validate_optional_text("session id", record.session_id.as_deref(), 256)?;
-    validate_text("message kind", &record.kind, 128)?;
-    record.sender.validate("sender id")?;
+    validate_optional_stored_text("session id", record.session_id.as_deref(), 256)?;
+    validate_stored_text("message kind", &record.kind, 128)?;
+    validate_stored_text("sender id", &record.sender.id, 512)?;
     if record.body.len() > crate::model::MAX_BODY_BYTES || record.body.contains('\0') {
         return Err(MessageStoreError::CorruptData(
             "stored body violates its bound".into(),
@@ -3079,9 +3079,10 @@ fn validate_stored_message(record: &MessageRecord) -> Result<()> {
     if let Some(reply_to) = record.reply_to.as_deref() {
         validate_uuid_v7("message reply_to", reply_to)?;
     }
-    validate_optional_text("trace id", record.trace_id.as_deref(), 256)?;
-    validate_optional_text("correlation id", record.correlation_id.as_deref(), 256)?;
-    record.idempotency.validate()?;
+    validate_optional_stored_text("trace id", record.trace_id.as_deref(), 256)?;
+    validate_optional_stored_text("correlation id", record.correlation_id.as_deref(), 256)?;
+    validate_stored_text("idempotency producer", &record.idempotency.producer, 256)?;
+    validate_stored_text("idempotency key", &record.idempotency.key, 256)?;
     if record.request_digest.len() != 64
         || !record
             .request_digest
@@ -3097,10 +3098,10 @@ fn validate_stored_message(record: &MessageRecord) -> Result<()> {
 
 fn validate_stored_delivery(record: &DeliveryRecord) -> Result<()> {
     validate_uuid_v7("delivery id", &record.id)?;
-    validate_owner(&record.owner)?;
+    validate_stored_text("owner", &record.owner, 256)?;
     validate_uuid_v7("delivery message id", &record.message_id)?;
-    validate_text("delivery route", &record.route, 256)?;
-    record.target.validate("delivery target id")?;
+    validate_stored_text("delivery route", &record.route, 256)?;
+    validate_stored_text("delivery target id", &record.target.id, 512)?;
     if record.max_attempts == 0
         || record.max_attempts > 100
         || record.attempt_count > record.max_attempts
@@ -3114,7 +3115,7 @@ fn validate_stored_delivery(record: &DeliveryRecord) -> Result<()> {
             "stored delivery attempt count and lease generation diverge".into(),
         ));
     }
-    validate_optional_text("delivery lease owner", record.lease_owner.as_deref(), 256)?;
+    validate_optional_stored_text("delivery lease owner", record.lease_owner.as_deref(), 256)?;
     if record.updated_at < record.created_at {
         return Err(MessageStoreError::CorruptData(
             "stored delivery updated_at predates creation".into(),
@@ -3177,7 +3178,7 @@ fn validate_stored_delivery(record: &DeliveryRecord) -> Result<()> {
         ));
     }
     if record.status == DeliveryStatus::DeadLettered {
-        validate_text(
+        validate_stored_text(
             "failure code",
             record.failure_code.as_deref().unwrap_or_default(),
             128,
@@ -3197,11 +3198,11 @@ fn validate_stored_event(event: &MessageEvent) -> Result<()> {
         ));
     }
     validate_uuid_v7("event id", &event.event_id)?;
-    validate_owner(&event.owner)?;
+    validate_stored_text("owner", &event.owner, 256)?;
     validate_uuid_v7("event message id", &event.message_id)?;
     validate_uuid_v7("event delivery id", &event.delivery_id)?;
-    validate_text("event route", &event.route, 256)?;
-    event.target.validate("event target id")?;
+    validate_stored_text("event route", &event.route, 256)?;
+    validate_stored_text("event target id", &event.target.id, 512)?;
     if let Some(reply_to) = event.reply_to.as_deref() {
         validate_uuid_v7("event reply_to", reply_to)?;
     }
@@ -3250,7 +3251,7 @@ fn validate_stored_event(event: &MessageEvent) -> Result<()> {
 }
 
 fn validate_stored_transport_receipt(record: &TransportReceiptRecord, digest: &str) -> Result<()> {
-    validate_owner(&record.owner)?;
+    validate_stored_text("owner", &record.owner, 256)?;
     validate_uuid_v7("transport receipt delivery id", &record.delivery_id)?;
     if record.generation == 0 {
         return Err(MessageStoreError::CorruptData(
@@ -3268,7 +3269,7 @@ fn validate_stored_transport_receipt(record: &TransportReceiptRecord, digest: &s
         destination_scope: record.destination_scope.clone(),
         external_ids: vec![record.external_id.clone()],
     };
-    request.validate()?;
+    request.validate_stored()?;
     if digest.len() != 64
         || !digest
             .bytes()
@@ -3425,11 +3426,11 @@ fn audit_row_contracts(connection: &Connection) -> Result<()> {
             revision,
             schema,
         ) = publication?;
-        validate_owner(&owner).map_err(|_| {
+        validate_stored_text("owner", &owner, 256).map_err(|_| {
             MessageStoreError::CorruptData("publication owner violates its bound".into())
         })?;
         validate_uuid_v7("publication message id", &message_id)?;
-        validate_text("publication conversation id", &conversation_id, 256)?;
+        validate_stored_text("publication conversation id", &conversation_id, 256)?;
         let status = MessagePublicationStatus::from_str(&status)?;
         let valid = conversation_sequence > 0
             && schema == i64::from(RECORD_SCHEMA)
@@ -3503,21 +3504,18 @@ fn audit_row_contracts(connection: &Connection) -> Result<()> {
             claimed_at,
             initial_expiry,
         ) = attempt?;
-        validate_owner(&owner).map_err(|_| {
+        validate_stored_text("owner", &owner, 256).map_err(|_| {
             MessageStoreError::CorruptData("attempt owner violates its bound".into())
         })?;
         validate_uuid_v7("attempt delivery id", &delivery_id)?;
-        validate_text("attempt route", &route, 256).map_err(|_| {
+        validate_stored_text("attempt route", &route, 256).map_err(|_| {
             MessageStoreError::CorruptData("attempt route violates its bound".into())
         })?;
-        let kind = EndpointKind::from_str(&target_kind)?;
-        EndpointRef {
-            kind,
-            id: target_id,
-        }
-        .validate("attempt target id")
-        .map_err(|_| MessageStoreError::CorruptData("attempt target violates its bound".into()))?;
-        validate_text("attempt consumer", &consumer, 256).map_err(|_| {
+        EndpointKind::from_str(&target_kind)?;
+        validate_stored_text("attempt target id", &target_id, 512).map_err(|_| {
+            MessageStoreError::CorruptData("attempt target violates its bound".into())
+        })?;
+        validate_stored_text("attempt consumer", &consumer, 256).map_err(|_| {
             MessageStoreError::CorruptData("attempt consumer violates its bound".into())
         })?;
         if generation == 0 || token_hash.len() != 32 || initial_expiry <= claimed_at {
@@ -3565,11 +3563,11 @@ fn audit_receipt_operation(
     result_json: &str,
     completed_at: DateTime<Utc>,
 ) -> Result<()> {
-    validate_owner(owner).map_err(|_| {
+    validate_stored_text("owner", owner, 256).map_err(|_| {
         MessageStoreError::CorruptData("receipt operation owner violates its bound".into())
     })?;
     validate_uuid_v7("receipt operation delivery id", delivery_id)?;
-    validate_text("receipt operation key", operation_key, 256).map_err(|_| {
+    validate_stored_text("receipt operation key", operation_key, 256).map_err(|_| {
         MessageStoreError::CorruptData("receipt operation key violates its bound".into())
     })?;
     if generation == 0 {
