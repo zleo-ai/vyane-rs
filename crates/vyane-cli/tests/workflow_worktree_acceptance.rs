@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
+#[cfg(target_os = "linux")]
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -53,7 +54,8 @@ prompt = "implement"
 "#;
 
 struct Fixture {
-    root: TempDir,
+    /// Owns every other path; dropped with the fixture.
+    _root: TempDir,
     repo: PathBuf,
     data: PathBuf,
     config: PathBuf,
@@ -122,7 +124,7 @@ printf '%s\n' '{"result":"wrote a file","session_id":"worktree-acceptance"}'
 
         Self {
             data: root.path().join("data"),
-            root,
+            _root: root,
             repo,
             config,
             workflow: workflow_path,
@@ -148,6 +150,11 @@ printf '%s\n' '{"result":"wrote a file","session_id":"worktree-acceptance"}'
     }
 }
 
+// Writable pinned workdirs are currently supported only on Linux. Elsewhere a
+// `sandbox = "write"` step is rejected at admission
+// (`workdir_pinning_unavailable`) before the fake harness runs, so the runs
+// that expect kept worktrees are Linux-only.
+#[cfg(target_os = "linux")]
 #[test]
 fn isolated_fan_out_keeps_one_dirty_worktree_per_target() {
     let fixture = Fixture::new(ISOLATED_WORKFLOW);
@@ -199,9 +206,9 @@ fn isolated_fan_out_keeps_one_dirty_worktree_per_target() {
         git(&fixture.repo, &["status", "--porcelain"]).is_empty(),
         "source tree must stay clean"
     );
-    drop(fixture.root);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn human_run_output_names_kept_branches_and_plan_shows_isolation() {
     let fixture = Fixture::new(ISOLATED_WORKFLOW);

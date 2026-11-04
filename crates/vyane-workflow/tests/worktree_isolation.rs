@@ -25,12 +25,13 @@ use vyane_core::{
 };
 use vyane_kernel::{CapabilityManifest, Dispatcher, Executor, ExecutorFactory, IsolationStrength};
 use vyane_workflow::{
-    GitWorktreeProvisioner, JournalStepStatus, ProvisionedWorktree, TargetResolver, Workflow,
-    WorkflowEngine, WorkflowError, WorkflowIsolation, WorkflowPlan, WorkflowPlanFeature,
-    WorkflowPlanFeatureSupport, WorkflowRunId, WorkflowRunStatus, WorkflowSourceBundle,
-    WorktreeDisposition, WorktreeError, WorktreeKeptReason, WorktreeProvisioner, WorktreeRequest,
-    WorktreeSettlement, read_journal,
+    GitWorktreeProvisioner, ProvisionedWorktree, TargetResolver, Workflow, WorkflowEngine,
+    WorkflowError, WorkflowIsolation, WorkflowPlan, WorkflowPlanFeature,
+    WorkflowPlanFeatureSupport, WorkflowRunId, WorkflowSourceBundle, WorktreeDisposition,
+    WorktreeError, WorktreeKeptReason, WorktreeProvisioner, WorktreeRequest, WorktreeSettlement,
 };
+#[cfg(target_os = "linux")]
+use vyane_workflow::{JournalStepStatus, WorkflowRunStatus, read_journal};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -1516,6 +1517,13 @@ fn write_fan_out() -> Workflow {
     .unwrap()
 }
 
+// The engine tests below dispatch `sandbox = "write"` steps through the real
+// kernel dispatcher, which pins the admitted workdir with
+// `PinnedWorkdir::open`. Writable pinned workdirs are currently supported
+// only on Linux; elsewhere admission fails closed with
+// `workdir_pinning_unavailable` before any harness runs, so these tests are
+// Linux-only like the other write-dispatch acceptance tests.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn fan_out_targets_get_distinct_workdirs_in_input_order() {
     let directory = TempDir::new().unwrap();
@@ -1594,6 +1602,7 @@ async fn engine_without_provisioner_rejects_isolation_before_journal() {
     assert!(!journal_dir.exists());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn cancelled_dispatch_still_settles_once_after_active_was_recorded() {
     let directory = TempDir::new().unwrap();
@@ -1644,6 +1653,7 @@ prompt = "hang"
     assert_eq!(step.worktrees[0].disposition, WorktreeDisposition::Kept);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn resume_after_crash_keeps_active_entry_and_uses_a_new_attempt() {
     let directory = TempDir::new().unwrap();
@@ -1714,6 +1724,7 @@ async fn resume_after_crash_keeps_active_entry_and_uses_a_new_attempt() {
     assert_eq!(provisioner.settles.load(Ordering::SeqCst), 4);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn provisioning_failure_fails_only_that_target_without_dispatch() {
     let directory = TempDir::new().unwrap();
@@ -1750,6 +1761,7 @@ async fn provisioning_failure_fails_only_that_target_without_dispatch() {
 
 /// A worktree that provisioning created but could not remove again is
 /// recorded as `cleanup_failed`, and its target is not dispatched.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn worktree_left_in_place_by_provisioning_is_journaled() {
     let directory = TempDir::new().unwrap();
