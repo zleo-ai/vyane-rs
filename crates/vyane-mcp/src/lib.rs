@@ -2191,7 +2191,7 @@ mod tests {
     fn dispatch_labels_share_the_service_label_rule_without_echo() {
         const CANARY: &str = "MCP_LABEL_CANARY";
         for labels in [
-            vec![format!("{CANARY}")],
+            vec![CANARY.to_string()],
             vec![format!("team\n{CANARY}=ops")],
             vec![format!("team=ops\u{1b}[2J{CANARY}")],
             vec![format!(" {CANARY}=ops")],
