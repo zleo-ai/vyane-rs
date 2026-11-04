@@ -1230,13 +1230,30 @@ async fn write_tools_reject_traversal_absolute_and_symlink_parent_paths() {
 /// could plant code that later runs unsandboxed on the host.
 #[tokio::test]
 async fn write_and_edit_refuse_host_control_directories_at_any_depth_and_case() {
-    for control in [".git", ".claude", ".codex", ".vyane", "sub/.GIT"] {
+    for control in [
+        ".git",
+        ".claude",
+        ".codex",
+        ".vyane",
+        "sub/.GIT",
+        ".mcp.json",
+        "src/.mcp.json",
+        "src/.MCP.json",
+    ] {
         let policy: NativeCommandPolicy = serde_json::from_value(json!({
             "allow": [{"program": "true"}],
             "writable_roots": [control],
         }))
         .expect("command policy shape");
         assert!(policy.validate().is_err(), "{control} must be refused");
+    }
+    for root in ["mcp.json", "src/mcp.json"] {
+        let policy: NativeCommandPolicy = serde_json::from_value(json!({
+            "allow": [{"program": "true"}],
+            "writable_roots": [root],
+        }))
+        .expect("command policy shape");
+        assert!(policy.validate().is_ok(), "{root} must stay a valid root");
     }
 
     for write_policy in [
