@@ -38,7 +38,7 @@ live-harness acceptance is claimed for this documentation update.
 
 This repository is the public Rust implementation of capabilities from the original private Python Vyane system. It is not a drop-in replacement: Python commands, configuration, stored sessions, workflows and operational integrations must be checked individually before migration. Do not point both implementations at the same state directory without a documented migration path.
 
-The [public capability matrix](parity/ORIGINAL-VYANE-PARITY.md) tracks 53 capabilities across eight domains: 7 implemented, 23 partial, 12 missing, 9 deliberately different or awaiting a decision, and 2 planned. The [sanitized manifest](parity/fixtures/v1/manifest.json) contains 44 cases in 5 suites: 30 normalized matches and 14 open differences. These are bounded behavior checks, not a whole-system parity percentage. Recompute the public Rust evidence with:
+The [public capability matrix](parity/ORIGINAL-VYANE-PARITY.md) tracks 53 capabilities across eight domains: 7 implemented, 25 partial, 10 missing, 9 deliberately different or awaiting a decision, and 2 planned. The [sanitized manifest](parity/fixtures/v1/manifest.json) contains 44 cases in 5 suites: 30 normalized matches and 14 open differences. These are bounded behavior checks, not a whole-system parity percentage. Recompute the public Rust evidence with:
 
 ```sh
 python3 .github/scripts/parity-report.py --format markdown

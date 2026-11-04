@@ -11,6 +11,8 @@
 //!   rename, so readers never observe a half-written session.
 //! - [`EventLog`] keeps owner-scoped, replayable event streams with monotonic
 //!   sequence allocation and selectable buffered or durable appends.
+//! - [`JsonlFeedbackStore`] appends owner-scoped 1–5 run ratings and folds
+//!   them so the latest rating per run and source wins.
 //! - [`PriceTable`] turns recorded [`vyane_core::Usage`] into a `cost_usd`,
 //!   never guessing an unknown model (it returns `None`).
 //!
@@ -18,6 +20,7 @@
 
 pub mod cost;
 pub mod event;
+pub mod feedback;
 pub mod jsonl;
 pub mod session;
 
@@ -25,6 +28,10 @@ pub use cost::{ModelPricing, PriceTable};
 pub use event::{
     EventCategory, EventCursor, EventDurability, EventLog, EventLogError, EventPage, EventRecord,
     EventResult, EventSource, NewEvent,
+};
+pub use feedback::{
+    AutoRule, FeedbackPage, FeedbackQuery, FeedbackRecord, FeedbackSource, JsonlFeedbackStore,
+    Rating, RatingIndex,
 };
 pub use jsonl::JsonlLedger;
 pub use session::FsSessionStore;

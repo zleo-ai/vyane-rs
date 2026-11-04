@@ -121,6 +121,9 @@ pub enum WorkflowError {
         "workflow file hash changed for resume: journal has {expected}, current file is {actual}"
     )]
     WorkflowHashChanged { expected: String, actual: String },
+    /// A step asks for worktree isolation on a surface that cannot provide it.
+    #[error("isolation_unsupported: {reason}")]
+    IsolationUnsupported { reason: &'static str },
 }
 
 impl WorkflowError {
@@ -155,6 +158,7 @@ impl WorkflowError {
             Self::InvalidJournalFileName { .. } => "invalid_journal_file_name",
             Self::JournalAlreadyExists { .. } => "journal_already_exists",
             Self::WorkflowHashChanged { .. } => "workflow_hash_changed",
+            Self::IsolationUnsupported { .. } => "isolation_unsupported",
         }
     }
 
@@ -176,6 +180,7 @@ impl WorkflowError {
                 | WorkflowError::MissingWorkflowPromptEntry { .. }
                 | WorkflowError::ExtraWorkflowPromptEntry { .. }
                 | WorkflowError::WorkflowHashChanged { .. }
+                | WorkflowError::IsolationUnsupported { .. }
         )
     }
 }

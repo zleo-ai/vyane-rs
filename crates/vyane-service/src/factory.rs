@@ -723,7 +723,7 @@ mod tests {
         assert_eq!(*events.lock().unwrap(), vec!["live"]);
         let env = observed_env.lock().unwrap().take().unwrap();
         assert_eq!(
-            env.inject.get("TARGET_ONLY").map(String::as_str),
+            env.inject.get("TARGET_ONLY").map(Secret::expose),
             Some("kept")
         );
         assert!(!env.inject.contains_key("CALLER_ONLY"));

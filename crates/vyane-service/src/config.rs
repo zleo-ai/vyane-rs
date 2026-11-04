@@ -26,6 +26,7 @@ const AGENT_METADATA_DB_FILE: &str = "agent-runs.sqlite3";
 const MESSAGE_DB_FILE: &str = "messages.sqlite3";
 const GOAL_DB_FILE: &str = "goals.sqlite3";
 const EVENT_LOG_DIR: &str = "events";
+const FEEDBACK_FILE: &str = "feedback.jsonl";
 const MANAGED_PERMISSION_CONFIG_ENV: &str = "VYANE_MANAGED_PERMISSION_CONFIG";
 const MANAGED_NATIVE_CONFIG_ENV: &str = "VYANE_MANAGED_NATIVE_CONFIG";
 
@@ -196,6 +197,9 @@ pub struct StoragePaths {
     pub ledger_path: PathBuf,
     pub sessions_dir: PathBuf,
     pub workflows_dir: PathBuf,
+    /// Root for per-target worktrees created by `isolation = "worktree"`
+    /// workflow steps: `<data_dir>/worktrees/<run>/<order>-<index>-<attempt>`.
+    pub worktrees_dir: PathBuf,
 }
 
 impl StoragePaths {
@@ -211,6 +215,7 @@ impl StoragePaths {
             ledger_path: data_dir.join("ledger.jsonl"),
             sessions_dir: data_dir.join("sessions"),
             workflows_dir: data_dir.join("workflows"),
+            worktrees_dir: data_dir.join("worktrees"),
             data_dir,
         }
     }
@@ -254,6 +259,12 @@ impl StoragePaths {
     pub fn event_log_dir(&self) -> PathBuf {
         self.data_dir.join(EVENT_LOG_DIR)
     }
+
+    /// Append-only JSONL file of owner-scoped run ratings.
+    #[must_use]
+    pub fn feedback_path(&self) -> PathBuf {
+        self.data_dir.join(FEEDBACK_FILE)
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +290,10 @@ mod tests {
             PathBuf::from("/tmp/vyane-explicit-path-test/workflows")
         );
         assert_eq!(
+            paths.worktrees_dir,
+            PathBuf::from("/tmp/vyane-explicit-path-test/worktrees")
+        );
+        assert_eq!(
             paths.task_metadata_db_path(),
             PathBuf::from("/tmp/vyane-explicit-path-test/tasks.sqlite3")
         );
@@ -297,6 +312,10 @@ mod tests {
         assert_eq!(
             paths.event_log_dir(),
             PathBuf::from("/tmp/vyane-explicit-path-test/events")
+        );
+        assert_eq!(
+            paths.feedback_path(),
+            PathBuf::from("/tmp/vyane-explicit-path-test/feedback.jsonl")
         );
     }
 

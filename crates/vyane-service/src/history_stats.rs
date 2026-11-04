@@ -30,7 +30,7 @@ impl RunCounts {
         format!("{rate:.1}").parse().ok()
     }
 
-    fn record(&mut self, status: RunStatus) {
+    pub(crate) fn record(&mut self, status: RunStatus) {
         self.total += 1;
         match status {
             RunStatus::Success => self.success += 1,
@@ -88,7 +88,7 @@ impl HistoryDurations {
         format!("{mean:.1}").parse().ok()
     }
 
-    fn record(&mut self, record: &RunRecord) {
+    pub(crate) fn record(&mut self, record: &RunRecord) {
         let elapsed = record.finished_at.signed_duration_since(record.started_at);
         let Ok(duration) = elapsed.to_std() else {
             self.invalid += 1;
@@ -141,7 +141,7 @@ impl HistoryCosts {
         (self.known != 0 && !self.overflowed).then_some(self.total_usd)
     }
 
-    fn record(&mut self, cost: Option<f64>) {
+    pub(crate) fn record(&mut self, cost: Option<f64>) {
         match cost {
             None => self.unknown += 1,
             Some(value) if !value.is_finite() || value < 0.0 => self.invalid += 1,
@@ -200,7 +200,7 @@ impl HistoryTokenTotal {
         self.total > u128::from(u64::MAX)
     }
 
-    fn record(&mut self, tokens: Option<u64>) {
+    pub(crate) fn record(&mut self, tokens: Option<u64>) {
         match tokens {
             Some(value) => {
                 self.known += 1;
@@ -239,7 +239,7 @@ pub struct HistoryUsage {
 }
 
 impl HistoryUsage {
-    fn record(&mut self, record: &RunRecord) {
+    pub(crate) fn record(&mut self, record: &RunRecord) {
         let usage = record.usage.as_ref();
         self.input_tokens.record(usage.map(|u| u.input_tokens));
         self.output_tokens.record(usage.map(|u| u.output_tokens));

@@ -943,7 +943,6 @@ fn validate_args(args: &[String]) -> Result<(), NativeCommandPolicyError> {
 fn validate_writable_root(root: &str) -> Result<(), NativeCommandPolicyError> {
     use std::path::{Component, Path};
 
-    const CONTROL_COMPONENTS: [&str; 4] = [".git", ".vyane", ".codex", ".claude"];
     if root.is_empty()
         || root.len() > MAX_ARG_BYTES
         || root.contains('\0')
@@ -956,11 +955,9 @@ fn validate_writable_root(root: &str) -> Result<(), NativeCommandPolicyError> {
         || Path::new(root)
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
-        || root.split('/').any(|component| {
-            CONTROL_COMPONENTS
-                .iter()
-                .any(|control| component.eq_ignore_ascii_case(control))
-        })
+        || root
+            .split('/')
+            .any(|component| vyane_core::is_host_control_component(component.as_ref()))
     {
         return Err(NativeCommandPolicyError::InvalidWritableRoot);
     }
@@ -1791,10 +1788,20 @@ mod tests {
             ".GIT",
             "src/.codex",
             "src/.CoDeX",
+            ".mcp.json",
+            "src/.mcp.json",
+            "src/.MCP.json",
         ] {
             let mut invalid = policy();
             invalid.writable_roots = vec![root.into()];
             assert!(invalid.validate().is_err(), "{root}");
+        }
+        // Look-alike names stay valid roots; a directory called `mcp.json`
+        // is not Claude Code's project MCP configuration.
+        for root in ["mcp.json", "src/mcp.json", "src/.mcp.json.d"] {
+            let mut valid = policy();
+            valid.writable_roots = vec![root.into()];
+            assert_eq!(valid.validate(), Ok(()), "{root}");
         }
         let mut duplicate = policy();
         duplicate.writable_roots = vec!["src".into(), "src".into()];

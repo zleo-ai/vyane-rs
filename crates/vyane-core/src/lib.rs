@@ -26,6 +26,7 @@ pub mod chat;
 pub mod cost;
 pub mod env;
 pub mod error;
+pub mod identifier;
 pub mod native_authority;
 pub mod receipt;
 pub mod run;
@@ -42,6 +43,9 @@ pub use chat::{ChatMessage, ChatOutcome, ChatRequest, Role, StreamEvent};
 pub use cost::{ModelTokenRate, estimate_configured_cost};
 pub use env::{BASELINE_ENV, EnvPolicy, InheritMode};
 pub use error::{ErrorKind, Result, VyaneError};
+pub use identifier::{
+    IdentifierProblem, InvalidIdentifier, identifier_problem, validate_identifier,
+};
 pub use native_authority::{NativeExecutionAuthority, NativeSideEffect};
 pub use receipt::{
     AttemptFailureClass, AttemptStatus, BillingModeCategory, CompletionReceipt, CostEvidence,
@@ -75,7 +79,10 @@ pub use traits::{
 };
 pub use web_fetch::{WebFetchOutcome, WebFetchRequest};
 pub use web_search::{WebSearchContextSize, WebSearchOutcome, WebSearchRequest, WebSearchSource};
-pub use workdir::{PinnedWorkdir, WorkdirIdentity};
+pub use workdir::{
+    HOST_CONTROL_COMPONENTS, HOST_CONTROL_FILE_NAMES, PinnedWorkdir, WorkdirIdentity,
+    is_host_control_component,
+};
 
 /// Re-exported so downstream crates use the same cancellation primitive.
 pub use tokio_util::sync::CancellationToken;

@@ -10,6 +10,7 @@ use crate::error::{WorkflowError, WorkflowResult};
 use crate::model::{OnError, StepTargets, Workflow, WorkflowRouteHints};
 use crate::template::step_placeholders;
 use crate::validate::MAX_TEMPLATE_ANCESTOR_RELATIONS;
+use crate::worktree::{WorkflowIsolation, isolation_problems};
 
 pub const WORKFLOW_PLAN_SCHEMA_V1: u32 = 1;
 pub const WORKFLOW_PLAN_MAX_STEPS: usize = 4_096;
@@ -71,11 +72,32 @@ pub struct WorkflowPlanStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
     pub sandbox: Sandbox,
+    /// Omitted when `none`, so plans without isolation keep their bytes.
+    #[serde(default, skip_serializing_if = "WorkflowIsolation::is_none")]
+    pub isolation: WorkflowIsolation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<WorkflowPlanDuration>,
     pub on_error: OnError,
     #[serde(default)]
     pub route: WorkflowPlanRouteHints,
+}
+
+impl WorkflowPlanStep {
+    /// Whether this step asks for any isolation setting.
+    #[must_use]
+    pub fn requests_isolation(&self) -> bool {
+        !self.isolation.is_none() || self.isolation_base.is_some()
+    }
+}
+
+impl WorkflowPlan {
+    /// Whether any step asks for isolation.
+    #[must_use]
+    pub fn requests_isolation(&self) -> bool {
+        self.steps.iter().any(WorkflowPlanStep::requests_isolation)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +226,7 @@ pub enum WorkflowPlanFeature {
     DynamicControlFlow,
     NestedWorkflow,
     SharedBudget,
+    WorktreeIsolation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +309,8 @@ impl WorkflowPlan {
                 system: step.system.clone(),
                 workdir,
                 sandbox: step.sandbox,
+                isolation: step.isolation,
+                isolation_base: step.isolation_base.clone(),
                 timeout: step.timeout.map(WorkflowPlanDuration::from_duration),
                 on_error: step.on_error,
                 route: WorkflowPlanRouteHints::from(&step.route),
@@ -409,7 +434,14 @@ impl WorkflowPlan {
                 .saturating_add(step.id.len())
                 .saturating_add(step.prompt_template.len())
                 .saturating_add(step.system.as_deref().map_or(0, str::len))
-                .saturating_add(step.workdir.as_deref().map_or(0, str::len));
+                .saturating_add(step.workdir.as_deref().map_or(0, str::len))
+                .saturating_add(step.isolation_base.as_deref().map_or(0, str::len));
+            problems.extend(isolation_problems(
+                &step.id,
+                step.sandbox,
+                step.isolation,
+                step.isolation_base.as_deref(),
+            ));
             if usize::try_from(step.order).ok() != Some(order) {
                 problems.push(format!(
                     "workflow plan step `{}` has order {}, expected {order}",
@@ -586,7 +618,9 @@ impl WorkflowPlan {
     /// execution against any particular resolver or harness.
     pub fn feature_support(feature: WorkflowPlanFeature) -> WorkflowPlanFeatureSupport {
         match feature {
-            WorkflowPlanFeature::DeclarativeDag => WorkflowPlanFeatureSupport::Supported,
+            WorkflowPlanFeature::DeclarativeDag | WorkflowPlanFeature::WorktreeIsolation => {
+                WorkflowPlanFeatureSupport::Supported
+            }
             WorkflowPlanFeature::DynamicControlFlow => WorkflowPlanFeatureSupport::Unsupported {
                 feature,
                 reason: "dynamic control flow cannot be represented by WorkflowPlan v1".into(),
@@ -658,6 +692,8 @@ impl WorkflowPlan {
                     system: step.system.clone(),
                     workdir: step.workdir.as_ref().map(PathBuf::from),
                     sandbox: step.sandbox,
+                    isolation: step.isolation,
+                    isolation_base: step.isolation_base.clone(),
                     timeout: step.timeout.and_then(|timeout| timeout.to_duration().ok()),
                     on_error: step.on_error,
                     route: WorkflowRouteHints::from(&step.route),

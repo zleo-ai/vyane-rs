@@ -26,11 +26,12 @@ use vyane_workflow::{
 
 use crate::app::{LoadedConfig, Runtime, StoragePaths, load_config};
 use crate::cli::{
-    BroadcastArgs, CheckArgs, Cli, Command, DaemonCommand, DispatchArgs, HistoryArgs, ReviewArgs,
-    RouteArgs, ServeArgs, SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs,
-    TaskCancelArgs, TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCancelArgs,
-    WorkflowCommand, WorkflowPlanArgs, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs,
-    WorkflowStatusArgs, WorkflowSubmitArgs,
+    BroadcastArgs, CheckArgs, Cli, Command, DaemonCommand, DispatchArgs, FeedbackCommand,
+    FeedbackListArgs, FeedbackRateArgs, HistoryArgs, ReviewArgs, RouteArgs, ServeArgs,
+    SessionCommand, SessionInspectArgs, SessionResetNativeArgs, SessionsArgs, TaskCancelArgs,
+    TaskCommand, TaskListArgs, TaskStatusArgs, WorkerArgs, WorkflowCancelArgs, WorkflowCommand,
+    WorkflowPlanArgs, WorkflowReplayArgs, WorkflowResumeArgs, WorkflowRunArgs, WorkflowStatusArgs,
+    WorkflowSubmitArgs,
 };
 use crate::daemon_client::DaemonWorkflowClient;
 use crate::output::{BroadcastJson, BroadcastRow, DurableTaskStatusJson, RunJson, TaskRow};
@@ -71,6 +72,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Dispatch(args) => run_dispatch(cli.config, args).await,
         Command::Broadcast(args) => run_broadcast(cli.config, args).await,
         Command::History(args) => run_history(args).await,
+        Command::Feedback(command) => run_feedback(command).await,
         Command::Sessions(args) => run_sessions(args).await,
         Command::Session(command) => run_session(command).await,
         Command::Workflow(command) => match command {
@@ -324,7 +326,7 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
     let phase = load_config(config_path.as_deref()).and_then(|loaded| {
         // Build once so auto-routing sees the exact labels/task that the kernel
         // will record. Explicit selectors pass through the same plan boundary.
-        let mut task = task_base(
+        let mut task = vyane_service::build_task_spec(
             args.task.clone(),
             args.workdir.clone(),
             args.sandbox.into(),
@@ -2366,7 +2368,7 @@ async fn wait_until(
 /// Build a `TaskSpec` from a frozen [`JobSpec`], reusing the shared task
 /// assembly so a detached run and an online run are constructed identically.
 fn task_from_job(job: &JobSpec) -> Result<TaskSpec> {
-    let mut task = task_base(
+    let mut task = vyane_service::build_task_spec(
         job.task.clone(),
         job.workdir.clone(),
         job.sandbox.into(),
@@ -2556,7 +2558,187 @@ async fn harness_available(kind: HarnessKind) -> bool {
     }
 }
 
+/// Print one feedback/outcome failure and return its exit code.
+///
+/// Caller-input errors (`Config`) exit 2; a missing or foreign run and storage
+/// failures exit 1. Only fixed service messages are printed: no path, no raw
+/// I/O error, and no echo of the rejected input.
+fn print_feedback_error(error: &anyhow::Error, json: bool) -> ExitCode {
+    let found = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<VyaneError>());
+    let kind = found.map_or(ErrorKind::Other, |error| error.kind);
+    let message = match (kind, found) {
+        (ErrorKind::Config | ErrorKind::NotFound, Some(error)) => error.message.clone(),
+        _ => {
+            tracing::warn!(error_kind = kind.as_str(), "feedback storage failure");
+            "feedback storage unavailable".to_owned()
+        }
+    };
+    if json {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "status": "error",
+                "error": { "kind": kind.as_str(), "message": message },
+            })
+        );
+    } else {
+        eprintln!("{}", crate::output::format_error_line(&message));
+    }
+    ExitCode::from(if kind == ErrorKind::Config { 2 } else { 1 })
+}
+
+fn feedback_config_error(message: &'static str) -> anyhow::Error {
+    VyaneError::new(ErrorKind::Config, message).into()
+}
+
+async fn run_feedback(command: FeedbackCommand) -> Result<ExitCode> {
+    let json = match &command {
+        FeedbackCommand::Rate(args) => args.json,
+        FeedbackCommand::List(args) => args.json,
+    };
+    let service = match StoragePaths::resolve().and_then(VyaneService::from_local_storage) {
+        Ok(service) => service,
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "open feedback storage");
+            let error = anyhow::Error::from(VyaneError::new(ErrorKind::Io, "open storage"));
+            return Ok(print_feedback_error(&error, json));
+        }
+    };
+    let result = match command {
+        FeedbackCommand::Rate(args) => run_feedback_rate(&service, args).await,
+        FeedbackCommand::List(args) => run_feedback_list(&service, args).await,
+    };
+    Ok(result.unwrap_or_else(|error| print_feedback_error(&error, json)))
+}
+
+async fn run_feedback_rate(service: &VyaneService, args: FeedbackRateArgs) -> Result<ExitCode> {
+    let (run_id, raw_rating) = match (args.last, args.run_id, args.rating) {
+        (false, Some(run_id), Some(rating)) => (Some(run_id), rating),
+        (true, Some(rating), None) => (None, rating),
+        (true, _, _) => {
+            return Err(feedback_config_error(
+                "with --last, pass only RATING (feedback rate --last <RATING>)",
+            ));
+        }
+        (false, _, _) => {
+            return Err(feedback_config_error(
+                "expected RUN_ID and RATING (feedback rate <RUN_ID> <RATING>)",
+            ));
+        }
+    };
+    let rating = raw_rating
+        .parse::<u8>()
+        .map_err(|_| feedback_config_error("rating must be an integer from 1 to 5"))
+        .and_then(|value| {
+            vyane_ledger::Rating::try_from(value)
+                .map(vyane_ledger::Rating::get)
+                .map_err(anyhow::Error::from)
+        })?;
+    if let Some(source) = args.source.as_deref() {
+        source.parse::<vyane_ledger::FeedbackSource>()?;
+    }
+    let run_id = match run_id {
+        Some(run_id) => run_id,
+        None => service.last_run_id().await?,
+    };
+    let view = service
+        .record_feedback(&run_id, rating, args.source.as_deref())
+        .await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        println!("{}", crate::output::format_feedback_line(&view));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_feedback_list(service: &VyaneService, args: FeedbackListArgs) -> Result<ExitCode> {
+    let list = service
+        .feedback(args.run_id.as_deref(), Some(args.limit))
+        .await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+    } else {
+        for view in &list.items {
+            println!("{}", crate::output::format_feedback_line(view));
+        }
+        if list.skipped_lines > 0 {
+            eprintln!(
+                "{}",
+                crate::output::format_feedback_skipped_line(list.skipped_lines)
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_history_outcomes(args: HistoryArgs) -> Result<ExitCode> {
+    let json = args.json;
+    let result = async {
+        if args
+            .since
+            .zip(args.until)
+            .is_some_and(|(since, until)| since > until)
+        {
+            return Err(feedback_config_error("since must not be later than until"));
+        }
+        // Parsed here rather than by clap so a rejected value is never echoed.
+        let group_by = match args.group_by.as_deref() {
+            None => vyane_service::DEFAULT_OUTCOME_GROUP_BY.to_vec(),
+            Some(raw) => vyane_service::parse_outcome_group_by(raw)?,
+        };
+        let status = args
+            .status
+            .as_deref()
+            .map(vyane_service::parse_run_status_filter)
+            .transpose()?;
+        let service = VyaneService::from_local_storage(StoragePaths::resolve()?)?;
+        service
+            .outcomes(
+                vyane_service::HistoryFilter {
+                    limit: None,
+                    provider: args.provider,
+                    status,
+                    since: args.since,
+                    until: args.until,
+                },
+                group_by,
+                args.include_auto_ratings,
+            )
+            .await
+    }
+    .await;
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => return Ok(print_feedback_error(&error, json)),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        crate::output::print_outcome_report(&report);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
+    if args.outcomes {
+        return run_history_outcomes(args).await;
+    }
+    // Parsed here rather than by clap so a rejected value is never echoed.
+    let status = match args
+        .status
+        .as_deref()
+        .map(vyane_service::parse_run_status_filter)
+        .transpose()
+    {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("{}", crate::output::format_error_line(&error.message));
+            return Ok(ExitCode::from(2));
+        }
+    };
     if args
         .since
         .zip(args.until)
@@ -2599,7 +2781,7 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
             .history(vyane_service::HistoryFilter {
                 limit: Some(usize::MAX),
                 provider: args.provider,
-                status: args.status.map(Into::into),
+                status,
                 since: args.since,
                 until: args.until,
             })
@@ -2691,7 +2873,7 @@ async fn run_history(args: HistoryArgs) -> Result<ExitCode> {
         .query(RunQuery {
             owner: Some("local".to_string()),
             provider: args.provider.map(ProviderId::new),
-            status: args.status.map(Into::into),
+            status,
             since: args.since,
             until: args.until,
             limit: Some(if has_local_filters {
@@ -2888,6 +3070,21 @@ async fn submit_daemon_workflow(args: WorkflowSubmitArgs) -> Result<ExitCode> {
         }
     };
 
+    // The resident daemon cannot isolate steps in worktrees. Fail closed on
+    // the bounded TOML alone, before contacting the daemon or reading prompt
+    // files. A file that cannot be read or parsed here falls through to the
+    // established path, which reports it after authentication.
+    if matches!(
+        vyane_workflow::workflow_file_requests_isolation(&file),
+        Ok(true)
+    ) {
+        let error = WorkflowError::IsolationUnsupported {
+            reason: ISOLATION_UNSUPPORTED_BY_DAEMON,
+        };
+        print_workflow_error(&error);
+        return Ok(workflow_error_exit(&error));
+    }
+
     // Submission is daemon-only. Authenticate the exact resident daemon before
     // reading and packaging a potentially large local source tree; there is no
     // foreground fallback on any control or transport failure.
@@ -3007,8 +3204,13 @@ fn plan_workflow(args: WorkflowPlanArgs) -> Result<ExitCode> {
             plan.capability_manifest.maximum_sandbox.as_str()
         );
         for step in &plan.steps {
+            let isolation = if step.isolation.is_none() {
+                String::new()
+            } else {
+                format!(" | isolation={}", step.isolation.as_str())
+            };
             println!(
-                "  {} | needs: [{}] | targets: [{}] | requested sandbox: {}",
+                "  {} | needs: [{}] | targets: [{}] | requested sandbox: {}{isolation}",
                 step.id,
                 step.needs.join(", "),
                 step.targets.target_names().join(", "),
@@ -3053,7 +3255,8 @@ async fn run_workflow(config_path: Option<PathBuf>, args: WorkflowRunArgs) -> Re
         Arc::new(runtime.dispatcher.clone()),
         resolver,
         paths.workflows_dir.clone(),
-    );
+    )
+    .with_worktree_provisioner(foreground_worktree_provisioner(&paths));
     if !args.json {
         engine = engine.with_observer(Arc::new(CliWorkflowObserver));
     }
@@ -3112,7 +3315,8 @@ async fn resume_workflow(
         Arc::new(runtime.dispatcher.clone()),
         resolver,
         paths.workflows_dir.clone(),
-    );
+    )
+    .with_worktree_provisioner(foreground_worktree_provisioner(&paths));
     if !args.json {
         engine = engine.with_observer(Arc::new(CliWorkflowObserver));
     }
@@ -3174,7 +3378,8 @@ async fn replay_workflow(
         Arc::new(runtime.dispatcher.clone()),
         resolver,
         paths.workflows_dir.clone(),
-    );
+    )
+    .with_worktree_provisioner(foreground_worktree_provisioner(&paths));
     if !args.json {
         engine = engine.with_observer(Arc::new(CliWorkflowObserver));
     }
@@ -3385,7 +3590,7 @@ async fn list_workflows(args: crate::cli::WorkflowListArgs) -> Result<ExitCode> 
 }
 
 fn task_from_broadcast(args: BroadcastArgs) -> Result<TaskSpec> {
-    task_base(
+    vyane_service::build_task_spec(
         args.task,
         args.workdir,
         args.sandbox.into(),
@@ -3393,36 +3598,6 @@ fn task_from_broadcast(args: BroadcastArgs) -> Result<TaskSpec> {
         args.timeout,
         args.label,
     )
-}
-
-fn task_base(
-    prompt: String,
-    workdir: Option<PathBuf>,
-    sandbox: vyane_core::Sandbox,
-    system: Option<String>,
-    timeout_secs: Option<u64>,
-    labels: Vec<String>,
-) -> Result<TaskSpec> {
-    let mut task = TaskSpec::new(prompt).with_sandbox(sandbox);
-    task.workdir = workdir;
-    task.system = system;
-    task.timeout = timeout_secs.map(Duration::from_secs);
-    task.labels = parse_labels(labels)?;
-    Ok(task)
-}
-
-fn parse_labels(raw: Vec<String>) -> Result<BTreeMap<String, String>> {
-    let mut labels = BTreeMap::new();
-    for label in raw {
-        let (key, value) = label
-            .split_once('=')
-            .ok_or_else(|| anyhow!("label `{label}` must be in key=value form"))?;
-        if key.is_empty() {
-            bail!("label `{label}` has an empty key");
-        }
-        labels.insert(key.to_string(), value.to_string());
-    }
-    Ok(labels)
 }
 
 fn parse_vars(raw: Vec<String>) -> Result<BTreeMap<String, String>> {
@@ -3542,6 +3717,20 @@ fn print_workflow_error(error: &WorkflowError) {
             &error.to_string()
         )
     );
+}
+
+/// Reason shown when a resident-daemon surface receives an isolation request.
+pub(crate) const ISOLATION_UNSUPPORTED_BY_DAEMON: &str =
+    "worktree isolation is not supported by the resident daemon; use `vyane workflow run`";
+
+/// Worktree provisioner for foreground `workflow run/resume/replay`. Worktrees
+/// live below the current owner's data directory, next to the journals.
+fn foreground_worktree_provisioner(
+    paths: &StoragePaths,
+) -> Arc<dyn vyane_workflow::WorktreeProvisioner> {
+    Arc::new(vyane_workflow::GitWorktreeProvisioner::new(
+        paths.worktrees_dir.clone(),
+    ))
 }
 
 fn workflow_error_exit(error: &WorkflowError) -> ExitCode {

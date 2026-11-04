@@ -72,7 +72,7 @@ Execução residente, workflows persistentes e objetivos locais continuam em evo
 <details>
 <summary>Resumo das evidências</summary>
 
-A [matriz pública de capacidades](docs/parity/ORIGINAL-VYANE-PARITY.md) acompanha 53 capacidades em 8 áreas: 7 implementadas, 23 parciais, 12 ausentes, 9 deliberadamente diferentes ou aguardando decisão e 2 planejadas. O [manifesto sem dados sensíveis](docs/parity/fixtures/v1/manifest.json) contém 44 casos em 5 conjuntos: 30 correspondências após normalização e 14 diferenças em aberto. Essas verificações limitadas não representam uma porcentagem de paridade do sistema inteiro.
+A [matriz pública de capacidades](docs/parity/ORIGINAL-VYANE-PARITY.md) acompanha 53 capacidades em 8 áreas: 7 implementadas, 25 parciais, 10 ausentes, 9 deliberadamente diferentes ou aguardando decisão e 2 planejadas. O [manifesto sem dados sensíveis](docs/parity/fixtures/v1/manifest.json) contém 44 casos em 5 conjuntos: 30 correspondências após normalização e 14 diferenças em aberto. Essas verificações limitadas não representam uma porcentagem de paridade do sistema inteiro.
 
 </details>
 

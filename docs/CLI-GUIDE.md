@@ -15,10 +15,11 @@ exposes a different subset of operations; they are not interchangeable:
 | **REST API** | `vyane serve --addr 127.0.0.1:9721` | programmatic access from any HTTP client |
 | **MCP** | `vyane mcp` | let other agents (Claude, Codex, …) call vyane as a tool |
 
-The production CLI MCP surface contains ten tools: dispatch, broadcast,
-history, sessions, `vyane_route`, `vyane_check`, `vyane_workflow_plan`, and
-authenticated durable workflow submit/status/cancel. The library's base server
-contains seven tools; only submit/status/cancel require an injected control port.
+The production CLI MCP surface contains twelve tools: dispatch, broadcast,
+history, sessions, `vyane_route`, `vyane_check`, `vyane_workflow_plan`,
+`vyane_feedback`, `vyane_outcomes`, and authenticated durable workflow
+submit/status/cancel. The library's base server contains nine tools; only
+submit/status/cancel require an injected control port.
 Generic success payloads have a 1 MiB cap;
 the two new diagnostics use stricter, smaller bounds. `vyane_route` is a
 Rust-side deterministic preview extension, not a same-name parity claim
@@ -258,6 +259,9 @@ support:
 | `GET` | `/v1/tasks/:id/output` | read a successful task's separate mode-0600 output artifact |
 | `POST` | `/v1/tasks/:id/cancel` | cancel a running task |
 | `GET` | `/v1/runs` | query the run ledger (filter by status/provider/start time) |
+| `POST` | `/v1/runs/:run_id/feedback` | rate one of your runs from 1 to 5 (`201` + rating view) |
+| `GET` | `/v1/feedback` | list your ratings, most recent first (`run_id`, `limit`) |
+| `GET` | `/v1/outcomes` | grouped outcome statistics (`group_by`, provider/status/time filters) |
 | `GET` | `/v1/sessions` | list saved sessions |
 
 History accepts an inclusive start-time cutoff through
@@ -386,6 +390,67 @@ not change list responses, authentication, existing errors, or stored records;
 stats still rejects an explicit limit. Clients should tolerate additional stats
 fields. This usage aggregate does not backfill previously missing usage or
 rewrite prices already stored on a run.
+
+### Run ratings and outcome statistics
+
+Rate a run you own from 1 (worst) to 5 (best), then compare targets by how
+their runs went:
+
+```sh
+vyane feedback rate 0195f0c2-0000-7000-8000-000000000000 4
+vyane feedback rate --last 5 --json            # your most recently recorded run
+vyane feedback rate --last 2 --source auto:tests
+vyane feedback list --run 0195f0c2-0000-7000-8000-000000000000 --json
+vyane history --outcomes --group-by provider,model --json
+vyane history --outcomes --include-auto-ratings --since 2026-01-01T00:00:00Z
+```
+
+`--source` is `human` (the default) or `auto:<rule>`, where the rule name
+matches `[a-z0-9][a-z0-9_-]{0,31}`. A rating holds no comment, prompt, or copy
+of the run's provider or model. Ratings are append-only in
+`<data_dir>/feedback.jsonl`; a new rating for the same run and source replaces
+the previous one when read. There is no edit or delete command: rate again.
+`feedback list` returns `{"items": [...], "skipped_lines": N}`, where each item
+has `view_schema`, `feedback_id`, `run_id`, `rating`, `source` and
+`recorded_at`. `skipped_lines` counts your own unreadable or unknown-schema
+lines and lines whose owner cannot be read; a line that names another owner is
+never counted. An append after a torn final line starts a new line, so the new
+rating stays readable. On unix the file is created owner-only (`0600`).
+
+A run that does not exist and a run that belongs to another owner give the same
+not-found error (CLI exit 1, REST `404 {"error":"run not found"}`, MCP
+`not_found`). A rating outside 1–5, an invalid source, an invalid grouping, an
+unknown status, `--outcomes` with `--stats`, `--limit`, `--session` or `--label`, and `since`
+later than `until` are caller errors (CLI exit 2, REST `400`, MCP
+`invalid_argument`). Error messages never echo the rejected source, grouping or
+status. The status filter accepts `success`, `error`, `timeout` and
+`cancelled` (also spelled `canceled`) on the CLI, REST and MCP alike.
+
+`history --outcomes` groups every matching run by 1–4 distinct dimensions:
+`provider`, `protocol`, `harness`, `model`, `effort`, `profile`, `status`
+(default `provider,harness,model,effort`). Provider, protocol, harness and
+model stay separate keys. A direct HTTP run has harness `direct`; effort and
+profile come from the reserved `routing.effort` and `routing.profile` labels
+and are `unknown` when a run did not record them. Each group reports the same
+counts, `success_rate`, `duration`, `cost` and `usage` objects as
+`history --stats`, plus `failover_count` and `failover_rate` (runs with more
+than one attempt, as a one-decimal percentage), `rating_count`, and
+`average_rating` (two decimals, `null` without ratings). Groups are sorted by
+key. The report also carries `group_by`, `include_auto_ratings`, `total_runs`
+and `feedback_skipped_lines`.
+
+Only human ratings count by default. With `--include-auto-ratings` (REST and
+MCP `include_auto_ratings=true`), a run without a human rating uses its latest
+automatic rating; a human rating always wins. Ratings are joined to runs by
+owner and run id, so another owner's ratings never enter your statistics.
+REST `GET /v1/outcomes` and MCP `vyane_outcomes` accept `group_by` as a
+comma-separated string plus `provider`, `status`, `since` and `until`; unknown
+query or argument fields are rejected. The JSON matches the CLI output for the
+same input.
+
+Ratings and outcome statistics are read-only for routing: `vyane route`,
+`auto` dispatch and failover never read them (ADR 0001). A feedback signal in
+route scoring would be a separate, explicitly enabled feature.
 
 SSE streaming events (`POST /v1/dispatch/stream`):
 
@@ -575,6 +640,81 @@ sanitized public view. Planning reads the workflow and declared prompt files,
 but does not load runtime configuration, resolve targets, render templates,
 call models or create a journal. Requested capabilities do not authorize
 execution or establish runtime readiness.
+
+### Worktree isolation for write steps
+
+By default every target of a step runs in the same workdir, so a write-capable
+`fan_out` lets agents overwrite each other. A step can opt into one git
+worktree per target:
+
+```toml
+[[step]]
+id = "impl"
+fan_out = ["claude", "codex"]
+sandbox = "write"
+isolation = "worktree"   # "none" (default) or "worktree"
+isolation_base = "HEAD"  # optional commit-ish; default HEAD
+prompt = "Implement the change"
+```
+
+Before dispatch, each target gets a worktree at
+`<data_dir>/worktrees/<run-id>/<step-order>-<target-index>-<attempt>` on a new
+branch `vyane/wt/<run-id>/<step-order>-<target-index>-<attempt>`. The base is
+resolved once per step, so every target starts from the same commit. A step
+`workdir` inside the repository maps to the same subdirectory of the worktree.
+The worktree is recorded in the journal as `active` before the target runs.
+
+After the target finishes, fails, times out or is cancelled, the worktree is
+settled:
+
+- no uncommitted, untracked or ignored files, and both `HEAD` and the branch
+  still at the base commit → the worktree is removed (`git worktree remove`
+  without `--force`) and the branch is deleted only if it still points at the
+  base commit;
+- otherwise it is kept with its branch: `dirty` for files, `committed` for new
+  commits (including commits made on a detached `HEAD` that only the
+  worktree's `HEAD` reflog still reaches), `unknown_state` when any check
+  fails;
+- a removal that does not finish is reported as `cleanup_failed`.
+
+When in doubt the worktree is kept; no check failure leads to a removal.
+Settlement runs every check against the git directory recorded when the
+worktree was created and keeps the tree (`unknown_state`) if its `.git` file
+was changed. It never runs git inside a nested repository: a worktree whose
+index holds a submodule (gitlink) is kept as `unknown_state`, and so is one
+whose branch was turned into a symbolic ref; the branch is deleted with
+`--no-deref`, never through a link to another branch. If preparing a
+new worktree fails after `git worktree add` (for example the step `workdir`
+is a file or a symlink at the base commit), the worktree and branch are
+removed again; if that removal fails too, the entry is recorded as
+`cleanup_failed`.
+`vyane workflow run`, `resume` and `replay` print one line per isolated target,
+for example `impl/claude: worktree kept: vyane/wt/<run>/0-0-0 <path> (base
+1a2b3c4 → head 5d6e7f8, committed)`; `--json` carries the same data in the
+journal step's `worktrees` array. A resumed run never removes a worktree left
+`active` by a crash: it becomes `kept` (`unknown_state`) and the retry uses the
+next attempt number and a new path. The same applies when a run stops on an
+internal error, such as a failed journal write, while isolated steps are still
+running: their worktrees are not settled and stay `active` until `resume`. If
+the journal write that records new worktrees fails, they are settled before
+the error is returned, since nothing ran in them. Merging, pushing and deleting kept
+worktrees stay manual (`git worktree list`, `git worktree remove`,
+`git branch -D`).
+
+Git runs with `GIT_*` variables removed, repository hooks disabled
+(`core.hooksPath=/dev/null`) and `core.fsmonitor=false`. Worktree paths are
+checked to stay below `<data_dir>/worktrees`.
+
+`isolation = "worktree"` with a read-only sandbox, an unknown `isolation`
+value, `isolation_base` without worktree isolation, and an empty, oversized
+(more than 256 bytes), option-like (`-…`) or control-character base are
+rejected before any journal is created. Plans without isolation keep their
+bytes and digest. `vyane workflow plan` shows `isolation=worktree` on such
+steps. The resident daemon does not isolate: `vyane workflow submit`, the
+daemon workflow API and MCP `vyane_workflow_submit` reject an isolation request
+with `isolation_unsupported` before creating a task. Isolation is foreground
+only, opt-in, and not available for `dispatch`, `broadcast` or AgentRuns;
+Windows is not supported.
 
 This closes the repository-local shared typed-plan prerequisite and CLI static
 plan inspection/export plus MCP source-to-plan compilation, not workflow parity.

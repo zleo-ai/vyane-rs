@@ -20,7 +20,9 @@ struct Snapshot {
     stderr: String,
 }
 
-const NESTED_PARENTS: &[&str] = &["session", "workflow", "task", "daemon", "a2a", "goal"];
+const NESTED_PARENTS: &[&str] = &[
+    "session", "workflow", "task", "daemon", "a2a", "goal", "feedback",
+];
 
 fn nested_command_names(help: &str) -> Vec<&str> {
     let mut names = Vec::new();

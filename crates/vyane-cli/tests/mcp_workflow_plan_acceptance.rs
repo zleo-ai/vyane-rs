@@ -145,7 +145,7 @@ fn assert_invalid(value: &Value) {
 async fn stdio_plan_matches_cli_schema_without_daemon_targets_or_execution() -> anyhow::Result<()> {
     let session = Session::start().await?;
     let tools = session.client.list_all_tools().await?;
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 12);
     let tool = tools
         .iter()
         .find(|t| t.name == "vyane_workflow_plan")
@@ -170,7 +170,23 @@ async fn stdio_plan_matches_cli_schema_without_daemon_targets_or_execution() -> 
     assert_eq!(value["capability_manifest"]["maximum_sandbox"], "full");
     assert_eq!(value["steps"][1]["needs"], json!(["gather"]));
     assert_eq!(value["steps"][1]["route"]["effort"], "high");
+    // Steps without isolation carry no isolation keys.
+    assert!(value["steps"][0].get("isolation").is_none());
+    assert!(value["steps"][0].get("isolation_base").is_none());
     assert_eq!(session.call(arguments()).await?, value);
+    let isolated_source = SOURCE.replace(
+        "sandbox = \"full\"",
+        "sandbox = \"full\"\nisolation = \"worktree\"\nisolation_base = \"HEAD\"",
+    );
+    let mut isolated = arguments();
+    isolated["workflow_toml"] = json!(isolated_source);
+    let isolated = session.call(isolated).await?;
+    assert_eq!(isolated["steps"][0]["isolation"], "worktree");
+    assert_eq!(isolated["steps"][0]["isolation_base"], "HEAD");
+    assert!(isolated["steps"][1].get("isolation").is_none());
+    let isolated_plan: WorkflowPlan = serde_json::from_value(isolated.clone())?;
+    isolated_plan.verify()?;
+    assert_ne!(isolated["plan_sha256"], value["plan_sha256"]);
     let mut changed = arguments();
     changed["prompt_files"][0]["content"] = json!("Changed {{vars.topic}}");
     let changed = session.call(changed).await?;

@@ -41,7 +41,7 @@
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use vyane_core::error::{ErrorKind, Result, VyaneError};
-use vyane_core::target::{Endpoint, HarnessKind, Protocol, Sandbox};
+use vyane_core::target::{Endpoint, HarnessKind, Protocol, Sandbox, Secret};
 use vyane_core::traits::{
     Harness, HarnessExecutionContext, HarnessJob, HarnessOutcome, HarnessStreamEvent,
 };
@@ -265,12 +265,12 @@ fn build_argv_scoped(
 /// Env-var injections for Codex from `job.endpoint`: only the API key value,
 /// under the name Codex is told to read (`env_key`). Base URL / wire API go via
 /// `-c` config args, not env. `None` endpoint ⇒ nothing (native auth).
-pub(crate) fn endpoint_injections(endpoint: Option<&Endpoint>) -> Vec<(String, String)> {
+pub(crate) fn endpoint_injections(endpoint: Option<&Endpoint>) -> Vec<(String, Secret)> {
     let mut out = Vec::new();
     if let Some(ep) = endpoint
         && let Some(auth) = &ep.auth
     {
-        out.push((ENV_API_KEY.into(), auth.secret.expose().to_string()));
+        out.push((ENV_API_KEY.into(), auth.secret.clone()));
     }
     out
 }
@@ -959,7 +959,7 @@ mod tests {
         let inj = endpoint_injections(Some(&ep));
         assert_eq!(
             inj,
-            vec![(ENV_API_KEY.to_string(), "test-api-key".to_string())]
+            vec![(ENV_API_KEY.to_string(), Secret::new("test-api-key"))]
         );
     }
 

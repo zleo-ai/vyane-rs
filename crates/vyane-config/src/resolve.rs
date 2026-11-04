@@ -251,7 +251,7 @@ fn gen_params_from_patch(patch: &ProfilePatch) -> GenParams {
 mod tests {
     use super::*;
     use crate::model::RawRoot;
-    use vyane_core::{AdapterTransport, Effort, Protocol, ProviderId};
+    use vyane_core::{AdapterTransport, Effort, Protocol, ProviderId, Secret};
 
     fn config_from_toml(src: &str) -> ResolvedConfig {
         let root: RawRoot = toml::from_str(src).unwrap();
@@ -427,15 +427,15 @@ mod tests {
             .unwrap()
             .expect("harness target must produce a policy");
         assert_eq!(
-            policy.inject.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            policy.inject.get("ANTHROPIC_BASE_URL").map(Secret::expose),
             Some("https://api.anthropic.example")
         );
         assert_eq!(
-            policy.inject.get("ANTHROPIC_API_KEY").map(String::as_str),
+            policy.inject.get("ANTHROPIC_API_KEY").map(Secret::expose),
             Some("sk-ant-test")
         );
         assert_eq!(
-            policy.inject.get("ANTHROPIC_MODEL").map(String::as_str),
+            policy.inject.get("ANTHROPIC_MODEL").map(Secret::expose),
             Some("a-capable-anthropic-model")
         );
         assert_eq!(policy.mode, vyane_core::InheritMode::Scrub);

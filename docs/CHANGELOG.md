@@ -7,14 +7,150 @@ This is a curated history, not a complete reconstruction of all development.
 
 ## Unreleased
 
+### Added
+
+- The Anthropic Messages client implements non-streaming typed tool turns
+  (`complete_turn`) and a separately authorized turn path
+  (`AuthorizedToolChatClient`). They keep tool calls and results, thinking
+  text, `stop_reason: "refusal"` (as a structured refusal), every system
+  message and the shared resource limits. This is not full parity with the
+  OpenAI Chat typed turn: thinking signatures and `redacted_thinking` data
+  are not kept, so replaying an assistant turn that carried thinking fails
+  with a `Config` error, which makes multi-turn tool loops with `effort` set
+  unsupported for now. Ordinary `complete` stays text-only.
+- `vyane feedback rate|list`, REST `POST /v1/runs/{run_id}/feedback` /
+  `GET /v1/feedback`, and MCP `vyane_feedback` record an owner-scoped 1–5
+  rating for one of your runs. Ratings are append-only; the latest rating per
+  run and source wins. No free-text comment is stored.
+- `vyane history --outcomes`, REST `GET /v1/outcomes`, and MCP
+  `vyane_outcomes` group your runs by provider, protocol, harness, model,
+  effort, profile or status and report success, failover, duration, token,
+  cost and average human rating. Machine-derived ratings are excluded unless
+  requested. Routing decisions do not read ratings.
+- A workflow step can set `isolation = "worktree"` (with optional
+  `isolation_base`) to run each write-capable target in its own git worktree
+  under the Vyane data directory. A worktree with no changes is removed; one
+  with uncommitted changes or new commits is kept and its branch, path and
+  base/head commits are recorded in the journal and printed. A worktree whose
+  index holds a submodule is kept as `unknown_state`; settlement never runs
+  git inside a nested repository. If a run stops on an internal error (for
+  example a failed journal write) while isolated steps are still running,
+  their worktrees stay `active` in the journal and a later `resume` reports
+  them as kept. Read-only steps and the resident daemon reject the option
+  instead of ignoring it. Default behavior is unchanged.
+
+### Changed
+
+- `ChatClient::complete_turn` on the Anthropic Messages client no longer falls
+  back to the text `complete` path, even for a tool-free request. Unknown
+  content blocks and a malformed `tool_use` input are `Protocol` errors.
+  Reserved fields in `params.extra` (such as `thinking`, `system` or
+  `max_tokens`), a thinking budget not below `max_output_tokens`, and a
+  non-default temperature together with `effort` are `Config` errors.
+- A read-only Claude Code dispatch now passes `--permission-mode dontAsk`
+  and denies the Bash, Edit, Write and NotebookEdit tools, so a permissive
+  `.claude/settings.json` in the workspace can no longer let the model edit
+  files. Read-only shell commands such as `git log` are no longer available
+  to it either. Hooks configured in those settings files still run, as in
+  an interactive session.
+- Rust embedders: `JournalStep` gains `worktrees`, `WorkflowPlanStep` and
+  `WorkflowStep` gain `isolation` and `isolation_base`, `StoragePaths` gains
+  `worktrees_dir`, `vyane_workflow::WorkflowError` gains
+  `IsolationUnsupported`, and `vyane_mcp::WorkflowControlError` gains
+  `IsolationUnsupported` (public MCP code `isolation_unsupported`). Struct
+  literals and exhaustive matches on these types need the new member.
+  `WorkflowPlanFeature` gains `WorktreeIsolation`; it is `#[non_exhaustive]`,
+  so matches on it are unaffected. Plans and journals without isolation keep
+  their serialized form.
+
 ### Fixed
 
+- A failed `git worktree add -b` no longer leaves its branch behind, so a
+  resumed run can retry the same attempt instead of failing forever on
+  "branch already exists". A generated branch that already existed before the
+  call is never touched and the attempt is skipped like an existing path.
+  When the leftovers cannot be cleared (a locked registration for a missing
+  directory, or a symlink planted at the planned path), they are reported as
+  left in place and recorded in the journal rather than removed through.
+- The run-status filter of `vyane history`, REST `GET /v1/history` and
+  `GET /v1/outcomes`, and MCP `vyane_history` and `vyane_outcomes` uses one
+  parser. A rejected status gets a fixed message that does not echo it (the
+  CLI still exits 2), and `canceled` is accepted as a spelling of `cancelled`
+  everywhere.
 - A workflow variable key that contains a control character is rejected.
   The error names the position, not the key. A key with an internal space
   stays valid, and a value may still contain a newline.
 - A goal observation whose goal id contains a control character is rejected
   before it is recorded. The receipt omits the id. An id with an internal
   space still reaches lookup.
+- Native `write_file` and `edit_file` refuse any path with a `.git`,
+  `.vyane`, `.codex`, `.claude` or `.mcp.json` component, at any depth and
+  in any ASCII case, matching the rule for command writable roots. Write
+  exclusions cannot relax it. Files there, such as git hooks, harness
+  settings or Claude Code's project MCP servers, run or are trusted outside
+  the sandbox.
+- Claude Code dispatch passes the task after a `--` marker, so a task that
+  starts with `-` is no longer parsed as a CLI option.
+- Environment values injected into a harness child, including an endpoint
+  API key, are held as secrets. Debug output of a harness job lists only the
+  variable names, and a serialized environment policy omits the injected
+  set.
+- A streaming HTTP response splits events at the first blank line even when
+  the endpoint mixes `\r\n\r\n` and `\n\n` delimiters, instead of merging
+  two events into malformed JSON. A single streamed event larger than the
+  8 MiB response cap now fails with a protocol error instead of buffering
+  without limit.
+- Streaming OpenAI Chat runs record their token usage. The usage report
+  arrives after the finish reason, and the stream used to end at the finish
+  reason, so these runs recorded zero tokens.
+- Streaming Anthropic runs record input and cache tokens, which the API
+  reports only at the start of the stream. Output tokens, reported as a
+  running total, are counted once. Streamed and non-streamed runs now
+  report the same usage.
+- A streaming Anthropic or OpenAI Responses run whose connection closes
+  before the stream's end event (`message_stop`, `response.completed` or
+  `response.incomplete`) fails with a transport error instead of being
+  recorded as a success with truncated output. A streaming OpenAI Chat run
+  must report a finish reason before the connection closes; `[DONE]` may
+  still be omitted.
+- Adding token usage together saturates at the largest count instead of
+  panicking in debug builds or wrapping to a small count in release builds
+  when an endpoint reports an extreme value.
+- Kernel-store owners and effect ids, and message-store owners, ids,
+  routes, consumers and idempotency keys, reject surrounding whitespace and
+  control characters (NUL included), the same character rule the agent
+  store and owner resolution already apply. Length limits are unchanged, so
+  a kernel-store owner is still limited to 128 bytes. An id with an internal
+  space stays valid. Message-store errors name the field, not the value.
+  Rows an earlier build wrote under its looser rule (padded or
+  control-character text, including transport receipt batches whose digest
+  covers that text) still open, audit and read back; only new writes are
+  held to the tightened rule. Known trade-off: such a row is readable but
+  cannot be addressed by its own value through an input that now applies
+  the strict rule (for example a conversation listing or a transport
+  receipt lookup keyed by a padded scope), which is rejected as invalid
+  input rather than matched.
+- Dispatch labels from CLI `--label`, REST `labels` and MCP `labels` share
+  one parser. A key must be non-blank, at most 256 bytes, without
+  surrounding whitespace or control characters; a value is a single line
+  without control characters (newline, tab and NUL included). A dispatch
+  carries at most 128 labels. A label error names the label's position,
+  not its text. MCP `session` and `labels` now have schema length limits.
+
+### Missed in the 0.1.0 notes
+
+These changes shipped in 0.1.0 but were not listed in its section.
+
+- A config file that sets `schema_version` to anything other than the
+  integer `1` is rejected while it is parsed, before any layer is merged.
+  Omitting `schema_version` still loads the file as version 1. Earlier
+  builds ignored the key, so a config that carried another value now fails
+  to load. ([#248](https://github.com/zleo-ai/vyane-rs/pull/248))
+- Every dispatch that records a run also appends one `dispatch.terminal`
+  event (run id and status only) to the run owner's event log. The data
+  directory therefore gains `events/<owner digest>/dispatch.jsonl` and a
+  lock file beside it. A failed event append is logged and does not fail
+  the dispatch. ([#242](https://github.com/zleo-ai/vyane-rs/pull/242))
 
 ## 0.1.0 - 2026-10-23
 

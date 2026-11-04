@@ -60,24 +60,31 @@ record even by accident.
 
 ## Crate map and dependency edges
 
+Arrows read "depends on". Only normal `[dependencies]` between workspace
+crates are listed; dev-dependencies are omitted.
+
 ```
-                         vyane-core
- (types · traits · errors · env policy · workdir pin; no orchestration runtime)
-        ▲     ▲        ▲         ▲          ▲        ▲
-        │     │        │         │          │        │
- vyane-config │  vyane-protocol  │    vyane-harness  │
-   │          │        │         │          │        │
- vyane-provider        │      vyane-ledger   │   vyane-kernel
-        │              │         │           │   (traits only)
-        └──────┬───────┴─────────┴───────────┴────────┘
-               ▼
-        vyane-service   ── (shared facade: config loading, selector
-                             resolution, dispatch/broadcast/history/sessions)
-          ▲           ▲
-          │           │
-   vyane-mcp     vyane-cli      (front-ends: MCP server, REST API,
-   (rmcp tools)  (+ axum API)    CLI — all consume vyane-service)
-                 (+ vyane-router)
+ leaves     vyane-core      (types · traits · errors · env policy · workdir pin;
+                             no orchestration runtime)
+            vyane-agent  ·  vyane-goal  ·  vyane-router  ·  vyane-quota
+                            (no workspace dependency)
+
+ core only  vyane-provider · vyane-protocol · vyane-harness · vyane-ledger
+            vyane-message  · vyane-task · vyane-kernel (traits only)
+                            (each ──▶ core and nothing else)
+
+ mid        vyane-config   ──▶ provider                               (+ core)
+            vyane-workflow ──▶ kernel                                 (+ core)
+            vyane-broker   ──▶ agent · message · ledger               (+ core)
+
+ facade     vyane-service  ──▶ agent · broker · config · goal · harness · kernel
+                               · ledger · message · protocol · router (+ core)
+                (config loading, selector resolution,
+                 dispatch/broadcast/history/sessions/feedback/outcomes)
+
+ front-end  vyane-mcp      ──▶ service · workflow                     (+ core)
+            vyane-cli      ──▶ every crate above except provider
+                (assembler: CLI, REST API, workflow daemon, MCP launcher)
 ```
 
 The load-bearing rule: **the kernel depends only on `vyane-core` traits.** It
@@ -101,39 +108,48 @@ Two consequences:
 |-------|----------------------------------|------|
 | `vyane-config` | `vyane-provider` | parse TOML, resolve profiles + failover chains → `BoundTarget` |
 | `vyane-provider` | — | provider registry, endpoints, auth styles, env-injection rules |
-| `vyane-protocol` | — | `ChatClient` over HTTP (OpenAI Chat / Responses, Anthropic Messages), including bounded non-streaming OpenAI Chat typed tool turns, a separately authorized OpenAI Chat turn path, and the shared HTTP base validator and endpoint-routing digest |
+| `vyane-protocol` | — | `ChatClient` over HTTP (OpenAI Chat / Responses, Anthropic Messages), including bounded non-streaming OpenAI Chat and Anthropic Messages typed tool turns, separately authorized turn paths for those two protocols, and the shared HTTP base validator and endpoint-routing digest |
 | `vyane-harness` | — | `Harness` wrapping coding CLIs, additive process-local execution context, pinned-workdir child handoff, process-group control, guarded native filesystem tools, and a bounded native turn driver |
 | `vyane-kernel` | — (traits only) | early execution identity, whole-chain capability admission, prepared dispatch, dispatch / broadcast / failover state machine |
 | `vyane-ledger` | — | JSONL `Ledger`, filesystem `SessionStore` with strict revisioned native-session snapshots/CAS transitions, cost table |
 | `vyane-task` | — | owner-qualified SQLite task lifecycle snapshots/events, revision + executor-epoch CAS, transactional schema migration |
+| `vyane-quota` | — (independent leaf crate) | bounded, platform-neutral upstream quota snapshots through optional `QuotaConnector` adapters; no provider endpoint, credential loader, background task or routing action; connector error detail truncated to 1024 bytes |
 | `vyane-goal` | — (independent leaf crate) | owner-scoped SQLite goal snapshots plus immutable lifecycle/progress events; acceptance descriptors are data, not executable checks |
 | `vyane-agent` | — (independent leaf crate) | owner-scoped SQLite AgentRun queue and worker-topology truth, fenced two-stage recovery admission, non-serializable active permits and native execution scopes with atomic durable revalidation, bounded tree cancellation, and body-free outbox |
-| `vyane-message` | — (independent leaf crate) | owner-scoped SQLite message/delivery truth, fenced leases, external receipts, per-projector body-free outbox |
+| `vyane-message` | — (leaf crate; `vyane-core` only for the shared identifier rule) | owner-scoped SQLite message/delivery truth, fenced leases, external receipts, per-projector body-free outbox |
 | `vyane-broker` | `vyane-agent`, `vyane-message`, `vyane-ledger` | bounded owner-bound delivery pump, replay-safe adapter boundary, maintenance, body-free message/AgentRun EventLog projectors, and an explicit unwired resident library driver |
-| `vyane-router` | `vyane-core` | target selection / routing policy |
+| `vyane-router` | — (independent leaf crate; `serde` only) | target selection / routing policy |
 | `vyane-workflow` | `vyane-kernel` | declarative DAG execution, bounded source bundles, atomic journals, and explicit resume |
-| `vyane-service` | `vyane-agent`, `vyane-kernel`, `vyane-config`, `vyane-ledger`, `vyane-message`, `vyane-broker` | shared facade plus principal-derived `OwnerScopedService`, allowlisted run/session views, owner-scoped session control, explicit projection construction, the fresh-sessionless authority bridge, fixed-owner one-shot drivers, a paired in-process backend and its resident library supervisor; ordinary dispatch constructs none of the optional AgentRun components |
-| `vyane-mcp` | `vyane-service`, `vyane-workflow`, `rmcp` 3.3 | six base tools plus an object-safe workflow-control port; it owns no daemon descriptor or credential; stdio dual-era handshake keeps `initialize` on 2025-11-25 and advertises MCP 2026-07-28 through discovery |
-| `vyane-cli` | `vyane-service`, `vyane-workflow`, `vyane-task`, `vyane-goal`, `vyane-mcp`, `axum` | assembler: CLI + bearer-authenticated loopback-only REST API + authenticated local workflow daemon + nine-tool MCP launcher with a verified daemon adapter |
+| `vyane-service` | `vyane-agent`, `vyane-broker`, `vyane-config`, `vyane-goal`, `vyane-harness`, `vyane-kernel`, `vyane-ledger`, `vyane-message`, `vyane-protocol`, `vyane-router` | shared facade plus principal-derived `OwnerScopedService`, allowlisted run/session views, owner-scoped session control, explicit projection construction, the fresh-sessionless authority bridge, fixed-owner one-shot drivers, a paired in-process backend and its resident library supervisor; ordinary dispatch constructs none of the optional AgentRun components |
+| `vyane-mcp` | `vyane-service`, `vyane-workflow`, `rmcp` 3.3 | nine base tools plus an object-safe workflow-control port; it owns no daemon descriptor or credential; stdio dual-era handshake keeps `initialize` on 2025-11-25 and advertises MCP 2026-07-28 through discovery |
+| `vyane-cli` | every other workspace crate except `vyane-provider` (reached through `vyane-config`), plus `axum` | assembler: CLI + bearer-authenticated loopback-only REST API + authenticated local workflow daemon + twelve-tool MCP launcher with a verified daemon adapter |
 
 `ChatClient::complete_turn` is an additive typed boundary. Its default fallback
 keeps text-only clients source-compatible but delegates only when the request
 is lossless legacy text; request-side tool calls/results, reasoning and refusal
 signals are never flattened. The non-streaming OpenAI Chat override also
-preserves response-side tool, reasoning and refusal signals. Anthropic/Responses
-typed turns, streaming tool envelopes and provider-specific quirk profiles
-remain open. This transport contract is a prerequisite for a native model loop;
-it is not itself a `NativeHarness` implementation.
+preserves response-side tool, reasoning and refusal signals. The Anthropic
+Messages override is a separate typed wire path and never falls back to text
+`complete`: it keeps tool calls/results and thinking text, maps
+`stop_reason: "refusal"` to the structured refusal, and replays refusals as
+text. It cannot keep thinking signatures or `redacted_thinking` data, so
+replaying a turn that carried thinking fails closed with a `Config` error;
+until that is representable it is not equivalent to the OpenAI Chat path.
+OpenAI Responses typed turns, streaming tool envelopes and provider-specific
+quirk profiles remain open. This transport contract is a
+prerequisite for a native model loop; it is not itself a `NativeHarness`
+implementation.
 
 `AuthorizedToolChatClient` is a separate trait with no fallback to the ordinary
-chat path. Its OpenAI Chat implementation asks a live
+chat path. The OpenAI Chat and Anthropic Messages implementations ask a live
 `NativeExecutionAuthority` for every explicit wire attempt immediately before
 `send`; an authority error is returned unchanged and cannot enter the HTTP
 retry policy. Cancellation is observed while waiting for authority, sending,
 reading a success body and backing off. The shared HTTP client follows no
 redirects and performs no implicit client retries, leaving the explicit Vyane
-loop as the sole owner of physical attempt numbering. This guarded entry point
-still has no production native-loop caller.
+loop as the sole owner of physical attempt numbering. The resident Native
+AgentRun lane currently consumes only the authorized OpenAI Chat path;
+Anthropic Messages typed-turn is not wired there yet.
 
 ## Execution identity and capability admission
 
@@ -274,6 +290,12 @@ device/inode evidence; loss of the live handle fails closed.
 Write tools use a second frozen policy axis and are assembled only when both
 the outer sandbox ceiling permits writes and the submission explicitly
 supplies `filesystem_write`. Read authority never implies write authority.
+Independently of any write exclusion, a write or edit target with a `.git`,
+`.vyane`, `.codex`, `.claude` or `.mcp.json` component (ASCII
+case-insensitive, at any depth) is refused, the same floor command writable
+roots apply, because host tools execute or trust those files outside the
+sandbox. Claude Code, for example, starts the approved MCP servers listed in
+a workspace `.mcp.json` on the host.
 New files are staged under the exact opened parent, their complete content is
 synced, and they are then published with `RENAME_NOREPLACE`. Existing-file
 edits compose the pure guarded text
@@ -486,8 +508,10 @@ So harnesses spawn **scrubbed by default**. `EnvPolicy` is a pure function of
 - `mode: InheritMode` — `Scrub` (default) starts from `BASELINE_ENV` only;
   `Full` inherits the whole parent environment (opt-in).
 - `allow: Vec<String>` — extra parent variables let through when scrubbing.
-- `inject: BTreeMap<String, String>` — variables set for this run (auth, base
-  URL, model). **Injection always wins**, even in `Full` mode.
+- `inject: BTreeMap<String, Secret>` — variables set for this run (auth, base
+  URL, model). **Injection always wins**, even in `Full` mode. Values are
+  `Secret`s: `EnvPolicy`'s `Debug` lists only the variable names, the set is
+  never serialized, and only `EnvPolicy::build` exposes the values.
 
 `BASELINE_ENV` is the minimal set a well-behaved CLI needs to start (`PATH`,
 `HOME`, `USER`, `SHELL`, `TERM`, locale vars, `TMPDIR`, `TZ`, the `XDG_*`
@@ -658,6 +682,39 @@ copies its dependency-closed, journal-recorded all-success prefix and then
 executes the remaining suffix live. This is explicit foreground continuation, never daemon
 restart replay.
 
+### Worktree isolation (opt-in)
+
+A step may set `isolation = "worktree"` (optional `isolation_base`). The plan
+carries both fields only when set, so plans without isolation keep their
+canonical bytes and digest; older binaries reject an isolated plan through
+`deny_unknown_fields`. The engine depends only on the
+`vyane_workflow::WorktreeProvisioner` port. `WorkflowEngine` without a
+provisioner fails closed for such a plan before any journal exists; the CLI
+injects `GitWorktreeProvisioner` rooted at `StoragePaths::worktrees_dir`
+(`<data_dir>/worktrees`) for foreground `workflow run/resume/replay` only.
+
+Per isolated step the engine provisions one worktree per target, writes the
+entries to the journal as `active`, then dispatches one `TaskSpec` per target
+(own workdir, bounded by `DEFAULT_BROADCAST_CONCURRENCY`, results in input
+order) instead of the shared-task broadcast. Settlement always follows
+dispatch, including cancellation and errors, and the disposition is written
+with the step result. Provisioning and settlement run on spawned tasks behind
+one lock so they progress while the engine loop is not polling. The git
+provisioner scrubs the environment of all `GIT_*` variables, disables hooks
+and fsmonitor, verifies that paths stay below its root, and removes a tree only
+when status is empty (including ignored files) and both `HEAD` and the branch
+equal the base commit and the worktree's `HEAD` reflog names no other commit,
+using `git worktree remove` without `--force` and a
+compare-and-delete of the branch. Every failed probe keeps the tree. This
+deliberately differs from the reference implementation, which inspected only
+`status --porcelain` and could delete committed work. Resume converts a
+crash-left `active` entry into `kept` and never removes it.
+
+The resident daemon, its HTTP API and MCP workflow submit do not isolate and
+reject an isolation request with `isolation_unsupported` before task creation.
+Default isolation, garbage collection and merge helpers are not implemented;
+making isolation a default needs its own decision.
+
 Dynamic control flow, nested workflows, shared budgets, a compatibility
 frontend, changed-plan call matching, public CLI/REST/MCP plan transport, sanitized
 cross-implementation route fixtures, and a production-complete model-tier
@@ -665,9 +722,13 @@ policy remain open.
 
 ## Static MCP diagnostics
 
-The MCP library exposes six base tools. Four execute or query the established
+The MCP library exposes nine base tools. Four execute or query the established
 service surface (`vyane_dispatch`, `vyane_broadcast`, `vyane_history`, and
-`vyane_sessions`). `vyane_route` is a Rust-specific deterministic route
+`vyane_sessions`). `vyane_feedback` records an owner-scoped 1-5 rating for one
+of the caller's runs and `vyane_outcomes` returns read-only grouped outcome
+statistics; neither changes routing. `vyane_workflow_plan` compiles a
+caller-supplied source bundle into a static plan without contacting the daemon
+or executing anything. `vyane_route` is a Rust-specific deterministic route
 preview extension; it is not evidence of a same-name tool or equivalent
 product behavior in the fixed original repository. `vyane_check` is a
 configuration-only diagnostic. It validates bounded provider/profile shapes,
@@ -734,6 +795,30 @@ Each `Attempt` records its own `target`, `transport`, `started_at`,
 `duration_ms`, and an `AttemptOutcome` (`Ok`, or `Err { kind, message,
 failed_over }` where `failed_over` says whether *this* error moved the kernel to
 the next target).
+
+### Run feedback lines
+
+`vyane-ledger::feedback::JsonlFeedbackStore` keeps owner-scoped run ratings in
+`<data_dir>/feedback.jsonl`, separate from the run ledger. Each line is one
+schema-1 object with exactly these fields:
+
+```json
+{"schema":1,"feedback_id":"<uuidv7>","owner":"local","run_id":"<uuidv7>","rating":4,"source":"human","recorded_at":"2026-11-03T08:00:00Z"}
+```
+
+`rating` is an integer from 1 to 5. `source` is `human` or `auto:<rule>` with a
+rule name matching `[a-z0-9][a-z0-9_-]{0,31}`. Writes use the run ledger's
+discipline: serialize outside the lock, take an advisory exclusive `fs4` lock,
+write the line with one `write_all`. Reads take no lock. A line with another
+schema value, an unknown field, an out-of-range value, or invalid JSON is
+skipped and counted, never reinterpreted. The file is append-only; for one
+`(owner, run_id, source)` the last valid line in file order wins.
+
+A rating does not copy provider, protocol, harness or model. Outcome statistics
+join ratings to `RunRecord`s by `(owner, run_id)`, so the run ledger stays the
+only source of those facts. The service checks that the run exists for the
+caller's owner before it appends a rating; a foreign run is reported exactly
+like an absent one. Routing never reads this file.
 
 `ExecutionScope`, `AttemptScope`, capability evidence and detached capability
 snapshots are separate audit/control types. The current `RunRecord` schema does

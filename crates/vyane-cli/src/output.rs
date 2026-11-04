@@ -131,6 +131,81 @@ pub fn format_record_line(record: &RunRecord) -> String {
     )
 }
 
+/// One human-readable rating row.
+pub fn format_feedback_line(view: &vyane_service::FeedbackView) -> String {
+    format!(
+        "{}  run {}  rating {}  source {}  recorded {}",
+        view.feedback_id,
+        view.run_id,
+        view.rating,
+        view.source,
+        view.recorded_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    )
+}
+
+/// Warning for feedback lines that could not be read.
+pub fn format_feedback_skipped_line(skipped: u64) -> String {
+    format!("warning: skipped {skipped} unreadable feedback line(s)")
+}
+
+fn optional_metric(value: Option<f64>, suffix: &str) -> String {
+    value.map_or_else(|| "n/a".to_owned(), |value| format!("{value}{suffix}"))
+}
+
+/// Human-readable outcome table: one tab-separated row per group.
+pub fn print_outcome_report(report: &vyane_service::OutcomeReport) {
+    let mut header: Vec<String> = report
+        .group_by
+        .iter()
+        .map(|dimension| dimension.as_str().to_ascii_uppercase())
+        .collect();
+    header.extend(
+        [
+            "TOTAL",
+            "SUCCESS RATE",
+            "FAILOVER RATE",
+            "MEAN DURATION",
+            "KNOWN COST USD",
+            "RATINGS",
+            "AVG RATING",
+        ]
+        .map(str::to_owned),
+    );
+    println!("{}", header.join("\t"));
+    for group in &report.groups {
+        let mut row: Vec<String> = report
+            .group_by
+            .iter()
+            .map(|dimension| group.key.get(dimension).cloned().unwrap_or_default())
+            .collect();
+        row.push(group.counts.total.to_string());
+        row.push(optional_metric(group.counts.success_rate(), "%"));
+        row.push(optional_metric(group.failover_rate(), "%"));
+        row.push(optional_metric(group.duration.mean_ms(), " ms"));
+        row.push(optional_metric(group.cost.known_total_usd(), ""));
+        row.push(group.rating_count.to_string());
+        row.push(optional_metric(group.average_rating(), ""));
+        println!("{}", row.join("\t"));
+    }
+    println!(
+        "Runs: {} in {} group(s); ratings: {}",
+        report.total_runs,
+        report.groups.len(),
+        if report.include_auto_ratings {
+            "human, then auto"
+        } else {
+            "human only"
+        }
+    );
+    if report.feedback_skipped_lines > 0 {
+        eprintln!(
+            "{}",
+            format_feedback_skipped_line(report.feedback_skipped_lines)
+        );
+    }
+}
+
 pub fn print_record_line(record: &RunRecord) {
     // Kind-only pure run status on history/record print (WP-438).
     tracing::info!(
@@ -2134,7 +2209,46 @@ pub fn format_workflow_summary(outcome: &WorkflowOutcome) -> String {
             first_line(output)
         );
     }
+    for (id, step) in &outcome.journal.steps {
+        for worktree in &step.worktrees {
+            let _ = writeln!(out, "{}", format_worktree_line(id, worktree));
+        }
+    }
     out
+}
+
+/// One human line per isolated target: what was kept, or that it was removed.
+pub fn format_worktree_line(step_id: &str, worktree: &vyane_workflow::JournalWorktree) -> String {
+    use vyane_workflow::WorktreeDisposition;
+
+    let short = |sha: &str| sha.chars().take(7).collect::<String>();
+    let head = worktree
+        .head_sha
+        .as_deref()
+        .map_or_else(|| "?".to_string(), short);
+    let commits = format!("base {} → head {head}", short(&worktree.base_sha));
+    let prefix = format!("{step_id}/{}", worktree.target);
+    match worktree.disposition {
+        WorktreeDisposition::Removed => {
+            format!("{prefix}: worktree removed: {}", worktree.branch)
+        }
+        WorktreeDisposition::Kept => format!(
+            "{prefix}: worktree kept: {} {} ({commits}, {})",
+            worktree.branch,
+            worktree.path,
+            worktree
+                .kept_reason
+                .map_or("unknown_state", |reason| reason.as_str())
+        ),
+        WorktreeDisposition::CleanupFailed => format!(
+            "{prefix}: worktree cleanup failed, inspect manually: {} {} ({commits})",
+            worktree.branch, worktree.path
+        ),
+        WorktreeDisposition::Active => format!(
+            "{prefix}: worktree active (not settled): {} {} ({commits})",
+            worktree.branch, worktree.path
+        ),
+    }
 }
 
 pub fn print_workflow_summary(outcome: &WorkflowOutcome) {
@@ -3159,6 +3273,7 @@ mod tests {
                 output: Some("found it\nsecond".into()),
                 outputs: None,
                 error: None,
+                worktrees: Vec::new(),
             },
         );
         steps.insert(
@@ -3169,6 +3284,7 @@ mod tests {
                 output: None,
                 outputs: None,
                 error: Some("synth boom".into()),
+                worktrees: Vec::new(),
             },
         );
         let source: WorkflowRunId = "01890f3e-7b7d-7cc2-98d2-3f9a2b6c7d8e"
@@ -3237,6 +3353,54 @@ mod tests {
         );
         assert!(
             text.contains(workflow_status_name(WorkflowRunStatus::Completed)),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn human_workflow_summary_reports_each_worktree_disposition() {
+        use vyane_workflow::{JournalWorktree, WorktreeDisposition, WorktreeKeptReason};
+
+        let mut outcome = sample_workflow_outcome(WorkflowRunStatus::Completed, false);
+        let entry = |target: &str,
+                     disposition: WorktreeDisposition,
+                     kept_reason: Option<WorktreeKeptReason>| JournalWorktree {
+            target: target.into(),
+            attempt: 0,
+            branch: format!("vyane/wt/run/0-{target}-0"),
+            path: format!("/data/worktrees/run/0-{target}-0"),
+            base_sha: "a".repeat(40),
+            head_sha: Some("b".repeat(40)),
+            disposition,
+            kept_reason,
+        };
+        outcome
+            .journal
+            .steps
+            .get_mut("finder")
+            .expect("sample has a finder step")
+            .worktrees = vec![
+            entry("x", WorktreeDisposition::Removed, None),
+            entry(
+                "y",
+                WorktreeDisposition::Kept,
+                Some(WorktreeKeptReason::Committed),
+            ),
+            entry("z", WorktreeDisposition::CleanupFailed, None),
+        ];
+        let text = format_workflow_summary(&outcome);
+        assert!(
+            text.contains("finder/x: worktree removed: vyane/wt/run/0-x-0"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "finder/y: worktree kept: vyane/wt/run/0-y-0 /data/worktrees/run/0-y-0 (base aaaaaaa → head bbbbbbb, committed)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("finder/z: worktree cleanup failed, inspect manually"),
             "{text}"
         );
     }

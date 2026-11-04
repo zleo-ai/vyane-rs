@@ -18,7 +18,9 @@
 //! 4. **Explicit optional components** — owner-bound message delivery and
 //!    AgentRun lifecycle projection remain opt-in and do not start resident
 //!    work during ordinary dispatch.
-//! 5. **Safe diagnostics** — [`VyaneService::route_preview`] and
+//! 5. **Run ratings and outcome statistics** — owner-scoped 1–5 ratings and
+//!    read-only grouped outcome statistics. Routing never reads them.
+//! 6. **Safe diagnostics** — [`VyaneService::route_preview`] and
 //!    [`VyaneService::check_config`], which expose bounded, static-only DTOs
 //!    without serializing paths, endpoints, credentials, prompts, or raw errors.
 //!
@@ -48,6 +50,7 @@ mod kernel_store;
 mod message;
 mod native_authority;
 mod native_permissions;
+mod outcomes;
 mod owner;
 mod routing;
 mod selector;
@@ -150,6 +153,12 @@ pub use message::{
 };
 pub use native_authority::AgentRunModelToolAuthority;
 pub use native_permissions::{NativePermissionSet, NativePermissionSetError, NativeWebSearchGrant};
+pub use outcomes::{
+    DEFAULT_OUTCOME_GROUP_BY, FEEDBACK_VIEW_SCHEMA, FeedbackList, FeedbackView,
+    MAX_OUTCOME_DIMENSIONS, OUTCOME_DIRECT_HARNESS, OUTCOME_UNKNOWN, OutcomeDimension,
+    OutcomeGroup, OutcomeReport, RUN_STATUS_FILTER_ERROR, parse_outcome_group_by,
+    parse_run_status_filter, summarize_outcomes, validate_outcome_group_by,
+};
 pub use owner::{
     AuthenticatedPrincipal, OwnerContext, OwnerContextError, OwnerContextFactory,
     PrincipalAuthenticator, PrincipalOwnerResolver,
@@ -164,4 +173,7 @@ pub use service::{
     RUN_VIEW_SCHEMA, RunAttemptOutcomeView, RunAttemptView, RunView, SESSION_VIEW_SCHEMA,
     SessionNativeState, SessionView, VyaneService,
 };
-pub use task::{build_task_spec, parse_labels, validate_user_routing_labels};
+pub use task::{
+    MAX_LABEL_KEY_BYTES, MAX_LABEL_VALUE_BYTES, MAX_LABELS, MAX_LABELS_TOTAL_BYTES,
+    build_task_spec, parse_labels, validate_user_routing_labels,
+};

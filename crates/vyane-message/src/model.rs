@@ -94,7 +94,7 @@ pub struct EndpointRef {
 }
 
 impl EndpointRef {
-    pub(crate) fn validate(&self, field: &str) -> Result<()> {
+    pub(crate) fn validate(&self, field: &'static str) -> Result<()> {
         validate_text(field, &self.id, 512)
     }
 }
@@ -561,7 +561,18 @@ impl fmt::Debug for NewTransportReceipt {
 
 impl NewTransportReceipt {
     pub(crate) fn validate(&self) -> Result<()> {
-        validate_text("transport receipt transport", &self.transport, 64)?;
+        self.validate_with(validate_text)
+    }
+
+    /// Re-checks a receipt rebuilt from a stored row. Text fields use the
+    /// legacy stored-text rule so rows written before the shared identifier
+    /// rule stay readable; the structural checks are unchanged.
+    pub(crate) fn validate_stored(&self) -> Result<()> {
+        self.validate_with(validate_stored_text)
+    }
+
+    fn validate_with(&self, text_rule: fn(&'static str, &str, usize) -> Result<()>) -> Result<()> {
+        text_rule("transport receipt transport", &self.transport, 64)?;
         if !self.transport.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         }) {
@@ -569,8 +580,8 @@ impl NewTransportReceipt {
                 "transport receipt transport must use lowercase ASCII identity characters".into(),
             ));
         }
-        validate_text("transport receipt account scope", &self.account_scope, 512)?;
-        validate_text(
+        text_rule("transport receipt account scope", &self.account_scope, 512)?;
+        text_rule(
             "transport receipt destination scope",
             &self.destination_scope,
             512,
@@ -582,7 +593,7 @@ impl NewTransportReceipt {
         }
         let mut external_ids = HashSet::with_capacity(self.external_ids.len());
         for external_id in &self.external_ids {
-            validate_text("transport receipt external id", external_id, 512)?;
+            text_rule("transport receipt external id", external_id, 512)?;
             if !external_ids.insert(external_id) {
                 return Err(MessageStoreError::InvalidInput(
                     "transport receipt contains a duplicate external id".into(),
@@ -592,8 +603,24 @@ impl NewTransportReceipt {
         Ok(())
     }
 
+    /// Digest of a receipt a caller is about to write. Applies the strict
+    /// input rule first, so the write path never stores a digest over text
+    /// it would not accept.
     pub(crate) fn canonical_digest(&self) -> Result<String> {
         self.validate()?;
+        self.digest()
+    }
+
+    /// Digest of a receipt rebuilt from stored rows. Applies the stored-row
+    /// rule, so a batch an earlier release wrote with padded text still
+    /// re-derives the digest it was stored with instead of failing as
+    /// corrupt. Only stored-row checks may use it.
+    pub(crate) fn stored_canonical_digest(&self) -> Result<String> {
+        self.validate_stored()?;
+        self.digest()
+    }
+
+    fn digest(&self) -> Result<String> {
         let mut hasher = Sha256::new();
         hasher.update(b"vyane-transport-receipt-v1\0");
         for value in [
@@ -985,7 +1012,28 @@ pub(crate) fn validate_limit(limit: usize, field: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_text(field: &str, value: &str, max: usize) -> Result<()> {
+/// Every caller-supplied identifier in this store (owner, ids, routes, keys,
+/// consumers) follows the shared rule from `vyane-core`: non-blank, bounded,
+/// no surrounding whitespace, no control characters. The error names the
+/// field and the reason, never the value.
+pub(crate) fn validate_text(field: &'static str, value: &str, max: usize) -> Result<()> {
+    vyane_core::validate_identifier(field, value, max)
+        .map_err(|error| MessageStoreError::InvalidInput(error.to_string()))
+}
+
+pub(crate) fn validate_optional_text(
+    field: &'static str,
+    value: Option<&str>,
+    max: usize,
+) -> Result<()> {
+    value.map_or(Ok(()), |value| validate_text(field, value, max))
+}
+
+/// The rule for text read back from the store. It is the rule every earlier
+/// release enforced on write (non-blank, bounded, no NUL), so rows those
+/// releases accepted keep decoding after the write rule tightened. Only
+/// stored-row checks may use it; caller input goes through [`validate_text`].
+pub(crate) fn validate_stored_text(field: &str, value: &str, max: usize) -> Result<()> {
     if value.trim().is_empty() || value.len() > max || value.contains('\0') {
         return Err(MessageStoreError::InvalidInput(format!(
             "{field} is empty, oversized, or contains NUL"
@@ -994,8 +1042,12 @@ pub(crate) fn validate_text(field: &str, value: &str, max: usize) -> Result<()> 
     Ok(())
 }
 
-pub(crate) fn validate_optional_text(field: &str, value: Option<&str>, max: usize) -> Result<()> {
-    value.map_or(Ok(()), |value| validate_text(field, value, max))
+pub(crate) fn validate_optional_stored_text(
+    field: &str,
+    value: Option<&str>,
+    max: usize,
+) -> Result<()> {
+    value.map_or(Ok(()), |value| validate_stored_text(field, value, max))
 }
 
 pub(crate) fn normalize_timestamp(value: DateTime<Utc>) -> Result<DateTime<Utc>> {
@@ -1079,10 +1131,13 @@ fn is_lower_hex_byte(byte: u8) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
-        DeliveryStatus, EndpointKind, MessageDirection, MessageEventKind, MessagePublicationStatus,
+        DeliveryStatus, EndpointKind, EndpointRef, IdempotencyKey, MessageDirection,
+        MessageEventKind, MessagePublicationStatus, validate_owner, validate_text,
     };
+    use crate::MessageStoreError;
 
     #[test]
     fn message_string_enum_tokens_are_public_snake_case() {
@@ -1096,5 +1151,53 @@ mod tests {
         assert_eq!(MessageEventKind::DeadLettered.to_string(), "dead_lettered");
         assert_eq!(MessagePublicationStatus::Staged.as_str(), "staged");
         assert_eq!(MessagePublicationStatus::Published.to_string(), "published");
+    }
+
+    /// Owners, routes, endpoint ids and idempotency keys follow the same
+    /// identifier rule as `OwnerContext` and the agent store, so a value is
+    /// legal in this store exactly when it is legal in its neighbours.
+    #[test]
+    fn message_identifiers_reject_control_characters_and_padding() {
+        for value in [
+            "local\n",
+            " local",
+            "local ",
+            "lo\u{1b}cal",
+            "local\t",
+            "lo\0cal",
+        ] {
+            assert!(
+                validate_owner(value).is_err(),
+                "message store accepted owner {value:?}"
+            );
+            assert!(
+                validate_text("delivery mailbox route", value, 256).is_err(),
+                "message store accepted route {value:?}"
+            );
+            let endpoint = EndpointRef {
+                kind: EndpointKind::Agent,
+                id: value.to_string(),
+            };
+            assert!(endpoint.validate("endpoint id").is_err(), "{value:?}");
+            let key = IdempotencyKey {
+                producer: "producer".into(),
+                key: value.to_string(),
+            };
+            assert!(key.validate().is_err(), "{value:?}");
+        }
+        validate_owner("local user").unwrap();
+        validate_text("delivery mailbox route", "inbox/main", 256).unwrap();
+    }
+
+    #[test]
+    fn message_identifier_errors_name_the_field_not_the_value() {
+        const CANARY: &str = "MESSAGE_ID_CANARY";
+        let Err(MessageStoreError::InvalidInput(error)) =
+            validate_text("delivery route", &format!("{CANARY}\n"), 256)
+        else {
+            panic!("padded route was accepted");
+        };
+        assert!(error.starts_with("delivery route "), "{error}");
+        assert!(!error.contains(CANARY), "{error}");
     }
 }

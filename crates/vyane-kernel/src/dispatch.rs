@@ -1177,6 +1177,8 @@ impl Dispatcher {
                     Ok(StreamEvent::Usage(u)) => {
                         usage.get_or_insert_with(Usage::default).add(&u);
                     }
+                    // `Done` is the stream's last event (see `StreamEvent`),
+                    // so usage has already been seen when it arrives.
                     Ok(StreamEvent::Done { .. }) => break,
                     Err(e) => {
                         stream_error = Some(e);

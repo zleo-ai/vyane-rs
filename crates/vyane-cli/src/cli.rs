@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use vyane_core::{RunStatus, Sandbox};
+use vyane_core::Sandbox;
 use vyane_goal::{GoalContinuitySignalKind, GoalStatus, TakeoverDecision};
 use vyane_workflow::WorkflowRunId;
 
@@ -32,6 +32,9 @@ pub enum Command {
     Broadcast(BroadcastArgs),
     /// Show recent run ledger records.
     History(HistoryArgs),
+    /// Rate your runs from 1 to 5 and list the ratings.
+    #[command(subcommand)]
+    Feedback(FeedbackCommand),
     /// List saved session records.
     Sessions(SessionsArgs),
     /// Inspect and safely reset local continuity sessions.
@@ -68,6 +71,46 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct CheckArgs {
     /// Emit static configuration diagnostics as JSON without probing harnesses.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FeedbackCommand {
+    /// Record a 1-5 rating for one of your runs (`rate <RUN_ID> <RATING>` or `rate --last <RATING>`).
+    Rate(FeedbackRateArgs),
+    /// List your ratings, most recent first.
+    List(FeedbackListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct FeedbackRateArgs {
+    /// Run id to rate; omit it when using --last.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: Option<String>,
+    /// Rating from 1 (worst) to 5 (best).
+    #[arg(value_name = "RATING")]
+    pub rating: Option<String>,
+    /// Rate your most recently recorded run; pass only RATING.
+    #[arg(long)]
+    pub last: bool,
+    /// Who produced the rating: human (default) or auto:<rule>.
+    #[arg(long, value_name = "SOURCE")]
+    pub source: Option<String>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FeedbackListArgs {
+    /// Only ratings for this run id.
+    #[arg(long = "run", value_name = "RUN_ID")]
+    pub run_id: Option<String>,
+    /// Maximum number of ratings to show; zero returns none.
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+    /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -825,12 +868,24 @@ pub struct HistoryArgs {
     /// Count all matching runs by provider and status, instead of listing them.
     #[arg(long, conflicts_with = "limit")]
     pub stats: bool,
+    /// Group all matching runs and report success, failover, duration, tokens, cost and rating.
+    #[arg(
+        long,
+        conflicts_with_all = ["stats", "limit", "session", "labels"]
+    )]
+    pub outcomes: bool,
+    /// Outcome grouping: 1-4 distinct dimensions from provider, protocol, harness, model, effort, profile, status (default: provider,harness,model,effort).
+    #[arg(long = "group-by", value_name = "DIM,...", requires = "outcomes")]
+    pub group_by: Option<String>,
+    /// Count machine (auto:<rule>) ratings when a run has no human rating.
+    #[arg(long, requires = "outcomes")]
+    pub include_auto_ratings: bool,
     /// Maximum number of records to show; zero returns no records.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
-    /// Filter by run status.
-    #[arg(long, value_enum)]
-    pub status: Option<RunStatusArg>,
+    /// Filter by run status: success, error, timeout, or cancelled.
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
     /// Filter by provider id.
     #[arg(long, value_name = "PROVIDER")]
     pub provider: Option<String>,
@@ -1055,31 +1110,6 @@ impl From<SandboxArg> for Sandbox {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum RunStatusArg {
-    Success,
-    Error,
-    Timeout,
-    Cancelled,
-}
-
-impl From<RunStatusArg> for RunStatus {
-    fn from(value: RunStatusArg) -> Self {
-        match value {
-            RunStatusArg::Success => RunStatus::Success,
-            RunStatusArg::Error => RunStatus::Error,
-            RunStatusArg::Timeout => RunStatus::Timeout,
-            RunStatusArg::Cancelled => RunStatus::Cancelled,
-        }
-    }
-}
-
-impl std::fmt::Display for RunStatusArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(RunStatus::from(*self).as_str())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -1094,17 +1124,6 @@ mod tests {
         assert_eq!(SandboxArg::ReadOnly.to_string(), "read-only");
         assert_eq!(SandboxArg::Write.to_string(), Sandbox::Write.as_str());
         assert_eq!(SandboxArg::Full.to_string(), "full");
-    }
-
-    #[test]
-    fn run_status_arg_display_uses_domain_run_status_tokens() {
-        assert_eq!(RunStatusArg::Success.to_string(), "success");
-        assert_eq!(
-            RunStatusArg::Timeout.to_string(),
-            RunStatus::Timeout.as_str()
-        );
-        assert_eq!(RunStatusArg::Cancelled.to_string(), "cancelled");
-        assert_eq!(RunStatusArg::Error.to_string(), "error");
     }
 
     #[test]

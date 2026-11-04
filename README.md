@@ -72,7 +72,7 @@ Resident execution, durable workflows and local goals are evolving. Native runs 
 <details>
 <summary>Evidence snapshot</summary>
 
-The [public capability matrix](docs/parity/ORIGINAL-VYANE-PARITY.md) tracks 53 capabilities across eight domains: 7 implemented, 23 partial, 12 missing, 9 deliberately different or awaiting a decision, and 2 planned. The [sanitized manifest](docs/parity/fixtures/v1/manifest.json) contains 44 cases in 5 suites: 30 normalized matches and 14 open differences. These bounded checks are not a whole-system parity percentage.
+The [public capability matrix](docs/parity/ORIGINAL-VYANE-PARITY.md) tracks 53 capabilities across eight domains: 7 implemented, 25 partial, 10 missing, 9 deliberately different or awaiting a decision, and 2 planned. The [sanitized manifest](docs/parity/fixtures/v1/manifest.json) contains 44 cases in 5 suites: 30 normalized matches and 14 open differences. These bounded checks are not a whole-system parity percentage.
 
 </details>
 

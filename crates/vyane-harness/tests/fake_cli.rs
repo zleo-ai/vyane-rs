@@ -232,7 +232,8 @@ async fn claude_fake_cli_argv_env_and_parsing() {
 
     let argv = read_lines(&argv_file);
     assert_eq!(argv[0], "-p");
-    assert_eq!(argv[1], "answer this");
+    assert_eq!(argv[argv.len() - 2], "--");
+    assert_eq!(argv[argv.len() - 1], "answer this");
     assert!(contains_window(&argv, &["--output-format", "json"]));
     assert!(contains_window(&argv, &["--model", "claude-test-model"]));
     assert!(contains_window(
@@ -247,6 +248,39 @@ async fn claude_fake_cli_argv_env_and_parsing() {
     assert!(child_env.contains("ANTHROPIC_AUTH_TOKEN=test-child-token\n"));
     assert!(child_env.contains("ANTHROPIC_MODEL=claude-test-model\n"));
     assert!(child_env.contains("EXPLICIT_CHILD=yes\n"));
+}
+
+/// The argv the child actually receives for a read-only run pins the
+/// permission mode, denies the mutating tools, and passes an option-shaped
+/// task only as the final positional argument behind `--`.
+#[tokio::test]
+async fn claude_fake_cli_read_only_argv_pins_permissions_and_guards_prompt() {
+    let dir = TempDir::new().unwrap();
+    let argv_file = dir.path().join("argv.txt");
+    let env_file = dir.path().join("env.txt");
+    let bin = argv_capture_script(&dir, "fake-claude", &argv_file, &env_file);
+
+    let job = base_job("--dangerously-skip-permissions");
+    ClaudeCodeHarness::with_binary(bin.to_string_lossy())
+        .run(job, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let argv = read_lines(&argv_file);
+    assert_eq!(
+        argv,
+        [
+            "-p",
+            "--output-format",
+            "json",
+            "--permission-mode",
+            "dontAsk",
+            "--disallowedTools",
+            "Bash,Edit,Write,NotebookEdit",
+            "--",
+            "--dangerously-skip-permissions",
+        ]
+    );
 }
 
 #[tokio::test]

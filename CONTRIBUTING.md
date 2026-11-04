@@ -35,6 +35,18 @@ The workspace Cargo config caps libtest at four threads because process-control
 acceptance tests create and signal real child groups; unbounded host-core
 parallelism can make those tests interfere on large development machines.
 
+A local `cargo test --workspace` is not the same run as CI. The `test` job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the workspace
+without `vyane-broker`, `vyane-service` and `vyane-cli`, then runs each of
+those three crates in its own invocation with `--test-threads=1`, and moves a
+list of fixtures that stall under suite load into separate `--exact`
+processes. Read that step for the exact split when a local run disagrees with
+CI. On Linux, the native command sandbox tests need `bubblewrap` and
+`keyutils` installed (CI installs them with `apt-get` before testing);
+without them those tests fail. Tests that rely on file permissions, such as
+a ledger made unreadable with mode `0o000`, fail when the suite runs as
+root, because root ignores those permissions.
+
 CI also runs `cargo check --workspace --all-targets --locked` on the exact
 workspace MSRV (`1.88.0`). Local stable-only checks do not prove MSRV
 compatibility.
@@ -62,7 +74,7 @@ vyane-kernel      dispatch / broadcast / failover state machine + streaming
 vyane-router      deterministic routing: complexity scoring, tag inference, tier mapping
 vyane-workflow    declarative workflow engine (DAG + journal/resume)
 vyane-service     shared facade: config loading, selector resolution, routing adapter
-vyane-mcp         MCP server (rmcp 3.3 SDK, 6 base tools over stdio)
+vyane-mcp         MCP server (rmcp 3.3 SDK, 9 base tools over stdio)
 vyane-cli         front-end: CLI + REST API (axum) + MCP launcher
 ```
 
@@ -80,8 +92,8 @@ interchangeable operations:
 | protocol | command | new code location |
 |----------|---------|-------------------|
 | CLI | `vyane dispatch/broadcast/review/route/task/workflow/a2a/goal` | `vyane-cli/src/command.rs` |
-| REST API | `vyane serve` (axum, 10 endpoints + SSE) | `vyane-cli/src/api.rs` |
-| MCP | `vyane mcp` (rmcp 3.3, 6 base or 9 daemon-backed tools over stdio) | `vyane-mcp/src/lib.rs` |
+| REST API | `vyane serve` (axum, 13 JSON method routes + `/v1/dispatch/stream` SSE + read-only goal continuity GET) | `vyane-cli/src/api.rs` |
+| MCP | `vyane mcp` (rmcp 3.3, 9 base tools; 12 with the CLI-injected workflow daemon adapter, over stdio) | `vyane-mcp/src/lib.rs` |
 
 When adding a shared operation, implement it in `vyane-service` and expose it
 through each applicable front-end. If an operation is intentionally

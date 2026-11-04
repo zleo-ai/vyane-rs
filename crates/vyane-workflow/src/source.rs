@@ -19,6 +19,7 @@ use crate::plan::{
     WORKFLOW_PLAN_MAX_TOTAL_BYTES, WORKFLOW_PLAN_MAX_TOTAL_ROUTE_VALUES,
     WORKFLOW_PLAN_MAX_TOTAL_TARGETS,
 };
+use crate::worktree::WorkflowIsolation;
 
 pub const WORKFLOW_SOURCE_MAX_TOML_BYTES: usize = 1024 * 1024;
 pub const WORKFLOW_SOURCE_MAX_PROMPT_BYTES: usize = 4 * 1024 * 1024;
@@ -316,6 +317,39 @@ impl WorkflowSourceBundle {
     }
 }
 
+/// Read only the bounded workflow TOML at `path` and report whether any step
+/// sets an isolation key (`isolation` other than `"none"`, or
+/// `isolation_base`). Prompt files are not opened.
+///
+/// Surfaces that cannot isolate (the resident daemon) use this to fail closed
+/// before contacting anything.
+pub fn workflow_file_requests_isolation(path: impl AsRef<Path>) -> WorkflowResult<bool> {
+    let path = path.as_ref();
+    let bytes = read_workflow_limited(path)?;
+    let source = std::str::from_utf8(&bytes).map_err(|_| WorkflowError::ParseWorkflow {
+        path: path.to_path_buf(),
+    })?;
+    Ok(raw_requests_isolation(&parse_raw(source, path)?))
+}
+
+impl WorkflowSourceBundle {
+    /// Whether any step of this bundle's TOML sets an isolation key.
+    pub fn requests_isolation(&self) -> WorkflowResult<bool> {
+        let raw = parse_raw(&self.workflow_toml, Path::new(BUNDLE_DISPLAY_PATH))?;
+        Ok(raw_requests_isolation(&raw))
+    }
+}
+
+fn raw_requests_isolation(raw: &RawRoot) -> bool {
+    raw.steps.iter().any(|step| {
+        step.isolation_base.is_some()
+            || step
+                .isolation
+                .as_deref()
+                .is_some_and(|value| value != WorkflowIsolation::None.as_str())
+    })
+}
+
 impl Workflow {
     pub fn from_path(path: impl AsRef<Path>) -> WorkflowResult<Self> {
         let path = path.as_ref().to_path_buf();
@@ -364,6 +398,9 @@ struct RawStep {
     system: Option<String>,
     workdir: Option<PathBuf>,
     sandbox: Option<Sandbox>,
+    /// Kept as text so an unknown value gets a step-scoped diagnostic.
+    isolation: Option<String>,
+    isolation_base: Option<String>,
     timeout_secs: Option<u64>,
     on_error: Option<OnError>,
     route: Option<WorkflowRouteHints>,
@@ -489,6 +526,16 @@ fn build_workflow(
             (None, Some(path)) => entries.get(path).map(|content| (*content).to_string()),
             (None, None) => None,
         };
+        let isolation = match raw_step.isolation.as_deref() {
+            None => WorkflowIsolation::None,
+            Some(value) => WorkflowIsolation::parse(value).ok_or_else(|| {
+                // The rejected value is not echoed.
+                WorkflowError::validation(vec![format!(
+                    "step {} has an unsupported `isolation` value; expected \"none\" or \"worktree\"",
+                    index + 1
+                )])
+            })?,
+        };
         steps.push(WorkflowStep {
             index,
             id: raw_step.id.unwrap_or_default(),
@@ -500,6 +547,8 @@ fn build_workflow(
             system: raw_step.system,
             workdir: raw_step.workdir,
             sandbox: raw_step.sandbox.unwrap_or_default(),
+            isolation,
+            isolation_base: raw_step.isolation_base,
             timeout: raw_step.timeout_secs.map(Duration::from_secs),
             on_error: raw_step.on_error.unwrap_or_default(),
             route: raw_step.route.unwrap_or_default(),

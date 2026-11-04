@@ -459,6 +459,7 @@ fn safe_rejection_code(bytes: &[u8]) -> &'static str {
         "invalid_request" => "invalid_request",
         "conflict" => "conflict",
         "not_found" => "not_found",
+        "isolation_unsupported" => "isolation_unsupported",
         _ => "http_rejection",
     }
 }

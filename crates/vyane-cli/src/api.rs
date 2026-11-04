@@ -29,7 +29,7 @@ use axum::{
     body::Bytes,
     extract::{
         DefaultBodyLimit, FromRef, Path, Query, RawQuery, Request, State,
-        rejection::{BytesRejection, PathRejection},
+        rejection::{BytesRejection, PathRejection, QueryRejection},
     },
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
@@ -46,9 +46,9 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use vyane_core::{CancellationToken, ErrorKind, RunStatus, Sandbox, VyaneError};
 use vyane_kernel::{DispatchOutcome, StreamDispatchEvent};
 use vyane_service::{
-    BroadcastParams, DispatchParams, GoalNextActionView, GoalReadError, GoalReadService,
-    HistoryFilter, OwnerContext, OwnerScopedService, RunView, SessionView, VyaneService,
-    parse_labels,
+    BroadcastParams, DispatchParams, FeedbackList, FeedbackView, GoalNextActionView, GoalReadError,
+    GoalReadService, HistoryFilter, OutcomeReport, OwnerContext, OwnerScopedService, RunView,
+    SessionView, VyaneService, parse_labels,
 };
 use vyane_task::{
     ControllerRef, FailureCode, NewTask, SqliteTaskStore, TaskKind, TaskOrigin, TaskQuery,
@@ -1468,6 +1468,47 @@ pub struct RunsQuery {
     pub until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Body for `POST /v1/runs/{run_id}/feedback`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackRequest {
+    /// Integer rating from 1 to 5.
+    pub rating: u8,
+    /// `human` (default) or `auto:<rule>`.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// Query params for `GET /v1/feedback`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackListQuery {
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// Max ratings to return. `None` defaults to 100. `0` is rejected as 400.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Query params for `GET /v1/outcomes`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomesQuery {
+    /// Comma-separated dimensions; defaults to `provider,harness,model,effort`.
+    #[serde(default)]
+    pub group_by: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub include_auto_ratings: bool,
+}
+
 /// Default and max record limits for `GET /v1/runs`.
 const DEFAULT_RUN_LIMIT: usize = 100;
 const MAX_RUN_LIMIT: usize = 10_000;
@@ -1904,6 +1945,9 @@ fn router_from_parts(
         .route("/v1/tasks/{id}/output", get(get_task_output))
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/runs", get(runs))
+        .route("/v1/runs/{run_id}/feedback", post(record_feedback))
+        .route("/v1/feedback", get(list_feedback))
+        .route("/v1/outcomes", get(outcomes))
         .route("/v1/sessions", get(sessions))
         .route(
             "/v1/goals/{id}/continuity-next",
@@ -2400,6 +2444,108 @@ async fn runs(
     })))
 }
 
+/// Map a feedback/outcome service error onto a status code. Only fixed
+/// service messages reach the client: never a path, an I/O error, or the
+/// rejected input.
+fn feedback_api_error(error: anyhow::Error) -> ApiError {
+    let found = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<VyaneError>());
+    match found {
+        Some(vyane) if vyane.kind == ErrorKind::Config => {
+            ApiError::bad_request(vyane.message.clone())
+        }
+        Some(vyane) if vyane.kind == ErrorKind::NotFound => ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "run not found".into(),
+        },
+        _ => {
+            eprintln!(
+                "{}",
+                crate::output::format_run_ledger_query_error_line(&format!("{error:#}"))
+            );
+            ApiError::internal("feedback storage unavailable")
+        }
+    }
+}
+
+/// `POST /v1/runs/{run_id}/feedback` — record a 1–5 rating for one of the
+/// caller's runs. A missing and a foreign run both return 404.
+async fn record_feedback(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<(StatusCode, Json<FeedbackView>), ApiError> {
+    let Path(run_id) = path.map_err(|_| ApiError::bad_request("invalid run id"))?;
+    let body = body.map_err(|_| ApiError::bad_request("invalid feedback request"))?;
+    let request: FeedbackRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::bad_request("invalid feedback request"))?;
+    let view = state
+        .service
+        .record_feedback(&run_id, request.rating, request.source.as_deref())
+        .await
+        .map_err(feedback_api_error)?;
+    Ok((StatusCode::CREATED, Json(view)))
+}
+
+/// `GET /v1/feedback` — the caller's folded ratings, most recent first.
+async fn list_feedback(
+    State(state): State<ApiState>,
+    query: Result<Query<FeedbackListQuery>, QueryRejection>,
+) -> Result<Json<FeedbackList>, ApiError> {
+    let Query(query) = query.map_err(|_| ApiError::bad_request("invalid feedback query"))?;
+    let limit = match query.limit {
+        Some(0) => {
+            return Err(ApiError::bad_request(
+                "limit must be greater than 0 (omit for default, or use a positive number)",
+            ));
+        }
+        Some(n) if n > MAX_RUN_LIMIT => {
+            return Err(ApiError::bad_request(format!(
+                "limit {n} exceeds maximum of {MAX_RUN_LIMIT}"
+            )));
+        }
+        Some(n) => n,
+        None => DEFAULT_RUN_LIMIT,
+    };
+    let list = state
+        .service
+        .feedback(query.run_id.as_deref(), Some(limit))
+        .await
+        .map_err(feedback_api_error)?;
+    Ok(Json(list))
+}
+
+/// `GET /v1/outcomes` — grouped outcome statistics for the caller's runs.
+async fn outcomes(
+    State(state): State<ApiState>,
+    query: Result<Query<OutcomesQuery>, QueryRejection>,
+) -> Result<Json<OutcomeReport>, ApiError> {
+    let Query(query) = query.map_err(|_| ApiError::bad_request("invalid outcomes query"))?;
+    let group_by = match query.group_by.as_deref() {
+        None => vyane_service::DEFAULT_OUTCOME_GROUP_BY.to_vec(),
+        Some(raw) => vyane_service::parse_outcome_group_by(raw)
+            .map_err(|error| ApiError::bad_request(error.message))?,
+    };
+    let status = match query.status.as_deref() {
+        Some(s) => Some(parse_run_status(s)?),
+        None => None,
+    };
+    let filter = HistoryFilter {
+        limit: None,
+        status,
+        provider: query.provider,
+        since: query.since,
+        until: query.until,
+    };
+    let report = state
+        .service
+        .outcomes(filter, group_by, query.include_auto_ratings)
+        .await
+        .map_err(feedback_api_error)?;
+    Ok(Json(report))
+}
+
 async fn sessions(
     State(state): State<ApiState>,
 ) -> Result<Json<ItemsEnvelope<SessionView>>, ApiError> {
@@ -2596,18 +2742,11 @@ fn parse_sandbox(raw: Option<&str>) -> Result<Sandbox, ApiError> {
     }
 }
 
-/// Parse a run-status filter string. Matches the `snake_case` serialization of
-/// [`RunStatus`].
+/// Parse a run-status filter string with the shared service parser. A
+/// rejected value gets a fixed message and is never echoed.
 fn parse_run_status(raw: &str) -> Result<RunStatus, ApiError> {
-    match raw {
-        "success" => Ok(RunStatus::Success),
-        "error" => Ok(RunStatus::Error),
-        "timeout" => Ok(RunStatus::Timeout),
-        "cancelled" => Ok(RunStatus::Cancelled),
-        _ => Err(ApiError::bad_request(format!(
-            "unknown status `{raw}` (expected success, error, timeout, or cancelled)"
-        ))),
-    }
+    vyane_service::parse_run_status_filter(raw)
+        .map_err(|error| ApiError::bad_request(error.message))
 }
 
 #[cfg(test)]
@@ -3611,6 +3750,222 @@ mod tests {
         );
     }
 
+    fn feedback_ledger_line(run_id: &str, owner: &str, provider: &str) -> String {
+        serde_json::json!({
+            "run_id": run_id, "owner": owner,
+            "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:00:01Z",
+            "task_digest": "d", "sandbox": "read-only",
+            "target": {"provider": provider, "protocol": "openai_chat", "model": "m"},
+            "transport": "direct_http", "attempts": [], "status": "success",
+            "labels": {"routing.effort": "low"}
+        })
+        .to_string()
+    }
+
+    fn feedback_post(
+        run_id: &str,
+        body: &str,
+        token: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut request = axum::http::Request::post(format!("/v1/runs/{run_id}/feedback"))
+            .header("host", "127.0.0.1:9721")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn feedback_and_outcomes_rest_are_authenticated_strict_and_foreign_as_absent() {
+        let root = crate::test_support::private_tempdir();
+        std::fs::write(
+            root.path().join("ledger.jsonl"),
+            [
+                feedback_ledger_line("run-1", "local", "p"),
+                feedback_ledger_line("run-2", "local", "q"),
+                feedback_ledger_line("run-foreign", "someone-else", "p"),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let (_task_directory, tasks) = temp_supervisor().await;
+        let service = test_service(root.path());
+        let app = router_from_parts(service.clone(), tasks, API_TOKEN).unwrap();
+
+        let created = app
+            .clone()
+            .oneshot(feedback_post(
+                "run-1",
+                r#"{"rating":4,"source":"human"}"#,
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let view = response_json(created).await;
+        assert_eq!(view["run_id"], "run-1");
+        assert_eq!(view["rating"], 4);
+        assert_eq!(view["source"], "human");
+        assert_eq!(view["view_schema"], 1);
+        assert!(view.get("owner").is_none());
+
+        let unauthorized = app
+            .clone()
+            .oneshot(feedback_post("run-1", r#"{"rating":4}"#, None))
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let forbidden = app
+            .clone()
+            .oneshot({
+                let mut request = feedback_post("run-1", r#"{"rating":4}"#, Some(API_TOKEN));
+                request.headers_mut().insert(
+                    header::HOST,
+                    HeaderValue::from_static("attacker.invalid:9721"),
+                );
+                request
+            })
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        for body in [
+            r#"{"rating":4,"comment":"FIELD_CANARY"}"#,
+            r#"{"rating":9}"#,
+            r#"{"rating":0}"#,
+            r#"{"rating":300}"#,
+            r#"{"rating":3,"source":"ROBOT_CANARY"}"#,
+            r#"{"source":"human"}"#,
+            "not json",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(feedback_post("run-1", body, Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+            assert!(!response_json(response).await.to_string().contains("CANARY"));
+        }
+
+        let mut not_found = Vec::new();
+        for run_id in ["run-foreign", "run-absent"] {
+            let response = app
+                .clone()
+                .oneshot(feedback_post(run_id, r#"{"rating":1}"#, Some(API_TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{run_id}");
+            not_found.push(response_json(response).await);
+        }
+        assert_eq!(not_found[0], not_found[1]);
+        assert_eq!(not_found[0], serde_json::json!({"error": "run not found"}));
+
+        let list = app
+            .clone()
+            .oneshot(goal_request("/v1/feedback", Some(API_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let list = response_json(list).await;
+        assert_eq!(list["items"].as_array().unwrap().len(), 1);
+        assert_eq!(list["skipped_lines"], 0);
+        for query in ["?limit=0", "?owner=someone-else", "?limit=10001"] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(
+                    &format!("/v1/feedback{query}"),
+                    Some(API_TOKEN),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/outcomes?group_by=provider,model",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        // The CLI prints this same service projection for the same input.
+        let expected = serde_json::to_value(
+            service
+                .outcomes(
+                    HistoryFilter::default(),
+                    vec![
+                        vyane_service::OutcomeDimension::Provider,
+                        vyane_service::OutcomeDimension::Model,
+                    ],
+                    false,
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body, expected);
+        assert_eq!(body["total_runs"], 2);
+        assert_eq!(
+            body["groups"][0]["key"],
+            serde_json::json!({"provider": "p", "model": "m"})
+        );
+        assert_eq!(body["groups"][0]["average_rating"], 4.0);
+        assert!(!body.to_string().contains("run-foreign"));
+
+        for query in [
+            "?group_by=vendor",
+            "?group_by=provider,provider",
+            "?group_by=provider,protocol,harness,model,effort",
+            "?status=nope",
+            "?since=2026-01-02T00:00:00Z&until=2026-01-01T00:00:00Z",
+            "?limit=5",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(goal_request(
+                    &format!("/v1/outcomes{query}"),
+                    Some(API_TOKEN),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
+        // A rejected status gets the shared fixed message, never an echo.
+        let response = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/outcomes?status=STATUS_CANARY",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"], vyane_service::RUN_STATUS_FILTER_ERROR);
+        assert!(!body.to_string().contains("CANARY"));
+        let response = app
+            .clone()
+            .oneshot(goal_request(
+                "/v1/outcomes?status=canceled",
+                Some(API_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let denied = app
+            .oneshot(goal_request("/v1/outcomes", None))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn history_cost_rest_projects_owned_filtered_saved_values() {
         const HISTORY: &str = include_str!("../../vyane-service/tests/fixtures/history_cost.jsonl");
@@ -4323,13 +4678,15 @@ mod tests {
         assert_eq!(parse_run_status("error").unwrap(), RunStatus::Error);
         assert_eq!(parse_run_status("timeout").unwrap(), RunStatus::Timeout);
         assert_eq!(parse_run_status("cancelled").unwrap(), RunStatus::Cancelled);
+        assert_eq!(parse_run_status("canceled").unwrap(), RunStatus::Cancelled);
     }
 
     #[test]
     fn run_status_unknown_errors() {
         let err = parse_run_status("pending").unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert!(err.message.contains("pending"));
+        assert_eq!(err.message, vyane_service::RUN_STATUS_FILTER_ERROR);
+        assert!(!err.message.contains("pending"));
     }
 
     // --- Error response formatting ----------------------------------------

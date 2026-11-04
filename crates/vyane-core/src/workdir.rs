@@ -7,6 +7,7 @@
 //! path.  The handle is intentionally not serializable; [`WorkdirIdentity`]
 //! is the separate, serializable evidence used for drift checks.
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,42 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::{ErrorKind, Result, VyaneError};
+
+/// Workspace directory names whose contents a host tool executes or trusts
+/// outside any sandbox: git hooks and `core.fsmonitor` / `core.hooksPath` in
+/// `.git`, and harness settings and hooks in `.vyane`, `.codex` and
+/// `.claude`.
+///
+/// Sandboxed execution (native file tools and command writable roots) must
+/// never write beneath a path that has any component equal to one of these
+/// names or to one of [`HOST_CONTROL_FILE_NAMES`], compared ASCII
+/// case-insensitively. This is a hard floor that no policy exclusion list can
+/// relax.
+pub const HOST_CONTROL_COMPONENTS: [&str; 4] = [".git", ".vyane", ".codex", ".claude"];
+
+/// Workspace file names that a supported harness reads at startup and acts on
+/// outside any sandbox: `.mcp.json` is Claude Code's project MCP server
+/// configuration, and Claude Code launches an approved server's `command` on
+/// the host when it next starts in that workdir. Its permission flags
+/// (`--permission-mode`, `--disallowedTools`) do not govern MCP server
+/// startup.
+///
+/// These fall under the same floor as [`HOST_CONTROL_COMPONENTS`] and are
+/// matched as whole components at any depth, so a directory with one of these
+/// names is refused too.
+pub const HOST_CONTROL_FILE_NAMES: [&str; 1] = [".mcp.json"];
+
+/// Whether `component` names a host control directory or file (see
+/// [`HOST_CONTROL_COMPONENTS`] and [`HOST_CONTROL_FILE_NAMES`]), ignoring
+/// ASCII case.
+#[must_use]
+pub fn is_host_control_component(component: &OsStr) -> bool {
+    let bytes = component.as_encoded_bytes();
+    HOST_CONTROL_COMPONENTS
+        .iter()
+        .chain(HOST_CONTROL_FILE_NAMES.iter())
+        .any(|control| bytes.eq_ignore_ascii_case(control.as_bytes()))
+}
 
 /// Serializable identity of an opened execution directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,5 +259,38 @@ mod tests {
         assert_eq!(pinned.canonical_path(), actual.as_path());
         assert_eq!(pinned.identity().device, metadata.dev());
         assert_eq!(pinned.identity().inode, metadata.ino());
+    }
+}
+
+#[cfg(test)]
+mod control_component_tests {
+    use std::ffi::OsStr;
+
+    use super::is_host_control_component;
+
+    #[test]
+    fn host_control_components_match_whole_names_ignoring_ascii_case() {
+        for name in [".git", ".GIT", ".Git", ".vyane", ".CODEX", ".Claude"] {
+            assert!(is_host_control_component(OsStr::new(name)), "{name}");
+        }
+        for name in ["git", ".github", ".gitignore", "x.git", ".claude2", "", "."] {
+            assert!(!is_host_control_component(OsStr::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn host_control_file_names_match_whole_names_ignoring_ascii_case() {
+        for name in [".mcp.json", ".MCP.json", ".Mcp.Json"] {
+            assert!(is_host_control_component(OsStr::new(name)), "{name}");
+        }
+        for name in [
+            "mcp.json",
+            ".mcp.json.bak",
+            "x.mcp.json",
+            ".mcp",
+            ".mcp.jsonc",
+        ] {
+            assert!(!is_host_control_component(OsStr::new(name)), "{name}");
+        }
     }
 }

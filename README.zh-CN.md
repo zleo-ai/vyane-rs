@@ -72,7 +72,7 @@ VYANE="$PWD/target/install/bin/vyane"
 <details>
 <summary>证据快照</summary>
 
-[公开能力矩阵](docs/parity/ORIGINAL-VYANE-PARITY.md)记录当前状态。矩阵按 8 个域追踪 53 个能力项：7 个 implemented、23 个 partial、12 个 missing、9 个刻意不同或待决策、2 个 planned。implemented 表示已实现，partial 表示部分实现，missing 表示缺失，planned 表示已规划。[脱敏清单](docs/parity/fixtures/v1/manifest.json)包含 5 个套件、44 个用例：30 个经规范化后匹配，14 个仍有未解决差异。这些有限范围的检查不能换算成整个系统的对齐百分比。
+[公开能力矩阵](docs/parity/ORIGINAL-VYANE-PARITY.md)记录当前状态。矩阵按 8 个域追踪 53 个能力项：7 个 implemented、25 个 partial、10 个 missing、9 个刻意不同或待决策、2 个 planned。implemented 表示已实现，partial 表示部分实现，missing 表示缺失，planned 表示已规划。[脱敏清单](docs/parity/fixtures/v1/manifest.json)包含 5 个套件、44 个用例：30 个经规范化后匹配，14 个仍有未解决差异。这些有限范围的检查不能换算成整个系统的对齐百分比。
 
 </details>
 

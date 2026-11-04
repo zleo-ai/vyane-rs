@@ -4,12 +4,12 @@
 //! history, session, and static diagnostic operations as callable tools.
 //!
 //! The server is transport-agnostic: it wraps a [`vyane_service::VyaneService`]
-//! and registers seven base tools (`vyane_dispatch`, `vyane_broadcast`,
-//! `vyane_history`, `vyane_sessions`, `vyane_route`, `vyane_check`, and
-//! `vyane_workflow_plan`). An
+//! and registers nine base tools (`vyane_dispatch`, `vyane_broadcast`,
+//! `vyane_history`, `vyane_sessions`, `vyane_route`, `vyane_check`,
+//! `vyane_workflow_plan`, `vyane_feedback`, and `vyane_outcomes`). An
 //! embedding process may inject an authenticated [`WorkflowControl`] port to
 //! add workflow submit/status/cancel without giving this crate daemon discovery
-//! or credentials. The `vyane mcp` CLI injects that port and exposes ten tools.
+//! or credentials. The `vyane mcp` CLI injects that port and exposes twelve tools.
 //!
 //! ## Tool result contract
 //!
@@ -48,8 +48,9 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use vyane_core::{ErrorKind, RunStatus, VyaneError};
 use vyane_service::{
-    BroadcastParams, DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError, DiagnosticErrorKind,
-    DispatchParams, HistoryFilter, RoutePreviewParams, RunView, VyaneService,
+    BroadcastParams, DEFAULT_OUTCOME_GROUP_BY, DIAGNOSTIC_MAX_OUTPUT_BYTES, DiagnosticError,
+    DiagnosticErrorKind, DispatchParams, HistoryFilter, RoutePreviewParams, RunView, VyaneService,
+    parse_outcome_group_by,
 };
 use vyane_workflow::{
     WORKFLOW_PLAN_MAX_PROMPT_BYTES, WORKFLOW_PLAN_MAX_ROUTE_VALUES, WORKFLOW_PLAN_MAX_SYSTEM_BYTES,
@@ -64,11 +65,12 @@ const BASE_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch server. \
     vyane_broadcast to fan one task out to several targets concurrently, \
     vyane_history to query the run ledger, vyane_sessions to list saved sessions, \
     vyane_route to preview deterministic routing, and vyane_check for a static-only redacted config check. \
+    Use vyane_feedback to rate one of your runs from 1 to 5 and vyane_outcomes for grouped success, failover, cost and rating statistics; ratings never change routing. \
     Use vyane_workflow_plan to compile caller-supplied workflow sources without execution; its payload includes the supplied prompts, system text, and workdirs. \
     A result with operation_status=completed is final even when detail_omitted=true; use its run receipt and never retry it as an execution failure.";
 
 const WORKFLOW_SERVER_INSTRUCTIONS: &str = "Vyane multi-model dispatch and durable workflow server. \
-    The execution, history, session, route, and check tools retain their base contracts. \
+    The execution, history, session, route, check, feedback, and outcomes tools retain their base contracts. \
     Use vyane_workflow_plan for static compilation without execution; it returns supplied prompts, system text, and workdirs. \
     Use vyane_workflow_submit with a caller-owned canonical UUIDv7 and bounded source bundle; \
     use workflow status before retrying an outcome_unknown submission, and workflow cancel for idempotent cancellation. \
@@ -208,6 +210,9 @@ impl std::fmt::Display for WorkflowFailureCode {
     }
 }
 
+const ISOLATION_UNSUPPORTED_MESSAGE: &str =
+    "worktree isolation is not supported by the resident daemon";
+
 /// Closed error taxonomy. Source messages cannot cross this boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowControlError {
@@ -217,6 +222,9 @@ pub enum WorkflowControlError {
     Unavailable,
     OutcomeUnknown,
     Internal,
+    /// The request asks for worktree isolation, which the resident daemon
+    /// does not provide. Nothing was submitted.
+    IsolationUnsupported,
 }
 
 impl WorkflowControlError {
@@ -230,6 +238,7 @@ impl WorkflowControlError {
             Self::Unavailable => "unavailable",
             Self::OutcomeUnknown => "outcome_unknown",
             Self::Internal => "internal",
+            Self::IsolationUnsupported => "isolation_unsupported",
         }
     }
 }
@@ -243,6 +252,7 @@ impl std::fmt::Display for WorkflowControlError {
             Self::Unavailable => "workflow control is unavailable",
             Self::OutcomeUnknown => "workflow submission outcome is unknown",
             Self::Internal => "workflow operation failed",
+            Self::IsolationUnsupported => ISOLATION_UNSUPPORTED_MESSAGE,
         })
     }
 }
@@ -275,8 +285,9 @@ pub struct DispatchArgs {
     /// Sandbox level for harness runs: `read_only` (default), `write`, or `full`.
     #[serde(default)]
     pub sandbox: Option<String>,
-    /// Optional session id to continue.
+    /// Optional session id to continue. At most 1024 UTF-8 bytes when set.
     #[serde(default)]
+    #[schemars(length(max = 1024))]
     pub session: Option<String>,
     /// System prompt for direct HTTP, appended instructions for harnesses.
     /// At most 1 MiB of UTF-8 bytes when set.
@@ -287,7 +298,11 @@ pub struct DispatchArgs {
     #[serde(default)]
     pub timeout_secs: Option<u64>,
     /// Free-form `key=value` ledger labels. Routing result labels are reserved.
+    /// At most 128 labels, routing hints included. A key is at most 256 bytes
+    /// without surrounding whitespace or control characters; a value is one
+    /// line without control characters.
     #[serde(default)]
+    #[schemars(length(max = 128), inner(length(max = 2097409)))]
     pub labels: Vec<String>,
     /// Auto-routing stage hint (for example `implementation` or `review`).
     /// At most 4096 UTF-8 bytes when set.
@@ -365,6 +380,51 @@ pub struct HistoryArgs {
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Arguments for `vyane_feedback`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackArgs {
+    /// Id of one of your runs.
+    #[schemars(length(min = 1, max = 256))]
+    pub run_id: String,
+    /// Rating from 1 (worst) to 5 (best).
+    #[schemars(range(min = 1, max = 5))]
+    pub rating: u8,
+    /// `human` (default) or `auto:<rule>` with a lowercase rule name.
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 64))]
+    pub source: Option<String>,
+}
+
+/// Arguments for `vyane_outcomes`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomesArgs {
+    /// Comma-separated 1-4 distinct dimensions from provider, protocol,
+    /// harness, model, effort, profile, status. Defaults to
+    /// `provider,harness,model,effort`.
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 256))]
+    pub group_by: Option<String>,
+    /// Filter by provider id.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Filter by run status: `success`, `error`, `timeout`, or `cancelled`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Include runs started at or after this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Include runs started at or before this RFC 3339 timestamp (with timezone).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Count `auto:<rule>` ratings for runs without a human rating.
+    #[serde(default)]
+    pub include_auto_ratings: bool,
 }
 
 /// One bounded route tag or candidate profile name.
@@ -489,6 +549,8 @@ impl Default for HistoryArgs {
 }
 
 const MAX_HISTORY_LIMIT: usize = 1_000;
+const MAX_FEEDBACK_RUN_ID_BYTES: usize = 256;
+const MAX_FEEDBACK_SOURCE_BYTES: usize = 64;
 const MAX_BROADCAST_TARGETS: usize = 64;
 const MAX_BROADCAST_TARGETS_BYTES: usize = 64 * 1024;
 const MAX_WORKFLOW_TOML_BYTES: usize = WORKFLOW_SOURCE_MAX_TOML_BYTES;
@@ -508,6 +570,13 @@ const MAX_EXECUTION_SYSTEM_BYTES: usize = WORKFLOW_PLAN_MAX_SYSTEM_BYTES;
 const MAX_EXECUTION_WORKDIR_BYTES: usize = WORKFLOW_PLAN_MAX_WORKDIR_BYTES;
 const MAX_EXECUTION_TARGET_BYTES: usize = WORKFLOW_PLAN_MAX_TARGET_BYTES;
 const MAX_EXECUTION_ROUTE_VALUES: usize = WORKFLOW_PLAN_MAX_ROUTE_VALUES;
+/// Session ids use the session store's own limit.
+const MAX_EXECUTION_SESSION_BYTES: usize = vyane_core::SessionRef::MAX_ID_BYTES;
+/// Labels use the shared dispatch label limits (the same parser serves CLI
+/// `--label` and REST `labels`). One raw label is `key=value`.
+const MAX_EXECUTION_LABELS: usize = vyane_service::MAX_LABELS;
+const MAX_EXECUTION_LABEL_BYTES: usize =
+    vyane_service::MAX_LABEL_KEY_BYTES + 1 + vyane_service::MAX_LABEL_VALUE_BYTES;
 /// Hard cap for every non-diagnostic MCP success payload. Diagnostics keep a
 /// smaller dedicated budget below. Oversized content is replaced by a stable
 /// limit error rather than being copied into one tool result.
@@ -525,6 +594,7 @@ enum PublicErrorCode {
     Unavailable,
     OutcomeUnknown,
     Internal,
+    IsolationUnsupported,
 }
 
 /// Safe failure information allowed to cross the MCP boundary.
@@ -675,6 +745,17 @@ impl SafeToolError {
         }
     }
 
+    const fn run_not_found() -> Self {
+        Self {
+            code: PublicErrorCode::NotFound,
+            message: "run was not found",
+        }
+    }
+
+    const fn invalid_feedback_source() -> Self {
+        Self::invalid_argument("source must be human or auto:<rule> with a lowercase rule name")
+    }
+
     const fn output_limit() -> Self {
         Self {
             code: PublicErrorCode::LimitExceeded,
@@ -712,6 +793,10 @@ impl SafeToolError {
             WorkflowControlError::Internal => Self {
                 code: PublicErrorCode::Internal,
                 message: "workflow operation failed",
+            },
+            WorkflowControlError::IsolationUnsupported => Self {
+                code: PublicErrorCode::IsolationUnsupported,
+                message: ISOLATION_UNSUPPORTED_MESSAGE,
             },
         }
     }
@@ -914,6 +999,101 @@ impl VyaneMcpServer {
         match self.service.history_views(filter).await {
             Ok(records) => Ok(success_json(&ToolItems { items: records })),
             Err(error) => Ok(error_json(classify_service_error(&error))),
+        }
+    }
+
+    /// Record a 1-5 rating for one of the caller's runs.
+    #[tool(
+        description = "Rate one of your runs from 1 (worst) to 5 (best). source is human (default) or auto:<rule>. The latest rating per run and source wins; no comment is stored. A run that does not exist or belongs to someone else returns not_found. Ratings never change routing.",
+        input_schema = rmcp::handler::server::tool::schema_for_type::<FeedbackArgs>()
+    )]
+    async fn vyane_feedback(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        let args: FeedbackArgs = match parse_arguments(arguments) {
+            Ok(args) => args,
+            Err(error) => return Ok(error_json(error)),
+        };
+        if !(1..=5).contains(&args.rating) {
+            return Ok(error_json(SafeToolError::invalid_argument(
+                "rating must be an integer from 1 to 5",
+            )));
+        }
+        if args.run_id.is_empty() || args.run_id.len() > MAX_FEEDBACK_RUN_ID_BYTES {
+            return Ok(error_json(SafeToolError::run_not_found()));
+        }
+        if args
+            .source
+            .as_ref()
+            .is_some_and(|source| source.len() > MAX_FEEDBACK_SOURCE_BYTES)
+        {
+            return Ok(error_json(SafeToolError::invalid_feedback_source()));
+        }
+        match self
+            .service
+            .record_feedback(&args.run_id, args.rating, args.source.as_deref())
+            .await
+        {
+            Ok(view) => Ok(success_json(&view)),
+            Err(error) => Ok(error_json(classify_feedback_error(
+                &error,
+                SafeToolError::invalid_feedback_source(),
+            ))),
+        }
+    }
+
+    /// Group the caller's runs and report outcome statistics.
+    #[tool(
+        description = "Group your runs by provider, protocol, harness, model, effort, profile or status (1-4 dimensions) and return success, failover, duration, token, cost and average rating per group. Only human ratings count unless include_auto_ratings=true. Read-only; routing never reads it.",
+        input_schema = rmcp::handler::server::tool::schema_for_type::<OutcomesArgs>()
+    )]
+    async fn vyane_outcomes(&self, arguments: JsonObject) -> Result<CallToolResult, McpError> {
+        let args: OutcomesArgs = match parse_arguments(arguments) {
+            Ok(args) => args,
+            Err(error) => return Ok(error_json(error)),
+        };
+        let group_by = match args.group_by.as_deref() {
+            None => DEFAULT_OUTCOME_GROUP_BY.to_vec(),
+            Some(raw) => match parse_outcome_group_by(raw) {
+                Ok(group_by) => group_by,
+                Err(_) => {
+                    return Ok(error_json(SafeToolError::invalid_argument(
+                        "group_by must name 1 to 4 distinct dimensions: provider, protocol, harness, model, effort, profile or status",
+                    )));
+                }
+            },
+        };
+        if args
+            .since
+            .zip(args.until)
+            .is_some_and(|(since, until)| since > until)
+        {
+            return Ok(error_json(SafeToolError::invalid_argument(
+                "since must not be later than until",
+            )));
+        }
+        let status = match args.status.as_deref() {
+            None => None,
+            Some(status) => match parse_status(status) {
+                Ok(status) => Some(status),
+                Err(message) => return Ok(error_json(SafeToolError::invalid_argument(message))),
+            },
+        };
+        let filter = HistoryFilter {
+            limit: None,
+            status,
+            provider: args.provider,
+            since: args.since,
+            until: args.until,
+        };
+        match self
+            .service
+            .outcomes(filter, group_by, args.include_auto_ratings)
+            .await
+        {
+            Ok(report) => Ok(success_json(&report)),
+            Err(error) => Ok(error_json(classify_feedback_error(
+                &error,
+                SafeToolError::invalid_argument("request contains an invalid argument"),
+            ))),
         }
     }
 
@@ -1260,14 +1440,10 @@ pub fn parse_sandbox(s: Option<&str>) -> Result<vyane_core::Sandbox, &'static st
 
 /// Parse an explicit history status. Unknown values are rejected rather than
 /// being widened into an unfiltered query.
+/// Uses the shared service parser, so MCP, REST and the CLI accept the same
+/// values and report the same fixed message.
 pub fn parse_status(s: &str) -> Result<RunStatus, &'static str> {
-    match s {
-        "success" => Ok(RunStatus::Success),
-        "error" => Ok(RunStatus::Error),
-        "timeout" => Ok(RunStatus::Timeout),
-        "cancelled" | "canceled" => Ok(RunStatus::Cancelled),
-        _ => Err("status must be one of success, error, timeout, cancelled, or canceled"),
-    }
+    vyane_service::parse_run_status_filter(s).map_err(|_| vyane_service::RUN_STATUS_FILTER_ERROR)
 }
 
 fn history_filter(args: HistoryArgs) -> std::result::Result<HistoryFilter, SafeToolError> {
@@ -1351,6 +1527,20 @@ fn validate_dispatch_inputs(args: &DispatchArgs) -> std::result::Result<(), Safe
         MAX_EXECUTION_ROUTE_VALUES,
         MAX_EXECUTION_TARGET_BYTES,
     )?;
+    validate_optional_execution_text(args.session.as_deref(), MAX_EXECUTION_SESSION_BYTES)?;
+    validate_execution_list(
+        &args.labels,
+        MAX_EXECUTION_LABELS,
+        MAX_EXECUTION_LABEL_BYTES,
+    )?;
+    // The merged label set (caller labels plus routing hints) goes through
+    // the same parser CLI and REST use. Its errors are position-only, but
+    // the MCP result keeps a fixed message anyway.
+    vyane_service::parse_labels(dispatch_labels(args)).map_err(|_| {
+        SafeToolError::invalid_argument(
+            "labels must be key=value pairs with a canonical key and a single-line value",
+        )
+    })?;
     Ok(())
 }
 
@@ -1558,6 +1748,21 @@ fn classify_service_error(error: &anyhow::Error) -> SafeToolError {
         || SafeToolError::from_kind(ErrorKind::Other),
         SafeToolError::from_kind,
     )
+}
+
+/// Map a feedback/outcome service error to a closed public error. A missing
+/// and a foreign run share one `not_found` result; a caller-input error uses
+/// `on_config`; anything else is an internal failure without detail.
+fn classify_feedback_error(error: &anyhow::Error, on_config: SafeToolError) -> SafeToolError {
+    let kind = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<VyaneError>())
+        .map(|error| error.kind);
+    match kind {
+        Some(ErrorKind::NotFound) => SafeToolError::run_not_found(),
+        Some(ErrorKind::Config) => on_config,
+        _ => SafeToolError::from_kind(ErrorKind::Other),
+    }
 }
 
 fn broadcast_error_item(selector: String, error: &anyhow::Error) -> BroadcastToolItem {
@@ -1983,6 +2188,31 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_labels_share_the_service_label_rule_without_echo() {
+        const CANARY: &str = "MCP_LABEL_CANARY";
+        for labels in [
+            vec![CANARY.to_string()],
+            vec![format!("team\n{CANARY}=ops")],
+            vec![format!("team=ops\u{1b}[2J{CANARY}")],
+            vec![format!(" {CANARY}=ops")],
+        ] {
+            let mut args = dispatch_base();
+            args.labels = labels;
+            let error = validate_dispatch_inputs(&args).unwrap_err();
+            assert_eq!(error.code, PublicErrorCode::InvalidArgument);
+            assert!(!error.message.contains(CANARY), "{}", error.message);
+        }
+        let mut hint = dispatch_base();
+        hint.route_tags = vec![format!("tag\n{CANARY}")];
+        assert!(validate_dispatch_inputs(&hint).is_err());
+
+        let mut valid = dispatch_base();
+        valid.labels = vec!["my team=ops = blue".into(), "empty=".into()];
+        valid.route_tags = vec!["security".into()];
+        assert!(validate_dispatch_inputs(&valid).is_ok());
+    }
+
+    #[test]
     fn execution_inputs_use_workflow_field_budgets() {
         assert!(validate_dispatch_inputs(&dispatch_base()).is_ok());
         let mut at_limit = dispatch_base();
@@ -2024,6 +2254,27 @@ mod tests {
         oversize_candidates.route_candidates =
             vec!["profile".into(); MAX_EXECUTION_ROUTE_VALUES + 1];
         assert_execution_limit(validate_dispatch_inputs(&oversize_candidates));
+
+        let mut session_at_limit = dispatch_base();
+        session_at_limit.session = Some("s".repeat(MAX_EXECUTION_SESSION_BYTES));
+        assert!(validate_dispatch_inputs(&session_at_limit).is_ok());
+        let mut oversize_session = dispatch_base();
+        oversize_session.session = Some("s".repeat(MAX_EXECUTION_SESSION_BYTES + 1));
+        assert_execution_limit(validate_dispatch_inputs(&oversize_session));
+
+        let mut labels_at_limit = dispatch_base();
+        labels_at_limit.labels = (0..MAX_EXECUTION_LABELS)
+            .map(|index| format!("k{index}=v"))
+            .collect();
+        assert!(validate_dispatch_inputs(&labels_at_limit).is_ok());
+        let mut too_many_labels = dispatch_base();
+        too_many_labels.labels = (0..=MAX_EXECUTION_LABELS)
+            .map(|index| format!("k{index}=v"))
+            .collect();
+        assert_execution_limit(validate_dispatch_inputs(&too_many_labels));
+        let mut oversize_label = dispatch_base();
+        oversize_label.labels = vec![format!("k={}", "v".repeat(MAX_EXECUTION_LABEL_BYTES - 1))];
+        assert_execution_limit(validate_dispatch_inputs(&oversize_label));
 
         let mut normal_broadcast = broadcast_base();
         normal_broadcast.workdir = Some("/tmp".into());
@@ -2086,6 +2337,18 @@ mod tests {
         assert_eq!(
             dispatch_properties["route_candidates"]["items"]["maxLength"],
             serde_json::json!(MAX_EXECUTION_TARGET_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["session"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_SESSION_BYTES)
+        );
+        assert_eq!(
+            dispatch_properties["labels"]["maxItems"],
+            serde_json::json!(MAX_EXECUTION_LABELS)
+        );
+        assert_eq!(
+            dispatch_properties["labels"]["items"]["maxLength"],
+            serde_json::json!(MAX_EXECUTION_LABEL_BYTES)
         );
         let broadcast_schema = rmcp::handler::server::tool::schema_for_type::<BroadcastArgs>();
         let broadcast_properties = broadcast_schema["properties"].as_object().unwrap();
@@ -2494,7 +2757,7 @@ mod tests {
             <() as rmcp::ServiceExt<rmcp::RoleClient>>::serve((), client_transport).await?;
 
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 9);
         for tool in &tools {
             let expected = match tool.name.as_ref() {
                 "vyane_dispatch" => rmcp::handler::server::tool::schema_for_type::<
@@ -2518,10 +2781,54 @@ mod tests {
                 "vyane_workflow_plan" => rmcp::handler::server::tool::schema_for_type::<
                     rmcp::handler::server::wrapper::Parameters<WorkflowPlanArgs>,
                 >(),
+                "vyane_feedback" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<FeedbackArgs>,
+                >(),
+                "vyane_outcomes" => rmcp::handler::server::tool::schema_for_type::<
+                    rmcp::handler::server::wrapper::Parameters<OutcomesArgs>,
+                >(),
                 other => panic!("unexpected tool {other}"),
             };
             assert_eq!(tool.input_schema.as_ref(), expected.as_ref());
             assert!(tool.description.is_some());
+            if tool.name.as_ref() == "vyane_feedback" {
+                assert_eq!(
+                    tool.input_schema.get("additionalProperties"),
+                    Some(&serde_json::json!(false))
+                );
+                assert_eq!(
+                    tool.input_schema["required"],
+                    serde_json::json!(["run_id", "rating"])
+                );
+                let properties = tool.input_schema["properties"].as_object().unwrap();
+                assert_eq!(properties["rating"]["minimum"], 1);
+                assert_eq!(properties["rating"]["maximum"], 5);
+                assert_eq!(properties["run_id"]["maxLength"], 256);
+                let mut names: Vec<_> = properties.keys().cloned().collect();
+                names.sort();
+                assert_eq!(names, ["rating", "run_id", "source"]);
+            }
+            if tool.name.as_ref() == "vyane_outcomes" {
+                assert_eq!(
+                    tool.input_schema.get("additionalProperties"),
+                    Some(&serde_json::json!(false))
+                );
+                assert!(tool.input_schema.get("required").is_none());
+                let properties = tool.input_schema["properties"].as_object().unwrap();
+                let mut names: Vec<_> = properties.keys().cloned().collect();
+                names.sort();
+                assert_eq!(
+                    names,
+                    [
+                        "group_by",
+                        "include_auto_ratings",
+                        "provider",
+                        "since",
+                        "status",
+                        "until"
+                    ]
+                );
+            }
             if tool.name.as_ref() == "vyane_route" {
                 assert_eq!(
                     tool.input_schema.get("additionalProperties"),
