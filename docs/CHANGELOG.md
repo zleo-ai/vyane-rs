@@ -65,6 +65,13 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Fixed
 
+- A failed `git worktree add -b` no longer leaves its branch behind, so a
+  resumed run can retry the same attempt instead of failing forever on
+  "branch already exists". A generated branch that already existed before the
+  call is never touched and the attempt is skipped like an existing path.
+  When the leftovers cannot be cleared (a locked registration for a missing
+  directory, or a symlink planted at the planned path), they are reported as
+  left in place and recorded in the journal rather than removed through.
 - The run-status filter of `vyane history`, REST `GET /v1/history` and
   `GET /v1/outcomes`, and MCP `vyane_history` and `vyane_outcomes` uses one
   parser. A rejected status gets a fixed message that does not echo it (the

@@ -251,6 +251,9 @@ impl GitWorktreeProvisioner {
     /// Undo a worktree whose provisioning did not finish. Nothing has run in
     /// it, so the same conservative removal as settlement applies: no
     /// `--force`, and the branch is deleted only while it is still at base.
+    /// The path must still be the real directory this provisioner planned;
+    /// a symlink planted there would make `git worktree remove` act on its
+    /// target, so such a path is left for the caller to report.
     async fn discard_new_worktree(
         &self,
         source_root: &Path,
@@ -258,6 +261,9 @@ impl GitWorktreeProvisioner {
         branch: &str,
         base_sha: &str,
     ) -> bool {
+        if !self.is_owned_worktree_path(root).await {
+            return false;
+        }
         let mut remove: Vec<OsString> = vec!["worktree".into(), "remove".into()];
         remove.push(root.as_os_str().to_os_string());
         if !self
@@ -306,19 +312,33 @@ impl GitWorktreeProvisioner {
                     // directory; fails harmlessly when there is none.
                     let mut remove: Vec<OsString> = vec!["worktree".into(), "remove".into()];
                     remove.push(root.as_os_str().to_os_string());
-                    let _ = self.git(source_root, &remove).await;
-                    self.git(
-                        source_root,
-                        [
-                            "update-ref",
-                            "--no-deref",
-                            "-d",
-                            branch_ref.as_str(),
-                            base_sha,
-                        ],
-                    )
-                    .await
-                    .is_some_and(|output| output.success)
+                    let unregistered = self
+                        .git(source_root, &remove)
+                        .await
+                        .is_some_and(|output| output.success);
+                    // A registration that survives the removal (git killed
+                    // while it still held the "initializing" lock) makes
+                    // every `git worktree add` at this path fail again. Only
+                    // deleting the branch would leave the attempt stuck, so
+                    // the leftovers are reported instead.
+                    if !unregistered
+                        && self.worktree_registered(source_root, root).await != Some(false)
+                    {
+                        false
+                    } else {
+                        self.git(
+                            source_root,
+                            [
+                                "update-ref",
+                                "--no-deref",
+                                "-d",
+                                branch_ref.as_str(),
+                                base_sha,
+                            ],
+                        )
+                        .await
+                        .is_some_and(|output| output.success)
+                    }
                 }
                 Ok(_) => {
                     self.discard_new_worktree(source_root, root, branch, base_sha)
@@ -351,6 +371,24 @@ impl GitWorktreeProvisioner {
             Some(1) => Some(false),
             _ => None,
         }
+    }
+
+    /// Whether `root` is still registered as a worktree of the repository at
+    /// `cwd`, whether or not its directory exists. `None` when the probe
+    /// failed.
+    async fn worktree_registered(&self, cwd: &Path, root: &Path) -> Option<bool> {
+        let output = self
+            .git(cwd, ["worktree", "list", "--porcelain", "-z"])
+            .await?;
+        if !output.success {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        Some(
+            text.split('\0')
+                .filter_map(|entry| entry.strip_prefix("worktree "))
+                .any(|path| Path::new(path) == root),
+        )
     }
 
     /// Whether the worktree's `.git` file still points at `git_dir`.

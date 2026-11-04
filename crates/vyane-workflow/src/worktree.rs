@@ -345,7 +345,7 @@ pub enum WorktreeError {
     BaseUnresolved,
     /// The worktree path, or the branch generated for it, already exists.
     /// The caller moves on to the next attempt.
-    #[error("worktree path already exists")]
+    #[error("worktree path or its generated branch already exists")]
     PathExists,
     #[error("git worktree add failed: {detail}")]
     AddFailed { detail: String },
