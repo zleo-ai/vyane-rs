@@ -77,10 +77,11 @@ This is a curated history, not a complete reconstruction of all development.
   before it is recorded. The receipt omits the id. An id with an internal
   space still reaches lookup.
 - Native `write_file` and `edit_file` refuse any path with a `.git`,
-  `.vyane`, `.codex` or `.claude` component, at any depth and in any ASCII
-  case, matching the rule for command writable roots. Write exclusions
-  cannot relax it. Files there, such as git hooks or harness settings, run
-  or are trusted outside the sandbox.
+  `.vyane`, `.codex`, `.claude` or `.mcp.json` component, at any depth and
+  in any ASCII case, matching the rule for command writable roots. Write
+  exclusions cannot relax it. Files there, such as git hooks, harness
+  settings or Claude Code's project MCP servers, run or are trusted outside
+  the sandbox.
 - Claude Code dispatch passes the task after a `--` marker, so a task that
   starts with `-` is no longer parsed as a CLI option.
 - Environment values injected into a harness child, including an endpoint

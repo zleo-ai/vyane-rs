@@ -1223,10 +1223,11 @@ async fn write_tools_reject_traversal_absolute_and_symlink_parent_paths() {
 
 /// Command writable roots refuse `.git`, `.vyane`, `.codex` and `.claude`
 /// because host tools execute or trust what lives there (git hooks,
-/// `core.fsmonitor`, harness settings and hooks). The file tools must apply
-/// the same floor at any depth and in any ASCII case, regardless of the
-/// configured write exclusions, or a model could plant code that later runs
-/// unsandboxed on the host.
+/// `core.fsmonitor`, harness settings and hooks). `.mcp.json` is refused for
+/// the same reason: Claude Code starts its approved MCP servers' commands on
+/// the host. The file tools must apply the same floor at any depth and in any
+/// ASCII case, regardless of the configured write exclusions, or a model
+/// could plant code that later runs unsandboxed on the host.
 #[tokio::test]
 async fn write_and_edit_refuse_host_control_directories_at_any_depth_and_case() {
     for control in [".git", ".claude", ".codex", ".vyane", "sub/.GIT"] {
@@ -1257,6 +1258,8 @@ async fn write_and_edit_refuse_host_control_directories_at_any_depth_and_case() 
             "./.git/hooks/post-checkout",
             "vendor/lib/.git/hooks/pre-commit",
             ".git",
+            ".mcp.json",
+            "sub/.MCP.json",
         ]
         .into_iter()
         .enumerate()
@@ -1292,6 +1295,8 @@ async fn write_and_edit_refuse_host_control_directories_at_any_depth_and_case() 
             "vendor/lib/.git/config",
             ".codex/config.toml",
             ".claude/settings.json",
+            ".mcp.json",
+            "sub/.MCP.json",
         ]
         .into_iter()
         .enumerate()
@@ -1328,9 +1333,14 @@ async fn write_and_edit_refuse_host_control_directories_at_any_depth_and_case() 
 
         // Look-alike names that are not control directories stay writable.
         let root = tempdir().expect("root");
-        for (sequence, target) in [".github/workflows/ci.yml", ".gitignore", "git/notes.txt"]
-            .into_iter()
-            .enumerate()
+        for (sequence, target) in [
+            ".github/workflows/ci.yml",
+            ".gitignore",
+            "git/notes.txt",
+            "mcp.json",
+        ]
+        .into_iter()
+        .enumerate()
         {
             if let Some(parent) = std::path::Path::new(target).parent() {
                 std::fs::create_dir_all(root.path().join(parent)).expect("dir");

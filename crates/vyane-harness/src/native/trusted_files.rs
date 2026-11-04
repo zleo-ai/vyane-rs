@@ -116,9 +116,10 @@ impl NativeReadHostError {
 ///
 /// `exclude` only narrows the boundary. Independently of it, writes and
 /// edits beneath any [`vyane_core::HOST_CONTROL_COMPONENTS`] directory
-/// (for example `.git/hooks/` or `.claude/settings.json`, in any ASCII case
-/// and at any depth) are always refused, because host tools execute or trust
-/// those files outside the sandbox.
+/// (for example `.git/hooks/` or `.claude/settings.json`) or to any
+/// [`vyane_core::HOST_CONTROL_FILE_NAMES`] file (`.mcp.json`), in any ASCII
+/// case and at any depth, are always refused, because host tools execute or
+/// trust those files outside the sandbox.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeWritePolicy {
@@ -1015,7 +1016,8 @@ fn checked_components(path: &str, allow_root: bool) -> Result<Vec<OsString>, Too
 
 /// [`checked_components`] for a mutation target, plus the host-control floor:
 /// no write or edit may land beneath a [`vyane_core::HOST_CONTROL_COMPONENTS`]
-/// directory at any depth. Policy exclusions cannot relax this.
+/// directory or on a [`vyane_core::HOST_CONTROL_FILE_NAMES`] file at any
+/// depth. Policy exclusions cannot relax this.
 fn checked_write_components(path: &str) -> Result<Vec<OsString>, ToolError> {
     let components = checked_components(path, false)?;
     reject_host_control_components(&components)?;
@@ -1028,7 +1030,7 @@ fn reject_host_control_components(components: &[OsString]) -> Result<(), ToolErr
         .any(|component| vyane_core::is_host_control_component(component))
     {
         return Err(ToolError::new(
-            "writes beneath host control directories are not allowed",
+            "writes to host control paths are not allowed",
         ));
     }
     Ok(())
@@ -1987,6 +1989,40 @@ fn read_utf8_bounded_blocking(file: &mut File) -> Result<String, ToolError> {
         return Err(ToolError::new("workspace file exceeds the read limit"));
     }
     String::from_utf8(bytes).map_err(|_| ToolError::new("workspace file is not UTF-8 text"))
+}
+
+/// Platform-independent: the host-control floor is pure path validation and
+/// runs before any Linux-only filesystem confinement.
+#[cfg(test)]
+mod host_control_floor_tests {
+    use super::checked_write_components;
+
+    #[test]
+    fn write_targets_refuse_claude_code_project_mcp_config_at_any_depth_and_case() {
+        for path in [
+            ".mcp.json",
+            "./.mcp.json",
+            ".MCP.json",
+            "sub/.MCP.json",
+            "a/b/.Mcp.Json",
+        ] {
+            assert!(
+                checked_write_components(path).is_err(),
+                "{path} must be refused"
+            );
+        }
+        for path in [
+            "mcp.json",
+            "sub/mcp.json",
+            ".mcp.json.bak",
+            "docs/x.mcp.json",
+        ] {
+            assert!(
+                checked_write_components(path).is_ok(),
+                "{path} must stay writable"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
