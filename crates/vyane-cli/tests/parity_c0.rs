@@ -296,13 +296,13 @@ fn c0_corpus_replays_offline() {
                 case.id
             );
             assert_disposition(case);
-            let case_dir = temp.path().join(&case.id.replace(['.', ':'], "_"));
+            let case_dir = temp.path().join(case.id.replace(['.', ':'], "_"));
             fs::create_dir_all(&case_dir).expect("case temp");
             let actual = replay(&suite.id, &case.input, &case_dir);
             let rendered = serde_json::to_string(&actual).expect("render actual");
             reject_private_text(&case.id, &rendered);
             assert!(
-                !rendered.contains(&case_dir.to_string_lossy().as_ref()),
+                !rendered.contains(case_dir.to_string_lossy().as_ref()),
                 "{} echoed its temp path",
                 case.id
             );

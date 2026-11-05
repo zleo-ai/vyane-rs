@@ -49,14 +49,16 @@ pub(super) fn replay(input: &Value, temp: &Path) -> Value {
 fn decide(preference_effort: &str, explicit_tier: &str) -> vyane_router::RouteDecision {
     let mut signals = ComplexitySignals::new();
     signals.explicit_tier = Some(explicit_tier.to_string());
-    let mut table = RoutePreferenceTable::default();
-    table.default = Some(RouteTargetPreference {
-        selection_key: String::new(),
-        provider: "relay".to_string(),
-        model: "model-a".to_string(),
-        effort: preference_effort.to_string(),
-        tier: String::new(),
-    });
+    let table = RoutePreferenceTable {
+        default: Some(RouteTargetPreference {
+            selection_key: String::new(),
+            provider: "relay".to_string(),
+            model: "model-a".to_string(),
+            effort: preference_effort.to_string(),
+            tier: String::new(),
+        }),
+        ..Default::default()
+    };
     let available = vec!["relay".to_string()];
     route_task("ping", &available, Some(&signals), Some(&table), "relay")
 }
