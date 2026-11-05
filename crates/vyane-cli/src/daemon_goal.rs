@@ -810,7 +810,15 @@ mod tests {
             let id = format!("foreign-{index:04}");
             create(&store, &id, 0);
             store
-                .claim(LOCAL_TASK_OWNER, &id, "foreign-worker", 60, now)
+                // This fixture measures paging, not lease expiry. Building a
+                // thousand durable rows can exceed a minute on Windows.
+                .claim(
+                    LOCAL_TASK_OWNER,
+                    &id,
+                    "foreign-worker",
+                    vyane_goal::MAX_LEASE_SECONDS,
+                    now,
+                )
                 .unwrap();
         }
         create(&store, "eligible-after-page", 1);
