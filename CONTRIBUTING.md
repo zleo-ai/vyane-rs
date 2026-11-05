@@ -20,6 +20,8 @@ Documentation maintenance: [translations](docs/TRANSLATING.md),
   in the workspace `Cargo.toml`).
 - Install the configured stable channel with `rustup` — it will pick up
   `rust-toolchain.toml` and the `rustfmt` + `clippy` components automatically.
+- On Windows, initialize the MSVC developer environment using the
+  [Windows build instructions](docs/WINDOWS.md) to avoid Git's GNU `link.exe`.
 
 ## Checks that must pass
 
