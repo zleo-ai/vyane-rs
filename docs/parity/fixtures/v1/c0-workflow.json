@@ -1,0 +1,435 @@
+{
+  "cases": [
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "workflow.feature.declarative-dag",
+      "input": {
+        "feature": "declarative_dag",
+        "op": "feature"
+      },
+      "normalized_oracle_output": {
+        "status": "supported"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "status": "supported"
+      },
+      "rust_output": {
+        "status": "supported"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "workflow.feature.worktree",
+      "input": {
+        "feature": "worktree_isolation",
+        "op": "feature"
+      },
+      "normalized_oracle_output": {
+        "status": "supported"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "status": "supported"
+      },
+      "rust_output": {
+        "status": "supported"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN dynamic control flow is not representable and is not a Deno script runner",
+      "disposition": "intentional_retain",
+      "id": "workflow.feature.dynamic",
+      "input": {
+        "feature": "dynamic_control_flow",
+        "op": "feature"
+      },
+      "normalized_oracle_output": {
+        "runner": "deno",
+        "status": "executable"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "runner": "deno",
+        "status": "executable"
+      },
+      "rust_output": {
+        "reason": "dynamic control flow cannot be represented by WorkflowPlan v1",
+        "status": "unsupported"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN nested workflow calls are not representable and are not a Deno script runner",
+      "disposition": "intentional_retain",
+      "id": "workflow.feature.nested",
+      "input": {
+        "feature": "nested_workflow",
+        "op": "feature"
+      },
+      "normalized_oracle_output": {
+        "runner": "deno",
+        "status": "executable"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "runner": "deno",
+        "status": "executable"
+      },
+      "rust_output": {
+        "reason": "nested workflow calls cannot be represented by WorkflowPlan v1",
+        "status": "unsupported"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING WF0: shared run budgets are unsupported in schema v1",
+      "disposition": "pending",
+      "id": "workflow.feature.shared-budget",
+      "input": {
+        "feature": "shared_budget",
+        "op": "feature"
+      },
+      "normalized_oracle_output": {
+        "status": "enforced"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "status": "enforced"
+      },
+      "rust_output": {
+        "reason": "shared run budgets are not enforced by WorkflowPlan v1",
+        "status": "unsupported"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN JavaScript workflow source is rejected at parse and is not executed",
+      "disposition": "intentional_retain",
+      "id": "workflow.parse.javascript",
+      "input": {
+        "op": "source",
+        "source": "javascript"
+      },
+      "normalized_oracle_output": {
+        "class": "executable",
+        "runner": "deno"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "executable",
+        "runner": "deno"
+      },
+      "rust_output": {
+        "class": "parse_workflow"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING an unknown step script key is ignored and the declarative step still validates",
+      "disposition": "pending",
+      "id": "workflow.parse.ignored-script",
+      "input": {
+        "op": "source",
+        "source": "ignored_script"
+      },
+      "normalized_oracle_output": {
+        "class": "executable",
+        "runner": "deno"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "executable",
+        "runner": "deno"
+      },
+      "rust_output": {
+        "class": "ok",
+        "problems": [],
+        "topo": [
+          "one"
+        ]
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "workflow.graph.cycle",
+      "input": {
+        "op": "source",
+        "source": "cycle"
+      },
+      "normalized_oracle_output": {
+        "class": "validation",
+        "problems": [
+          "workflow dependency cycle detected involving: a, b"
+        ]
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "validation",
+        "problems": [
+          "workflow dependency cycle detected involving: a, b"
+        ]
+      },
+      "rust_output": {
+        "class": "validation",
+        "problems": [
+          "workflow dependency cycle detected involving: a, b"
+        ]
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "workflow.graph.duplicate",
+      "input": {
+        "op": "source",
+        "source": "duplicate"
+      },
+      "normalized_oracle_output": {
+        "class": "validation",
+        "problems": [
+          "duplicate step id `one`"
+        ]
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "validation",
+        "problems": [
+          "duplicate step id `one`"
+        ]
+      },
+      "rust_output": {
+        "class": "validation",
+        "problems": [
+          "duplicate step id `one`"
+        ]
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "workflow.graph.both-prompts",
+      "input": {
+        "op": "source",
+        "source": "both_prompts"
+      },
+      "normalized_oracle_output": {
+        "class": "validation",
+        "problems": [
+          "step 1 must set exactly one of `prompt` or `prompt_file`, not both"
+        ]
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "validation",
+        "problems": [
+          "step 1 must set exactly one of `prompt` or `prompt_file`, not both"
+        ]
+      },
+      "rust_output": {
+        "class": "validation",
+        "problems": [
+          "step 1 must set exactly one of `prompt` or `prompt_file`, not both"
+        ]
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "workflow.graph.blank-name",
+      "input": {
+        "op": "source",
+        "source": "blank_name"
+      },
+      "normalized_oracle_output": {
+        "class": "validation",
+        "problems": [
+          "[workflow].name is required"
+        ]
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "validation",
+        "problems": [
+          "[workflow].name is required"
+        ]
+      },
+      "rust_output": {
+        "class": "validation",
+        "problems": [
+          "[workflow].name is required"
+        ]
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "workflow.graph.both-targets",
+      "input": {
+        "op": "source",
+        "source": "both_targets"
+      },
+      "normalized_oracle_output": {
+        "class": "validation",
+        "problems": [
+          "step `one` must set exactly one of `target` or `fan_out`, not both"
+        ]
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "validation",
+        "problems": [
+          "step `one` must set exactly one of `target` or `fan_out`, not both"
+        ]
+      },
+      "rust_output": {
+        "class": "validation",
+        "problems": [
+          "step `one` must set exactly one of `target` or `fan_out`, not both"
+        ]
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "workflow.graph.topo",
+      "input": {
+        "op": "source",
+        "source": "topo"
+      },
+      "normalized_oracle_output": {
+        "class": "ok",
+        "problems": [],
+        "topo": [
+          "a",
+          "b"
+        ]
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "ok",
+        "problems": [],
+        "topo": [
+          "a",
+          "b"
+        ]
+      },
+      "rust_output": {
+        "class": "ok",
+        "problems": [],
+        "topo": [
+          "a",
+          "b"
+        ]
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN a successful journal step stays successful; this is not the Python changed-plan prefix cache",
+      "disposition": "intentional_retain",
+      "id": "workflow.journal.reset",
+      "input": {
+        "op": "reset"
+      },
+      "normalized_oracle_output": {
+        "failed": "cached_prefix",
+        "success": "cached"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failed": "cached_prefix",
+        "success": "cached"
+      },
+      "rust_output": {
+        "failed": "pending",
+        "success": "success"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "workflow.on-error",
+      "input": {
+        "op": "on_error"
+      },
+      "normalized_oracle_output": {
+        "abort": "abort",
+        "continue": "continue"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "abort": "abort",
+        "continue": "continue"
+      },
+      "rust_output": {
+        "abort": "abort",
+        "continue": "continue"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    }
+  ],
+  "normalization": {
+    "display_paths": "omitted",
+    "javascript": "not_executed",
+    "worktree_supported": "schema_v1_representable_only"
+  },
+  "schema_version": 1,
+  "suite": "workflow"
+}
