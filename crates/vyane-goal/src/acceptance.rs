@@ -5,9 +5,12 @@
 //! [`crate::GoalStore::satisfy_criterion`] operation; this module never marks
 //! a goal complete and never performs network or shell interpretation.
 
+#[cfg(unix)]
 use std::io::Read;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,7 +24,9 @@ use crate::{
 
 pub const MAX_VERIFIER_TIMEOUT: Duration = Duration::from_secs(300);
 pub const MAX_OUTPUT_TAIL_BYTES: usize = 4_000;
+#[cfg(unix)]
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
+#[cfg(unix)]
 const EXECUTABLE_BUSY_MAX_RETRIES: usize = 50;
 
 #[derive(Debug, Clone)]
@@ -211,16 +216,16 @@ impl AcceptanceVerifier {
         })
     }
 
+    #[cfg(not(unix))]
     fn verify_command(
         &self,
         index: usize,
         key: String,
         kind: String,
         target: String,
-        cancel: &CancellationToken,
+        _cancel: &CancellationToken,
     ) -> Option<CriterionResult> {
-        #[cfg(not(unix))]
-        return Some(self.result(
+        Some(self.result(
             index,
             key,
             kind,
@@ -229,7 +234,18 @@ impl AcceptanceVerifier {
             Vec::new(),
             None,
             "command acceptance verification requires Unix process-group support",
-        ));
+        ))
+    }
+
+    #[cfg(unix)]
+    fn verify_command(
+        &self,
+        index: usize,
+        key: String,
+        kind: String,
+        target: String,
+        cancel: &CancellationToken,
+    ) -> Option<CriterionResult> {
         #[cfg(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))]
         return Some(self.result(
             index,
@@ -452,6 +468,7 @@ impl AcceptanceVerifier {
     }
 }
 
+#[cfg(unix)]
 fn spawn_with_busy_retry(
     process: &mut Command,
     deadline: Instant,
@@ -504,12 +521,7 @@ fn child_exited_without_reap(pid: u32) -> std::io::Result<bool> {
     .map_err(std::io::Error::from)
 }
 
-#[cfg(any(
-    not(unix),
-    target_os = "cygwin",
-    target_os = "openbsd",
-    target_os = "redox"
-))]
+#[cfg(any(target_os = "cygwin", target_os = "openbsd", target_os = "redox"))]
 fn child_exited_without_reap(_pid: u32) -> std::io::Result<bool> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -542,6 +554,7 @@ pub fn parse_command(target: &str) -> Option<Vec<String>> {
     (!argv.is_empty() && argv.iter().all(|part| !part.contains('\0'))).then_some(argv)
 }
 
+#[cfg(unix)]
 fn spawn_tail_reader(mut reader: impl Read + Send + 'static) -> thread::JoinHandle<String> {
     thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -562,6 +575,7 @@ fn spawn_tail_reader(mut reader: impl Read + Send + 'static) -> thread::JoinHand
     })
 }
 
+#[cfg(unix)]
 fn join_tail_bounded(reader: Option<thread::JoinHandle<String>>) -> String {
     let Some(reader) = reader else {
         return String::new();
@@ -590,9 +604,7 @@ fn kill_process_group(pid: u32) {
     let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
 }
 
-#[cfg(not(unix))]
-fn kill_process_group(_pid: u32) {}
-
+#[cfg(unix)]
 fn terminate_child_group(child: &mut Child) {
     kill_process_group(child.id());
     let _ = child.kill();
@@ -703,6 +715,22 @@ mod tests {
         assert!(!result.all_satisfied);
         assert_eq!(result.results[0].status, CriterionStatus::ManualRequired);
         assert_eq!(result.results[1].status, CriterionStatus::Inconclusive);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn command_verification_reports_unsupported_without_spawning() {
+        let verifier = AcceptanceVerifier::new(".", Duration::from_secs(1)).expect("cwd");
+        let result = verifier.verify(&record(vec![AcceptanceCriterion::new(
+            "custom",
+            "cmd:definitely-not-a-real-binary-vyane",
+        )]));
+        assert!(!result.all_satisfied);
+        let result = &result.results[0];
+        assert_eq!(result.status, CriterionStatus::Inconclusive);
+        assert!(result.detail.contains("Unix process-group support"));
+        assert!(result.command.is_empty());
+        assert_eq!(result.exit_code, None);
     }
 
     #[cfg(all(

@@ -708,6 +708,8 @@ fn atomic_publish(directory: &Path, target: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         fs::File::open(path)
@@ -822,10 +824,13 @@ fn invalid_sidecar_entry(sidecar: &str, message: String) -> ControllerCleanupEnt
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[cfg(unix)]
     use std::process::{Child, Command, Stdio};
+    #[cfg(unix)]
     use std::sync::Barrier;
 
     use super::*;
+    #[cfg(unix)]
     use crate::task::proc::{install_process_group, pid_alive};
 
     fn test_control() -> (tempfile::TempDir, WorkflowHarnessControl) {

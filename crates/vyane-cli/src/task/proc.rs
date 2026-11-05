@@ -111,12 +111,6 @@ pub fn spawn_tokio_in_session(
     cmd.spawn()
 }
 
-#[cfg(all(test, not(unix)))]
-pub fn install_process_group(_cmd: &mut std::process::Command) {
-    // Non-Unix: no setsid. Group semantics degrade to a direct child kill.
-    // v0.1/v0.2 target Unix; this stub keeps the crate compiling elsewhere.
-}
-
 /// Send `sig` to the process group `pgid` by passing the negative pid, which is
 /// how `kill(2)` addresses an entire group. Errors (e.g. ESRCH — the group is
 /// already gone) are ignored, which is the desired idempotent behaviour.
@@ -225,6 +219,7 @@ pub enum IdentityCheck {
     /// task's record: it is (to a very high confidence) the same worker.
     Match,
     /// No process currently holds this pid — the worker is gone.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Dead,
     /// A process holds the pid but its group or start time does not match the
     /// task's record: the pid was almost certainly reused by an unrelated

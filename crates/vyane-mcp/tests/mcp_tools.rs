@@ -1601,6 +1601,7 @@ fn sealed_reads_fail() -> bool {
     cfg!(unix)
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 struct RestoreMode {
     path: std::path::PathBuf,
     mode: u32,

@@ -1148,6 +1148,8 @@ fn open_private_log(path: &Path) -> Result<std::fs::File> {
 }
 
 fn require_owner_only(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

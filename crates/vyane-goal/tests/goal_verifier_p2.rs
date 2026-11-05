@@ -8,8 +8,6 @@
 //! during implementation, these probes drive the real GoalStore entry points.
 
 mod common;
-use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use tempfile::TempDir;
@@ -27,9 +25,6 @@ fn timestamp(seconds: i64) -> DateTime<Utc> {
 
 fn fixture() -> (TempDir, SqliteGoalStore) {
     let directory = common::private_tempdir();
-    // GoalStore refuses group/world-writable parents; neutralize umask 002 temps.
-    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
-        .expect("restrict tempdir permissions");
     let store =
         SqliteGoalStore::open(directory.path().join("goals.sqlite3")).expect("open goal store");
     (directory, store)

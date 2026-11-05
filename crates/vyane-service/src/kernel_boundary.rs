@@ -4157,7 +4157,7 @@ mod tests {
     }
 
     #[test]
-    fn named_root_discovery_rejects_dotdot_separator_and_symlink() {
+    fn named_root_discovery_rejects_dotdot_and_separator() {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("root");
         fs::create_dir(&root).unwrap();
@@ -4208,7 +4208,16 @@ mod tests {
         assert_eq!(separator.error, Some(KernelErrorCode::NotFound));
         assert_ne!(separator.kind, KernelEventKind::Approved);
         assert_approval_stays_pending(&separator_store, separator_id);
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn named_root_discovery_rejects_symlink() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let root_s = root.to_string_lossy().into_owned();
+        let adapter = LocalKernelAdapter::new(principal());
         let outside_link = parent.path().join("outside-link");
         fs::create_dir(&outside_link).unwrap();
         let link_id = "rcpt-link";

@@ -15,11 +15,14 @@ use assert_cmd::Command;
 use chrono::{TimeZone as _, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
+#[cfg(unix)]
 use tempfile::TempDir;
+#[cfg(unix)]
+use vyane_goal::GoalContinuityStepStatus;
 use vyane_goal::{
-    GoalContinuityMode, GoalContinuityPolicy, GoalContinuityStepStatus, GoalExecutionTarget,
-    GoalQuotaEvent, GoalStore, NewGoal, SqliteGoalStore, TakeoverApprovalStatus, TakeoverFinish,
-    TakeoverRunStatus, apply_quota_handoff_events,
+    GoalContinuityMode, GoalContinuityPolicy, GoalExecutionTarget, GoalQuotaEvent, GoalStore,
+    NewGoal, SqliteGoalStore, TakeoverApprovalStatus, TakeoverFinish, TakeoverRunStatus,
+    apply_quota_handoff_events,
 };
 
 fn vyane() -> Command {
