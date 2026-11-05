@@ -736,7 +736,7 @@ async fn diagnostics_tools_work_over_real_rmcp_duplex_and_redact_canaries() -> a
             protocol: bound_target.protocol,
             model: bound_target.model.clone(),
             endpoint_routing_digest: "a".repeat(64),
-            canonical_workdir: "/CANARY_WIRE_BOUND_WORKDIR".into(),
+            canonical_workdir: root.path().join("CANARY_WIRE_BOUND_WORKDIR"),
             workdir_identity: vyane_core::WorkdirIdentity {
                 device: 123,
                 inode: 456,
@@ -1446,6 +1446,8 @@ async fn tool_call_with_wrong_owner_is_rejected_without_reading_other_owner_data
 
     let _restore_ledger = RestoreMode::new(&ledger, 0o600);
     let _restore_sessions = RestoreMode::new(&foreign_session_dir, 0o700);
+    #[cfg(not(unix))]
+    let ledger_before = std::fs::read(&ledger)?;
     seal_private(&ledger)?;
     seal_private(&foreign_session_dir)?;
 
@@ -1491,14 +1493,20 @@ async fn tool_call_with_wrong_owner_is_rejected_without_reading_other_owner_data
     assert!(!wire.contains(FOREIGN_SESSION));
     assert!(!wire.contains(FOREIGN_TRANSCRIPT));
 
-    assert!(
-        still_sealed(&ledger),
-        "wrong-owner history must not open the other owner's ledger"
-    );
-    assert!(
-        still_sealed(&foreign_session_dir),
-        "wrong-owner sessions must not enter the other owner's session directory"
-    );
+    if sealed_reads_fail() {
+        assert!(
+            still_sealed(&ledger),
+            "wrong-owner history must not open the other owner's ledger"
+        );
+        assert!(
+            still_sealed(&foreign_session_dir),
+            "wrong-owner sessions must not enter the other owner's session directory"
+        );
+    }
+    // POSIX sealing is unavailable here; retain wire isolation and read-only
+    // behavior checks without pretending to have tested Windows ACL denial.
+    #[cfg(not(unix))]
+    assert_eq!(std::fs::read(&ledger)?, ledger_before);
 
     let attempted = call_json(&client, "vyane_history", serde_json::json!({"limit": 1})).await?;
     if sealed_reads_fail() {
