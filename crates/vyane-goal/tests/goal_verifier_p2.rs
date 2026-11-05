@@ -50,7 +50,11 @@ fn goal_with_manual(store: &SqliteGoalStore, id: &str, at: DateTime<Utc>) {
     store.create(OWNER, goal).expect("create goal");
 }
 
-fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
+fn satisfied_result(
+    index: usize,
+    criterion: &AcceptanceCriterion,
+    cwd: &std::path::Path,
+) -> CriterionResult {
     assert_ne!(
         criterion.kind, "manual-confirm",
         "manual-confirm must be waived, not forged"
@@ -62,7 +66,7 @@ fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionR
         target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
         command: vec!["true".into()],
-        cwd: "/tmp".into(),
+        cwd: cwd.to_string_lossy().into_owned(),
         exit_code: Some(0),
         duration_ms: 1,
         stdout_tail: String::new(),
@@ -78,12 +82,13 @@ fn record_independent_verification(
     indices: &[usize],
     at: DateTime<Utc>,
 ) {
+    let workdir = common::private_tempdir();
     let record = store.get(OWNER, id).expect("get").expect("record");
     let results = indices
         .iter()
         .map(|index| {
             let criterion = &record.acceptance_criteria[*index];
-            satisfied_result(*index, criterion)
+            satisfied_result(*index, criterion, workdir.path())
         })
         .collect::<Vec<_>>();
     let verification = AcceptanceVerification {
@@ -296,7 +301,7 @@ fn satisfy_then_empty_satisfied_artifact_does_not_unlock_done() {
 
 #[test]
 fn mismatched_command_payload_is_rejected_even_with_exit_zero() {
-    let (_directory, store) = fixture();
+    let (directory, store) = fixture();
     let at = timestamp(1_700_000_000);
     goal_with_criteria(&store, "mismatch", at);
     store.start(OWNER, "mismatch", at).expect("start");
@@ -309,7 +314,7 @@ fn mismatched_command_payload_is_rejected_even_with_exit_zero() {
         target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
         command: vec!["false".into()],
-        cwd: "/tmp".into(),
+        cwd: directory.path().to_string_lossy().into_owned(),
         exit_code: Some(0),
         duration_ms: 1,
         stdout_tail: String::new(),
@@ -612,7 +617,7 @@ fn future_progress_timestamp_does_not_false_kill_active_lease() {
 
 #[test]
 fn long_running_command_verification_is_accepted_within_verifier_budget() {
-    let (_directory, store) = fixture();
+    let (directory, store) = fixture();
     let at = timestamp(1_700_000_000);
     let mut goal = NewGoal::new("Long command", at);
     goal.id = Some("long-cmd".into());
@@ -628,7 +633,7 @@ fn long_running_command_verification_is_accepted_within_verifier_budget() {
         target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
         command: vec!["sleep".into(), "6".into()],
-        cwd: "/tmp".into(),
+        cwd: directory.path().to_string_lossy().into_owned(),
         exit_code: Some(0),
         duration_ms: 6000,
         stdout_tail: String::new(),

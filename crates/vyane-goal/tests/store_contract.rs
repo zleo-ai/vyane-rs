@@ -120,7 +120,11 @@ fn wal_sidecars_are_private_with_umask_022_in_a_public_directory() {
     }
 }
 
-fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
+fn satisfied_result(
+    index: usize,
+    criterion: &AcceptanceCriterion,
+    cwd: &std::path::Path,
+) -> CriterionResult {
     CriterionResult {
         criterion_index: index,
         criterion_key: criterion_key(index, criterion),
@@ -128,7 +132,7 @@ fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionR
         target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
         command: vec!["true".into()],
-        cwd: "/tmp".into(),
+        cwd: cwd.to_string_lossy().into_owned(),
         exit_code: Some(0),
         duration_ms: 1,
         stdout_tail: String::new(),
@@ -145,10 +149,11 @@ fn record_independent_verification(
     indices: &[usize],
     at: DateTime<Utc>,
 ) {
+    let workdir = common::private_tempdir();
     let record = store.get(owner, id).expect("get").expect("record");
     let results = indices
         .iter()
-        .map(|index| satisfied_result(*index, &record.acceptance_criteria[*index]))
+        .map(|index| satisfied_result(*index, &record.acceptance_criteria[*index], workdir.path()))
         .collect::<Vec<_>>();
     let verification = AcceptanceVerification {
         goal_id: id.into(),
