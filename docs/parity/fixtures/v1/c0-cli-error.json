@@ -1,0 +1,872 @@
+{
+  "cases": [
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "cli-error.kind.timeout",
+      "input": {
+        "kind": "timeout",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "timeout",
+        "rust_kind": "timeout"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "timeout",
+        "rust_kind": "timeout"
+      },
+      "rust_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "timeout",
+        "rust_kind": "timeout"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "cli-error.kind.rate-limited",
+      "input": {
+        "kind": "rate_limited",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "rate_limit",
+        "rust_kind": "rate_limited"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "rate_limit",
+        "rust_kind": "rate_limited"
+      },
+      "rust_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "rate_limit",
+        "rust_kind": "rate_limited"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "cli-error.kind.spawn-failed",
+      "input": {
+        "kind": "spawn_failed",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "runtime_unavailable",
+        "rust_kind": "spawn_failed"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "runtime_unavailable",
+        "rust_kind": "spawn_failed"
+      },
+      "rust_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "runtime_unavailable",
+        "rust_kind": "spawn_failed"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "cli-error.kind.harness-failed",
+      "input": {
+        "kind": "harness_failed",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "runtime_crash",
+        "rust_kind": "harness_failed"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "runtime_crash",
+        "rust_kind": "harness_failed"
+      },
+      "rust_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "runtime_crash",
+        "rust_kind": "harness_failed"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "cli-error.kind.other",
+      "input": {
+        "kind": "other",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": "other"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": "other"
+      },
+      "rust_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": "other"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING transport stays a distinct failover kind and is not collapsed to execution_error",
+      "disposition": "pending",
+      "id": "cli-error.kind.transport",
+      "input": {
+        "kind": "transport",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "transport",
+        "rust_kind": "transport"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING protocol stays a distinct failover kind and is not collapsed to execution_error",
+      "disposition": "pending",
+      "id": "cli-error.kind.protocol",
+      "input": {
+        "kind": "protocol",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "protocol",
+        "rust_kind": "protocol"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING authentication remains its own failover kind; the authored Python label is execution_error",
+      "disposition": "pending",
+      "id": "cli-error.kind.auth",
+      "input": {
+        "kind": "auth",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "auth",
+        "rust_kind": "auth"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING unsupported is fail-closed and is not yet the policy_blocked label",
+      "disposition": "pending",
+      "id": "cli-error.kind.unsupported",
+      "input": {
+        "kind": "unsupported",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "policy_blocked",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "policy_blocked",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "unsupported",
+        "rust_kind": "unsupported"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN caller cancellation must not fail over",
+      "disposition": "intentional_retain",
+      "id": "cli-error.kind.cancelled",
+      "input": {
+        "kind": "cancelled",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "cancelled",
+        "rust_kind": "cancelled"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN configuration failures must not fail over",
+      "disposition": "intentional_retain",
+      "id": "cli-error.kind.config",
+      "input": {
+        "kind": "config",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "config",
+        "rust_kind": "config"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN a missing entity is not a missing runtime binary",
+      "disposition": "intentional_retain",
+      "id": "cli-error.kind.not-found",
+      "input": {
+        "kind": "not_found",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "runtime_unavailable",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "runtime_unavailable",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "not_found",
+        "rust_kind": "not_found"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN a conflict must be reloaded and must not fail over",
+      "disposition": "intentional_retain",
+      "id": "cli-error.kind.conflict",
+      "input": {
+        "kind": "conflict",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "conflict",
+        "rust_kind": "conflict"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN local io failures must not fail over",
+      "disposition": "intentional_retain",
+      "id": "cli-error.kind.io",
+      "input": {
+        "kind": "io",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "io",
+        "rust_kind": "io"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN an indeterminate publication must not be retried",
+      "disposition": "intentional_retain",
+      "id": "cli-error.kind.indeterminate",
+      "input": {
+        "kind": "indeterminate",
+        "op": "error_kind"
+      },
+      "normalized_oracle_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "execution_error",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "indeterminate",
+        "rust_kind": "indeterminate"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING overloaded has no ErrorKind yet",
+      "disposition": "pending",
+      "id": "cli-error.unmapped.overloaded",
+      "input": {
+        "concept": "overloaded",
+        "op": "unmapped"
+      },
+      "normalized_oracle_output": {
+        "concept": "overloaded",
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "overloaded",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "concept": "overloaded",
+        "failover_eligible": true,
+        "mapped": true,
+        "reason": "overloaded",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "concept": "overloaded",
+        "failover_eligible": false,
+        "mapped": false,
+        "reason": null,
+        "rust_kind": null
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING policy_blocked is a retry-policy config stop and has no ErrorKind yet",
+      "disposition": "pending",
+      "id": "cli-error.unmapped.policy-blocked",
+      "input": {
+        "concept": "policy_blocked",
+        "op": "unmapped"
+      },
+      "normalized_oracle_output": {
+        "concept": "policy_blocked",
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "policy_blocked",
+        "rust_kind": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "concept": "policy_blocked",
+        "failover_eligible": false,
+        "mapped": true,
+        "reason": "policy_blocked",
+        "rust_kind": null
+      },
+      "rust_output": {
+        "concept": "policy_blocked",
+        "failover_eligible": false,
+        "mapped": false,
+        "reason": null,
+        "rust_kind": null
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING this diagnostic class has no Python twin",
+      "disposition": "pending",
+      "id": "cli-error.diagnostic.invalid-input",
+      "input": {
+        "kind": "invalid_input",
+        "op": "diagnostic_kind"
+      },
+      "normalized_oracle_output": {
+        "kind": "unspecified"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "kind": "unspecified"
+      },
+      "rust_output": {
+        "kind": "invalid_input"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING this diagnostic class has no Python twin",
+      "disposition": "pending",
+      "id": "cli-error.diagnostic.config-invalid",
+      "input": {
+        "kind": "config_invalid",
+        "op": "diagnostic_kind"
+      },
+      "normalized_oracle_output": {
+        "kind": "unspecified"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "kind": "unspecified"
+      },
+      "rust_output": {
+        "kind": "config_invalid"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING this diagnostic class has no Python twin",
+      "disposition": "pending",
+      "id": "cli-error.diagnostic.budget-exceeded",
+      "input": {
+        "kind": "budget_exceeded",
+        "op": "diagnostic_kind"
+      },
+      "normalized_oracle_output": {
+        "kind": "unspecified"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "kind": "unspecified"
+      },
+      "rust_output": {
+        "kind": "budget_exceeded"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING Python feedback is one command with a zero rating default; this binary requires feedback rate",
+      "disposition": "pending",
+      "id": "cli-error.feedback.missing-human",
+      "input": {
+        "json": false,
+        "op": "feedback_missing"
+      },
+      "normalized_oracle_output": {
+        "class": "usage",
+        "command": "feedback",
+        "exit": 2,
+        "message": "rating defaults to 0 and the rate subcommand is absent"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "usage",
+        "command": "feedback",
+        "exit": 2,
+        "message": "rating defaults to 0 and the rate subcommand is absent"
+      },
+      "rust_output": {
+        "class": "config",
+        "command": "feedback rate",
+        "exit": 2,
+        "message": "error: expected RUN_ID and RATING (feedback rate <RUN_ID> <RATING>)"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING JSON feedback errors use the feedback rate command, not the Python feedback command",
+      "disposition": "pending",
+      "id": "cli-error.feedback.missing-json",
+      "input": {
+        "json": true,
+        "op": "feedback_missing"
+      },
+      "normalized_oracle_output": {
+        "class": "usage",
+        "command": "feedback",
+        "exit": 2,
+        "message": "rating defaults to 0 and the rate subcommand is absent"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "usage",
+        "command": "feedback",
+        "exit": 2,
+        "message": "rating defaults to 0 and the rate subcommand is absent"
+      },
+      "rust_output": {
+        "class": "config",
+        "command": "feedback rate",
+        "exit": 2,
+        "message": "{\"error\":{\"kind\":\"config\",\"message\":\"expected RUN_ID and RATING (feedback rate <RUN_ID> <RATING>)\"},\"status\":\"error\"}"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING a rating outside 1 to 5 is a config error on feedback rate",
+      "disposition": "pending",
+      "id": "cli-error.feedback.rating-range",
+      "input": {
+        "op": "feedback_rating"
+      },
+      "normalized_oracle_output": {
+        "class": "usage",
+        "command": "feedback",
+        "exit": 2,
+        "message": "rating defaults to 0 until a positive value is supplied"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "usage",
+        "command": "feedback",
+        "exit": 2,
+        "message": "rating defaults to 0 until a positive value is supplied"
+      },
+      "rust_output": {
+        "class": "config",
+        "command": "feedback rate",
+        "exit": 2,
+        "message": "error: rating must be an integer from 1 to 5"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "cli-error.command.unknown",
+      "input": {
+        "op": "unknown_command"
+      },
+      "normalized_oracle_output": {
+        "class": "usage",
+        "exit": 2,
+        "stderr_nonempty": true,
+        "stdout_empty": true
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "usage",
+        "exit": 2,
+        "stderr_nonempty": true,
+        "stdout_empty": true
+      },
+      "rust_output": {
+        "class": "usage",
+        "exit": 2,
+        "stderr_nonempty": true,
+        "stdout_empty": true
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING version is a flag here and a subcommand in the Python CLI; the version text is not pinned",
+      "disposition": "pending",
+      "id": "cli-error.command.version",
+      "input": {
+        "op": "version"
+      },
+      "normalized_oracle_output": {
+        "program": "vyane",
+        "surface": "subcommand"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "program": "vyane",
+        "surface": "subcommand"
+      },
+      "rust_output": {
+        "exit": 0,
+        "lines": 1,
+        "program": "vyane"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING session commands are list, inspect, and reset-native rather than create, history, message, bind, and archive",
+      "disposition": "pending",
+      "id": "cli-error.command.session",
+      "input": {
+        "op": "session_commands"
+      },
+      "normalized_oracle_output": {
+        "commands": [
+          "create",
+          "list",
+          "history",
+          "message",
+          "bind",
+          "archive"
+        ],
+        "exit": 0
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "commands": [
+          "create",
+          "list",
+          "history",
+          "message",
+          "bind",
+          "archive"
+        ],
+        "exit": 0
+      },
+      "rust_output": {
+        "commands": [
+          "list",
+          "inspect",
+          "reset-native"
+        ],
+        "exit": 0
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING workflow help has no tail command and adds plan, submit, resume, replay, and list",
+      "disposition": "pending",
+      "id": "cli-error.command.workflow",
+      "input": {
+        "op": "workflow_commands"
+      },
+      "normalized_oracle_output": {
+        "commands": [
+          "run",
+          "status",
+          "tail",
+          "cancel"
+        ],
+        "exit": 0
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "commands": [
+          "run",
+          "status",
+          "tail",
+          "cancel"
+        ],
+        "exit": 0
+      },
+      "rust_output": {
+        "commands": [
+          "plan",
+          "run",
+          "submit",
+          "status",
+          "cancel",
+          "resume",
+          "replay",
+          "list"
+        ],
+        "exit": 0
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    }
+  ],
+  "normalization": {
+    "command_inventory": "help_indent_2_names_only",
+    "json_objects": "serde_json_map_key_order",
+    "newlines": "crlf_to_lf",
+    "paths": "omitted",
+    "tracing_lines": "dropped",
+    "version_text": "unpinned"
+  },
+  "schema_version": 1,
+  "suite": "cli_error"
+}
