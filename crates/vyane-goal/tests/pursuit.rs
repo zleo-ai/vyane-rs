@@ -193,6 +193,8 @@ fn config(directory: &TempDir, max_segments: u16, max_failures: u16) -> PursuitC
     }
 }
 
+// Requires execution by the Unix command acceptance verifier.
+#[cfg(unix)]
 #[tokio::test]
 async fn segment_then_reverify_completes_without_runtime_owned_done() {
     let (directory, store) = fixture();
@@ -381,6 +383,8 @@ async fn resumed_checkpoint_cannot_bypass_exhausted_failure_budget() {
     assert_eq!(must_not_run.call_count(), 0);
 }
 
+// Requires execution by the Unix command acceptance verifier.
+#[cfg(unix)]
 #[tokio::test]
 async fn resumed_verifier_error_does_not_exceed_exhausted_failure_budget() {
     let (directory, store) = fixture();
@@ -562,6 +566,8 @@ async fn segment_and_failure_budgets_pause_deterministically() {
     assert_eq!(failures.segments_completed, 1);
 }
 
+// Requires execution by the Unix command acceptance verifier.
+#[cfg(unix)]
 #[tokio::test]
 async fn verifier_and_runtime_failures_each_consume_one_failure_slot() {
     let (directory, store) = fixture();
@@ -591,6 +597,8 @@ async fn verifier_and_runtime_failures_each_consume_one_failure_slot() {
     assert_eq!(outcome.segments_completed, 1);
 }
 
+// Requires execution by the Unix command acceptance verifier.
+#[cfg(unix)]
 #[tokio::test]
 async fn success_resets_only_runtime_failures_not_verifier_errors() {
     let (directory, store) = fixture();
@@ -1297,6 +1305,8 @@ async fn authority_change_after_verification_persistence_stops_before_runtime() 
     assert_eq!(runtime.call_count(), 0);
 }
 
+// Requires execution by the Unix command acceptance verifier.
+#[cfg(unix)]
 #[tokio::test]
 async fn verifier_failure_budget_is_durable_at_verification_checkpoint() {
     let (directory, store) = fixture();
@@ -1427,6 +1437,8 @@ async fn same_worker_reclaim_after_verification_stops_before_runtime() {
     assert_eq!(runtime.call_count(), 0);
 }
 
+// Requires execution by the Unix command acceptance verifier.
+#[cfg(unix)]
 #[tokio::test]
 async fn multiple_criteria_are_satisfied_once_across_fresh_segments() {
     let (directory, store) = fixture();
