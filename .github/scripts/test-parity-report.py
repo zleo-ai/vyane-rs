@@ -48,11 +48,38 @@ class CapabilityIdentityTests(unittest.TestCase):
         result = self.report()
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
-        self.assertEqual(len(report["suites"]), 5)
+        baseline_ids = [
+            "routing",
+            "automatic_routing",
+            "failover",
+            "target_resolution",
+            "dispatch_trail",
+        ]
         self.assertEqual(
-            report["totals"],
-            {"cases": 44, "dispositions": {"normalized_exact": 30, "open_difference": 14}},
+            [suite["id"] for suite in report["suites"][:5]],
+            baseline_ids,
         )
+        baseline = {"normalized_exact": 0, "open_difference": 0}
+        baseline_cases = 0
+        for suite in report["suites"][:5]:
+            baseline_cases += suite["cases"]
+            for name, count in suite["dispositions"].items():
+                self.assertIn(name, baseline)
+                baseline[name] += count
+        self.assertEqual(baseline_cases, 44)
+        self.assertEqual(baseline, {"normalized_exact": 30, "open_difference": 14})
+        c0_ids = []
+        for suite in report["suites"][5:]:
+            c0_ids.append(suite["id"])
+            self.assertGreater(suite["cases"], 0)
+            self.assertTrue(
+                set(suite["dispositions"]) <= {"aligned", "intentional_retain", "pending"}
+            )
+        self.assertEqual(
+            c0_ids,
+            ["cli_error", "selector", "effort", "usage", "session", "workflow"],
+        )
+        self.assertEqual(report["totals"]["cases"], sum(suite["cases"] for suite in report["suites"]))
 
     def assert_id_rejected(self, replacement: str) -> None:
         self.replace_id(replacement)

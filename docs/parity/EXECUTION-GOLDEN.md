@@ -1,5 +1,11 @@
 # Explicit targets and dispatch trails
 
+The original five suites and their 44 cases stay the baseline. The incremental
+C0 contract, including CLI and error classification, selector, effort, usage,
+session, and declarative workflow semantics, is
+[C0-BEHAVIOR-CONTRACT.md](C0-BEHAVIOR-CONTRACT.md). Those cases do not replace
+this file and do not change the 53-capability implementation counts.
+
 The `target_resolution` and `dispatch_trail` suites add a supplementary
 `execution-behavior-v1` capture to the existing parity manifest. They do not
 refresh the older classifier, taxonomy or automatic-routing reference outputs,

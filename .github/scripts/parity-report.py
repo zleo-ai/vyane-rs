@@ -166,6 +166,24 @@ def fixture_path(raw: object) -> Path:
     return resolved
 
 
+C0_MANIFEST_PATH = FIXTURE_ROOT / "c0-manifest.json"
+C0_DISPOSITIONS = {"aligned", "intentional_retain", "pending"}
+C0_RUST_TEST = "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+FORBIDDEN_FIXTURE_SNIPPETS = (
+    "beacon.sqlite",
+    ".config/vyane",
+    ".config\\vyane",
+    "sk-",
+    "api_key",
+    "AKIA",
+    "github_pat_",
+    "BEGIN PRIVATE",
+    "C:/Users/",
+    "C:\\Users\\",
+    "/Users/",
+)
+
+
 def validate_disposition(case: dict[str, Any]) -> None:
     case_id = case.get("id")
     if not isinstance(case_id, str) or not case_id:
@@ -186,8 +204,27 @@ def validate_disposition(case: dict[str, Any]) -> None:
             fail(f"open_difference case {case_id} is now equal")
         if not isinstance(blocker, str) or not blocker.startswith("BLOCKER "):
             fail(f"open_difference case {case_id} lacks a public blocker")
+    elif disposition == "aligned":
+        if blocker is not None or normalized != rust:
+            fail(f"aligned case {case_id} drifted")
+    elif disposition == "intentional_retain":
+        if normalized == rust:
+            fail(f"intentional_retain case {case_id} is now equal")
+        if not isinstance(blocker, str) or not blocker.startswith("RETAIN "):
+            fail(f"intentional_retain case {case_id} lacks a RETAIN blocker")
+    elif disposition == "pending":
+        if normalized == rust:
+            fail(f"pending case {case_id} is now equal")
+        if not isinstance(blocker, str) or not blocker.startswith("PENDING "):
+            fail(f"pending case {case_id} lacks a PENDING blocker")
     else:
         fail(f"case {case_id} has unknown disposition")
+
+
+def reject_private_snippets(path: Path, payload: str) -> None:
+    for snippet in FORBIDDEN_FIXTURE_SNIPPETS:
+        if snippet in payload:
+            fail(f"{path.relative_to(REPO_ROOT)} contains forbidden snippet {snippet!r}")
 
 
 def build_report() -> dict[str, Any]:
@@ -318,6 +355,7 @@ def build_report() -> dict[str, Any]:
             }
         )
 
+    validate_c0(report_suites, total)
     return {
         "schema_version": 1,
         "normalization_version": manifest.get("normalization_version"),
@@ -329,18 +367,136 @@ def build_report() -> dict[str, Any]:
     }
 
 
+def validate_c0(report_suites: list[dict[str, Any]], total: Counter) -> None:
+    manifest = load_json(C0_MANIFEST_PATH)
+    require_keys(
+        manifest,
+        {"schema_version", "normalization_version", "reference", "suites"},
+        "c0 manifest",
+    )
+    if manifest["schema_version"] != 1:
+        fail("c0 manifest schema_version must be 1")
+    if manifest["normalization_version"] != "vyane-c0-contract-v1":
+        fail("c0 manifest normalization_version is unsupported")
+    reference = manifest["reference"]
+    if reference != {
+        "snapshot": "c0-contract-2026-11-05",
+        "disclosure": "sanitized_behavior_only",
+        "python_expectation": "authored_contract_pin",
+    }:
+        fail("c0 manifest reference metadata drifted")
+    reject_private_snippets(C0_MANIFEST_PATH, C0_MANIFEST_PATH.read_text(encoding="utf-8"))
+    suites = manifest["suites"]
+    if not isinstance(suites, list) or not suites:
+        fail("c0 manifest suites must be a non-empty list")
+    seen = {suite["id"] for suite in report_suites}
+    for suite in suites:
+        if not isinstance(suite, dict):
+            fail("c0 suite entries must be objects")
+        require_keys(
+            suite,
+            {"id", "fixture_sha256", "scope", "normalized_fixture", "cases"},
+            "c0 suite",
+        )
+        suite_id = suite["id"]
+        if not isinstance(suite_id, str) or not suite_id or suite_id in seen:
+            fail("c0 suite ids must be unique non-empty strings")
+        seen.add(suite_id)
+        path = fixture_path(suite["normalized_fixture"])
+        try:
+            fixture_bytes = path.read_bytes()
+        except OSError as error:
+            fail(f"cannot read {path.relative_to(REPO_ROOT)}: {error}")
+        digest = hashlib.sha256(fixture_bytes).hexdigest()
+        if digest != suite["fixture_sha256"]:
+            fail(f"fixture digest drifted for {suite_id}")
+        reject_private_snippets(path, fixture_bytes.decode("utf-8"))
+        fixture = load_json(path)
+        require_keys(
+            fixture,
+            {"schema_version", "suite", "normalization", "cases"},
+            f"fixture {suite_id}",
+        )
+        if fixture["schema_version"] != 1 or fixture["suite"] != suite_id:
+            fail(f"fixture identity drifted for {suite_id}")
+        if not isinstance(fixture["normalization"], dict) or not fixture["normalization"]:
+            fail(f"fixture {suite_id} normalization must be a non-empty object")
+        cases = fixture["cases"]
+        manifest_cases = suite["cases"]
+        if not isinstance(cases, list) or not isinstance(manifest_cases, list):
+            fail(f"suite {suite_id} cases must be lists")
+        fixture_by_id = {case.get("id"): case for case in cases if isinstance(case, dict)}
+        manifest_by_id = {
+            case.get("id"): case for case in manifest_cases if isinstance(case, dict)
+        }
+        if len(fixture_by_id) != len(cases) or fixture_by_id.keys() != manifest_by_id.keys():
+            fail(f"c0 manifest and fixture case sets differ for {suite_id}")
+        counts: Counter = Counter()
+        differences = []
+        for case_id in sorted(fixture_by_id):
+            case = fixture_by_id[case_id]
+            manifest_case = manifest_by_id[case_id]
+            require_keys(
+                manifest_case,
+                {"id", "disposition", "blocker"},
+                f"c0 manifest case {case_id}",
+            )
+            require_keys(
+                case,
+                {
+                    "id",
+                    "input",
+                    "oracle_locator",
+                    "oracle_raw_output",
+                    "normalized_oracle_output",
+                    "rust_output",
+                    "disposition",
+                    "blocker",
+                    "rust_test",
+                },
+                f"c0 fixture case {case_id}",
+            )
+            locator = case["oracle_locator"]
+            if locator != {"fn": "authored_contract_pin", "args": {}}:
+                fail(f"c0 case {case_id} must use the authored contract locator")
+            if case["rust_test"] != C0_RUST_TEST:
+                fail(f"c0 case {case_id} rust_test drifted")
+            if case["disposition"] != manifest_case["disposition"]:
+                fail(f"case disposition drifted for {case_id}")
+            if case["blocker"] != manifest_case["blocker"]:
+                fail(f"case blocker drifted for {case_id}")
+            if case["disposition"] not in C0_DISPOSITIONS:
+                fail(f"c0 case {case_id} has a baseline disposition")
+            validate_disposition(case)
+            counts[case["disposition"]] += 1
+            total[case["disposition"]] += 1
+            if case["disposition"] != "aligned":
+                differences.append({"id": case_id, "blocker": case["blocker"]})
+        report_suites.append(
+            {
+                "id": suite_id,
+                "fixture_sha256": digest,
+                "cases": len(cases),
+                "dispositions": dict(sorted(counts.items())),
+                "open_differences": differences,
+            }
+        )
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Public parity report",
         "",
-        "| Suite | Cases | Exact | Normalized exact | Open differences |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        "| Suite | Cases | Exact | Normalized exact | Open differences | Aligned | Retained | Pending |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for suite in report["suites"]:
         counts = suite["dispositions"]
         lines.append(
             f"| `{suite['id']}` | {suite['cases']} | {counts.get('exact', 0)} | "
-            f"{counts.get('normalized_exact', 0)} | {counts.get('open_difference', 0)} |"
+            f"{counts.get('normalized_exact', 0)} | {counts.get('open_difference', 0)} | "
+            f"{counts.get('aligned', 0)} | {counts.get('intentional_retain', 0)} | "
+            f"{counts.get('pending', 0)} |"
         )
     differences = [
         difference
@@ -373,21 +529,22 @@ def main() -> int:
                 cargo = str(conventional)
             else:
                 fail("cargo was not found on PATH or in the conventional user toolchain")
-        completed = subprocess.run(
-            [
-                cargo,
-                "test",
-                "-p",
-                "vyane-cli",
-                "--test",
-                "parity_manifest",
-                "--locked",
-            ],
-            cwd=REPO_ROOT,
-            check=False,
-        )
-        if completed.returncode != 0:
-            return completed.returncode
+        for test_name in ("parity_manifest", "parity_c0"):
+            completed = subprocess.run(
+                [
+                    cargo,
+                    "test",
+                    "-p",
+                    "vyane-cli",
+                    "--test",
+                    test_name,
+                    "--locked",
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+            )
+            if completed.returncode != 0:
+                return completed.returncode
 
     report = build_report()
     if args.format == "markdown":
