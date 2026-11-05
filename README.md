@@ -29,7 +29,7 @@ failover: fixture: review-model; recorded attempts=2
 
 ## Quickstart
 
-**1. Install from source.** Requires stable Rust/Cargo (minimum Rust 1.88) and a C/C++ build toolchain. Linux and macOS are the CI platforms; Windows support is not claimed.
+**1. Install from source.** Requires stable Rust/Cargo (minimum Rust 1.88) and a C/C++ build toolchain. CI checks Linux, macOS and Windows builds/tests. On Windows, follow the [MSVC setup and feature boundaries](docs/WINDOWS.md); full Windows feature support is not claimed.
 
 ```sh
 git clone https://github.com/zleo-ai/vyane-rs.git

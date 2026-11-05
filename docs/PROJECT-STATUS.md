@@ -1,6 +1,6 @@
 # Project status and migration boundaries
 
-Checked against source `fe43941` on 2026-10-15. See the [README](../README.md) for the short introduction.
+Capability snapshot: source `fe43941` on 2026-10-15. Platform build/test gates follow the current [CI workflow](../.github/workflows/ci.yml). See the [README](../README.md) for the short introduction.
 
 ## Availability
 
@@ -15,7 +15,7 @@ This is an early, source-build project with unstable APIs. The workspace version
 | Durable tasks, local messages/goals and Linux resident Process/Native runs | Native runs are fresh and sessionless; approval resume, native session resume, and automatic restart replay remain open. |
 | Explicit permissions, scrubbed child environments and run accounting | CLI sandbox enforcement is delegated to the selected harness. Owner fields and loopback authentication do not provide hostile same-user or multi-user isolation. |
 
-Linux and macOS are the CI platforms; some resident execution and sandbox features are Linux-specific. Windows support is not claimed. Model access, credentials and any coding-agent CLI must be supplied separately. Provider calls may incur costs; building and the [offline checks](QUICKSTART.md#first-run-without-credentials) do not call models.
+CI checks Linux, macOS and Windows builds/tests; some resident execution and sandbox features are Linux-specific. The [Windows gate](WINDOWS.md) covers compilation and offline tests, with explicit process-control and security restrictions; full Windows feature support is not claimed. Model access, credentials and any coding-agent CLI must be supplied separately. Provider calls may incur costs; building and the [offline checks](QUICKSTART.md#first-run-without-credentials) do not call models.
 
 ## Coding-agent integration
 

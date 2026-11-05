@@ -212,7 +212,7 @@ test must go red.
 
 ### CI tiers
 
-Everyday PRs run the existing CI matrix (fmt/clippy/test on both OSes,
+Everyday PRs run the existing CI matrix (fmt/clippy/test on all three OSes,
 MSRV, coverage, release-gate smoke). Milestone and release work
 additionally run the full verification path (publish-workflow token-free
 preflight, release-gate drill). This is policy; it does not change
