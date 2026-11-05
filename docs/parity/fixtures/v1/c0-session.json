@@ -1,0 +1,302 @@
+{
+  "cases": [
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "session.id-empty",
+      "input": {
+        "mode": "empty",
+        "op": "session_id"
+      },
+      "normalized_oracle_output": {
+        "accepted": false,
+        "bytes": 0,
+        "class": "config"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "accepted": false,
+        "bytes": 0,
+        "class": "config"
+      },
+      "rust_output": {
+        "accepted": false,
+        "bytes": 0,
+        "class": "config"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "session.id-nul",
+      "input": {
+        "mode": "nul",
+        "op": "session_id"
+      },
+      "normalized_oracle_output": {
+        "accepted": false,
+        "bytes": 3,
+        "class": "config"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "accepted": false,
+        "bytes": 3,
+        "class": "config"
+      },
+      "rust_output": {
+        "accepted": false,
+        "bytes": 3,
+        "class": "config"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING a whitespace-only session id is accepted",
+      "disposition": "pending",
+      "id": "session.id-space",
+      "input": {
+        "mode": "space",
+        "op": "session_id"
+      },
+      "normalized_oracle_output": {
+        "accepted": false,
+        "bytes": 1,
+        "class": "config"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "accepted": false,
+        "bytes": 1,
+        "class": "config"
+      },
+      "rust_output": {
+        "accepted": true,
+        "bytes": 1,
+        "class": "ok"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "session.id-exact-cap",
+      "input": {
+        "mode": "exact_cap",
+        "op": "session_id"
+      },
+      "normalized_oracle_output": {
+        "accepted": true,
+        "bytes": 1024,
+        "class": "ok"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "accepted": true,
+        "bytes": 1024,
+        "class": "ok"
+      },
+      "rust_output": {
+        "accepted": true,
+        "bytes": 1024,
+        "class": "ok"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING session ids are capped at 1024 UTF-8 bytes",
+      "disposition": "pending",
+      "id": "session.id-overlong",
+      "input": {
+        "mode": "overlong",
+        "op": "session_id"
+      },
+      "normalized_oracle_output": {
+        "accepted": true,
+        "bytes": 1025,
+        "class": "ok"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "accepted": true,
+        "bytes": 1025,
+        "class": "ok"
+      },
+      "rust_output": {
+        "accepted": false,
+        "bytes": 1025,
+        "class": "config"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN harness native resume stays fail-closed for legacy and bound state; see vyane-kernel acceptance harness_legacy_native_resume_is_rejected_even_for_read_only and native_resume_rejects_when_any_admitted_fallback_is_a_harness",
+      "disposition": "intentional_retain",
+      "id": "session.native-resume",
+      "input": {
+        "op": "native_resume"
+      },
+      "normalized_oracle_output": {
+        "absent": "resume",
+        "bound": "resume",
+        "legacy_unbound": "resume",
+        "states": [
+          "absent",
+          "legacy_unbound",
+          "bound"
+        ]
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "absent": "resume",
+        "bound": "resume",
+        "legacy_unbound": "resume",
+        "states": [
+          "absent",
+          "legacy_unbound",
+          "bound"
+        ]
+      },
+      "rust_output": {
+        "absent": "fallthrough",
+        "bound": "unsupported",
+        "legacy_unbound": "unsupported",
+        "states": [
+          "absent",
+          "legacy_unbound",
+          "bound"
+        ]
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING native transitions are reset, fork_fresh, and commit",
+      "disposition": "pending",
+      "id": "session.transitions",
+      "input": {
+        "op": "transitions"
+      },
+      "normalized_oracle_output": {
+        "archive": "archive",
+        "bind": "bind",
+        "create": "create"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "archive": "archive",
+        "bind": "bind",
+        "create": "create"
+      },
+      "rust_output": {
+        "commit": "commit",
+        "fork_fresh": "fork_fresh",
+        "reset": "reset"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "session.apply-update",
+      "input": {
+        "op": "apply_update"
+      },
+      "normalized_oracle_output": {
+        "model": "model-a",
+        "native_session_id": "native-public",
+        "owner": "local",
+        "provider": "relay",
+        "run_count": 2,
+        "session_id": "sess-public",
+        "transcript_len": 2
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "model": "model-a",
+        "native_session_id": "native-public",
+        "owner": "local",
+        "provider": "relay",
+        "run_count": 2,
+        "session_id": "sess-public",
+        "transcript_len": 2
+      },
+      "rust_output": {
+        "model": "model-a",
+        "native_session_id": "native-public",
+        "owner": "local",
+        "provider": "relay",
+        "run_count": 2,
+        "session_id": "sess-public",
+        "transcript_len": 2
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "session.chat-roles",
+      "input": {
+        "op": "chat_roles"
+      },
+      "normalized_oracle_output": {
+        "roles": [
+          "system",
+          "user",
+          "assistant"
+        ]
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "roles": [
+          "system",
+          "user",
+          "assistant"
+        ]
+      },
+      "rust_output": {
+        "roles": [
+          "system",
+          "user",
+          "assistant"
+        ]
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    }
+  ],
+  "normalization": {
+    "ids": "counts_and_owner_only",
+    "native_ids": "state_token_only",
+    "timestamps": "omitted",
+    "transcript_text": "length_only"
+  },
+  "schema_version": 1,
+  "suite": "session"
+}
