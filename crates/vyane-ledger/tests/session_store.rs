@@ -87,7 +87,7 @@ fn binding(native_session_id: &str, marker: &str) -> NativeSessionBinding {
             protocol: Protocol::OpenaiResponses,
             model: ModelId::new("model-a"),
             endpoint_routing_digest: digest(&format!("endpoint-{marker}")),
-            canonical_workdir: "/workspace".into(),
+            canonical_workdir: std::env::temp_dir().join("session workspace 中文"),
             workdir_identity: WorkdirIdentity {
                 device: 11,
                 inode: 22,

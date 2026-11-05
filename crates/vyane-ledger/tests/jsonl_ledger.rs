@@ -67,7 +67,7 @@ fn attempt() -> Attempt {
 #[tokio::test]
 async fn append_then_query_roundtrips_in_reverse() {
     let dir = TempDir::new().unwrap();
-    let ledger = JsonlLedger::new(dir.path().join("runs.jsonl"));
+    let ledger = JsonlLedger::new(dir.path().join("账本 with spaces.jsonl"));
 
     // Append oldest → newest. The query must hand them back newest → oldest.
     for i in 0..5 {
