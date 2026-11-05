@@ -1,0 +1,2 @@
+# Public parity manifests pin the exact bytes of these JSON fixtures.
+docs/parity/fixtures/v1/*.json text eol=lf
