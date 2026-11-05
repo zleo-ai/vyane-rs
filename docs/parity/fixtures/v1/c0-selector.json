@@ -1,0 +1,605 @@
+{
+  "cases": [
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "selector.direct-model",
+      "input": {
+        "op": "resolve",
+        "selector": "relay/model-a"
+      },
+      "normalized_oracle_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "selector.target-prefix",
+      "input": {
+        "op": "resolve",
+        "selector": "target:relay/model-a"
+      },
+      "normalized_oracle_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "selector.profile-chain",
+      "input": {
+        "op": "resolve",
+        "selector": "profile:primary"
+      },
+      "normalized_oracle_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          },
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-b",
+            "protocol": "anthropic_messages",
+            "provider": "backup",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          },
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-b",
+            "protocol": "anthropic_messages",
+            "provider": "backup",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          },
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-b",
+            "protocol": "anthropic_messages",
+            "provider": "backup",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "selector.bare-profile",
+      "input": {
+        "op": "resolve",
+        "selector": "primary"
+      },
+      "normalized_oracle_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          },
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-b",
+            "protocol": "anthropic_messages",
+            "provider": "backup",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          },
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-b",
+            "protocol": "anthropic_messages",
+            "provider": "backup",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          },
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-b",
+            "protocol": "anthropic_messages",
+            "provider": "backup",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN this selector entry resolves the profile named auto and does not call the router",
+      "disposition": "intentional_retain",
+      "id": "selector.bare-auto",
+      "input": {
+        "op": "resolve",
+        "selector": "auto"
+      },
+      "normalized_oracle_output": {
+        "chain": null,
+        "class": "routed"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": null,
+        "class": "routed"
+      },
+      "rust_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-auto",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN profile:auto resolves that profile and does not call the router",
+      "disposition": "intentional_retain",
+      "id": "selector.profile-auto",
+      "input": {
+        "op": "resolve",
+        "selector": "profile:auto"
+      },
+      "normalized_oracle_output": {
+        "chain": null,
+        "class": "routed"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": null,
+        "class": "routed"
+      },
+      "rust_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-auto",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN a profile: prefix looks up that whole name and does not select provider/model",
+      "disposition": "intentional_retain",
+      "id": "selector.profile-slash",
+      "input": {
+        "op": "resolve",
+        "selector": "profile:relay/model-z"
+      },
+      "normalized_oracle_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-z",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-z",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_output": {
+        "chain": null,
+        "class": "not_found"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "selector.direct-slash",
+      "input": {
+        "op": "resolve",
+        "selector": "relay/model-z"
+      },
+      "normalized_oracle_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-z",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-z",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_output": {
+        "chain": [
+          {
+            "effort": null,
+            "harness": "none",
+            "model": "model-z",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "selector.empty-profile",
+      "input": {
+        "op": "resolve",
+        "selector": "profile:"
+      },
+      "normalized_oracle_output": {
+        "chain": null,
+        "class": "selector_syntax"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": null,
+        "class": "selector_syntax"
+      },
+      "rust_output": {
+        "chain": null,
+        "class": "selector_syntax"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "selector.split-trim",
+      "input": {
+        "op": "split",
+        "value": " a, ,b "
+      },
+      "normalized_oracle_output": {
+        "class": "ok",
+        "values": [
+          "a",
+          "b"
+        ]
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "ok",
+        "values": [
+          "a",
+          "b"
+        ]
+      },
+      "rust_output": {
+        "class": "ok",
+        "values": [
+          "a",
+          "b"
+        ]
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "selector.split-empty",
+      "input": {
+        "op": "split",
+        "value": " , "
+      },
+      "normalized_oracle_output": {
+        "class": "selector_syntax",
+        "values": null
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "selector_syntax",
+        "values": null
+      },
+      "rust_output": {
+        "class": "selector_syntax",
+        "values": null
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING an unknown profile is not_found here and config in the authored Python pin",
+      "disposition": "pending",
+      "id": "selector.unknown-profile",
+      "input": {
+        "op": "resolve",
+        "selector": "missing"
+      },
+      "normalized_oracle_output": {
+        "chain": null,
+        "class": "config"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": null,
+        "class": "config"
+      },
+      "rust_output": {
+        "chain": null,
+        "class": "not_found"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "selector.profile-effort",
+      "input": {
+        "op": "resolve",
+        "selector": "effort-high"
+      },
+      "normalized_oracle_output": {
+        "chain": [
+          {
+            "effort": "high",
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "chain": [
+          {
+            "effort": "high",
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_output": {
+        "chain": [
+          {
+            "effort": "high",
+            "harness": "none",
+            "model": "model-a",
+            "protocol": "openai_chat",
+            "provider": "relay",
+            "transport": "direct_http"
+          }
+        ],
+        "class": "ok"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    }
+  ],
+  "normalization": {
+    "credential_material": "must_be_absent",
+    "endpoints": "omitted",
+    "harness_none": "token_none",
+    "order": "declared_failover_order"
+  },
+  "schema_version": 1,
+  "suite": "selector"
+}
