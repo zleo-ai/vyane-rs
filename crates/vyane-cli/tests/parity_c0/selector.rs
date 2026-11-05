@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use vyane_core::{BoundTarget, VyaneError};
 use vyane_service::{load_config, resolve_target_chain, split_targets};
 

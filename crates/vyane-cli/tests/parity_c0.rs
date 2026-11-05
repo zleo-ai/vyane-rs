@@ -23,7 +23,7 @@ use sha2::{Digest as _, Sha256};
 
 const RUST_TEST: &str = "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline";
 const FORBIDDEN_SNIPPETS: &[&str] = &[
-    "beacon.sqlite",
+    ".sqlite",
     ".config/vyane",
     ".config\\vyane",
     "sk-",

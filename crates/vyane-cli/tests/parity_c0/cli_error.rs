@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use assert_cmd::Command;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use vyane_core::ErrorKind;
 use vyane_service::DiagnosticErrorKind;
 

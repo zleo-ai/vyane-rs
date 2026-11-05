@@ -170,7 +170,7 @@ C0_MANIFEST_PATH = FIXTURE_ROOT / "c0-manifest.json"
 C0_DISPOSITIONS = {"aligned", "intentional_retain", "pending"}
 C0_RUST_TEST = "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
 FORBIDDEN_FIXTURE_SNIPPETS = (
-    "beacon.sqlite",
+    ".sqlite",
     ".config/vyane",
     ".config\\vyane",
     "sk-",
