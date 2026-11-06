@@ -220,6 +220,8 @@ pub fn take_inherited_pinned_workdir(
 }
 
 fn terminate_failed_worker(child: &mut Child, pid: i32) {
+    #[cfg(not(unix))]
+    let _ = pid;
     #[cfg(unix)]
     signal_group(pid, SIGKILL);
     // Direct-child kill is the non-Unix fallback and harmless after a Unix group
@@ -250,7 +252,7 @@ fn open_private_log(path: &Path) -> Result<File> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::fs;

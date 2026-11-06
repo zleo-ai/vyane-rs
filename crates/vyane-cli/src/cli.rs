@@ -9,6 +9,7 @@ use vyane_workflow::WorkflowRunId;
 #[derive(Debug, Parser)]
 #[command(
     name = "vyane",
+    bin_name = "vyane",
     version = env!("VYANE_CLI_VERSION"),
     about = "Run configured AI targets with failover and a local run ledger.",
     long_about = "Vyane assembles configured providers, protocols, CLI harnesses, the dispatch kernel, and local storage into one command-line tool."

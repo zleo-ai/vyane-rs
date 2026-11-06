@@ -141,7 +141,14 @@ impl JsonlLedger {
 
         // `append(true)` implies write access and opens with O_APPEND, so every
         // write lands at EOF atomically at the OS level.
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        // Windows LockFileEx needs generic read or write access. Append-only
+        // access alone cannot acquire the lock; keep append semantics and add
+        // read access only on Windows rather than widening Unix requirements.
+        #[cfg(windows)]
+        options.read(true);
+        let mut file = options.open(path)?;
 
         // Advisory exclusive lock serializes concurrent writers across threads
         // and processes. The lock is released when `file` is dropped — at the

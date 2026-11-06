@@ -1148,6 +1148,8 @@ fn open_private_log(path: &Path) -> Result<std::fs::File> {
 }
 
 fn require_owner_only(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1462,9 +1464,21 @@ mod tests {
         publish_control(&paths, &"a".repeat(64), &descriptor).unwrap();
         write_private_atomic(&paths.token(), b"malformed").unwrap();
 
-        assert!(read_live_control(&paths).unwrap().is_none());
-        assert!(!paths.descriptor().exists());
-        assert!(!paths.token().exists());
+        #[cfg(unix)]
+        {
+            assert!(read_live_control(&paths).unwrap().is_none());
+            assert!(!paths.descriptor().exists());
+            assert!(!paths.token().exists());
+        }
+        #[cfg(not(unix))]
+        {
+            let error = read_live_control(&paths).unwrap_err();
+            assert!(error.to_string().contains("identity is unverifiable"));
+            // Without process identity, do not assume that this generation is
+            // stale or delete its control files. Do not parse the token either.
+            assert_eq!(read_descriptor_optional(&paths).unwrap(), Some(descriptor));
+            assert_eq!(std::fs::read(paths.token()).unwrap(), b"malformed");
+        }
     }
 
     #[test]

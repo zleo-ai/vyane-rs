@@ -15,11 +15,14 @@ use assert_cmd::Command;
 use chrono::{TimeZone as _, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
+#[cfg(unix)]
 use tempfile::TempDir;
+#[cfg(unix)]
+use vyane_goal::GoalContinuityStepStatus;
 use vyane_goal::{
-    GoalContinuityMode, GoalContinuityPolicy, GoalContinuityStepStatus, GoalExecutionTarget,
-    GoalQuotaEvent, GoalStore, NewGoal, SqliteGoalStore, TakeoverApprovalStatus, TakeoverFinish,
-    TakeoverRunStatus, apply_quota_handoff_events,
+    GoalContinuityMode, GoalContinuityPolicy, GoalExecutionTarget, GoalQuotaEvent, GoalStore,
+    NewGoal, SqliteGoalStore, TakeoverApprovalStatus, TakeoverFinish, TakeoverRunStatus,
+    apply_quota_handoff_events,
 };
 
 fn vyane() -> Command {
@@ -228,6 +231,7 @@ exit 1
     "custom:cmd:./pursuit-ready-check".into()
 }
 
+#[cfg(unix)]
 #[test]
 fn lifecycle_round_trip_has_stable_json_and_persisted_acceptance() {
     let directory = common::private_tempdir();
@@ -1599,7 +1603,7 @@ fn malformed_input_and_illegal_transition_have_json_error_and_exit_two() {
 }
 
 #[test]
-fn verify_runs_bounded_commands_and_persists_only_satisfied_criteria() {
+fn verify_persists_only_satisfied_criteria_and_reports_platform_limits() {
     let directory = common::private_tempdir();
     let db = db_text(&directory.path().join("goals.sqlite3"));
     let created = json_output(
@@ -1672,13 +1676,20 @@ fn verify_runs_bounded_commands_and_persists_only_satisfied_criteria() {
     );
     assert_eq!(
         verified["verification"]["results"][0]["status"],
-        "satisfied"
+        if cfg!(unix) {
+            "satisfied"
+        } else {
+            "inconclusive"
+        }
     );
     assert_eq!(
         verified["verification"]["results"][1]["status"],
         "manual_required"
     );
-    assert!(verified["goal"]["acceptance_criteria"][0]["satisfied_at"].is_string());
+    assert_eq!(
+        verified["goal"]["acceptance_criteria"][0]["satisfied_at"].is_string(),
+        cfg!(unix)
+    );
     assert!(verified["goal"]["acceptance_criteria"][1]["satisfied_at"].is_null());
 
     let verified_again = json_output(
@@ -1725,6 +1736,7 @@ fn verify_runs_bounded_commands_and_persists_only_satisfied_criteria() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn verify_all_satisfied_returns_success_exit_code() {
     let directory = common::private_tempdir();

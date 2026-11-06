@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+#[cfg(unix)]
+use anyhow::Context as _;
+use anyhow::Result;
 use fs4::fs_std::FileExt as _;
 
 /// Held for the full lifetime of a process that may own in-process tasks.

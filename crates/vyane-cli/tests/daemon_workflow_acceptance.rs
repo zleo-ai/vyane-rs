@@ -5,6 +5,9 @@
 //! graceful shutdown. The target is a local Wiremock server, so no external
 //! network or installed harness is required.
 
+// Detached daemon identity and graceful stop require Unix process control.
+#![cfg(unix)]
+
 mod common;
 use std::fs;
 use std::path::{Path, PathBuf};

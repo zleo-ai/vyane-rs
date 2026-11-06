@@ -79,10 +79,12 @@ pub(crate) struct RunResult {
 }
 
 /// Grace period between `SIGTERM` and the escalating `SIGKILL` on the group.
+#[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(3);
 /// Maximum time to wait for stdout/stderr EOF after the direct child exits.
 const POST_EXIT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// Brief bounded settle after SIGKILL before publishing `Stopped`.
+#[cfg(unix)]
 const POST_KILL_SETTLE_GRACE: Duration = Duration::from_millis(500);
 /// Linux/WSL can transiently return ETXTBSY while a directly spawned executable
 /// replacement is becoming visible. Retry that one errno briefly; lifecycle
@@ -105,6 +107,7 @@ const NATIVE_NETWORK_FD: RawFd = 5;
 /// Codex/Claude and all descendants.
 #[cfg(unix)]
 const PINNED_WORKDIR_FD: RawFd = 8;
+#[cfg(unix)]
 pub(crate) const NATIVE_MOUNT_FD_START: RawFd = 10;
 /// Private, inherited descriptor containing shell-quoted target environment
 /// exports. The trusted start-gate sentinel itself never inherits target
@@ -368,6 +371,7 @@ enum LeaderResolution {
     IdentityUnknown,
 }
 
+#[cfg(unix)]
 enum LeaderWait {
     Reaped,
     TimedOut,
@@ -583,6 +587,8 @@ async fn establish_lifecycle(
 }
 
 fn harness_command(program: &str, args: &[String], start_gated: bool) -> Command {
+    #[cfg(not(unix))]
+    let _ = start_gated;
     #[cfg(unix)]
     if start_gated {
         let mut command = Command::new("/bin/sh");
@@ -883,7 +889,7 @@ pub(crate) fn env_key_list(env: &BTreeMap<String, String>) -> String {
 ///
 /// stdout/stderr are captured to strings (harness output is machine-readable
 /// and bounded; v0.1 harnesses are one-shot, so this is not a streaming path).
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) async fn run_capture(
     program: &str,
     args: &[String],
@@ -1051,6 +1057,8 @@ async fn run_capture_with_pinned_limit_confined(
     network_channel: Option<NativeNetworkChannel>,
     native_mounts: Vec<NativeMountHandle>,
 ) -> Result<RunResult> {
+    #[cfg(not(unix))]
+    let _ = seccomp_filter;
     let RunControl {
         cancel,
         timeout,
@@ -1168,7 +1176,7 @@ async fn run_capture_with_pinned_limit_confined(
     }
 
     let started = Instant::now();
-    let (mut child, mut sentinel_status) = spawn_controlled_harness_child(
+    let (mut child, sentinel_status) = spawn_controlled_harness_child(
         &mut cmd,
         program,
         ControlledSpawn {
@@ -1214,8 +1222,13 @@ async fn run_capture_with_pinned_limit_confined(
     // Race: normal exit vs. cancellation vs. timeout. `tokio::select!` polls the
     // wait while background tasks drain pipes so pipe backpressure can't
     // deadlock the child.
+    #[cfg(unix)]
+    let mut sentinel_status = sentinel_status;
     let sentinel_controlled = sentinel_status.is_some();
+    #[cfg(unix)]
     let mut sentinel_error = None;
+    #[cfg(not(unix))]
+    let sentinel_error: Option<VyaneError> = None;
     let (termination, leader_identity_error) = {
         // A timeout of None means "run until completion".
         let timeout_fut = async {
@@ -1405,7 +1418,7 @@ async fn captured_string(output: &SharedOutput) -> String {
 /// Partial lines (no newline before EOF) are also delivered. Lines are
 /// delivered in arrival order; the callback is called from a tokio task so it
 /// must be `Send + Sync`.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) async fn run_stream_capture(
     program: &str,
     args: &[String],
@@ -1495,7 +1508,7 @@ pub(crate) async fn run_stream_capture_with_pinned(
     }
 
     let started = Instant::now();
-    let (mut child, mut sentinel_status) = spawn_controlled_harness_child(
+    let (mut child, sentinel_status) = spawn_controlled_harness_child(
         &mut cmd,
         program,
         ControlledSpawn {
@@ -1539,8 +1552,13 @@ pub(crate) async fn run_stream_capture_with_pinned(
     );
 
     // Same race: normal exit vs. cancellation vs. timeout.
+    #[cfg(unix)]
+    let mut sentinel_status = sentinel_status;
     let sentinel_controlled = sentinel_status.is_some();
+    #[cfg(unix)]
     let mut sentinel_error = None;
+    #[cfg(not(unix))]
+    let sentinel_error: Option<VyaneError> = None;
     let (termination, leader_identity_error) = {
         let timeout_fut = async {
             match control_deadline {

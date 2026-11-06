@@ -267,6 +267,7 @@ fn assert_no_task_dir(data_dir: &Path) {
 
 /// New detached submissions may persist lifecycle artifacts, but never the
 /// private request or any of its canaries inside their task directory.
+#[cfg(unix)]
 fn assert_private_request_absent(data_dir: &Path, id: &str, canaries: &[&str]) {
     let task_dir = data_dir.join("tasks").join(id);
     assert!(task_dir.is_dir(), "missing task directory for {id}");
@@ -301,6 +302,7 @@ fn assert_private_request_absent(data_dir: &Path, id: &str, canaries: &[&str]) {
     }
 }
 
+#[cfg(unix)]
 fn assert_task_database_excludes(data_dir: &Path, canaries: &[&str]) {
     for suffix in ["", "-wal", "-shm"] {
         let path = data_dir.join(format!("tasks.sqlite3{suffix}"));
@@ -403,6 +405,7 @@ fn poll_until_terminal(data_dir: &Path, id: &str, budget: Duration) -> Value {
 }
 
 /// Poll a predicate over the public task-status JSON until true or timeout.
+#[cfg(unix)]
 fn poll_status_file<F: Fn(&Value) -> bool>(
     data_dir: &Path,
     id: &str,
@@ -426,6 +429,8 @@ fn poll_status_file<F: Fn(&Value) -> bool>(
 /// matches the answer; the ledger records the run.
 // Detached long-delay MockServer fixtures need independent Tokio workers so
 // the delayed target stays schedulable while the parent CLI returns/cancels.
+// Requires Unix detached process/session identity and group control.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detach_returns_fast_then_completes_success() {
     let server = MockServer::start().await;
@@ -1132,6 +1137,8 @@ async fn new_scaffold_without_status_or_job_shows_stale_and_explains() {
 /// cancelled RunRecord.
 // Detached long-delay MockServer fixtures need independent Tokio workers so
 // the delayed target stays schedulable while the parent CLI returns/cancels.
+// Requires Unix detached process/session identity and group control.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_finalizes_cancelled_and_kills_group() {
     let server = MockServer::start().await;
@@ -1587,6 +1594,8 @@ async fn terminal_metadata_cancel_kills_stopped_outer_and_nested_groups() {
 /// Acceptance #4: a hand-crafted task dir with `state: running` + a dead pid is
 /// shown as `died` by `task list`, and `task status` exits nonzero with a clear
 /// message.
+// Requires Unix detached process/session identity and group control.
+#[cfg(unix)]
 #[tokio::test]
 async fn orphan_running_with_dead_pid_shows_died() {
     let data_dir = common::private_tempdir();
@@ -1738,6 +1747,7 @@ async fn task_list_orders_recent_first_and_json_parses() {
 /// helper. Production cancel uses the same `kill(pid, 0)` probe, so treating
 /// `Z` as dead would let tests call `task cancel` while
 /// `verify_controller_identity` still returns `Match`.
+#[cfg(unix)]
 fn wait_pid_dead(pid: i32, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     loop {
@@ -1753,6 +1763,7 @@ fn wait_pid_dead(pid: i32, budget: Duration) -> bool {
 
 /// Whether the process GROUP `pgid` is empty, polling `kill(-pgid, 0)` until it
 /// reports ESRCH (no members) or the budget elapses.
+#[cfg(unix)]
 fn wait_group_empty(pgid: i32, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     loop {
@@ -1780,11 +1791,6 @@ fn unix_group_has_members(pgid: i32) -> bool {
     result.is_ok() || matches!(result, Err(rustix::io::Errno::PERM))
 }
 
-#[cfg(not(unix))]
-fn unix_group_has_members(_pgid: i32) -> bool {
-    false
-}
-
 /// Test-local liveness probe (the crate's own `pid_alive` is not part of the
 /// public test surface). `kill(pid, 0)`: rc==0 → alive; ESRCH → dead; EPERM →
 /// alive (exists but not signalable).
@@ -1806,11 +1812,6 @@ fn unix_signal_pid(pid: i32, signal: i32) {
     let signal = rustix::process::Signal::from_named_raw(signal).expect("named signal");
     rustix::process::kill_process(pid, signal)
         .unwrap_or_else(|error| panic!("signal {signal:?} to pid {pid} failed: {error}"));
-}
-
-#[cfg(not(unix))]
-fn unix_pid_alive(_pid: i32) -> bool {
-    true
 }
 
 #[cfg(unix)]

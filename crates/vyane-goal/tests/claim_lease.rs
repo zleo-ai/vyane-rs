@@ -322,7 +322,11 @@ fn goal_with_criteria(store: &SqliteGoalStore, id: &str, at: DateTime<Utc>) {
     store.create(OWNER, goal).expect("create goal");
 }
 
-fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionResult {
+fn satisfied_result(
+    index: usize,
+    criterion: &AcceptanceCriterion,
+    cwd: &std::path::Path,
+) -> CriterionResult {
     CriterionResult {
         criterion_index: index,
         criterion_key: criterion_key(index, criterion),
@@ -330,7 +334,7 @@ fn satisfied_result(index: usize, criterion: &AcceptanceCriterion) -> CriterionR
         target: criterion.target.clone(),
         status: CriterionStatus::Satisfied,
         command: vec!["true".into()],
-        cwd: "/tmp".into(),
+        cwd: cwd.to_string_lossy().into_owned(),
         exit_code: Some(0),
         duration_ms: 1,
         stdout_tail: String::new(),
@@ -346,10 +350,12 @@ fn record_independent_verification(
     indices: &[usize],
     at: DateTime<Utc>,
 ) {
+    // Keep a real workdir alive while the store re-runs the claimed commands.
+    let workdir = common::private_tempdir();
     let record = store.get(OWNER, id).expect("get").expect("record");
     let results = indices
         .iter()
-        .map(|index| satisfied_result(*index, &record.acceptance_criteria[*index]))
+        .map(|index| satisfied_result(*index, &record.acceptance_criteria[*index], workdir.path()))
         .collect::<Vec<_>>();
     let verification = AcceptanceVerification {
         goal_id: id.into(),

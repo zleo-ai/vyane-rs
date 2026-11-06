@@ -12,10 +12,12 @@ use vyane_broker::{
     AdapterContext, AdapterFailure, AdapterOutcome, BrokerError, BrokerScope, DeliveryAdapter,
     DeliveryEnvelope, MessageBroker, PumpItemStatus, PumpOptions, ReplaySafety,
 };
+#[cfg(unix)]
+use vyane_message::MessageStoreError;
 use vyane_message::{
     ClaimQuery, DeliveryMailbox, DeliveryStatus, EndpointKind, EndpointRef, IdempotencyKey,
-    LeaseRequest, MessageDirection, MessagePublicationStatus, MessageStore, MessageStoreError,
-    NackDisposition, NewDelivery, NewMessage, NewTransportReceipt, SqliteMessageStore,
+    LeaseRequest, MessageDirection, MessagePublicationStatus, MessageStore, NackDisposition,
+    NewDelivery, NewMessage, NewTransportReceipt, SqliteMessageStore,
 };
 
 #[derive(Clone)]

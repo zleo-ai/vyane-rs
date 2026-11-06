@@ -816,6 +816,8 @@ async fn create_private_dir(path: &Path) -> Result<(), WorktreeError> {
 }
 
 async fn set_private_permissions(path: &Path) -> Result<(), WorktreeError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

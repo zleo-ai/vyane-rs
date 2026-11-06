@@ -165,6 +165,7 @@ fn workflow_effort_failover_config(primary: &MockServer, backup: &MockServer) ->
 /// A profile that resolves to a `CliWrap` (harness) target, never `DirectHttp`.
 /// The fake Claude executable used by the streaming acceptance test resolves
 /// through this target's scrubbed `PATH`.
+#[cfg(unix)]
 fn harness_config() -> String {
     r#"
         [providers.native]
