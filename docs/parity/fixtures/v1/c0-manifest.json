@@ -1,0 +1,464 @@
+{
+  "normalization_version": "vyane-c0-contract-v1",
+  "reference": {
+    "disclosure": "sanitized_behavior_only",
+    "python_expectation": "authored_contract_pin",
+    "snapshot": "c0-contract-2026-11-05"
+  },
+  "schema_version": 1,
+  "suites": [
+    {
+      "cases": [
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "cli-error.kind.timeout"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "cli-error.kind.rate-limited"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "cli-error.kind.spawn-failed"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "cli-error.kind.harness-failed"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "cli-error.kind.other"
+        },
+        {
+          "blocker": "PENDING transport stays a distinct failover kind and is not collapsed to execution_error",
+          "disposition": "pending",
+          "id": "cli-error.kind.transport"
+        },
+        {
+          "blocker": "PENDING protocol stays a distinct failover kind and is not collapsed to execution_error",
+          "disposition": "pending",
+          "id": "cli-error.kind.protocol"
+        },
+        {
+          "blocker": "PENDING authentication remains its own failover kind; the authored Python label is execution_error",
+          "disposition": "pending",
+          "id": "cli-error.kind.auth"
+        },
+        {
+          "blocker": "PENDING unsupported is fail-closed and is not yet the policy_blocked label",
+          "disposition": "pending",
+          "id": "cli-error.kind.unsupported"
+        },
+        {
+          "blocker": "RETAIN caller cancellation must not fail over",
+          "disposition": "intentional_retain",
+          "id": "cli-error.kind.cancelled"
+        },
+        {
+          "blocker": "RETAIN configuration failures must not fail over",
+          "disposition": "intentional_retain",
+          "id": "cli-error.kind.config"
+        },
+        {
+          "blocker": "RETAIN a missing entity is not a missing runtime binary",
+          "disposition": "intentional_retain",
+          "id": "cli-error.kind.not-found"
+        },
+        {
+          "blocker": "RETAIN a conflict must be reloaded and must not fail over",
+          "disposition": "intentional_retain",
+          "id": "cli-error.kind.conflict"
+        },
+        {
+          "blocker": "RETAIN local io failures must not fail over",
+          "disposition": "intentional_retain",
+          "id": "cli-error.kind.io"
+        },
+        {
+          "blocker": "RETAIN an indeterminate publication must not be retried",
+          "disposition": "intentional_retain",
+          "id": "cli-error.kind.indeterminate"
+        },
+        {
+          "blocker": "PENDING overloaded has no ErrorKind yet",
+          "disposition": "pending",
+          "id": "cli-error.unmapped.overloaded"
+        },
+        {
+          "blocker": "PENDING policy_blocked is a retry-policy config stop and has no ErrorKind yet",
+          "disposition": "pending",
+          "id": "cli-error.unmapped.policy-blocked"
+        },
+        {
+          "blocker": "PENDING this diagnostic class has no Python twin",
+          "disposition": "pending",
+          "id": "cli-error.diagnostic.invalid-input"
+        },
+        {
+          "blocker": "PENDING this diagnostic class has no Python twin",
+          "disposition": "pending",
+          "id": "cli-error.diagnostic.config-invalid"
+        },
+        {
+          "blocker": "PENDING this diagnostic class has no Python twin",
+          "disposition": "pending",
+          "id": "cli-error.diagnostic.budget-exceeded"
+        },
+        {
+          "blocker": "PENDING Python feedback is one command with a zero rating default; this binary requires feedback rate",
+          "disposition": "pending",
+          "id": "cli-error.feedback.missing-human"
+        },
+        {
+          "blocker": "PENDING JSON feedback errors use the feedback rate command, not the Python feedback command",
+          "disposition": "pending",
+          "id": "cli-error.feedback.missing-json"
+        },
+        {
+          "blocker": "PENDING a rating outside 1 to 5 is a config error on feedback rate",
+          "disposition": "pending",
+          "id": "cli-error.feedback.rating-range"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "cli-error.command.unknown"
+        },
+        {
+          "blocker": "PENDING version is a flag here and a subcommand in the Python CLI; the version text is not pinned",
+          "disposition": "pending",
+          "id": "cli-error.command.version"
+        },
+        {
+          "blocker": "PENDING session commands are list, inspect, and reset-native rather than create, history, message, bind, and archive",
+          "disposition": "pending",
+          "id": "cli-error.command.session"
+        },
+        {
+          "blocker": "PENDING workflow help has no tail command and adds plan, submit, resume, replay, and list",
+          "disposition": "pending",
+          "id": "cli-error.command.workflow"
+        }
+      ],
+      "fixture_sha256": "2944a2507da6efe224ae287aac06ca1b890b34977aee40e15cbdb1933b3d0d3e",
+      "id": "cli_error",
+      "normalized_fixture": "docs/parity/fixtures/v1/c0-cli-error.json",
+      "scope": "CLI exit classes, error-kind failover eligibility, and command inventory. Paths and version text are omitted."
+    },
+    {
+      "cases": [
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "selector.direct-model"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "selector.target-prefix"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "selector.profile-chain"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "selector.bare-profile"
+        },
+        {
+          "blocker": "RETAIN this selector entry resolves the profile named auto and does not call the router",
+          "disposition": "intentional_retain",
+          "id": "selector.bare-auto"
+        },
+        {
+          "blocker": "RETAIN profile:auto resolves that profile and does not call the router",
+          "disposition": "intentional_retain",
+          "id": "selector.profile-auto"
+        },
+        {
+          "blocker": "RETAIN a profile: prefix looks up that whole name and does not select provider/model",
+          "disposition": "intentional_retain",
+          "id": "selector.profile-slash"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "selector.direct-slash"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "selector.empty-profile"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "selector.split-trim"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "selector.split-empty"
+        },
+        {
+          "blocker": "PENDING an unknown profile is not_found here and config in the authored Python pin",
+          "disposition": "pending",
+          "id": "selector.unknown-profile"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "selector.profile-effort"
+        }
+      ],
+      "fixture_sha256": "0456444f7fcb17ec75cb41b5cb3ebc60f5ca730dc4c3c9d9add919d7be585dd9",
+      "id": "selector",
+      "normalized_fixture": "docs/parity/fixtures/v1/c0-selector.json",
+      "scope": "Public resolve_target_chain and split_targets against a neutral offline config. Endpoints and credential material are not projected."
+    },
+    {
+      "cases": [
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "effort.serde-closed"
+        },
+        {
+          "blocker": "PENDING max is outside the closed effort set",
+          "disposition": "pending",
+          "id": "effort.serde-max"
+        },
+        {
+          "blocker": "PENDING none is outside the closed effort set",
+          "disposition": "pending",
+          "id": "effort.serde-none"
+        },
+        {
+          "blocker": "PENDING route_task collapses max to medium",
+          "disposition": "pending",
+          "id": "effort.route-max"
+        },
+        {
+          "blocker": "PENDING route_task collapses none to medium",
+          "disposition": "pending",
+          "id": "effort.route-none"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "effort.route-high"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "effort.route-xhigh"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "effort.route-inherit"
+        },
+        {
+          "blocker": "PENDING a profile effort of max fails closed-set config load",
+          "disposition": "pending",
+          "id": "effort.toml-max"
+        }
+      ],
+      "fixture_sha256": "de5049f037c6e21635b1df2ed85ce88d803ce601435fc48297a8ea25352c0ada",
+      "id": "effort",
+      "normalized_fixture": "docs/parity/fixtures/v1/c0-effort.json",
+      "scope": "Closed Effort serde, public route_task effort collapse, and config load of an out-of-set token."
+    },
+    {
+      "cases": [
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "usage.absent-rate"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "usage.absent-usage"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "usage.zero-tokens"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "usage.parent-rates"
+        },
+        {
+          "blocker": "PENDING Q0: cache and reasoning are subsets of the parent counts here and disjoint billed volume in the Python cost helper",
+          "disposition": "pending",
+          "id": "usage.subset-rates"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "usage.missing-subset-rates"
+        },
+        {
+          "blocker": "PENDING Q0: a cached subset larger than input is clamped to the parent count",
+          "disposition": "pending",
+          "id": "usage.clamp-subset"
+        },
+        {
+          "blocker": "RETAIN usage counters saturate and must not wrap",
+          "disposition": "intentional_retain",
+          "id": "usage.saturating-add"
+        }
+      ],
+      "fixture_sha256": "23b761bba752548fe67fa9a4d153eaa53327f5407640e79e92de5287ab0f12e6",
+      "id": "usage",
+      "normalized_fixture": "docs/parity/fixtures/v1/c0-usage.json",
+      "scope": "estimate_configured_cost in integer micro-USD and saturating Usage::add. Absent price stays unknown."
+    },
+    {
+      "cases": [
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "session.id-empty"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "session.id-nul"
+        },
+        {
+          "blocker": "PENDING a whitespace-only session id is accepted",
+          "disposition": "pending",
+          "id": "session.id-space"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "session.id-exact-cap"
+        },
+        {
+          "blocker": "PENDING session ids are capped at 1024 UTF-8 bytes",
+          "disposition": "pending",
+          "id": "session.id-overlong"
+        },
+        {
+          "blocker": "RETAIN harness native resume stays fail-closed for legacy and bound state; see vyane-kernel acceptance harness_legacy_native_resume_is_rejected_even_for_read_only and native_resume_rejects_when_any_admitted_fallback_is_a_harness",
+          "disposition": "intentional_retain",
+          "id": "session.native-resume"
+        },
+        {
+          "blocker": "PENDING native transitions are reset, fork_fresh, and commit",
+          "disposition": "pending",
+          "id": "session.transitions"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "session.apply-update"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "session.chat-roles"
+        }
+      ],
+      "fixture_sha256": "4a47ed1b538d77f705fc374feea2c9b7674185c42b6aa0335a13f72ffa618d7e",
+      "id": "session",
+      "normalized_fixture": "docs/parity/fixtures/v1/c0-session.json",
+      "scope": "Public session id rules, native-state tokens, transitions, and SessionUpdate.apply_to. Native resume policy is cited, not reimplemented."
+    },
+    {
+      "cases": [
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "workflow.feature.declarative-dag"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "workflow.feature.worktree"
+        },
+        {
+          "blocker": "RETAIN dynamic control flow is not representable and is not a Deno script runner",
+          "disposition": "intentional_retain",
+          "id": "workflow.feature.dynamic"
+        },
+        {
+          "blocker": "RETAIN nested workflow calls are not representable and are not a Deno script runner",
+          "disposition": "intentional_retain",
+          "id": "workflow.feature.nested"
+        },
+        {
+          "blocker": "PENDING WF0: shared run budgets are unsupported in schema v1",
+          "disposition": "pending",
+          "id": "workflow.feature.shared-budget"
+        },
+        {
+          "blocker": "RETAIN JavaScript workflow source is rejected at parse and is not executed",
+          "disposition": "intentional_retain",
+          "id": "workflow.parse.javascript"
+        },
+        {
+          "blocker": "PENDING an unknown step script key is ignored and the declarative step still validates",
+          "disposition": "pending",
+          "id": "workflow.parse.ignored-script"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "workflow.graph.cycle"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "workflow.graph.duplicate"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "workflow.graph.both-prompts"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "workflow.graph.blank-name"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "workflow.graph.both-targets"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "workflow.graph.topo"
+        },
+        {
+          "blocker": "RETAIN a successful journal step stays successful; this is not the Python changed-plan prefix cache",
+          "disposition": "intentional_retain",
+          "id": "workflow.journal.reset"
+        },
+        {
+          "blocker": null,
+          "disposition": "aligned",
+          "id": "workflow.on-error"
+        }
+      ],
+      "fixture_sha256": "441e1ccb15fd7b65802f7d28d6c517495e5180bbe515081e299e9c250a62546c",
+      "id": "workflow",
+      "normalized_fixture": "docs/parity/fixtures/v1/c0-workflow.json",
+      "scope": "Declarative workflow schema v1 features, validation messages, journal reset, and on-error tokens. Deno scripts are not executed."
+    }
+  ]
+}

@@ -1,0 +1,255 @@
+{
+  "cases": [
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "effort.serde-closed",
+      "input": {
+        "op": "serde_closed"
+      },
+      "normalized_oracle_output": {
+        "high": "high",
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "high": "high",
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "rust_output": {
+        "high": "high",
+        "low": "low",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING max is outside the closed effort set",
+      "disposition": "pending",
+      "id": "effort.serde-max",
+      "input": {
+        "op": "serde_open",
+        "token": "max"
+      },
+      "normalized_oracle_output": {
+        "accepted": true,
+        "effort": "max"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "accepted": true,
+        "effort": "max"
+      },
+      "rust_output": {
+        "accepted": false
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING none is outside the closed effort set",
+      "disposition": "pending",
+      "id": "effort.serde-none",
+      "input": {
+        "op": "serde_open",
+        "token": "none"
+      },
+      "normalized_oracle_output": {
+        "accepted": true,
+        "effort": "none"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "accepted": true,
+        "effort": "none"
+      },
+      "rust_output": {
+        "accepted": false
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING route_task collapses max to medium",
+      "disposition": "pending",
+      "id": "effort.route-max",
+      "input": {
+        "explicit_tier": "economy",
+        "op": "route",
+        "preference_effort": "max"
+      },
+      "normalized_oracle_output": {
+        "effort": "max",
+        "tier": "economy"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "effort": "max",
+        "tier": "economy"
+      },
+      "rust_output": {
+        "effort": "medium",
+        "tier": "economy"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING route_task collapses none to medium",
+      "disposition": "pending",
+      "id": "effort.route-none",
+      "input": {
+        "explicit_tier": "economy",
+        "op": "route",
+        "preference_effort": "none"
+      },
+      "normalized_oracle_output": {
+        "effort": "none",
+        "tier": "economy"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "effort": "none",
+        "tier": "economy"
+      },
+      "rust_output": {
+        "effort": "medium",
+        "tier": "economy"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "effort.route-high",
+      "input": {
+        "explicit_tier": "economy",
+        "op": "route",
+        "preference_effort": "HIGH"
+      },
+      "normalized_oracle_output": {
+        "effort": "high",
+        "tier": "economy"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "effort": "high",
+        "tier": "economy"
+      },
+      "rust_output": {
+        "effort": "high",
+        "tier": "economy"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "effort.route-xhigh",
+      "input": {
+        "explicit_tier": "frontier",
+        "op": "route",
+        "preference_effort": "xhigh"
+      },
+      "normalized_oracle_output": {
+        "effort": "xhigh",
+        "tier": "frontier"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "effort": "xhigh",
+        "tier": "frontier"
+      },
+      "rust_output": {
+        "effort": "xhigh",
+        "tier": "frontier"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "effort.route-inherit",
+      "input": {
+        "op": "inherit"
+      },
+      "normalized_oracle_output": {
+        "economy": "low",
+        "frontier": "high",
+        "mainline": "medium"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "economy": "low",
+        "frontier": "high",
+        "mainline": "medium"
+      },
+      "rust_output": {
+        "economy": "low",
+        "frontier": "high",
+        "mainline": "medium"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING a profile effort of max fails closed-set config load",
+      "disposition": "pending",
+      "id": "effort.toml-max",
+      "input": {
+        "op": "toml_max"
+      },
+      "normalized_oracle_output": {
+        "class": "ok",
+        "effort": "max",
+        "loaded": true
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "class": "ok",
+        "effort": "max",
+        "loaded": true
+      },
+      "rust_output": {
+        "class": "config",
+        "loaded": false
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    }
+  ],
+  "normalization": {
+    "closed_set": "low_medium_high_xhigh",
+    "inherit": "effort_for_tier",
+    "open_tokens": "rejected"
+  },
+  "schema_version": 1,
+  "suite": "effort"
+}

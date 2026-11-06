@@ -1,0 +1,256 @@
+{
+  "cases": [
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "usage.absent-rate",
+      "input": {
+        "input_per_1m": 1,
+        "input_tokens": 1,
+        "op": "estimate",
+        "output_per_1m": 1,
+        "output_tokens": 1,
+        "rate_present": false,
+        "usage_present": true
+      },
+      "normalized_oracle_output": {
+        "micro_usd": null,
+        "status": "unknown"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "micro_usd": null,
+        "status": "unknown"
+      },
+      "rust_output": {
+        "micro_usd": null,
+        "status": "unknown"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "usage.absent-usage",
+      "input": {
+        "input_per_1m": 1,
+        "op": "estimate",
+        "output_per_1m": 1,
+        "rate_present": true,
+        "usage_present": false
+      },
+      "normalized_oracle_output": {
+        "micro_usd": null,
+        "status": "unknown"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "micro_usd": null,
+        "status": "unknown"
+      },
+      "rust_output": {
+        "micro_usd": null,
+        "status": "unknown"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "usage.zero-tokens",
+      "input": {
+        "input_per_1m": 2.5,
+        "input_tokens": 0,
+        "op": "estimate",
+        "output_per_1m": 10,
+        "output_tokens": 0,
+        "rate_present": true,
+        "usage_present": true
+      },
+      "normalized_oracle_output": {
+        "micro_usd": 0,
+        "status": "priced"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "micro_usd": 0,
+        "status": "priced"
+      },
+      "rust_output": {
+        "micro_usd": 0,
+        "status": "priced"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "usage.parent-rates",
+      "input": {
+        "input_per_1m": 2.5,
+        "input_tokens": 1000000,
+        "op": "estimate",
+        "output_per_1m": 10,
+        "output_tokens": 500000,
+        "rate_present": true,
+        "usage_present": true
+      },
+      "normalized_oracle_output": {
+        "micro_usd": 7500000,
+        "status": "priced"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "micro_usd": 7500000,
+        "status": "priced"
+      },
+      "rust_output": {
+        "micro_usd": 7500000,
+        "status": "priced"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING Q0: cache and reasoning are subsets of the parent counts here and disjoint billed volume in the Python cost helper",
+      "disposition": "pending",
+      "id": "usage.subset-rates",
+      "input": {
+        "cache_read_per_1m": 0.1,
+        "cached_input_tokens": 900,
+        "input_per_1m": 1,
+        "input_tokens": 1000,
+        "op": "estimate",
+        "output_per_1m": 2,
+        "output_tokens": 1000,
+        "rate_present": true,
+        "reasoning_per_1m": 8,
+        "reasoning_tokens": 400,
+        "usage_present": true
+      },
+      "normalized_oracle_output": {
+        "micro_usd": 6290,
+        "status": "priced"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "micro_usd": 6290,
+        "status": "priced"
+      },
+      "rust_output": {
+        "micro_usd": 4590,
+        "status": "priced"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": null,
+      "disposition": "aligned",
+      "id": "usage.missing-subset-rates",
+      "input": {
+        "cached_input_tokens": 900,
+        "input_per_1m": 1,
+        "input_tokens": 1000,
+        "op": "estimate",
+        "output_per_1m": 2,
+        "output_tokens": 1000,
+        "rate_present": true,
+        "reasoning_tokens": 400,
+        "usage_present": true
+      },
+      "normalized_oracle_output": {
+        "micro_usd": 3000,
+        "status": "priced"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "micro_usd": 3000,
+        "status": "priced"
+      },
+      "rust_output": {
+        "micro_usd": 3000,
+        "status": "priced"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "PENDING Q0: a cached subset larger than input is clamped to the parent count",
+      "disposition": "pending",
+      "id": "usage.clamp-subset",
+      "input": {
+        "cache_read_per_1m": 0.1,
+        "cached_input_tokens": 1000,
+        "input_per_1m": 1,
+        "input_tokens": 100,
+        "op": "estimate",
+        "output_per_1m": 0,
+        "output_tokens": 0,
+        "rate_present": true,
+        "usage_present": true
+      },
+      "normalized_oracle_output": {
+        "micro_usd": 100,
+        "status": "priced"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "micro_usd": 100,
+        "status": "priced"
+      },
+      "rust_output": {
+        "micro_usd": 10,
+        "status": "priced"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    },
+    {
+      "blocker": "RETAIN usage counters saturate and must not wrap",
+      "disposition": "intentional_retain",
+      "id": "usage.saturating-add",
+      "input": {
+        "op": "saturating_add"
+      },
+      "normalized_oracle_output": {
+        "input": "unbounded"
+      },
+      "oracle_locator": {
+        "args": {},
+        "fn": "authored_contract_pin"
+      },
+      "oracle_raw_output": {
+        "input": "unbounded"
+      },
+      "rust_output": {
+        "input": "saturated"
+      },
+      "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
+    }
+  ],
+  "normalization": {
+    "absent": "unknown_not_zero",
+    "scale": "micro_usd_rounded",
+    "subset": "clamped_parent_count"
+  },
+  "schema_version": 1,
+  "suite": "usage"
+}
