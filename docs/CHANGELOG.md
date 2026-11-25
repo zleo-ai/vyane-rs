@@ -9,6 +9,7 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Added
 
+- `CursorCliHarness` runs one existing Cursor CLI print (`agent -p --output-format json`) and maps the result object onto `HarnessOutcome`. `result` and `session_id` are kept; the envelope publishes no token usage, so `usage` stays empty. Credentials go to the child only as `CURSOR_API_KEY` and `CURSOR_API_ENDPOINT` through the scrubbed environment. Config profiles and the service assembler keep the existing Claude Code and Codex CLI support matrix.
 - The Anthropic Messages client implements non-streaming typed tool turns
   (`complete_turn`) and a separately authorized turn path
   (`AuthorizedToolChatClient`). They keep tool calls and results, thinking

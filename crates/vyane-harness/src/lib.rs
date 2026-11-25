@@ -1,11 +1,12 @@
 //! # vyane-harness
 //!
-//! CLI harness adapters implementing [`vyane_core::Harness`]: Claude Code and
-//! the Codex CLI. Each wraps a coding CLI as a headless one-shot execution
-//! shell — a scrubbed child environment built strictly through
-//! [`vyane_core::EnvPolicy`], a process-group spawn so cancel/timeout kills the
-//! whole tree (not just the direct child), and machine-readable output parsed
-//! down to the final answer + native session id + usage.
+//! CLI harness adapters implementing [`vyane_core::Harness`]: Claude Code, the
+//! Codex CLI, and a Cursor CLI one-round JSON adapter. Each wraps a coding CLI
+//! as a headless one-shot execution shell — a scrubbed child environment built
+//! strictly through [`vyane_core::EnvPolicy`], a process-group spawn so
+//! cancel/timeout kills the whole tree (not just the direct child), and
+//! machine-readable output parsed down to the final answer + native session id
+//! + usage.
 //!
 //! ## Environment variable names (endpoint injection)
 //!
@@ -13,12 +14,18 @@
 //! the base URL, credential, and model into the child env under the names each
 //! CLI reads. These names are the public, documented ones:
 //!
-//! | purpose | Claude Code | Codex CLI |
-//! |---------|-------------|-----------|
-//! | base URL | `ANTHROPIC_BASE_URL` | (via `-c model_providers.<name>.base_url`) |
-//! | auth (Bearer) | `ANTHROPIC_AUTH_TOKEN` | `OPENAI_API_KEY` |
-//! | auth (x-api-key) | `ANTHROPIC_API_KEY` | `OPENAI_API_KEY` |
-//! | model | `ANTHROPIC_MODEL` (+ `--model`) | `--model` |
+//! | purpose | Claude Code | Codex CLI | Cursor CLI |
+//! |---------|-------------|-----------|------------|
+//! | base URL | `ANTHROPIC_BASE_URL` | (via `-c model_providers.<name>.base_url`) | `CURSOR_API_ENDPOINT` |
+//! | auth (Bearer) | `ANTHROPIC_AUTH_TOKEN` | `OPENAI_API_KEY` | `CURSOR_API_KEY` |
+//! | auth (x-api-key) | `ANTHROPIC_API_KEY` | `OPENAI_API_KEY` | `CURSOR_API_KEY` |
+//! | model | `ANTHROPIC_MODEL` (+ `--model`) | `--model` | `--model` |
+//!
+//! [`CursorCliHarness`] invokes the existing `agent` binary for one print-mode
+//! round (`-p --output-format json`) and maps that single result object onto
+//! [`vyane_core::HarnessOutcome`]. It does not start `agent acp`. The service
+//! assembler support matrix stays Claude Code and Codex CLI; callers construct
+//! this adapter directly.
 //!
 //! When the endpoint is `None` the harness authenticates natively and injects
 //! nothing for auth — the scrubbed baseline is all the child sees.
@@ -34,6 +41,7 @@
 
 mod claude_code;
 mod codex_cli;
+mod cursor_cli;
 pub mod native;
 mod parse;
 mod probe;
@@ -41,3 +49,4 @@ mod spawn;
 
 pub use claude_code::ClaudeCodeHarness;
 pub use codex_cli::CodexCliHarness;
+pub use cursor_cli::CursorCliHarness;
