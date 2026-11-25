@@ -42,6 +42,12 @@ fn base_job(prompt: &str) -> HarnessJob {
     }
 }
 
+fn spawning_job(prompt: &str) -> HarnessJob {
+    let mut job = base_job(prompt);
+    job.sandbox = Sandbox::Full;
+    job
+}
+
 fn shell_quote(value: &Path) -> String {
     format!("'{}'", value.display().to_string().replace('\'', "'\\''"))
 }
@@ -105,13 +111,12 @@ printf '%s\n' '{json}'
     );
     let bin = write_script(&dir, "fake-cursor", &body);
 
-    let mut job = base_job("answer this");
+    let mut job = spawning_job("answer this");
     job.model = ModelId::new("grok-4.7");
-    job.sandbox = Sandbox::Write;
     job.resume = Some("cursor-resume".into());
     job.workdir = Some(workdir.clone());
     job.endpoint = Some(Endpoint {
-        base_url: "https://endpoint.example".into(),
+        base_url: String::new(),
         auth: Some(AuthMaterial {
             style: AuthStyle::Bearer,
             secret: Secret::new("test-cursor-child-key"),
@@ -136,15 +141,17 @@ printf '%s\n' '{json}'
     assert_eq!(argv[argv.len() - 1], "answer this");
     assert!(contains_window(&argv, &["--output-format", "json"]));
     assert!(contains_window(&argv, &["--model", "grok-4.7"]));
-    assert!(contains_window(&argv, &["--sandbox", "enabled"]));
+    assert!(contains_window(&argv, &["--sandbox", "disabled"]));
+    assert!(contains_window(&argv, &["--force"]));
     assert!(contains_window(
         &argv,
         &["--workspace", workdir.to_str().unwrap()]
     ));
     assert!(contains_window(&argv, &["--resume", "cursor-resume"]));
     let flags = flags_before_prompt(&argv);
+    assert_eq!(flags.iter().filter(|arg| *arg == "--force").count(), 1);
     for forbidden in [
-        "--force",
+        "--trust",
         "--yolo",
         "--mode",
         "acp",
@@ -157,12 +164,145 @@ printf '%s\n' '{json}'
 
     let child_env = fs::read_to_string(&env_file).unwrap();
     assert!(child_env.contains("CURSOR_API_KEY=test-cursor-child-key\n"));
-    assert!(child_env.contains("CURSOR_API_ENDPOINT=https://endpoint.example\n"));
+    assert!(!child_env.contains("CURSOR_API_ENDPOINT="));
     assert!(child_env.contains("EXPLICIT_CHILD=yes\n"));
 }
 
 #[tokio::test]
-async fn read_only_prompt_that_looks_like_force_stays_positional() {
+async fn restricted_modes_do_not_spawn_under_hostile_ambient_config() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let xdg = dir.path().join("xdg");
+    let config_dir = dir.path().join("cursor-config");
+    let work = dir.path().join("work");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::write(
+        home.join(".cursor/cli-config.json"),
+        r#"{"version":1,"approvalMode":"unrestricted","permissions":{"allow":["Shell(sh)"],"deny":[]}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(xdg.join("cursor")).unwrap();
+    fs::write(
+        xdg.join("cursor/cli-config.json"),
+        r#"{"version":1,"approvalMode":"unrestricted"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("cli-config.json"),
+        r#"{"version":1,"approvalMode":"unrestricted"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(work.join(".cursor")).unwrap();
+    fs::write(
+        work.join(".cursor/cli.json"),
+        r#"{"permissions":{"allow":["Shell(sh)","Write(**)"]}}"#,
+    )
+    .unwrap();
+    fs::write(
+        work.join(".cursor/hooks.json"),
+        r#"{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"sh -c true"}]}}"#,
+    )
+    .unwrap();
+
+    let marker = dir.path().join("spawned");
+    let argv_file = dir.path().join("argv.txt");
+    let body = format!(
+        r#"#!/bin/sh
+set -eu
+: > {argv}
+for arg in "$@"; do
+  printf '%s\n' "$arg" >> {argv}
+done
+printf spawned > {marker}
+printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"ran"}}'
+"#,
+        argv = shell_quote(&argv_file),
+        marker = shell_quote(&marker),
+    );
+    let bin = write_script(&dir, "hostile-agent", &body);
+    let parent = vec![
+        ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+        ("HOME".to_string(), home.display().to_string()),
+        ("XDG_CONFIG_HOME".to_string(), xdg.display().to_string()),
+        (
+            "CURSOR_CONFIG_DIR".to_string(),
+            config_dir.display().to_string(),
+        ),
+    ];
+
+    for sandbox in [Sandbox::ReadOnly, Sandbox::Write] {
+        let mut job = base_job("do not run");
+        job.sandbox = sandbox;
+        job.workdir = Some(work.clone());
+        job.env.allow.extend([
+            "HOME".to_string(),
+            "XDG_CONFIG_HOME".to_string(),
+            "CURSOR_CONFIG_DIR".to_string(),
+        ]);
+        let err = CursorCliHarness::with_binary_and_parent_env_for_tests(
+            bin.to_string_lossy(),
+            parent.clone(),
+        )
+        .run(job, CancellationToken::new())
+        .await
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Unsupported);
+        assert!(err.message.contains("refuses to spawn"), "{}", err.message);
+        assert!(err.message.contains(sandbox.as_str()), "{}", err.message);
+        assert!(!marker.exists(), "restricted sandbox spawned the child");
+        assert!(!argv_file.exists(), "restricted sandbox wrote argv");
+    }
+
+    let mut explicit = spawning_job("explicit full");
+    explicit.workdir = Some(work);
+    explicit.env.allow.extend([
+        "HOME".to_string(),
+        "XDG_CONFIG_HOME".to_string(),
+        "CURSOR_CONFIG_DIR".to_string(),
+    ]);
+    let outcome =
+        CursorCliHarness::with_binary_and_parent_env_for_tests(bin.to_string_lossy(), parent)
+            .run(explicit, CancellationToken::new())
+            .await
+            .unwrap();
+    assert_eq!(outcome.text, "ran");
+    assert!(marker.is_file());
+    let argv = read_lines(&argv_file);
+    let flags = flags_before_prompt(&argv);
+    assert!(contains_window(flags, &["--sandbox", "disabled"]));
+    assert_eq!(flags.iter().filter(|arg| *arg == "--force").count(), 1);
+    assert!(!flags.iter().any(|arg| arg == "--trust"));
+}
+
+#[tokio::test]
+async fn custom_endpoint_does_not_spawn() {
+    let dir = TempDir::new().unwrap();
+    let marker = dir.path().join("spawned");
+    let body = format!("#!/bin/sh\nprintf spawned > {}\n", shell_quote(&marker));
+    let bin = write_script(&dir, "endpoint-agent", &body);
+
+    let mut job = spawning_job("do not retarget");
+    job.endpoint = Some(Endpoint {
+        base_url: "https://endpoint.example".into(),
+        auth: Some(AuthMaterial {
+            style: AuthStyle::Bearer,
+            secret: Secret::new("must-not-matter"),
+        }),
+    });
+    let err = CursorCliHarness::with_binary(bin.to_string_lossy())
+        .run(job, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Unsupported);
+    assert!(err.message.contains("custom endpoint"), "{}", err.message);
+    assert!(!err.message.contains("must-not-matter"));
+    assert!(!err.message.contains("https://endpoint.example"));
+    assert!(!marker.exists());
+}
+
+#[tokio::test]
+async fn full_prompt_that_looks_like_force_stays_positional() {
     let dir = TempDir::new().unwrap();
     let argv_file = dir.path().join("argv.txt");
     let body = format!(
@@ -179,7 +319,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
     let bin = write_script(&dir, "fake-cursor-readonly", &body);
 
     let outcome = CursorCliHarness::with_binary(bin.to_string_lossy())
-        .run(base_job("--force"), CancellationToken::new())
+        .run(spawning_job("--force"), CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(outcome.text, "kept");
@@ -188,9 +328,9 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
     assert_eq!(argv[argv.len() - 2], "--");
     assert_eq!(argv[argv.len() - 1], "--force");
     let flags = flags_before_prompt(&argv);
-    assert!(contains_window(flags, &["--mode", "ask"]));
-    assert!(contains_window(flags, &["--sandbox", "enabled"]));
-    assert!(!flags.iter().any(|arg| arg == "--force"));
+    assert!(contains_window(flags, &["--sandbox", "disabled"]));
+    assert_eq!(flags.iter().filter(|arg| *arg == "--force").count(), 1);
+    assert!(!flags.iter().any(|arg| arg == "--trust"));
     assert!(!flags.iter().any(|arg| arg == "acp"));
 }
 
@@ -228,7 +368,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
 
     let outcome =
         CursorCliHarness::with_binary_and_parent_env_for_tests(bin.to_string_lossy(), parent_env)
-            .run(base_job("native auth"), CancellationToken::new())
+            .run(spawning_job("native auth"), CancellationToken::new())
             .await
             .unwrap();
     assert_eq!(outcome.text, "native");
@@ -257,7 +397,7 @@ exit 0
     );
 
     let err = CursorCliHarness::with_binary(bin.to_string_lossy())
-        .run(base_job("fail"), CancellationToken::new())
+        .run(spawning_job("fail"), CancellationToken::new())
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::HarnessFailed);
@@ -279,7 +419,7 @@ exit 0
     );
 
     let err = CursorCliHarness::with_binary(bin.to_string_lossy())
-        .run(base_job("fail closed"), CancellationToken::new())
+        .run(spawning_job("fail closed"), CancellationToken::new())
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::HarnessFailed);
@@ -298,7 +438,7 @@ async fn nonzero_exit_is_harness_failed() {
     );
 
     let err = CursorCliHarness::with_binary(bin.to_string_lossy())
-        .run(base_job("fail"), CancellationToken::new())
+        .run(spawning_job("fail"), CancellationToken::new())
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::HarnessFailed);
@@ -307,10 +447,25 @@ async fn nonzero_exit_is_harness_failed() {
 }
 
 #[tokio::test]
+async fn restricted_missing_binary_is_unsupported_before_spawn() {
+    for sandbox in [Sandbox::ReadOnly, Sandbox::Write] {
+        let mut job = base_job("fail");
+        job.sandbox = sandbox;
+        let err = CursorCliHarness::with_binary("/no/such/cursor-agent")
+            .run(job, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Unsupported);
+        assert!(err.message.contains("refuses to spawn"), "{}", err.message);
+        assert!(err.message.contains(sandbox.as_str()), "{}", err.message);
+    }
+}
+
+#[tokio::test]
 async fn missing_binary_is_spawn_failed() {
     let dir = TempDir::new().unwrap();
     let err = CursorCliHarness::with_binary(dir.path().join("missing").to_string_lossy())
-        .run(base_job("fail"), CancellationToken::new())
+        .run(spawning_job("fail"), CancellationToken::new())
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::SpawnFailed);
@@ -393,7 +548,7 @@ async fn timeout_kills_the_process_group() {
     let child_pid = dir.path().join("child.pid");
     let bin = kill_tree_script(&dir, &heartbeat, &child_pid);
 
-    let mut job = base_job("hang");
+    let mut job = spawning_job("hang");
     job.timeout = Some(Duration::from_secs(10));
 
     let err = CursorCliHarness::with_binary(bin.to_string_lossy())
@@ -417,7 +572,7 @@ async fn cancellation_kills_the_process_group() {
     let harness_token = token.clone();
     let mut run = tokio::spawn(async move {
         CursorCliHarness::with_binary(bin.to_string_lossy())
-            .run(base_job("hang"), harness_token)
+            .run(spawning_job("hang"), harness_token)
             .await
     });
 

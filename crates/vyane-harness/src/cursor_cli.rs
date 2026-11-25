@@ -1,12 +1,10 @@
 //! [`Harness`] for the **Cursor CLI**, one print-mode JSON round.
 //!
-//! Command shape (documented `agent` parameters, print mode):
+//! Command shape for [`Sandbox::Full`] (documented `agent` parameters):
 //!
 //! ```text
-//! agent -p --output-format json --trust [--model M]
-//!       [--mode ask --sandbox enabled
-//!        | --sandbox enabled
-//!        | --sandbox disabled --force]
+//! agent -p --output-format json [--model M]
+//!       --sandbox disabled --force
 //!       [--workspace <workdir>] [--resume <session-id>] -- <prompt>
 //! ```
 //!
@@ -15,22 +13,35 @@
 //!   `stream-json`, and it does not invoke the `acp` subcommand.
 //! * The prompt is one positional argument after `--`, so task text that
 //!   starts with `-` cannot be parsed as a CLI flag.
-//! * `--trust` accepts the workspace trust prompt so a headless round does not
-//!   wait for an interactive answer. Trusting the workspace also allows
-//!   project hooks that the CLI runs for a trusted workspace.
-//! * Sandbox mapping: see [`sandbox_args`]. These are Cursor CLI flags. They
-//!   are not an OS sandbox.
+//! * [`Sandbox::ReadOnly`] and [`Sandbox::Write`] are refused with
+//!   [`ErrorKind::Unsupported`] before any process is spawned. Documented
+//!   print mode still runs workspace edits, allowlisted commands, and every
+//!   `permissions.allow` rule without `--force`. Global `cli-config.json` can
+//!   set `approvalMode` to `unrestricted`, which the headless docs treat as
+//!   `--force`. Project `.cursor/cli.json` can add those allow rules.
+//!   `CURSOR_CONFIG_DIR` and `XDG_CONFIG_HOME` only relocate the global file.
+//!   `--trust` records workspace trust, and trusted project hooks can run
+//!   shell commands; omitting `--trust` does not clear a trust decision
+//!   already saved for that workspace. `--mode ask` and `--sandbox enabled`
+//!   are not documented to override those inputs, so this adapter does not
+//!   claim that they enforce a ceiling.
+//! * [`Sandbox::Full`] is the explicit unrestricted print: `--sandbox disabled
+//!   --force`, and never `--trust`. `--force` is the documented switch for
+//!   running actions that would otherwise need approval. Deny rules and team
+//!   policy can still reject it; they cannot grant a wider sandbox than
+//!   `Full`.
 //! * `--resume <id>` continues a native session from `job.resume`.
-//! * A custom endpoint is injected through the child environment
-//!   (`CURSOR_API_ENDPOINT`, `CURSOR_API_KEY`). The API key is never placed on
-//!   argv (`--api-key` is not used). Cursor publishes one API-key variable, so
-//!   both [`AuthStyle`] values use `CURSOR_API_KEY`.
+//! * A non-empty endpoint base URL is refused before spawn. The public auth
+//!   docs name `CURSOR_API_KEY` and `--api-key`; this adapter uses the
+//!   environment variable only, and only when the base URL is empty. Both
+//!   [`AuthStyle`] values use that one variable.
 //! * `--model` is passed only when the job's model id is non-empty. Reasoning
 //!   effort and other [`vyane_core::GenParams`] fields are not rewritten into
 //!   the model id or into extra flags; this CLI's documented one-round JSON
 //!   surface has no separate effort flag.
 //! * The published JSON result has no token-usage object. [`HarnessOutcome::usage`]
-//!   stays empty even if a future or non-standard payload adds one.
+//!   stays empty even if a future or non-standard payload adds one. The
+//!   `type` field must be the string `result`.
 //!
 //! This type is not selected by the service assembler. Profiles and routing
 //! keep the Claude Code and Codex CLI support matrix.
@@ -51,8 +62,6 @@ use crate::spawn::{
 
 /// Cursor CLI API key variable. Documented alternative to `--api-key`.
 const ENV_API_KEY: &str = "CURSOR_API_KEY";
-/// Cursor CLI API endpoint variable. Documented alternative to `--endpoint`.
-const ENV_ENDPOINT: &str = "CURSOR_API_ENDPOINT";
 
 /// Documented Cursor Agent binary name, resolved through `PATH` at spawn time.
 const BIN: &str = "agent";
@@ -156,37 +165,53 @@ impl Default for CursorCliHarness {
     }
 }
 
-/// Map a [`Sandbox`] level onto Cursor CLI print-mode flags.
+/// Refuse [`Sandbox::ReadOnly`] and [`Sandbox::Write`] before spawn.
 ///
-/// * **`ReadOnly`** → `--mode ask --sandbox enabled`. Ask mode is the
-///   documented read-only mode. The sandbox flag stays enabled so command
-///   execution, if the CLI still attempts it, remains inside the CLI sandbox.
-///   `--force` is absent.
-/// * **`Write`** → `--sandbox enabled`, default agent mode. File tools stay
-///   available. Commands that would need an interactive approval are rejected
-///   by print mode because `--force` is absent.
-/// * **`Full`** → `--sandbox disabled --force`. This is the CLI's unrestricted
-///   print-mode switch. Reserve it for an isolated workspace.
-fn sandbox_args(sandbox: Sandbox) -> Vec<String> {
+/// See the module docs for the documented print-mode inputs that can widen
+/// those requests. [`Sandbox::Full`] is the only level this adapter can state
+/// explicitly, via `--sandbox disabled --force`.
+fn reject_restricted_sandbox(sandbox: Sandbox) -> Result<()> {
     match sandbox {
-        Sandbox::ReadOnly => vec![
-            "--mode".into(),
-            "ask".into(),
-            "--sandbox".into(),
-            "enabled".into(),
-        ],
-        Sandbox::Write => vec!["--sandbox".into(), "enabled".into()],
-        Sandbox::Full => vec!["--sandbox".into(), "disabled".into(), "--force".into()],
+        Sandbox::ReadOnly | Sandbox::Write => Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            format!(
+                "cursor-cli refuses to spawn for sandbox {}: documented print mode still applies global cli-config.json approvalMode, project .cursor/cli.json allow rules, and trusted-workspace hooks, and no documented switch isolates them",
+                sandbox.as_str()
+            ),
+        )),
+        Sandbox::Full => Ok(()),
     }
 }
 
+/// A non-empty base URL would retarget the CLI. That override is not part of
+/// the verified public auth surface, so the run stops before spawn.
+fn reject_custom_endpoint(endpoint: Option<&Endpoint>) -> Result<()> {
+    if endpoint.is_some_and(|endpoint| !endpoint.base_url.is_empty()) {
+        return Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            "cursor-cli refuses to spawn because a custom endpoint base URL is not a verified override",
+        ));
+    }
+    Ok(())
+}
+
+/// Flags for the one sandbox level this adapter executes.
+fn full_sandbox_args() -> Vec<String> {
+    vec!["--sandbox".into(), "disabled".into(), "--force".into()]
+}
+
 /// Construct the Cursor CLI argv (excluding the program name) for one JSON round.
-fn build_argv(job: &HarnessJob) -> Vec<String> {
+///
+/// Returns [`ErrorKind::Unsupported`] for a restricted sandbox or a custom
+/// endpoint. Callers must not spawn after that error.
+fn build_argv(job: &HarnessJob) -> Result<Vec<String>> {
+    reject_restricted_sandbox(job.sandbox)?;
+    reject_custom_endpoint(job.endpoint.as_ref())?;
+
     let mut args = vec![
         "-p".to_string(),
         "--output-format".to_string(),
         "json".to_string(),
-        "--trust".to_string(),
     ];
 
     if !job.model.as_str().is_empty() {
@@ -194,7 +219,7 @@ fn build_argv(job: &HarnessJob) -> Vec<String> {
         args.push(job.model.as_str().to_string());
     }
 
-    args.extend(sandbox_args(job.sandbox));
+    args.extend(full_sandbox_args());
 
     if let Some(dir) = &job.workdir {
         let text = dir.display().to_string();
@@ -213,23 +238,26 @@ fn build_argv(job: &HarnessJob) -> Vec<String> {
 
     args.push("--".into());
     args.push(job.prompt.clone());
-    args
+    Ok(args)
 }
 
-/// Endpoint environment injections. `None` means the CLI authenticates with
-/// its own stored login, and this function injects nothing.
+/// Endpoint environment injections for a run that has already passed
+/// [`reject_custom_endpoint`].
+///
+/// A non-empty base URL injects nothing, including the API key, so a rejected
+/// endpoint cannot leave a credential in a child environment. An empty base
+/// URL with auth injects `CURSOR_API_KEY` only.
 fn endpoint_injections(endpoint: Option<&Endpoint>) -> Vec<(String, Secret)> {
-    let mut out = Vec::new();
     let Some(endpoint) = endpoint else {
-        return out;
+        return Vec::new();
     };
     if !endpoint.base_url.is_empty() {
-        out.push((ENV_ENDPOINT.into(), Secret::new(endpoint.base_url.clone())));
+        return Vec::new();
     }
-    if let Some(auth) = &endpoint.auth {
-        out.push((ENV_API_KEY.into(), auth.secret.clone()));
+    match &endpoint.auth {
+        Some(auth) => vec![(ENV_API_KEY.into(), auth.secret.clone())],
+        None => Vec::new(),
     }
-    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,12 +288,13 @@ fn parse_cursor_json(stdout: &str) -> Parsed {
         return missing("one-round output was not a JSON object");
     };
 
-    if let Some(kind) = obj.get("type") {
-        match kind.as_str() {
+    match obj.get("type") {
+        Some(kind) => match kind.as_str() {
             Some("result") => {}
             Some(_) => return missing("one-round output type was not result"),
             None => return missing("one-round output type was not a string"),
-        }
+        },
+        None => return missing("one-round output type was absent"),
     }
 
     let Some(text) = obj.get("result").and_then(Value::as_str) else {
@@ -342,7 +371,7 @@ impl Harness for CursorCliHarness {
     }
 
     async fn run(&self, job: HarnessJob, cancel: CancellationToken) -> Result<HarnessOutcome> {
-        let argv = build_argv(&job);
+        let argv = build_argv(&job)?;
         let env = self.build_env(&job);
 
         tracing::debug!(
@@ -395,51 +424,60 @@ mod tests {
         &args[..end]
     }
 
+    fn full_job(prompt: &str) -> HarnessJob {
+        let mut sample = job(prompt);
+        sample.sandbox = Sandbox::Full;
+        sample
+    }
+
     #[test]
-    fn argv_read_only_is_one_json_round_without_force() {
-        let args = build_argv(&job("hello"));
-        assert_eq!(
-            args,
-            vec![
-                "-p",
-                "--output-format",
-                "json",
-                "--trust",
-                "--mode",
-                "ask",
-                "--sandbox",
-                "enabled",
-                "--",
-                "hello",
-            ]
-        );
-        let flags = flags_before_prompt(&args);
-        for forbidden in ["--force", "--yolo", "acp", "stream-json", "--api-key"] {
-            assert!(!flags.iter().any(|arg| arg == forbidden), "{args:?}");
+    fn restricted_sandboxes_are_rejected_before_argv() {
+        for sandbox in [Sandbox::ReadOnly, Sandbox::Write] {
+            let mut sample = job("hello");
+            sample.sandbox = sandbox;
+            sample.endpoint = Some(Endpoint {
+                base_url: "https://endpoint.example".into(),
+                auth: Some(AuthMaterial {
+                    style: AuthStyle::Bearer,
+                    secret: Secret::new("must-not-matter"),
+                }),
+            });
+            let err = build_argv(&sample).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Unsupported);
+            assert!(err.message.contains("refuses to spawn"), "{}", err.message);
+            assert!(err.message.contains(sandbox.as_str()), "{}", err.message);
+            assert!(!err.message.contains("must-not-matter"));
+            assert!(!err.message.contains("--trust"));
         }
     }
 
     #[test]
-    fn argv_write_keeps_sandbox_and_omits_force() {
-        let mut sample = job("edit");
-        sample.sandbox = Sandbox::Write;
-        let args = build_argv(&sample);
-        let flags = flags_before_prompt(&args);
-        assert!(
-            flags
-                .windows(2)
-                .any(|pair| pair == ["--sandbox", "enabled"])
-        );
-        assert!(!flags.iter().any(|arg| arg == "--mode"));
-        assert!(!flags.iter().any(|arg| arg == "--force"));
-        assert!(!flags.iter().any(|arg| arg == "--yolo"));
+    fn custom_endpoint_is_rejected_before_argv_on_full() {
+        for base_url in [
+            "https://endpoint.example",
+            " https://endpoint.example ",
+            "  ",
+        ] {
+            let mut sample = full_job("hello");
+            sample.endpoint = Some(Endpoint {
+                base_url: base_url.into(),
+                auth: Some(AuthMaterial {
+                    style: AuthStyle::Bearer,
+                    secret: Secret::new("must-not-matter"),
+                }),
+            });
+            let err = build_argv(&sample).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Unsupported);
+            assert!(err.message.contains("custom endpoint"), "{}", err.message);
+            assert!(!err.message.contains("must-not-matter"));
+            assert!(!err.message.contains("https://endpoint.example"));
+        }
     }
 
     #[test]
     fn argv_full_disables_sandbox_and_sets_force_before_prompt() {
-        let mut sample = job("--force");
-        sample.sandbox = Sandbox::Full;
-        let args = build_argv(&sample);
+        let mut sample = full_job("--force");
+        let args = build_argv(&sample).unwrap();
         let flags = flags_before_prompt(&args);
         assert!(
             flags
@@ -447,28 +485,40 @@ mod tests {
                 .any(|pair| pair == ["--sandbox", "disabled"])
         );
         assert!(flags.iter().any(|arg| arg == "--force"));
+        assert!(!flags.iter().any(|arg| arg == "--trust"));
+        assert!(!flags.iter().any(|arg| arg == "--yolo"));
+        assert!(!flags.iter().any(|arg| arg == "--mode"));
         assert_eq!(args[args.len() - 2], "--");
         assert_eq!(args[args.len() - 1], "--force");
         assert_eq!(flags.iter().filter(|arg| *arg == "--force").count(), 1);
+        sample.prompt = "hello".into();
+        assert!(
+            !build_argv(&sample)
+                .unwrap()
+                .iter()
+                .any(|arg| arg == "--trust")
+        );
     }
 
     #[test]
     fn argv_prompt_that_looks_like_a_flag_stays_behind_end_of_options() {
         for prompt in ["--force", "--yolo", "-p", "--", "acp", "- fix x"] {
-            let args = build_argv(&job(prompt));
+            let args = build_argv(&full_job(prompt)).unwrap();
             assert_eq!(args[args.len() - 2], "--");
             assert_eq!(args[args.len() - 1], prompt);
             let flags = flags_before_prompt(&args);
-            assert!(!flags.iter().any(|arg| arg == "--force"), "{args:?}");
+            assert_eq!(flags.iter().filter(|arg| *arg == "--force").count(), 1);
+            assert!(!flags.iter().any(|arg| arg == "--trust"), "{args:?}");
             assert!(!flags.iter().any(|arg| arg == "acp"), "{args:?}");
+            assert!(!flags.iter().any(|arg| arg == "stream-json"), "{args:?}");
+            assert!(!flags.iter().any(|arg| arg == "--api-key"), "{args:?}");
         }
     }
 
     #[test]
     fn argv_passes_model_workspace_and_resume_without_rewriting_effort() {
-        let mut sample = job("answer\nthis");
+        let mut sample = full_job("answer\nthis");
         sample.model = ModelId::new("grok-4.7");
-        sample.sandbox = Sandbox::Write;
         sample.workdir = Some("/work/tree".into());
         sample.resume = Some("cursor-session".into());
         sample.params.effort = Some(Effort::Xhigh);
@@ -479,10 +529,10 @@ mod tests {
             .insert("fast".into(), Value::Bool(false));
         sample.protocol = Protocol::AnthropicMessages;
 
-        let with_params = build_argv(&sample);
+        let with_params = build_argv(&sample).unwrap();
         sample.params = GenParams::default();
         sample.protocol = Protocol::OpenaiChat;
-        let without_params = build_argv(&sample);
+        let without_params = build_argv(&sample).unwrap();
         assert_eq!(with_params, without_params);
         assert_eq!(
             with_params,
@@ -490,11 +540,11 @@ mod tests {
                 "-p",
                 "--output-format",
                 "json",
-                "--trust",
                 "--model",
                 "grok-4.7",
                 "--sandbox",
-                "enabled",
+                "disabled",
+                "--force",
                 "--workspace",
                 "/work/tree",
                 "--resume",
@@ -507,44 +557,51 @@ mod tests {
 
     #[test]
     fn argv_omits_empty_model_resume_and_workdir() {
-        let mut sample = job("hello");
+        let mut sample = full_job("hello");
         sample.model = ModelId::new("");
         sample.resume = Some(String::new());
         sample.workdir = Some("".into());
-        let args = build_argv(&sample);
+        let args = build_argv(&sample).unwrap();
         assert!(!args.iter().any(|arg| arg == "--model"));
         assert!(!args.iter().any(|arg| arg == "--resume"));
         assert!(!args.iter().any(|arg| arg == "--workspace"));
+        assert!(!args.iter().any(|arg| arg == "--trust"));
     }
 
     #[test]
-    fn endpoint_injections_use_documented_env_names_for_both_auth_styles() {
+    fn endpoint_injections_keep_only_an_api_key_on_an_empty_base_url() {
         assert!(endpoint_injections(None).is_empty());
 
-        let key_only = Endpoint {
-            base_url: String::new(),
-            auth: Some(AuthMaterial {
-                style: AuthStyle::XApiKey,
-                secret: Secret::new("child-key"),
-            }),
-        };
-        let injected = endpoint_injections(Some(&key_only));
-        assert_eq!(injected.len(), 1);
-        assert_eq!(injected[0].0, ENV_API_KEY);
-        assert_eq!(injected[0].1.expose(), "child-key");
+        for style in [AuthStyle::XApiKey, AuthStyle::Bearer] {
+            let key_only = Endpoint {
+                base_url: String::new(),
+                auth: Some(AuthMaterial {
+                    style,
+                    secret: Secret::new("child-key"),
+                }),
+            };
+            let injected = endpoint_injections(Some(&key_only));
+            assert_eq!(injected.len(), 1);
+            assert_eq!(injected[0].0, ENV_API_KEY);
+            assert_eq!(injected[0].1.expose(), "child-key");
+        }
 
-        let both = Endpoint {
+        let custom = Endpoint {
             base_url: "https://endpoint.example".into(),
             auth: Some(AuthMaterial {
                 style: AuthStyle::Bearer,
-                secret: Secret::new("bearer-key"),
+                secret: Secret::new("must-not-leak"),
             }),
         };
-        let injected = endpoint_injections(Some(&both));
-        assert_eq!(injected[0].0, ENV_ENDPOINT);
-        assert_eq!(injected[0].1.expose(), "https://endpoint.example");
-        assert_eq!(injected[1].0, ENV_API_KEY);
-        assert_eq!(injected[1].1.expose(), "bearer-key");
+        assert!(endpoint_injections(Some(&custom)).is_empty());
+        let whitespace = Endpoint {
+            base_url: "  ".into(),
+            auth: Some(AuthMaterial {
+                style: AuthStyle::Bearer,
+                secret: Secret::new("must-not-leak"),
+            }),
+        };
+        assert!(endpoint_injections(Some(&whitespace)).is_empty());
     }
 
     #[test]
@@ -560,16 +617,16 @@ mod tests {
         ];
         let harness = CursorCliHarness::with_binary_and_parent_env_for_tests("agent", parent);
 
-        let scrubbed = harness.build_env(&job("hello"));
+        let scrubbed = harness.build_env(&full_job("hello"));
         assert_eq!(scrubbed.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(scrubbed.get("HOME").map(String::as_str), Some("/tmp/home"));
         assert!(!scrubbed.contains_key("CURSOR_API_KEY"));
         assert!(!scrubbed.contains_key("CURSOR_API_ENDPOINT"));
 
-        let mut sample = job("hello");
+        let mut sample = full_job("hello");
         sample.env = EnvPolicy::scrubbed().inject("EXPLICIT_CHILD", "yes");
         sample.endpoint = Some(Endpoint {
-            base_url: "https://endpoint.example".into(),
+            base_url: String::new(),
             auth: Some(AuthMaterial {
                 style: AuthStyle::Bearer,
                 secret: Secret::new("child-secret"),
@@ -580,21 +637,31 @@ mod tests {
             injected.get("CURSOR_API_KEY").map(String::as_str),
             Some("child-secret")
         );
-        assert_eq!(
-            injected.get("CURSOR_API_ENDPOINT").map(String::as_str),
-            Some("https://endpoint.example")
-        );
+        assert!(!injected.contains_key("CURSOR_API_ENDPOINT"));
         assert_eq!(
             injected.get("EXPLICIT_CHILD").map(String::as_str),
             Some("yes")
         );
-        assert_ne!(
-            injected.get("CURSOR_API_KEY").map(String::as_str),
-            Some("parent-secret")
+
+        sample.endpoint = Some(Endpoint {
+            base_url: "https://endpoint.example".into(),
+            auth: Some(AuthMaterial {
+                style: AuthStyle::Bearer,
+                secret: Secret::new("must-not-leak"),
+            }),
+        });
+        let blocked = harness.build_env(&sample);
+        assert!(!blocked.contains_key("CURSOR_API_KEY"));
+        assert!(!blocked.contains_key("CURSOR_API_ENDPOINT"));
+        assert!(
+            !blocked
+                .values()
+                .any(|value| value.contains("must-not-leak"))
         );
-        assert_ne!(
-            injected.get("CURSOR_API_ENDPOINT").map(String::as_str),
-            Some("https://parent.example")
+        assert!(
+            !blocked
+                .values()
+                .any(|value| value.contains("https://endpoint.example"))
         );
     }
 
@@ -650,6 +717,7 @@ mod tests {
             "not json at all partial answer should not leak",
             r#"["result"]"#,
             r#"{"type":"result","subtype":"success","is_error":false}"#,
+            r#"{"subtype":"success","is_error":false,"result":"partial answer should not leak"}"#,
             r#"{"type":"assistant","result":"partial answer should not leak"}"#,
             r#"{"type":"result","subtype":"success","is_error":"false","result":"x"}"#,
             "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\"}\n{\"result\":\"second\"}",
