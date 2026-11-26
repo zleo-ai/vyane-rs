@@ -58,6 +58,7 @@ mod service;
 mod task;
 #[cfg(test)]
 mod test_support;
+mod waiting;
 
 pub use agent::AgentProjectionComponents;
 pub use agent_completion::{
@@ -146,7 +147,7 @@ pub use kernel_boundary::{
 };
 pub use kernel_store::{
     ApprovalDecision, ApprovalDecisionKind, ApprovalDenyBinding, ApprovalGrantBinding,
-    ArtifactMeta, KernelStore, KernelStoreError, LeaseFence,
+    ApprovalStageDelivery, ArtifactMeta, KernelStore, KernelStoreError, LeaseFence,
 };
 pub use message::{
     AgentMessageCompletionReadError, AgentMessageCompletionStageError, MessageComponents,
@@ -176,4 +177,10 @@ pub use service::{
 pub use task::{
     MAX_LABEL_KEY_BYTES, MAX_LABEL_VALUE_BYTES, MAX_LABELS, MAX_LABELS_TOTAL_BYTES,
     build_task_spec, parse_labels, validate_user_routing_labels,
+};
+pub use waiting::{
+    WAITING_LIST_SCHEMA, WAITING_SOURCE_LIMIT, WaitingItem, WaitingList, WaitingPage, WaitingQuery,
+    WaitingQueryError, WaitingRead, WaitingSourceName, WaitingSourceReason, WaitingSourceReport,
+    WaitingSourceStatus, assemble_waiting_list, collect_waiting_list, format_waiting_list,
+    waits_for_human_decision,
 };

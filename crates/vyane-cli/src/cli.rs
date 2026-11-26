@@ -62,11 +62,43 @@ pub enum Command {
     /// Create, inspect, and advance owner-scoped local goals.
     #[command(subcommand)]
     Goal(GoalCommand),
+    /// List read-only items that are waiting for a human.
+    Waiting(WaitingArgs),
     /// Run the MCP server over stdio (for use as an MCP tool server).
     Mcp,
     /// Internal: execute a detached run. Not for direct use.
     #[command(name = "__worker", hide = true)]
     Worker(WorkerArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum WaitingWithout {
+    Approvals,
+    Tasks,
+    Projections,
+}
+
+#[derive(Debug, Args)]
+pub struct WaitingArgs {
+    /// Goal database. Defaults to the goal database under the Vyane data directory.
+    #[arg(long, value_name = "PATH")]
+    pub goal_db: Option<PathBuf>,
+
+    /// Kernel database. Omit it to leave the kernel sources turned off.
+    #[arg(long, value_name = "PATH")]
+    pub kernel_db: Option<PathBuf>,
+
+    /// Owner whose rows are listed.
+    #[arg(long, default_value = "local")]
+    pub owner: String,
+
+    /// Turn this source off. Repeat the flag to turn off more than one.
+    #[arg(long, value_enum)]
+    pub without: Vec<WaitingWithout>,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

@@ -209,6 +209,9 @@ pub struct KernelStore {
     /// When false, SQLite opens without CREATE so a probe cannot materialize
     /// an empty `kernel.sqlite` after a missing-file race.
     allow_create: bool,
+    /// When true, connections are read-only and `query_only`. This store does
+    /// not create the file, migrate it, or change its journal mode.
+    read_only: bool,
 }
 
 impl KernelStore {
@@ -221,6 +224,7 @@ impl KernelStore {
         let store = Self {
             path,
             allow_create: true,
+            read_only: false,
         };
         store.initialize()?;
         Ok(store)
@@ -243,8 +247,55 @@ impl KernelStore {
         let store = Self {
             path,
             allow_create: false,
+            read_only: false,
         };
         store.initialize()?;
+        Ok(store)
+    }
+
+    /// Open an existing kernel database for queries only.
+    ///
+    /// Missing files and schema mismatches fail closed. The connection cannot
+    /// create, migrate, or update rows.
+    pub fn open_readonly(path: impl Into<PathBuf>) -> KernelStoreResult<Self> {
+        let path = path.into();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                KernelStoreError::Io("kernel sqlite does not exist".into())
+            } else {
+                KernelStoreError::Io("kernel sqlite metadata is unreadable".into())
+            }
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(KernelStoreError::InvalidInput(
+                "kernel sqlite must be a regular file",
+            ));
+        }
+        let store = Self {
+            path,
+            allow_create: false,
+            read_only: true,
+        };
+        let conn = store.connect()?;
+        let found: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found != SCHEMA_VERSION {
+            return Err(KernelStoreError::UnsupportedSchema {
+                found,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        let identity: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kernel_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if identity.as_deref() != Some(SCHEMA_VERSION.to_string().as_str()) {
+            return Err(KernelStoreError::InvalidInput(
+                "missing kernel schema identity",
+            ));
+        }
         Ok(store)
     }
 
@@ -282,6 +333,7 @@ impl KernelStore {
         Ok(Self {
             path,
             allow_create: false,
+            read_only: false,
         })
     }
 
@@ -302,13 +354,23 @@ impl KernelStore {
     }
 
     fn connect(&self) -> KernelStoreResult<Connection> {
-        let conn = if self.allow_create {
+        let conn = if self.read_only {
+            Connection::open_with_flags(
+                &self.path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )?
+        } else if self.allow_create {
             Connection::open(&self.path)?
         } else {
             Connection::open_with_flags(&self.path, Self::existing_open_flags())?
         };
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
+        if self.read_only {
+            conn.pragma_update(None, "query_only", true)?;
+        }
         Ok(conn)
     }
 
@@ -1177,6 +1239,72 @@ impl KernelStore {
         self.get_delivery_phase(owner, receipt_id)?
             .ok_or(KernelStoreError::NotFound)
     }
+
+    /// Pending approval decisions for one owner, oldest first.
+    ///
+    /// `limit` is the maximum number of rows returned. Pass one more than the
+    /// page size to detect truncation. This method only reads.
+    pub fn list_pending_approvals(
+        &self,
+        owner: &str,
+        limit: usize,
+    ) -> KernelStoreResult<Vec<ApprovalDecision>> {
+        validate_owner(owner)?;
+        let limit = i64::try_from(limit).map_err(|_| KernelStoreError::InvalidInput("limit"))?;
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT owner, approval_id, receipt_id, run_id, request_digest, decision,
+                    decided_by, bound_revision, bound_lease_owner, bound_generation,
+                    decided_at_ms, created_at_ms, updated_at_ms
+             FROM kernel_approvals
+             WHERE owner = ?1 AND decision = 'pending'
+             ORDER BY created_at_ms ASC, approval_id ASC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![owner, limit], approval_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Deliveries currently in the approval-required phase, oldest first.
+    ///
+    /// Approved, running, and terminal phases are not included. `limit` bounds
+    /// the page. This method only reads.
+    pub fn list_approval_stage_deliveries(
+        &self,
+        owner: &str,
+        limit: usize,
+    ) -> KernelStoreResult<Vec<ApprovalStageDelivery>> {
+        validate_owner(owner)?;
+        let limit = i64::try_from(limit).map_err(|_| KernelStoreError::InvalidInput("limit"))?;
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT owner, receipt_id, run_id, approval_id, updated_at_ms
+             FROM kernel_delivery
+             WHERE owner = ?1 AND phase = 'approval_required'
+             ORDER BY updated_at_ms ASC, receipt_id ASC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![owner, limit], |row| {
+            Ok(ApprovalStageDelivery {
+                owner: row.get(0)?,
+                receipt_id: row.get(1)?,
+                run_id: row.get(2)?,
+                approval_id: row.get(3)?,
+                updated_at_ms: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+/// One kernel delivery sitting in the approval-required phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalStageDelivery {
+    pub owner: String,
+    pub receipt_id: String,
+    pub run_id: String,
+    pub approval_id: Option<String>,
+    pub updated_at_ms: i64,
 }
 
 fn load_approval(
@@ -1190,32 +1318,36 @@ fn load_approval(
                 decided_at_ms, created_at_ms, updated_at_ms
          FROM kernel_approvals WHERE owner = ?1 AND approval_id = ?2",
         params![owner, approval_id],
-        |row| {
-            let decision_s: String = row.get(5)?;
-            Ok(ApprovalDecision {
-                owner: row.get(0)?,
-                approval_id: row.get(1)?,
-                receipt_id: row.get(2)?,
-                run_id: row.get(3)?,
-                request_digest: row.get(4)?,
-                decision: ApprovalDecisionKind::parse(&decision_s).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        5,
-                        rusqlite::types::Type::Text,
-                        Box::new(std::io::Error::other(e.to_string())),
-                    )
-                })?,
-                decided_by: row.get(6)?,
-                bound_revision: row.get::<_, i64>(7)? as u64,
-                bound_lease_owner: row.get(8)?,
-                bound_generation: row.get::<_, Option<i64>>(9)?.map(|g| g as u64),
-                decided_at_ms: row.get(10)?,
-                created_at_ms: row.get(11)?,
-                updated_at_ms: row.get(12)?,
-            })
-        },
+        approval_from_row,
     )
     .map_err(Into::into)
+}
+
+fn approval_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalDecision> {
+    let decision_s: String = row.get(5)?;
+    Ok(ApprovalDecision {
+        owner: row.get(0)?,
+        approval_id: row.get(1)?,
+        receipt_id: row.get(2)?,
+        run_id: row.get(3)?,
+        request_digest: row.get(4)?,
+        decision: ApprovalDecisionKind::parse(&decision_s).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(error.to_string())),
+            )
+        })?,
+        decided_by: row.get(6)?,
+        bound_revision: row.get::<_, i64>(7)? as u64,
+        bound_lease_owner: row.get(8)?,
+        bound_generation: row
+            .get::<_, Option<i64>>(9)?
+            .map(|generation| generation as u64),
+        decided_at_ms: row.get(10)?,
+        created_at_ms: row.get(11)?,
+        updated_at_ms: row.get(12)?,
+    })
 }
 
 fn final_status_str(status: ReceiptFinalStatus) -> &'static str {

@@ -151,6 +151,33 @@ latter is only a sender label, not authenticated principal authority or
 identity. Do not expose this CLI directly as a hostile multi-user service.
 See [WP-59](plan/WP-59.md) for the exact boundary.
 
+## Waiting list
+
+`vyane waiting` assembles a read-only list from stores that already exist:
+
+```sh
+vyane waiting --goal-db goals.sqlite --kernel-db kernel.sqlite
+vyane waiting --goal-db goals.sqlite --kernel-db kernel.sqlite --json
+vyane waiting --kernel-db kernel.sqlite --without projections
+```
+
+The three sources are pending kernel approvals (`approvals`), kernel
+deliveries in the `approval_required` phase (`tasks`), and in-progress goal
+projections whose next action is `decide_approval` or `manual_decision`
+(`projections`). Omit `--kernel-db` to leave both kernel sources turned off.
+`--without approvals|tasks|projections` turns off one source and can be
+repeated. The goal database defaults to the goal file under the Vyane data
+directory.
+
+The command opens those files read-only. It does not create, migrate, or
+update them. If one source is missing or cannot be read, its status is
+`unavailable` and the reason names the condition (`not_found`,
+`unsupported_schema`, or `read_failed`). The other sources are still printed,
+so a failed read does not blank the list. JSON uses schema `waiting-list.v1`.
+
+This is not an HTTP waiting inbox. It does not mutate a board, send a
+notification, read a secret, or snooze an item.
+
 ## Local goals
 
 The CLI exposes an owner-scoped goal lifecycle over one SQLite source of truth:
