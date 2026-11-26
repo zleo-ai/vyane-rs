@@ -2,6 +2,7 @@
 //! harnesses, kernel orchestration and local persistence behind a CLI.
 
 mod a2a;
+mod acp;
 #[cfg(target_os = "linux")]
 mod agent_host;
 #[cfg(target_os = "linux")]

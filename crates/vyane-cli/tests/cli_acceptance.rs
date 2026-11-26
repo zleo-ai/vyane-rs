@@ -1584,6 +1584,7 @@ fn help_lists_all_commands() {
         "review",
         "route",
         "serve",
+        "acp",
         "mcp",
         "task",
         "a2a",
