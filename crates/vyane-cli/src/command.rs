@@ -347,7 +347,12 @@ async fn run_dispatch(config_path: Option<PathBuf>, args: DispatchArgs) -> Resul
         if let Some(session) = args.session.as_ref() {
             task.session = Some(SessionRef::try_new(session.clone())?);
         }
-        let plan = vyane_service::plan_dispatch(&loaded, &args.target, &mut task)?;
+        let plan = vyane_service::plan_dispatch_with(
+            &loaded,
+            &args.target,
+            &mut task,
+            args.quota_snapshot.as_deref(),
+        )?;
         Ok((loaded, plan, task))
     });
     let (loaded, plan, task) = match phase {
@@ -3557,6 +3562,7 @@ async fn run_route_command(config_path: Option<PathBuf>, args: RouteArgs) -> Res
         retry_count: args.retry_count,
         candidate_profiles,
         allow_frontier: !args.no_frontier,
+        quota_snapshot: args.quota_snapshot,
     };
 
     let result = match vyane_service::route_task(&loaded.config, route_params) {

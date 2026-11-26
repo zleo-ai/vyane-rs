@@ -829,6 +829,11 @@ pub struct DispatchArgs {
     /// For `--target auto`, prohibit frontier-tier routing.
     #[arg(long)]
     pub no_frontier: bool,
+    /// For `--target auto`, read a local quota snapshot and skip a busy
+    /// subscription when a freer one is usable. Named targets do not open the
+    /// file. A missing or unreadable snapshot keeps the unfiltered route.
+    #[arg(long, value_name = "PATH")]
+    pub quota_snapshot: Option<PathBuf>,
     /// Run in the background: spawn a detached worker, print its id, and exit
     /// without waiting. Inspect it later with `vyane task`.
     #[arg(long)]
@@ -1088,6 +1093,11 @@ pub struct RouteArgs {
     /// Prohibit frontier-tier routing.
     #[arg(long)]
     pub no_frontier: bool,
+    /// Read a local quota snapshot and skip a busy subscription when a freer
+    /// one is usable. The file is not opened when this flag is omitted. A
+    /// missing or unreadable snapshot keeps the unfiltered route.
+    #[arg(long, value_name = "PATH")]
+    pub quota_snapshot: Option<PathBuf>,
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
