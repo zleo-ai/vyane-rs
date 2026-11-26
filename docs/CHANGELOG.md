@@ -11,6 +11,14 @@ This is a curated history, not a complete reconstruction of all development.
 
 - `vyane route` and `vyane dispatch --target auto` accept `--quota-snapshot PATH`. The file is a local JSON snapshot of subscription pace. When one subscription is busy and another has more room, automatic routing leaves the busy profile out. Omitting the flag does not open a file. A missing or unreadable snapshot produces the same route as omitting the flag. A named dispatch target ignores the flag.
 - `vyane acp` serves an Agent Client Protocol echo shell over stdio. It completes `initialize`, stores `session/new` only in memory, and echoes prompt text in one `agent_message_chunk`. It does not load configuration, read credentials, dispatch, call a model, or create a state database.
+- `vyane waiting` prints a read-only list assembled from three existing
+  sources: pending kernel approval decisions, kernel deliveries whose phase
+  is `approval_required`, and goal continuity projections whose next action
+  is `decide_approval` or `manual_decision`. Every source is named. A source
+  that is turned off, missing, or unreadable stays in the report with a
+  status, and the other sources are still listed. The command does not
+  migrate or write either database. It is not a `GET /api/waiting` route and
+  does not scan a board, notifications, or secrets, and it does not snooze.
 - `CursorCliHarness` runs one existing Cursor CLI print (`agent -p --output-format json --sandbox disabled --force`) and maps the result object onto `HarnessOutcome`. `result` and `session_id` are kept; the envelope publishes no token usage, so `usage` stays empty. `ReadOnly` and `Write` are refused before spawn, because documented print mode can still widen them through global `approvalMode`, project allow rules, and trusted-workspace hooks. A non-empty endpoint base URL is refused before spawn. An empty base URL may pass `CURSOR_API_KEY` through the scrubbed environment. Config profiles and the service assembler keep the existing Claude Code and Codex CLI support matrix.
 - The Anthropic Messages client implements non-streaming typed tool turns
   (`complete_turn`) and a separately authorized turn path

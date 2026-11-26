@@ -56,13 +56,43 @@ const GOAL_COLUMNS: &str = "\
 #[derive(Debug, Clone)]
 pub struct SqliteGoalStore {
     path: PathBuf,
+    /// When true, every connection is `SQLITE_OPEN_READ_ONLY` and `query_only`.
+    /// Opening this way does not create the file or run migrations.
+    read_only: bool,
 }
 
 impl SqliteGoalStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
-        let store = Self { path: path.into() };
+        let store = Self {
+            path: path.into(),
+            read_only: false,
+        };
         store.initialize()?;
         Ok(store)
+    }
+
+    /// Open an existing goal database without creating it or migrating it.
+    ///
+    /// A missing file, a symlink, or a schema other than [`SCHEMA_VERSION`]
+    /// fails before any write. Callers that need a migration must use [`Self::open`].
+    pub fn open_readonly(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        require_existing_goal_database(&path)?;
+        let connection = open_readonly_database(&path)?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        configure_readonly_connection(&connection)?;
+        let found = user_version(&connection)?;
+        if found != SCHEMA_VERSION {
+            return Err(GoalStoreError::UnsupportedSchema {
+                found,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        validate_schema(&connection)?;
+        Ok(Self {
+            path,
+            read_only: true,
+        })
     }
 
     #[must_use]
@@ -251,9 +281,17 @@ impl SqliteGoalStore {
     }
 
     fn connection(&self) -> Result<Connection> {
-        let connection = open_database(&self.path)?;
+        let connection = if self.read_only {
+            open_readonly_database(&self.path)?
+        } else {
+            open_database(&self.path)?
+        };
         connection.busy_timeout(BUSY_TIMEOUT)?;
-        configure_connection(&connection)?;
+        if self.read_only {
+            configure_readonly_connection(&connection)?;
+        } else {
+            configure_connection(&connection)?;
+        }
         let found = user_version(&connection)?;
         if found != SCHEMA_VERSION {
             return Err(if found > SCHEMA_VERSION {
@@ -2969,6 +3007,61 @@ fn configure_connection(connection: &Connection) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "FULL")?;
+    Ok(())
+}
+
+/// Read-only connections must not change journal mode or synchronous flags.
+/// Both of those pragmas can rewrite the database file.
+fn configure_readonly_connection(connection: &Connection) -> Result<()> {
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "query_only", "ON")?;
+    Ok(())
+}
+
+fn open_readonly_database(path: &Path) -> Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    Ok(Connection::open_with_flags(path, flags)?)
+}
+
+fn require_existing_goal_database(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_metadata = std::fs::symlink_metadata(parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(GoalStoreError::InvalidInput(
+            "goal database parent must be a real directory".into(),
+        ));
+    }
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(error.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(GoalStoreError::InvalidInput(
+            "goal database must be a regular file".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if parent_metadata.permissions().mode() & 0o022 != 0 {
+            return Err(GoalStoreError::InvalidInput(
+                "goal database parent must not be group- or world-writable".into(),
+            ));
+        }
+        if metadata.permissions().mode() & 0o7777 != 0o600 {
+            return Err(GoalStoreError::InvalidInput(
+                "goal database must be a private regular file".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
