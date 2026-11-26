@@ -109,8 +109,8 @@
       "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"
     },
     {
-      "blocker": "PENDING route_task collapses none to medium",
-      "disposition": "pending",
+      "blocker": null,
+      "disposition": "aligned",
       "id": "effort.route-none",
       "input": {
         "explicit_tier": "economy",
@@ -130,7 +130,7 @@
         "tier": "economy"
       },
       "rust_output": {
-        "effort": "medium",
+        "effort": "none",
         "tier": "economy"
       },
       "rust_test": "crates/vyane-cli/tests/parity_c0.rs::c0_corpus_replays_offline"

@@ -47,6 +47,7 @@ impl std::fmt::Display for RouteTier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouteEffort {
+    None,
     Low,
     Medium,
     High,
@@ -58,6 +59,7 @@ impl RouteEffort {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            RouteEffort::None => "none",
             RouteEffort::Low => "low",
             RouteEffort::Medium => "medium",
             RouteEffort::High => "high",

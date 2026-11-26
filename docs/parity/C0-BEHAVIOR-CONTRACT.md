@@ -138,10 +138,12 @@ effort. Endpoints are not pinned. Declared failover order is kept.
 Fixture: `docs/parity/fixtures/v1/c0-effort.json`.
 
 `vyane_core::Effort` accepts only `low`, `medium`, `high`, and `xhigh`.
-`parse_effort` stays crate-private. Collapse of `max` and `none` is
+`parse_effort` stays crate-private. Routing of `max` and `none` is
 observed through public `route_task` with explicit tier `economy`,
 provider `relay`, and task `ping`. Empty preference effort inherits
 `effort_for_tier`: frontier `high`, mainline `medium`, economy `low`.
+A profile with `params.effort = "none"` previews as `none` and fails
+target binding before dispatch.
 
 | Case | Disposition | Input and expectation |
 | --- | --- | --- |
@@ -149,7 +151,7 @@ provider `relay`, and task `ping`. Empty preference effort inherits
 | `effort.serde-max` | pending | `max` fails deserialize. Python accepts it. |
 | `effort.serde-none` | pending | `none` fails deserialize. Python accepts it. |
 | `effort.route-max` | pending | Preference `max` becomes `medium` on tier `economy`. |
-| `effort.route-none` | pending | Preference `none` becomes `medium` on tier `economy`. |
+| `effort.route-none` | aligned | Preference `none` stays `none` on tier `economy`. |
 | `effort.route-high` | aligned | Preference `HIGH` stays `high` on tier `economy`. |
 | `effort.route-xhigh` | aligned | Preference `xhigh` stays `xhigh` on tier `frontier`. |
 | `effort.route-inherit` | aligned | Empty effort inherits low, medium, and high from the three tiers. |

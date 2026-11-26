@@ -246,8 +246,8 @@
           "id": "effort.route-max"
         },
         {
-          "blocker": "PENDING route_task collapses none to medium",
-          "disposition": "pending",
+          "blocker": null,
+          "disposition": "aligned",
           "id": "effort.route-none"
         },
         {
@@ -271,10 +271,10 @@
           "id": "effort.toml-max"
         }
       ],
-      "fixture_sha256": "de5049f037c6e21635b1df2ed85ce88d803ce601435fc48297a8ea25352c0ada",
+      "fixture_sha256": "2dce77b65222832ef55f10d7482501ced9825eb24fbd35cc5bdbd19ff7ec8b89",
       "id": "effort",
       "normalized_fixture": "docs/parity/fixtures/v1/c0-effort.json",
-      "scope": "Closed Effort serde, public route_task effort collapse, and config load of an out-of-set token."
+      "scope": "Closed Effort serde, public route_task effort handling, and config load of an out-of-set token."
     },
     {
       "cases": [

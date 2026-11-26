@@ -101,6 +101,7 @@ pub fn normalize_key(value: &str) -> String {
 /// Parse an effort string into a [`RouteEffort`]. Falls back to `Medium`.
 pub fn parse_effort(s: &str) -> RouteEffort {
     match s.trim().to_ascii_lowercase().as_str() {
+        "none" => RouteEffort::None,
         "low" => RouteEffort::Low,
         "high" => RouteEffort::High,
         "xhigh" => RouteEffort::Xhigh,

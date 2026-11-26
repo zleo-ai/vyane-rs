@@ -242,7 +242,22 @@ mod tests {
         assert_eq!(profile.harness.as_deref(), Some("none"));
         assert_eq!(
             profile.params.as_ref().unwrap().effort,
-            Some(vyane_core::Effort::High)
+            Some(crate::ProfileEffort::High)
+        );
+
+        let disable_effort: RawRoot = toml::from_str(
+            r#"
+            [profiles.review.params]
+            effort = "none"
+            "#,
+        )
+        .unwrap();
+        layers.merge(&disable_effort).unwrap();
+        layers.merge(&over).unwrap();
+        let profile = layers.profiles.get("review").unwrap();
+        assert_eq!(
+            profile.params.as_ref().unwrap().effort,
+            Some(crate::ProfileEffort::None)
         );
     }
 

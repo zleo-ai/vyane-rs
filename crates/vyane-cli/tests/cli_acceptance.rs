@@ -1479,6 +1479,70 @@ async fn route_simple_task_to_economy() {
         .stdout(predicate::str::contains("economy"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn route_preserves_explicit_none_and_dispatch_rejects_it_before_wire() {
+    let server = MockServer::start().await;
+    mock_openai(&server, 200, "auto answer").await;
+    let config_dir = common::private_tempdir();
+    let data_dir = common::private_tempdir();
+    let base = auto_route_config_for(&server);
+    let no_effort = base.replace("effort = \"low\"", "");
+    let explicit_none = base.replace("effort = \"low\"", "effort = \"none\"");
+    let config = write_config(&config_dir, &explicit_none);
+
+    let route_effort = || {
+        let output = vyane()
+            .arg("--config")
+            .arg(&config)
+            .args(["route", "say hello", "--tier", "economy", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&output).expect("route decision");
+        json["effort"].clone()
+    };
+    let dispatch = |target| {
+        let mut cmd = vyane();
+        cmd.env("VYANE_CLI_TEST_KEY", "sk-test")
+            .env("VYANE_DATA_DIR", data_dir.path())
+            .arg("--config")
+            .arg(&config)
+            .args(["dispatch", "say hello", "--target", target]);
+        cmd
+    };
+
+    assert_eq!(route_effort(), "none");
+    for target in ["auto", "cheap"] {
+        dispatch(target)
+            .assert()
+            .code(2)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(
+                "explicit reasoning effort `none` is unsupported for execution",
+            ));
+    }
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+
+    fs::write(&config, no_effort).expect("omit profile effort");
+    assert_eq!(route_effort(), "low");
+    dispatch("auto").assert().success();
+    dispatch("cheap").assert().success();
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 2);
+    let auto: Value = serde_json::from_slice(&requests[0].body).expect("auto request");
+    let direct: Value = serde_json::from_slice(&requests[1].body).expect("direct request");
+    assert_eq!(auto["reasoning_effort"], "low");
+    assert!(direct.get("reasoning_effort").is_none());
+}
+
 /// `vyane route --tier frontier` overrides to the frontier profile.
 #[tokio::test]
 async fn route_explicit_tier_override() {

@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
-use vyane_config::{RawFailoverElement, ResolvedConfig};
+use vyane_config::{ProfileEffort, RawFailoverElement, ResolvedConfig};
 use vyane_core::{BoundTarget, Effort, TaskSpec};
 use vyane_router::{
     ComplexitySignals, RouteDecision, RouteEffort, RoutePreferenceTable, RouteTargetPreference,
@@ -100,7 +100,7 @@ pub fn plan_dispatch(
     let route = route_task(&loaded.config, route_params)?;
     let chain = resolve_target_chain(loaded, &route.profile)?;
     let mut chain = guard_route_chain(loaded, &route.profile, chain, allow_frontier)?;
-    apply_route_effort(&mut chain, &route.decision);
+    apply_route_effort(&mut chain, &route.decision)?;
     record_route_labels(task, &route, &chain);
 
     Ok(DispatchPlan {
@@ -204,7 +204,7 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
                 .params
                 .as_ref()
                 .and_then(|params| params.effort)
-                .map(|effort| effort.as_str().to_string())
+                .map(|effort| route_effort_from_profile(effort).as_str().to_string())
                 .unwrap_or_default(),
             tier: patch.tier.clone().unwrap_or_default(),
         };
@@ -250,7 +250,7 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
                     .params
                     .as_ref()
                     .and_then(|params| params.effort)
-                    .map(|effort| effort.as_str().to_string())
+                    .map(|effort| route_effort_from_profile(effort).as_str().to_string())
                     .unwrap_or_default(),
                 tier: patch.tier.clone().unwrap_or_default(),
             })
@@ -327,13 +327,14 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
         decision.model = model.as_str().to_string();
     }
     decision.effort = explicit_effort
+        .map(route_effort_from_core)
         .or_else(|| {
             selected_patch
                 .params
                 .as_ref()
                 .and_then(|params| params.effort)
+                .map(route_effort_from_profile)
         })
-        .map(route_effort_from_core)
         .unwrap_or_else(|| effort_for_tier(decision.tier));
 
     Ok(RouteResult { decision, profile })
@@ -592,8 +593,9 @@ fn classify_direct_failover(
     }
 }
 
-pub fn apply_route_effort(chain: &mut [BoundTarget], decision: &RouteDecision) {
+pub fn apply_route_effort(chain: &mut [BoundTarget], decision: &RouteDecision) -> Result<()> {
     let effort = match decision.effort {
+        RouteEffort::None => bail!("explicit reasoning effort `none` is unsupported for execution"),
         RouteEffort::Low => Effort::Low,
         RouteEffort::Medium => Effort::Medium,
         RouteEffort::High => Effort::High,
@@ -601,6 +603,17 @@ pub fn apply_route_effort(chain: &mut [BoundTarget], decision: &RouteDecision) {
     };
     for bound in chain {
         bound.params.effort = Some(effort);
+    }
+    Ok(())
+}
+
+fn route_effort_from_profile(effort: ProfileEffort) -> RouteEffort {
+    match effort {
+        ProfileEffort::None => RouteEffort::None,
+        ProfileEffort::Low => RouteEffort::Low,
+        ProfileEffort::Medium => RouteEffort::Medium,
+        ProfileEffort::High => RouteEffort::High,
+        ProfileEffort::Xhigh => RouteEffort::Xhigh,
     }
 }
 
@@ -942,7 +955,7 @@ mod tests {
                 model: Some(ModelId::new("same-model")),
                 tier: Some("economy".into()),
                 params: Some(GenParamsPatch {
-                    effort: Some(Effort::Low),
+                    effort: Some(ProfileEffort::Low),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -957,7 +970,7 @@ mod tests {
                 model: Some(ModelId::new("same-model")),
                 tier: Some("frontier".into()),
                 params: Some(GenParamsPatch {
-                    effort: Some(Effort::Xhigh),
+                    effort: Some(ProfileEffort::Xhigh),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1162,7 +1175,7 @@ mod tests {
     fn configured_profile_effort_flows_into_decision() {
         let mut config = make_config();
         config.profiles.get_mut("economy-model").unwrap().params = Some(GenParamsPatch {
-            effort: Some(Effort::Xhigh),
+            effort: Some(ProfileEffort::Xhigh),
             ..Default::default()
         });
 
@@ -1197,7 +1210,7 @@ mod tests {
     fn explicit_effort_overrides_selected_profile_and_tier_default() {
         let mut config = make_config();
         config.profiles.get_mut("economy-model").unwrap().params = Some(GenParamsPatch {
-            effort: Some(Effort::Medium),
+            effort: Some(ProfileEffort::Medium),
             ..Default::default()
         });
 
@@ -1309,7 +1322,7 @@ effort = "xhigh"
         .unwrap()
         .decision;
 
-        apply_route_effort(&mut chain, &decision);
+        apply_route_effort(&mut chain, &decision).unwrap();
         assert!(
             chain
                 .iter()

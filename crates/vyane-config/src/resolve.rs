@@ -101,7 +101,7 @@ impl ResolvedConfig {
                         .resolve_provider_model(
                             provider,
                             model,
-                            &gen_params_from_patch(patch),
+                            &gen_params_from_patch(patch)?,
                             env_lookup,
                         )?,
                 };
@@ -117,6 +117,7 @@ impl ResolvedConfig {
         profile_name: &str,
         env_lookup: &dyn Fn(&str) -> Option<String>,
     ) -> Result<BoundTarget> {
+        let params = gen_params_from_patch(patch)?;
         let provider_id = patch.provider.as_deref().ok_or_else(|| {
             VyaneError::new(
                 ErrorKind::Config,
@@ -133,7 +134,6 @@ impl ResolvedConfig {
         let _sandbox: Sandbox = patch.sandbox.unwrap_or_default();
         let model = provider.resolve_model(patch.model.as_ref())?;
         let endpoint = provider.resolve_endpoint_with(env_lookup)?;
-        let params = gen_params_from_patch(patch);
         let transport = transport_for(&harness);
 
         Ok(BoundTarget {
@@ -238,12 +238,12 @@ fn transport_for(harness: &Option<HarnessKind>) -> AdapterTransport {
     }
 }
 
-fn gen_params_from_patch(patch: &ProfilePatch) -> GenParams {
+fn gen_params_from_patch(patch: &ProfilePatch) -> Result<GenParams> {
     let mut params = GenParams::default();
     if let Some(p) = &patch.params {
-        p.apply_over(&mut params);
+        p.apply_over(&mut params)?;
     }
-    params
+    Ok(params)
 }
 
 #[cfg(test)]

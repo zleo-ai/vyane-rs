@@ -389,6 +389,33 @@ const fn default_max_redirects() -> u32 {
     3
 }
 
+/// A profile's reasoning preference. Explicit `none` can be inspected
+/// by the router, but does not yet have a verified transport representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProfileEffort {
+    None,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+impl ProfileEffort {
+    fn execution_level(self) -> Result<Effort, VyaneError> {
+        match self {
+            Self::None => Err(VyaneError::new(
+                ErrorKind::Unsupported,
+                "explicit reasoning effort `none` is unsupported for execution",
+            )),
+            Self::Low => Ok(Effort::Low),
+            Self::Medium => Ok(Effort::Medium),
+            Self::High => Ok(Effort::High),
+            Self::Xhigh => Ok(Effort::Xhigh),
+        }
+    }
+}
+
 /// A generation-parameters patch, mirroring `vyane_core::GenParams` but with
 /// every field optional so a layer can set just one.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -400,7 +427,7 @@ pub struct GenParamsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<Effort>,
+    pub effort: Option<ProfileEffort>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -411,7 +438,11 @@ impl GenParamsPatch {
     /// wholesale-replaced — the same sub-map merge `Provider::apply_patch` uses
     /// for its `extra`, matching the "override per field" precedence rule
     /// applied to every field throughout this crate.
-    pub fn apply_over(&self, base: &mut vyane_core::GenParams) {
+    pub fn apply_over(&self, base: &mut vyane_core::GenParams) -> Result<(), VyaneError> {
+        let effort = self
+            .effort
+            .map(ProfileEffort::execution_level)
+            .transpose()?;
         if let Some(v) = self.temperature {
             base.temperature = Some(v);
         }
@@ -421,12 +452,13 @@ impl GenParamsPatch {
         if let Some(v) = self.max_output_tokens {
             base.max_output_tokens = Some(v);
         }
-        if let Some(v) = self.effort {
+        if let Some(v) = effort {
             base.effort = Some(v);
         }
         for (k, v) in &self.extra {
             base.extra.insert(k.clone(), v.clone());
         }
+        Ok(())
     }
 }
 
