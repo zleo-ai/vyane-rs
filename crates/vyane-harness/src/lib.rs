@@ -43,12 +43,17 @@
 //! → `Cancelled`.
 //!
 //! See `docs/plan/WP-03.md` for the full work-package specification.
+//!
+//! Same-machine session presence is a separate JSON table in [`presence`].
+//! [`native::NativePresence`] updates that table in this process. It does not
+//! spawn a helper, and it does not change the Claude Code or Codex adapters.
 
 mod claude_code;
 mod codex_cli;
 mod cursor_cli;
 pub mod native;
 mod parse;
+pub mod presence;
 mod probe;
 mod spawn;
 

@@ -21,7 +21,7 @@ struct Snapshot {
 }
 
 const NESTED_PARENTS: &[&str] = &[
-    "session", "workflow", "task", "daemon", "a2a", "goal", "feedback",
+    "session", "workflow", "task", "daemon", "a2a", "presence", "goal", "feedback",
 ];
 
 fn nested_command_names(help: &str) -> Vec<&str> {

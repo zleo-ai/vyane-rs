@@ -19,6 +19,8 @@ futures = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
+fs4 = { workspace = true }
+dirs = { workspace = true }
 regex = { workspace = true }
 globset = { workspace = true }
 thiserror = { workspace = true }

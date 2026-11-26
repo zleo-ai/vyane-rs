@@ -59,6 +59,9 @@ pub enum Command {
     /// Use a local SQLite inbox; this is not authenticated A2A protocol transport.
     #[command(subcommand)]
     A2a(A2aCommand),
+    /// Record same-machine session presence in a local JSON table.
+    #[command(subcommand)]
+    Presence(PresenceCommand),
     /// Create, inspect, and advance owner-scoped local goals.
     #[command(subcommand)]
     Goal(GoalCommand),
@@ -669,6 +672,98 @@ pub struct A2aReadArgs {
     pub to: String,
     /// Exact message id to acknowledge.
     pub message_id: String,
+}
+
+/// Check in, heartbeat, leave, and list the local presence table.
+///
+/// The table is JSON, separate from the A2A mailbox. Card ids are opaque.
+/// Prompts and tool outputs are not accepted.
+#[derive(Debug, Subcommand)]
+pub enum PresenceCommand {
+    /// Register or refresh this session, including an opaque card id.
+    Checkin(PresenceCheckinArgs),
+    /// Refresh the heartbeat without changing card or status.
+    Heartbeat(PresenceHeartbeatArgs),
+    /// Remove this session from the online table.
+    Leave(PresenceLeaveArgs),
+    /// List sessions that are currently online.
+    List(PresenceListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PresenceCommonArgs {
+    /// Presence JSON file. Never the A2A database.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<PathBuf>,
+    /// Unix seconds to use instead of the current time.
+    #[arg(long, value_name = "SECONDS")]
+    pub now: Option<f64>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PresenceCheckinArgs {
+    #[command(flatten)]
+    pub common: PresenceCommonArgs,
+    /// Session id.
+    #[arg(long)]
+    pub session: String,
+    /// Display label.
+    #[arg(long, default_value = "")]
+    pub label: String,
+    /// Repository label.
+    #[arg(long, default_value = "")]
+    pub repo: String,
+    /// Opaque card id. The value is stored as given.
+    #[arg(long, default_value = "")]
+    pub card: String,
+    /// One-line status. Not a prompt or tool output.
+    #[arg(long, default_value = "")]
+    pub status: String,
+    /// Harness name.
+    #[arg(long, default_value = "")]
+    pub harness: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PresenceHeartbeatArgs {
+    #[command(flatten)]
+    pub common: PresenceCommonArgs,
+    /// Session id.
+    #[arg(long)]
+    pub session: String,
+    /// Display label. Empty keeps the stored label.
+    #[arg(long, default_value = "")]
+    pub label: String,
+    /// Repository label. Empty keeps the stored repo.
+    #[arg(long, default_value = "")]
+    pub repo: String,
+    /// Harness name. Empty keeps the stored harness.
+    #[arg(long, default_value = "")]
+    pub harness: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PresenceLeaveArgs {
+    #[command(flatten)]
+    pub common: PresenceCommonArgs,
+    /// Session id.
+    #[arg(long)]
+    pub session: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PresenceListArgs {
+    #[command(flatten)]
+    pub common: PresenceCommonArgs,
+    /// Mark this session as self and hide it unless --all is set.
+    #[arg(long, default_value = "")]
+    pub session: String,
+    /// Include this session and sessions outside the online window.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Subcommand)]

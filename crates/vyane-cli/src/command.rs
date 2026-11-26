@@ -96,6 +96,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
             DaemonCommand::Stop => crate::daemon::stop_daemon().await,
         },
         Command::A2a(command) => crate::a2a::run(command),
+        Command::Presence(command) => crate::presence::run(command),
         Command::Goal(command) => crate::goal::run(cli.config, command).await,
         Command::Acp => crate::acp::run().await,
         Command::Waiting(args) => crate::waiting::run(args),
