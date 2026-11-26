@@ -2521,6 +2521,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "command-fds",
+ "dirs",
+ "fs4",
  "futures",
  "globset",
  "libc",

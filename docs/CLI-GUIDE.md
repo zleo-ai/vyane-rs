@@ -151,6 +151,36 @@ latter is only a sender label, not authenticated principal authority or
 identity. Do not expose this CLI directly as a hostile multi-user service.
 See [WP-59](plan/WP-59.md) for the exact boundary.
 
+## Local presence table
+
+Same-machine sessions can check in, send a heartbeat, leave, and list who is
+online. The table is one JSON file. It is not the A2A SQLite mailbox, and the
+two are not stored together.
+
+```sh
+vyane presence checkin --session s1 --label one --card any-card-id --status editing
+vyane presence heartbeat --session s1
+vyane presence list
+vyane presence leave --session s1
+```
+
+A card id is stored as an opaque string. The table keeps session metadata
+only: session id, label, repo, card, a one-line status, harness name, and
+timestamps. It does not accept prompts or tool outputs.
+
+`list` prints `no online peers` only after a successful read of an empty
+online window. A corrupt or unreadable table exits non-zero and does not print
+that line. The file lock wait is fixed at 200 milliseconds and returns
+`store_busy` instead of waiting indefinitely.
+
+The native harness calls the same library in-process
+(`vyane_harness::native::NativePresence`). That path does not spawn a second
+process and does not change Claude Code or Codex settings.
+
+The default file is `$XDG_CONFIG_HOME/vyane/agent-presence.json`, or the
+platform config directory when `XDG_CONFIG_HOME` is unset. Override it with
+`--path` or `VYANE_AGENT_PRESENCE_PATH`.
+
 ## Local goals
 
 The CLI exposes an owner-scoped goal lifecycle over one SQLite source of truth:

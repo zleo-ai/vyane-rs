@@ -1587,6 +1587,7 @@ fn help_lists_all_commands() {
         "mcp",
         "task",
         "a2a",
+        "presence",
         "goal",
     ] {
         assert!(help.contains(cmd), "help text must list command '{cmd}'");
