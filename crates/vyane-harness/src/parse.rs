@@ -239,7 +239,7 @@ fn extract_codex_usage(obj: &serde_json::Map<String, Value>) -> Option<Usage> {
     Some(Usage {
         input_tokens: input,
         output_tokens: output,
-        reasoning_tokens: None,
+        reasoning_tokens: u.get("reasoning_output_tokens").and_then(Value::as_u64),
         cached_input_tokens: cached,
     })
 }

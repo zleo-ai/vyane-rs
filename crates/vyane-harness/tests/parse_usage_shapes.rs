@@ -1,5 +1,4 @@
-//! Codex usage JSON shapes the parser already reads, beyond
-//! `turn.completed.usage` and `token_count.info.total_token_usage`.
+//! Codex usage JSON shapes exercised through the CLI harness.
 //!
 //! Cost and `duration_ms` are not part of these shapes: the harness does not
 //! parse them into the outcome. Duration on the outcome is the measured run
@@ -69,7 +68,7 @@ fi
     body
 }
 
-async fn assert_codex_usage(name: &str, events: &[&str], session: &str, usage: Usage) {
+async fn assert_codex_usage(name: &str, events: &[&str], session: &str, usage: Option<Usage>) {
     let dir = TempDir::new().unwrap();
     let bin = write_script(&dir, name, &codex_script(events));
     let outcome = CodexCliHarness::with_binary(bin.to_string_lossy())
@@ -80,7 +79,7 @@ async fn assert_codex_usage(name: &str, events: &[&str], session: &str, usage: U
     assert_eq!(outcome.text, "codex final");
     assert_eq!(outcome.native_session_id.as_deref(), Some(session));
     assert_eq!(outcome.exit_code, 0);
-    assert_eq!(outcome.usage, Some(usage));
+    assert_eq!(outcome.usage, usage);
 }
 
 fn usage(input: u64, output: u64, cached: u64) -> Usage {
@@ -101,7 +100,10 @@ async fn token_count_prefers_total_usage_over_last_usage() {
             r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":12,"output_tokens":40,"reasoning_output_tokens":7,"total_tokens":140},"last_token_usage":{"input_tokens":8,"cached_input_tokens":4,"output_tokens":9,"reasoning_output_tokens":3,"total_tokens":17}}}}"#,
         ],
         "th-total",
-        usage(100, 40, 12),
+        Some(Usage {
+            reasoning_tokens: Some(7),
+            ..usage(100, 40, 12)
+        }),
     )
     .await;
 }
@@ -115,7 +117,7 @@ async fn token_count_reads_last_token_usage_when_total_is_absent() {
             r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":8,"output_tokens":9,"cached_input_tokens":4}}}}"#,
         ],
         "th-last",
-        usage(8, 9, 4),
+        Some(usage(8, 9, 4)),
     )
     .await;
 }
@@ -129,7 +131,7 @@ async fn token_count_reads_info_usage_when_named_totals_are_absent() {
             r#"{"type":"event_msg","payload":{"type":"token_count","info":{"usage":{"input_tokens":21,"output_tokens":22,"cached_input_tokens":2}}}}"#,
         ],
         "th-info",
-        usage(21, 22, 2),
+        Some(usage(21, 22, 2)),
     )
     .await;
 }
@@ -142,7 +144,64 @@ async fn other_events_read_top_level_usage() {
             r#"{"type":"item.completed","thread_id":"th-top","item":{"type":"agent_message","text":"ignored"},"usage":{"input_tokens":30,"output_tokens":31,"cached_input_tokens":6}}"#,
         ],
         "th-top",
-        usage(30, 31, 6),
+        Some(usage(30, 31, 6)),
     )
     .await;
+}
+
+#[tokio::test]
+async fn turn_completed_reads_reported_reasoning_usage() {
+    for reasoning in [0, 7] {
+        let turn = format!(
+            r#"{{"type":"turn.completed","usage":{{"input_tokens":100,"cached_input_tokens":12,"cache_write_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":{reasoning}}}}}"#
+        );
+        assert_codex_usage(
+            "fake-codex-turn-usage",
+            &[r#"{"type":"thread.started","thread_id":"th-turn"}"#, &turn],
+            "th-turn",
+            Some(Usage {
+                reasoning_tokens: Some(reasoning),
+                ..usage(100, 40, 12)
+            }),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn malformed_reasoning_preserves_other_turn_usage() {
+    for malformed in ["null", r#""7""#, "-1", "1.5"] {
+        let turn = format!(
+            r#"{{"type":"turn.completed","usage":{{"input_tokens":100,"cached_input_tokens":12,"output_tokens":40,"reasoning_output_tokens":{malformed}}}}}"#
+        );
+        assert_codex_usage(
+            "fake-codex-malformed-reasoning",
+            &[
+                r#"{"type":"thread.started","thread_id":"th-malformed"}"#,
+                &turn,
+            ],
+            "th-malformed",
+            Some(usage(100, 40, 12)),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn reasoning_does_not_activate_usage_with_zero_input_and_output() {
+    for reasoning in [0, 7] {
+        let turn = format!(
+            r#"{{"type":"turn.completed","usage":{{"input_tokens":0,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":{reasoning}}}}}"#
+        );
+        assert_codex_usage(
+            "fake-codex-inactive-usage",
+            &[
+                r#"{"type":"thread.started","thread_id":"th-inactive"}"#,
+                &turn,
+            ],
+            "th-inactive",
+            None,
+        )
+        .await;
+    }
 }
