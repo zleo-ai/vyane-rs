@@ -592,6 +592,10 @@ does not contact a provider to fill it. When the snapshot shows one
 subscription running hot and another with more room, `route` and
 `dispatch --target auto` leave the busy profile out of consideration. A
 missing or unreadable file produces the same route as leaving the flag off.
+A stale file, a schema other than 1, a probe status other than `ok`, and an
+invalidation do too. While a subscription remains eligible, a profile with no
+weekly window is left out, and when every known subscription is hot only the
+least-hot profile stays.
 `dispatch` to a named target ignores the flag and does not open the file.
 
 Routing hints can also be supplied as `routing.stage`, `routing.tier`,

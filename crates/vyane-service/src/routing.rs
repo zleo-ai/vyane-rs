@@ -1601,8 +1601,17 @@ tier = "economy"
         let snapshot_path = directory.path().join("quota-snapshot.json");
         let missing_path = directory.path().join("missing-quota-snapshot.json");
         let corrupt_path = directory.path().join("corrupt-quota-snapshot.json");
-        std::fs::write(&snapshot_path, fresh_subscription_snapshot()).unwrap();
+        let wrong_schema_path = directory.path().join("wrong-schema-quota-snapshot.json");
+        let fresh = fresh_subscription_snapshot();
+        std::fs::write(&snapshot_path, &fresh).unwrap();
         std::fs::write(&corrupt_path, "{").unwrap();
+        let mut wrong_schema: serde_json::Value = serde_json::from_str(&fresh).unwrap();
+        wrong_schema["schema_version"] = serde_json::json!(2);
+        std::fs::write(
+            &wrong_schema_path,
+            serde_json::to_string(&wrong_schema).unwrap(),
+        )
+        .unwrap();
 
         let off = route_task(
             &loaded.config,
@@ -1619,6 +1628,7 @@ tier = "economy"
             missing_path.as_path(),
             directory.path(),
             corrupt_path.as_path(),
+            wrong_schema_path.as_path(),
         ] {
             let unchanged = route_task(
                 &loaded.config,
