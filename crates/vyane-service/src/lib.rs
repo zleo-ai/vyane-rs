@@ -52,6 +52,7 @@ mod native_authority;
 mod native_permissions;
 mod outcomes;
 mod owner;
+mod quota_route;
 mod routing;
 mod selector;
 mod service;
@@ -165,8 +166,9 @@ pub use owner::{
     PrincipalAuthenticator, PrincipalOwnerResolver,
 };
 pub use routing::{
-    DispatchPlan, RouteParams, RouteResult, plan_dispatch, replay_recorded_auto_chain,
-    resolve_auto_route_candidate_chains, route_task, validate_auto_route_candidates,
+    DispatchPlan, RouteParams, RouteResult, plan_dispatch, plan_dispatch_with,
+    replay_recorded_auto_chain, resolve_auto_route_candidate_chains, route_task,
+    validate_auto_route_candidates,
 };
 pub use selector::{resolve_target_chain, split_targets};
 pub use service::{

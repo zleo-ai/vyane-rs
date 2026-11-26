@@ -624,7 +624,20 @@ vyane route "write an ADR for the system architecture" --changed-files 20
 vyane route "simple task" --tier frontier
 vyane dispatch "fix the parser" --target auto
 vyane dispatch "review auth" --target auto --no-frontier
+vyane route "fix the parser" --quota-snapshot ./quota-snapshot.json
 ```
+
+`--quota-snapshot` is off unless you pass it. The path is a local JSON file
+with `schema_version` 1 and per-provider weekly subscription windows. Vyane
+does not contact a provider to fill it. When the snapshot shows one
+subscription running hot and another with more room, `route` and
+`dispatch --target auto` leave the busy profile out of consideration. A
+missing or unreadable file produces the same route as leaving the flag off.
+A stale file, a schema other than 1, a probe status other than `ok`, and an
+invalidation do too. While a subscription remains eligible, a profile with no
+weekly window is left out, and when every known subscription is hot only the
+least-hot profile stays.
+`dispatch` to a named target ignores the flag and does not open the file.
 
 Routing hints can also be supplied as `routing.stage`, `routing.tier`,
 `routing.tags`, `routing.candidates`, and `routing.allow_frontier` labels.
