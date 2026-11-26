@@ -109,7 +109,7 @@ Two consequences:
 | `vyane-config` | `vyane-provider` | parse TOML, resolve profiles + failover chains → `BoundTarget` |
 | `vyane-provider` | — | provider registry, endpoints, auth styles, env-injection rules |
 | `vyane-protocol` | — | `ChatClient` over HTTP (OpenAI Chat / Responses, Anthropic Messages), including bounded non-streaming OpenAI Chat and Anthropic Messages typed tool turns, separately authorized turn paths for those two protocols, and the shared HTTP base validator and endpoint-routing digest |
-| `vyane-harness` | — | `Harness` wrapping coding CLIs, additive process-local execution context, pinned-workdir child handoff, process-group control, guarded native filesystem tools, and a bounded native turn driver |
+| `vyane-harness` | — | `Harness` wrapping coding CLIs, additive process-local execution context, pinned-workdir child handoff, process-group control, guarded native filesystem tools, a bounded native turn driver, and an in-process local JSON presence table separate from the message store |
 | `vyane-kernel` | — (traits only) | early execution identity, whole-chain capability admission, prepared dispatch, dispatch / broadcast / failover state machine |
 | `vyane-ledger` | — | JSONL `Ledger`, filesystem `SessionStore` with strict revisioned native-session snapshots/CAS transitions, cost table |
 | `vyane-task` | — | owner-qualified SQLite task lifecycle snapshots/events, revision + executor-epoch CAS, transactional schema migration |

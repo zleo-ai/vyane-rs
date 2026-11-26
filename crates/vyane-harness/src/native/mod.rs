@@ -11,8 +11,13 @@
 //! access. [`risky_operations_policy`] remains only an approval classifier, and
 //! [`protected_paths_policy`] continues to deny `run_bash` until a separately
 //! enforced child-process sandbox exists.
+//!
+//! [`NativePresence`] updates the local presence table by calling
+//! [`crate::presence`] in this process. It does not spawn a helper, and it does
+//! not change the Claude Code or Codex CLI adapters.
 
 mod permissions;
+mod presence;
 mod text_edit;
 mod tools;
 mod trusted_commands;
@@ -28,6 +33,7 @@ pub use permissions::{
     PermissionDecision, PermissionEffect, PermissionPolicy, PermissionRule, PermissionRuleError,
     protected_paths_policy, risky_operations_policy,
 };
+pub use presence::NativePresence;
 pub use text_edit::{
     EditError, EditOutcome, EditRequest, MatchPass, MatchSearch, ReplacedSpan, compute_edit,
     compute_edit_bounded, locate,

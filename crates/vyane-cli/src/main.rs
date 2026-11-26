@@ -30,6 +30,7 @@ mod native_agent;
 #[allow(dead_code)]
 mod native_agent_spool;
 mod output;
+mod presence;
 mod review;
 mod supervisor;
 mod task;

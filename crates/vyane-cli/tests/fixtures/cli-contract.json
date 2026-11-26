@@ -5,7 +5,7 @@
       "--help"
     ],
     "exit_code": 0,
-    "stdout": "Vyane assembles configured providers, protocols, CLI harnesses, the dispatch kernel, and local storage into one command-line tool.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check      Validate configuration and show local readiness\n  dispatch   Run one task against a profile, provider/model, or auto-routed target\n  broadcast  Run one task against several targets concurrently\n  history    Show recent run ledger records\n  feedback   Rate your runs from 1 to 5 and list the ratings\n  sessions   List saved session records\n  session    Inspect and safely reset local continuity sessions\n  workflow   Run, resume, and list declarative workflows\n  review     Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route      Show what the router would pick for a task (dry-run, no dispatch)\n  task       Inspect and manage detached background runs\n  serve      Start the bearer-authenticated loopback HTTP API server\n  daemon     Run and control the authenticated local workflow daemon\n  a2a        Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  goal       Create, inspect, and advance owner-scoped local goals\n  acp        Serve an Agent Client Protocol echo shell over stdio\n  mcp        Run the MCP server over stdio (for use as an MCP tool server)\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n  -h, --help\n          Print help (see a summary with '-h')\n\n  -V, --version\n          Print version\n",
+    "stdout": "Vyane assembles configured providers, protocols, CLI harnesses, the dispatch kernel, and local storage into one command-line tool.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check      Validate configuration and show local readiness\n  dispatch   Run one task against a profile, provider/model, or auto-routed target\n  broadcast  Run one task against several targets concurrently\n  history    Show recent run ledger records\n  feedback   Rate your runs from 1 to 5 and list the ratings\n  sessions   List saved session records\n  session    Inspect and safely reset local continuity sessions\n  workflow   Run, resume, and list declarative workflows\n  review     Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route      Show what the router would pick for a task (dry-run, no dispatch)\n  task       Inspect and manage detached background runs\n  serve      Start the bearer-authenticated loopback HTTP API server\n  daemon     Run and control the authenticated local workflow daemon\n  a2a        Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  presence   Record same-machine session presence in a local JSON table\n  goal       Create, inspect, and advance owner-scoped local goals\n  acp        Serve an Agent Client Protocol echo shell over stdio\n  mcp        Run the MCP server over stdio (for use as an MCP tool server)\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n  -h, --help\n          Print help (see a summary with '-h')\n\n  -V, --version\n          Print version\n",
     "stderr": ""
   },
   {
@@ -14,7 +14,7 @@
       "-h"
     ],
     "exit_code": 0,
-    "stdout": "Run configured AI targets with failover and a local run ledger.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check      Validate configuration and show local readiness\n  dispatch   Run one task against a profile, provider/model, or auto-routed target\n  broadcast  Run one task against several targets concurrently\n  history    Show recent run ledger records\n  feedback   Rate your runs from 1 to 5 and list the ratings\n  sessions   List saved session records\n  session    Inspect and safely reset local continuity sessions\n  workflow   Run, resume, and list declarative workflows\n  review     Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route      Show what the router would pick for a task (dry-run, no dispatch)\n  task       Inspect and manage detached background runs\n  serve      Start the bearer-authenticated loopback HTTP API server\n  daemon     Run and control the authenticated local workflow daemon\n  a2a        Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  goal       Create, inspect, and advance owner-scoped local goals\n  acp        Serve an Agent Client Protocol echo shell over stdio\n  mcp        Run the MCP server over stdio (for use as an MCP tool server)\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help (see more with '--help')\n  -V, --version        Print version\n",
+    "stdout": "Run configured AI targets with failover and a local run ledger.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check      Validate configuration and show local readiness\n  dispatch   Run one task against a profile, provider/model, or auto-routed target\n  broadcast  Run one task against several targets concurrently\n  history    Show recent run ledger records\n  feedback   Rate your runs from 1 to 5 and list the ratings\n  sessions   List saved session records\n  session    Inspect and safely reset local continuity sessions\n  workflow   Run, resume, and list declarative workflows\n  review     Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route      Show what the router would pick for a task (dry-run, no dispatch)\n  task       Inspect and manage detached background runs\n  serve      Start the bearer-authenticated loopback HTTP API server\n  daemon     Run and control the authenticated local workflow daemon\n  a2a        Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  presence   Record same-machine session presence in a local JSON table\n  goal       Create, inspect, and advance owner-scoped local goals\n  acp        Serve an Agent Client Protocol echo shell over stdio\n  mcp        Run the MCP server over stdio (for use as an MCP tool server)\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help (see more with '--help')\n  -V, --version        Print version\n",
     "stderr": ""
   },
   {
@@ -155,6 +155,60 @@
     ],
     "exit_code": 0,
     "stdout": "Use a local SQLite inbox; this is not authenticated A2A protocol transport\n\nUsage: vyane a2a [OPTIONS] <COMMAND>\n\nCommands:\n  send   Queue one local message for an agent mailbox\n  inbox  List one local agent mailbox without changing delivery state\n  read   Deliver one exact mailbox message, then acknowledge after stdout flushes\n  help   Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "presence-help",
+    "args": [
+      "presence",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Record same-machine session presence in a local JSON table\n\nUsage: vyane presence [OPTIONS] <COMMAND>\n\nCommands:\n  checkin    Register or refresh this session, including an opaque card id\n  heartbeat  Refresh the heartbeat without changing card or status\n  leave      Remove this session from the online table\n  list       List sessions that are currently online\n  help       Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "presence-checkin-help",
+    "args": [
+      "presence",
+      "checkin",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Register or refresh this session, including an opaque card id\n\nUsage: vyane presence checkin [OPTIONS] --session <SESSION>\n\nOptions:\n      --config <PATH>      Config file to load instead of the default user + project files\n      --path <PATH>        Presence JSON file. Never the A2A database\n      --now <SECONDS>      Unix seconds to use instead of the current time\n      --json               Emit machine-readable JSON\n      --session <SESSION>  Session id\n      --label <LABEL>      Display label [default: \"\"]\n      --repo <REPO>        Repository label [default: \"\"]\n      --card <CARD>        Opaque card id. The value is stored as given [default: \"\"]\n      --status <STATUS>    One-line status. Not a prompt or tool output [default: \"\"]\n      --harness <HARNESS>  Harness name [default: \"\"]\n  -h, --help               Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "presence-heartbeat-help",
+    "args": [
+      "presence",
+      "heartbeat",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Refresh the heartbeat without changing card or status\n\nUsage: vyane presence heartbeat [OPTIONS] --session <SESSION>\n\nOptions:\n      --config <PATH>      Config file to load instead of the default user + project files\n      --path <PATH>        Presence JSON file. Never the A2A database\n      --now <SECONDS>      Unix seconds to use instead of the current time\n      --json               Emit machine-readable JSON\n      --session <SESSION>  Session id\n      --label <LABEL>      Display label. Empty keeps the stored label [default: \"\"]\n      --repo <REPO>        Repository label. Empty keeps the stored repo [default: \"\"]\n      --harness <HARNESS>  Harness name. Empty keeps the stored harness [default: \"\"]\n  -h, --help               Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "presence-leave-help",
+    "args": [
+      "presence",
+      "leave",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Remove this session from the online table\n\nUsage: vyane presence leave [OPTIONS] --session <SESSION>\n\nOptions:\n      --config <PATH>      Config file to load instead of the default user + project files\n      --path <PATH>        Presence JSON file. Never the A2A database\n      --now <SECONDS>      Unix seconds to use instead of the current time\n      --json               Emit machine-readable JSON\n      --session <SESSION>  Session id\n  -h, --help               Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "presence-list-help",
+    "args": [
+      "presence",
+      "list",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "List sessions that are currently online\n\nUsage: vyane presence list [OPTIONS]\n\nOptions:\n      --config <PATH>      Config file to load instead of the default user + project files\n      --path <PATH>        Presence JSON file. Never the A2A database\n      --now <SECONDS>      Unix seconds to use instead of the current time\n      --json               Emit machine-readable JSON\n      --session <SESSION>  Mark this session as self and hide it unless --all is set [default: \"\"]\n      --all                Include this session and sessions outside the online window\n  -h, --help               Print help\n",
     "stderr": ""
   },
   {
@@ -698,7 +752,7 @@
     "args": [],
     "exit_code": 2,
     "stdout": "",
-    "stderr": "error: 'vyane' requires a subcommand but one was not provided\n  [subcommands: check, dispatch, broadcast, history, feedback, sessions, session, workflow, review, route, task, serve, daemon, a2a, goal, acp, mcp, __worker, help]\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+    "stderr": "error: 'vyane' requires a subcommand but one was not provided\n  [subcommands: check, dispatch, broadcast, history, feedback, sessions, session, workflow, review, route, task, serve, daemon, a2a, presence, goal, acp, mcp, __worker, help]\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
   },
   {
     "name": "unknown-command",
