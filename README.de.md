@@ -29,7 +29,7 @@ failover: fixture: review-model; recorded attempts=2
 
 ## Schnellstart
 
-**1. Aus dem Quellcode installieren.** Erforderlich sind stabiles Rust/Cargo (mindestens Rust 1.88) und eine C/C++-Build-Toolchain. Die CI läuft auf Linux und macOS; Windows-Unterstützung wird nicht zugesichert.
+**1. Aus dem Quellcode installieren.** Erforderlich sind stabiles Rust/Cargo (mindestens Rust 1.88) und eine C/C++-Build-Toolchain. Die CI prüft Builds und die jeweils anwendbaren Tests unter Linux, macOS und Windows. Für Windows beschreibt die [Anleitung](docs/WINDOWS.md) die MSVC-Einrichtung, den Offline-Einstieg in PowerShell und die Plattformgrenzen.
 
 ```sh
 git clone https://github.com/zleo-ai/vyane-rs.git

@@ -29,7 +29,7 @@ failover: fixture: review-model; recorded attempts=2
 
 ## Início rápido
 
-**1. Instale pelo código-fonte.** É necessário Rust/Cargo estável (no mínimo Rust 1.88) e ferramentas de compilação C/C++. A CI cobre Linux e macOS; não declaramos suporte a Windows.
+**1. Instale pelo código-fonte.** É necessário Rust/Cargo estável (no mínimo Rust 1.88) e ferramentas de compilação C/C++. A CI verifica a compilação e os testes aplicáveis no Linux, macOS e Windows. Consulte o [guia do Windows](docs/WINDOWS.md) para configurar o MSVC, experimentar a CLI offline no PowerShell e conhecer os limites da plataforma.
 
 ```sh
 git clone https://github.com/zleo-ai/vyane-rs.git

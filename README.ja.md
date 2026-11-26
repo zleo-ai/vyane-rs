@@ -29,7 +29,7 @@ failover: fixture: review-model; recorded attempts=2
 
 ## クイックスタート
 
-**1. ソースからインストール。** stable Rust/Cargo（Rust 1.88 以上）と C/C++ ビルドツールが必要です。CI 対象は Linux と macOS です。Windows 対応は表明していません。
+**1. ソースからインストール。** stable Rust/Cargo（Rust 1.88 以上）と C/C++ ビルドツールが必要です。CI では Linux、macOS、Windows でビルドと各環境に該当するテストを実行します。MSVC の設定、PowerShell でのオフライン確認、機能の制限については [Windows ガイド](docs/WINDOWS.md)を参照してください。
 
 ```sh
 git clone https://github.com/zleo-ai/vyane-rs.git

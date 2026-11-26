@@ -29,7 +29,7 @@ failover: fixture: review-model; recorded attempts=2
 
 ## 快速开始
 
-**1. 从源码安装。** 需要 stable Rust/Cargo（最低 Rust 1.88）和 C/C++ 构建工具链。CI 覆盖 Linux 和 macOS；目前不声明支持 Windows。
+**1. 从源码安装。** 需要 stable Rust/Cargo（最低 Rust 1.88）和 C/C++ 构建工具链。CI 在 Linux、macOS 和 Windows 上验证构建及各平台适用的测试。Windows 的 MSVC 配置、PowerShell 离线入门和功能限制见 [Windows 指南](docs/WINDOWS.md)。
 
 ```sh
 git clone https://github.com/zleo-ai/vyane-rs.git

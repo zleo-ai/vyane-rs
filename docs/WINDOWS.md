@@ -1,4 +1,6 @@
-# Windows build and test gate
+# Windows quickstart and CI coverage
+
+## Build with MSVC
 
 Use stable Rust with the `x86_64-pc-windows-msvc` host, Visual Studio 2022
 Build Tools (Desktop development with C++), and a Windows SDK. From PowerShell
@@ -18,12 +20,27 @@ the system PATH. Git's `usr/bin/link.exe` is GNU's file-link utility and cannot
 link MSVC objects. Setting just a linker path without SDK/library discovery is
 not sufficient. Missing prerequisites are reported; the script installs nothing.
 
-The compilation/test gate does not imply full Windows feature support.
-Unix process-group command verification, detached process control, Linux pinned
-workdirs and native sandboxing still have platform restrictions. Basic storage
-round trips do not establish Windows ACL or sandbox equivalence.
+## Preview routing offline in PowerShell
 
-## Offline checks and platform coverage
+After building, run these commands from the checkout root. They use the
+bundled [offline configuration](examples/offline.toml).
+
+```powershell
+$vyane = '.\target\debug\vyane.exe'
+$config = '.\docs\examples\offline.toml'
+
+& $vyane --config $config check --json
+& $vyane --config $config route 'Explain this function' --json
+```
+
+The first command reports static configuration diagnostics without probing
+harnesses. The second previews the routing decision. Look for the `offline`
+profile in the check output and `"selection_key": "offline"` in the route
+output. Both commands run without provider credentials or model requests and
+consume no model quota. The example uses a deliberately invalid endpoint.
+Use this configuration only for checks and routing previews.
+
+## Test locally
 
 After initializing MSVC, run the normal contributor checks:
 
@@ -55,19 +72,20 @@ cargo test -p vyane-cli --no-fail-fast --locked -- --test-threads=1
 if ($LASTEXITCODE -ne 0) { throw 'CLI tests failed' }
 ```
 
-Windows runs the applicable SQLite, JSONL, session CAS/lock, routing, direct
-HTTP and CLI contracts. Platform exclusions remain explicit in source:
+## CI coverage and platform boundaries
 
-- Unix command-verifier success/error probes (including command-dependent
-  pursuit and CLI lifecycle cases) require process-group cleanup and waitid.
-  Windows instead checks inconclusive verification without marking criteria
-  satisfied, and keeps lifecycle/store and manual-waiver tests.
-- Detached latency, group cancellation, orphan PID detection and resident
-  daemon lifecycle require Unix process identity/control. Windows daemon control
-  reads fail closed and retain unverifiable sidecars.
-- Symlink/permission probes use Unix APIs; Linux pinned-directory and native
-  sandbox fixtures remain Linux-only. These exclusions do not establish
-  Windows reparse-point, ACL or sandbox safety.
+The CI test matrix runs on Linux, macOS and Windows. The Windows lane is a
+hard failure gate for the x64 MSVC workspace build and applicable tests,
+including SQLite, JSONL, session CAS and locking, routing, direct HTTP and CLI
+contracts. Linux and macOS use their own test splits.
 
-The Windows CI lane is a hard failure gate. Linux/macOS retain their existing
-test process splits and Linux sandbox prerequisites.
+- **Unix process control.** Command-verifier success and error probes require
+  Unix process-group cleanup and `waitid`. Windows tests cover inconclusive
+  verification, lifecycle/store behavior and manual waivers. Detached process
+  control and the resident daemon lifecycle depend on Unix process identity
+  and control. Windows daemon control reads fail closed and retain
+  unverifiable sidecars.
+- **Linux native isolation.** Pinned workdirs and native sandbox fixtures are
+  Linux-only. Windows storage tests cover basic round trips. Windows
+  reparse-point, ACL and sandbox safety are outside that coverage.
+- **Workflow worktrees.** Workflow worktree isolation is unsupported on Windows.

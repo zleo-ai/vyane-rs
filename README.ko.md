@@ -29,7 +29,7 @@ failover: fixture: review-model; recorded attempts=2
 
 ## 빠른 시작
 
-**1. 소스에서 설치합니다.** stable Rust/Cargo(최소 Rust 1.88)와 C/C++ 빌드 도구가 필요합니다. CI 플랫폼은 Linux와 macOS이며 Windows 지원은 보장하지 않습니다.
+**1. 소스에서 설치합니다.** stable Rust/Cargo(최소 Rust 1.88)와 C/C++ 빌드 도구가 필요합니다. CI는 Linux, macOS, Windows에서 빌드와 각 플랫폼에 해당하는 테스트를 실행합니다. MSVC 설정, PowerShell 오프라인 시작 방법, 플랫폼별 기능 제한은 [Windows 가이드](docs/WINDOWS.md)를 참고하세요.
 
 ```sh
 git clone https://github.com/zleo-ai/vyane-rs.git
