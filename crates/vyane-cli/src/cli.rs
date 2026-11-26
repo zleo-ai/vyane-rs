@@ -62,6 +62,11 @@ pub enum Command {
     /// Create, inspect, and advance owner-scoped local goals.
     #[command(subcommand)]
     Goal(GoalCommand),
+    /// Serve an Agent Client Protocol echo shell over stdio.
+    #[command(
+        long_about = "Serve an Agent Client Protocol echo shell over stdio. Answers initialize and session/new, then echoes session/prompt text. Does not dispatch, read configuration or credentials, call a model, or create a state database."
+    )]
+    Acp,
     /// List read-only items that are waiting for a human.
     Waiting(WaitingArgs),
     /// Run the MCP server over stdio (for use as an MCP tool server).

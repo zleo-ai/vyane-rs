@@ -41,6 +41,20 @@ workdirs and sandboxes above read-only are rejected before daemon contact. This 
 workflow control, not general task, board, collaboration, or multi-principal
 MCP parity.
 
+## Agent Client Protocol echo shell
+
+`vyane acp` is a newline-delimited [Agent Client Protocol](https://agentclientprotocol.com)
+agent on stdin and stdout. It answers `initialize`, keeps `session/new` in
+memory, and returns the prompt's text blocks as one `agent_message_chunk`
+with `stopReason` `end_turn`. Resource and resource-link blocks are accepted
+and not opened. Closing stdin exits 0.
+
+This shell is separate from the service layer used by the CLI, REST, and MCP
+entry points. It does not load configuration, read credentials, dispatch a
+target, call a model, connect MCP servers named in `session/new`, or create a
+ledger, session store, or other state database. A global `--config` path is
+left unopened. `loadSession` is false. `vyane mcp` remains the tool server.
+
 ## Static configuration JSON
 
 `vyane check --json` exposes the same static `ConfigCheckReport` as MCP

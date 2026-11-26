@@ -77,7 +77,7 @@ vyane-router      deterministic routing: complexity scoring, tag inference, tier
 vyane-workflow    declarative workflow engine (DAG + journal/resume)
 vyane-service     shared facade: config loading, selector resolution, routing adapter
 vyane-mcp         MCP server (rmcp 3.3 SDK, 9 base tools over stdio)
-vyane-cli         front-end: CLI + REST API (axum) + MCP launcher
+vyane-cli         front-end: CLI + REST API (axum) + MCP launcher + ACP echo shell
 ```
 
 The load-bearing rule: **the kernel depends only on `vyane-core` traits.** It

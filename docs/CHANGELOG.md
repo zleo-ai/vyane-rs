@@ -9,6 +9,7 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Added
 
+- `vyane acp` serves an Agent Client Protocol echo shell over stdio. It completes `initialize`, stores `session/new` only in memory, and echoes prompt text in one `agent_message_chunk`. It does not load configuration, read credentials, dispatch, call a model, or create a state database.
 - `vyane waiting` prints a read-only list assembled from three existing
   sources: pending kernel approval decisions, kernel deliveries whose phase
   is `approval_required`, and goal continuity projections whose next action
