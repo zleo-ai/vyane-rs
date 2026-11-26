@@ -122,7 +122,7 @@ Two consequences:
 | `vyane-workflow` | `vyane-kernel` | declarative DAG execution, bounded source bundles, atomic journals, and explicit resume |
 | `vyane-service` | `vyane-agent`, `vyane-broker`, `vyane-config`, `vyane-goal`, `vyane-harness`, `vyane-kernel`, `vyane-ledger`, `vyane-message`, `vyane-protocol`, `vyane-router` | shared facade plus principal-derived `OwnerScopedService`, allowlisted run/session views, owner-scoped session control, explicit projection construction, the fresh-sessionless authority bridge, fixed-owner one-shot drivers, a paired in-process backend and its resident library supervisor; ordinary dispatch constructs none of the optional AgentRun components |
 | `vyane-mcp` | `vyane-service`, `vyane-workflow`, `rmcp` 3.3 | nine base tools plus an object-safe workflow-control port; it owns no daemon descriptor or credential; stdio dual-era handshake keeps `initialize` on 2025-11-25 and advertises MCP 2026-07-28 through discovery |
-| `vyane-cli` | every other workspace crate except `vyane-provider` (reached through `vyane-config`), plus `axum` | assembler: CLI + bearer-authenticated loopback-only REST API + authenticated local workflow daemon + twelve-tool MCP launcher with a verified daemon adapter |
+| `vyane-cli` | every other workspace crate except `vyane-provider` (reached through `vyane-config`), plus `axum` | assembler: CLI + bearer-authenticated loopback-only REST API + authenticated local workflow daemon + twelve-tool MCP launcher with a verified daemon adapter. `vyane acp` is a separate stdio echo shell and does not load config, dispatch, or open storage |
 
 `ChatClient::complete_turn` is an additive typed boundary. Its default fallback
 keeps text-only clients source-compatible but delegates only when the request
