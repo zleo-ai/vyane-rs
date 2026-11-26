@@ -921,6 +921,7 @@ fn open_lock(path: &Path) -> Result<File, PresenceError> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)
         .map_err(PresenceError::Io)
 }
