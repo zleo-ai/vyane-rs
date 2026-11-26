@@ -401,6 +401,7 @@ pub(crate) fn route_preview(
             extra_tags: params.extra_tags,
             candidate_profiles: params.candidate_profiles,
             allow_frontier: params.allow_frontier,
+            quota_snapshot: None,
         },
     )
     .map_err(|_| static_config_error("routing configuration cannot produce a preview"))?;

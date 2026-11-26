@@ -7,8 +7,14 @@
 //! reads `tier`/`tags` from configured profiles, builds a
 //! [`RoutePreferenceTable`], calls [`vyane_router::route_task`], and maps the
 //! decision back to a profile name the dispatch path understands.
+//!
+//! When the caller supplies a local quota snapshot path, automatic routing
+//! may drop a busy subscription profile before that preference table is
+//! built. The snapshot is not opened otherwise. A missing or unreadable file
+//! leaves the candidate list, and therefore the route, unchanged.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use vyane_config::{RawFailoverElement, ResolvedConfig};
@@ -40,6 +46,10 @@ pub struct RouteParams {
     pub candidate_profiles: Vec<String>,
     /// Whether frontier-tier profiles may be selected. Defaults to true.
     pub allow_frontier: bool,
+    /// Local quota snapshot. `None` does not open a file. A path is read only
+    /// while choosing an automatic route; a missing or unreadable snapshot
+    /// leaves that route unchanged.
+    pub quota_snapshot: Option<PathBuf>,
 }
 
 impl Default for RouteParams {
@@ -55,6 +65,7 @@ impl Default for RouteParams {
             extra_tags: Vec::new(),
             candidate_profiles: Vec::new(),
             allow_frontier: true,
+            quota_snapshot: None,
         }
     }
 }
@@ -87,6 +98,20 @@ pub fn plan_dispatch(
     selector: &str,
     task: &mut TaskSpec,
 ) -> Result<DispatchPlan> {
+    plan_dispatch_with(loaded, selector, task, None)
+}
+
+/// Same as [`plan_dispatch`], with an optional local quota snapshot.
+///
+/// The path is opened only when `selector` is `auto`. Any other selector
+/// ignores it and does not open the file. When the file is missing or the
+/// read fails, the automatic route matches [`plan_dispatch`].
+pub fn plan_dispatch_with(
+    loaded: &LoadedConfig,
+    selector: &str,
+    task: &mut TaskSpec,
+    quota_snapshot: Option<&Path>,
+) -> Result<DispatchPlan> {
     if !selector.eq_ignore_ascii_case("auto") {
         return Ok(DispatchPlan {
             selector: selector.to_string(),
@@ -95,7 +120,8 @@ pub fn plan_dispatch(
         });
     }
 
-    let route_params = route_params_from_labels(task.prompt.clone(), &task.labels)?;
+    let mut route_params = route_params_from_labels(task.prompt.clone(), &task.labels)?;
+    route_params.quota_snapshot = quota_snapshot.map(Path::to_path_buf);
     let allow_frontier = route_params.allow_frontier;
     let route = route_task(&loaded.config, route_params)?;
     let chain = resolve_target_chain(loaded, &route.profile)?;
@@ -167,6 +193,10 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
         Some(tier) if tier.eq_ignore_ascii_case("frontier") => 2,
         _ => 3,
     });
+
+    if let Some(path) = params.quota_snapshot.as_deref() {
+        apply_quota_candidate_filter(&mut candidates, path);
+    }
 
     // Build the preference table from profile tier/tags/stage.
     let mut tag_preferences: BTreeMap<String, RouteTargetPreference> = BTreeMap::new();
@@ -337,6 +367,35 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
         .unwrap_or_else(|| effort_for_tier(decision.tier));
 
     Ok(RouteResult { decision, profile })
+}
+
+fn apply_quota_candidate_filter<'a>(
+    candidates: &mut Vec<(&'a String, &'a vyane_config::ProfilePatch)>,
+    path: &Path,
+) {
+    let pairs = candidates
+        .iter()
+        .filter_map(|(name, patch)| {
+            patch
+                .provider
+                .clone()
+                .map(|provider| ((*name).clone(), provider))
+        })
+        .collect::<Vec<_>>();
+    let Some(pool) = crate::quota_route::narrow_auto_candidates(&pairs, path) else {
+        return;
+    };
+    if pool.is_empty() {
+        return;
+    }
+    let narrowed = candidates
+        .iter()
+        .copied()
+        .filter(|(name, _)| pool.iter().any(|kept| kept.as_str() == name.as_str()))
+        .collect::<Vec<_>>();
+    if !narrowed.is_empty() {
+        *candidates = narrowed;
+    }
 }
 
 fn validate_route_param_values(config: &ResolvedConfig, params: &RouteParams) -> Result<()> {
@@ -1501,5 +1560,253 @@ effort = "xhigh"
         let result = route_task(&config, params).unwrap();
         // "fix...crash...bug" should classify as debug intent.
         assert!(!result.decision.intent.is_empty());
+    }
+
+    #[test]
+    fn local_quota_snapshot_drops_busy_profile_only_when_enabled() {
+        let directory = crate::test_support::private_tempdir();
+        let config_path = directory.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[providers.busy-provider]
+base_url = "https://busy.example.invalid"
+auth_style = "bearer"
+protocol = "openai_chat"
+default_model = "busy-model"
+
+[providers.free-provider]
+base_url = "https://free.example.invalid"
+auth_style = "bearer"
+protocol = "openai_chat"
+default_model = "free-model"
+
+[profiles.busy]
+provider = "busy-provider"
+protocol = "openai_chat"
+harness = "none"
+model = "busy-model"
+tier = "economy"
+
+[profiles.free]
+provider = "free-provider"
+protocol = "openai_chat"
+harness = "none"
+model = "free-model"
+tier = "economy"
+"#,
+        )
+        .unwrap();
+        let loaded = crate::config::load_config(Some(&config_path)).unwrap();
+        let snapshot_path = directory.path().join("quota-snapshot.json");
+        let missing_path = directory.path().join("missing-quota-snapshot.json");
+        let corrupt_path = directory.path().join("corrupt-quota-snapshot.json");
+        std::fs::write(&snapshot_path, fresh_subscription_snapshot()).unwrap();
+        std::fs::write(&corrupt_path, "{").unwrap();
+
+        let off = route_task(
+            &loaded.config,
+            RouteParams {
+                task: "ping".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(off.profile, "busy");
+        let off_bytes = decision_bytes(&off.decision);
+
+        for path in [
+            missing_path.as_path(),
+            directory.path(),
+            corrupt_path.as_path(),
+        ] {
+            let unchanged = route_task(
+                &loaded.config,
+                RouteParams {
+                    task: "ping".into(),
+                    quota_snapshot: Some(path.to_path_buf()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(decision_bytes(&unchanged.decision), off_bytes, "{path:?}");
+            assert_eq!(unchanged.profile, off.profile);
+        }
+
+        let stale_path = directory.path().join("stale-quota-snapshot.json");
+        std::fs::write(&stale_path, stale_subscription_snapshot()).unwrap();
+        let stale = route_task(
+            &loaded.config,
+            RouteParams {
+                task: "ping".into(),
+                quota_snapshot: Some(stale_path),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(decision_bytes(&stale.decision), off_bytes);
+
+        let ignored = route_task(
+            &loaded.config,
+            RouteParams {
+                task: "ping".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(decision_bytes(&ignored.decision), off_bytes);
+        assert!(!decision_text(&off_bytes).contains("snapshot-note-not-routed"));
+
+        let filtered = route_task(
+            &loaded.config,
+            RouteParams {
+                task: "ping".into(),
+                quota_snapshot: Some(snapshot_path.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered.profile, "free");
+        assert_eq!(filtered.decision.provider, "free-provider");
+        assert_ne!(decision_bytes(&filtered.decision), off_bytes);
+        let filtered_text = decision_text(&decision_bytes(&filtered.decision));
+        assert!(!filtered_text.contains("snapshot-note-not-routed"));
+        assert!(!filtered_text.contains("busy-provider"));
+
+        let mut off_task = TaskSpec::new("ping");
+        let mut missing_task = TaskSpec::new("ping");
+        let mut filtered_task = TaskSpec::new("ping");
+        let mut named_off_task = TaskSpec::new("ping");
+        let mut named_on_task = TaskSpec::new("ping");
+        let auto_off = plan_dispatch(&loaded, "auto", &mut off_task).unwrap();
+        let auto_missing =
+            plan_dispatch_with(&loaded, "auto", &mut missing_task, Some(&missing_path)).unwrap();
+        let auto_filtered =
+            plan_dispatch_with(&loaded, "auto", &mut filtered_task, Some(&snapshot_path)).unwrap();
+        assert_eq!(plan_bytes(&auto_missing), plan_bytes(&auto_off));
+        assert_eq!(missing_task.labels, off_task.labels);
+        assert_eq!(auto_off.selector, "busy");
+        assert_eq!(auto_filtered.selector, "free");
+        assert_ne!(plan_bytes(&auto_filtered), plan_bytes(&auto_off));
+
+        let named_off = plan_dispatch(&loaded, "busy", &mut named_off_task).unwrap();
+        let named_on =
+            plan_dispatch_with(&loaded, "busy", &mut named_on_task, Some(directory.path()))
+                .unwrap();
+        let named_with_snapshot = plan_dispatch_with(
+            &loaded,
+            "busy",
+            &mut TaskSpec::new("ping"),
+            Some(&snapshot_path),
+        )
+        .unwrap();
+        assert_eq!(plan_bytes(&named_on), plan_bytes(&named_off));
+        assert_eq!(plan_bytes(&named_with_snapshot), plan_bytes(&named_off));
+        assert_eq!(named_on.selector, "busy");
+        assert!(named_on.route.is_none());
+        assert_eq!(named_on.chain[0].target.model.as_str(), "busy-model");
+    }
+
+    fn decision_text(bytes: &[u8]) -> String {
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn decision_bytes(decision: &vyane_router::RouteDecision) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec_pretty(decision).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn plan_bytes(plan: &DispatchPlan) -> Vec<u8> {
+        let decision = plan
+            .route
+            .as_ref()
+            .map(|route| serde_json::to_value(&route.decision).unwrap());
+        let chain = plan
+            .chain
+            .iter()
+            .map(|bound| {
+                serde_json::json!({
+                    "provider": bound.target.provider.as_str(),
+                    "protocol": bound.target.protocol.as_str(),
+                    "harness": bound.target.harness.as_ref().map(|kind| kind.as_str()),
+                    "model": bound.target.model.as_str(),
+                    "transport": bound.transport.as_str(),
+                    "effort": bound.params.effort.map(|effort| effort.as_str()),
+                    "endpoint": bound.endpoint.as_ref().map(|endpoint| &endpoint.base_url),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_vec(&serde_json::json!({
+            "selector": &plan.selector,
+            "decision": decision,
+            "chain": chain,
+        }))
+        .unwrap()
+    }
+
+    fn fresh_subscription_snapshot() -> String {
+        subscription_snapshot(now_ms(), 96.0, 2.1, 40.0, 1.0)
+    }
+
+    fn stale_subscription_snapshot() -> String {
+        subscription_snapshot(now_ms() - 3 * 60 * 60 * 1_000, 96.0, 2.1, 40.0, 1.0)
+    }
+
+    fn subscription_snapshot(
+        generated_at_ms: i64,
+        busy_used: f64,
+        busy_pace: f64,
+        free_used: f64,
+        free_pace: f64,
+    ) -> String {
+        let week_ms = 7 * 24 * 3_600 * 1_000;
+        let five_hours_ms = 5 * 3_600 * 1_000;
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "generated_at_ms": generated_at_ms,
+            "probe_status": "ok",
+            "note": "snapshot-note-not-routed",
+            "providers": [
+                {
+                    "provider": "busy-provider",
+                    "kind": "subscription",
+                    "windows": [
+                        window("busy-provider:5h", 99.0, 5.0, five_hours_ms),
+                        window("anthropic:7d:fable", 1.0, 0.1, week_ms),
+                        window("xai-oauth:product:side", 1.0, 0.1, week_ms),
+                        window("busy-provider:7d", busy_used, busy_pace, week_ms),
+                    ]
+                },
+                {
+                    "provider": "free-provider",
+                    "kind": "subscription",
+                    "windows": [
+                        window("free-provider:5h", 99.0, 5.0, five_hours_ms),
+                        window("free-provider:7d", free_used, free_pace, week_ms),
+                    ]
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn window(id: &str, used_pct: f64, pace_ratio: f64, duration_ms: i64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "duration_ms": duration_ms,
+            "used_pct": used_pct,
+            "pace_ratio": pace_ratio,
+        })
+    }
+
+    fn now_ms() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
     }
 }
