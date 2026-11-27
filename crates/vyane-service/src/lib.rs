@@ -53,6 +53,7 @@ mod native_permissions;
 mod outcomes;
 mod owner;
 mod quota_route;
+mod quota_snapshot_view;
 mod routing;
 mod selector;
 mod service;
@@ -164,6 +165,11 @@ pub use outcomes::{
 pub use owner::{
     AuthenticatedPrincipal, OwnerContext, OwnerContextError, OwnerContextFactory,
     PrincipalAuthenticator, PrincipalOwnerResolver,
+};
+pub use quota_snapshot_view::{
+    QUOTA_SNAPSHOT_FUTURE_TOLERANCE_MS, QUOTA_SNAPSHOT_MAX_BYTES, QUOTA_SNAPSHOT_READ_SCHEMA,
+    QUOTA_SNAPSHOT_STALE_AFTER_MS, QuotaSnapshotReadReason, QuotaSnapshotReadState,
+    QuotaSnapshotReadView, quota_snapshot_read_view,
 };
 pub use routing::{
     DispatchPlan, RouteParams, RouteResult, plan_dispatch, plan_dispatch_with,
