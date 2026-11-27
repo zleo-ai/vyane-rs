@@ -1,9 +1,10 @@
 //! # vyane-harness
 //!
 //! CLI harness adapters implementing [`vyane_core::Harness`]: Claude Code, the
-//! Codex CLI, a Cursor CLI one-round JSON adapter, and a Grok Build one-round
-//! JSON adapter. Each wraps a coding CLI as a headless one-shot execution
-//! shell — a scrubbed child environment built strictly through
+//! Codex CLI, a Cursor CLI one-round JSON adapter, a Grok Build one-round JSON
+//! adapter, and an OpenCode one-round JSON adapter. Each wraps a coding CLI as
+//! a headless one-shot execution shell — a scrubbed child environment built
+//! strictly through
 //! [`vyane_core::EnvPolicy`], a process-group spawn so cancel/timeout kills the
 //! whole tree (not just the direct child), and machine-readable output parsed
 //! down to the final answer + native session id + usage.
@@ -44,6 +45,21 @@
 //! `XAI_API_KEY` is removed from the child environment. Callers construct this
 //! adapter directly. The assembler support matrix stays Claude Code and Codex
 //! CLI.
+//! [`OpencodeHarness`] invokes `opencode run <prompt> --format json` for one
+//! shot. The prompt is an argument and stdin stays closed. `--model` comes
+//! from the job model, or from `params.extra["model"]` when the job model is
+//! empty. A provider string in `params.extra` is joined as `provider/model`
+//! when the model does not already contain `/`. `job.resume` is `--session`.
+//! No sandbox tier adds a flag, and no environment name is removed after the
+//! policy is applied. An endpoint on the job is not injected and is not
+//! refused. NDJSON `type=text` parts, plus non-JSON lines other than a
+//! `Session:` fallback, are the answer. `sessionID` is the session id.
+//! `type=error` and `event_error` fail the run. `type=step_finish` token
+//! input and output map onto [`vyane_core::Usage`]; `total` is not a field of
+//! that type. Callers construct this adapter directly. The assembler support
+//! matrix stays Claude Code and Codex CLI. Auto, failover, and broadcast do
+//! not gain an OpenCode default pool. It is not listed in the endpoint table
+//! above: there is no documented environment override to inject or remove.
 //!
 //! When the endpoint is `None` the harness authenticates natively and injects
 //! nothing for auth — the scrubbed baseline is all the child sees.
@@ -66,6 +82,7 @@ mod codex_cli;
 mod cursor_cli;
 mod grok_build;
 pub mod native;
+mod opencode;
 mod parse;
 pub mod presence;
 mod probe;
@@ -75,3 +92,4 @@ pub use claude_code::ClaudeCodeHarness;
 pub use codex_cli::CodexCliHarness;
 pub use cursor_cli::CursorCliHarness;
 pub use grok_build::GrokBuildHarness;
+pub use opencode::OpencodeHarness;
