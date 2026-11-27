@@ -276,14 +276,13 @@ fn emit(text: Result<String, serde_json::Error>) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::HashMap;
     use std::ffi::OsString;
     use std::path::Path;
-    use std::time::Duration;
 
     use super::{
-        ServerCommand, SmokeFailure, SmokeSuccess, prepare_child_env, probe, read_timeout,
-        render_failure, render_success, select_tools,
+        SmokeFailure, SmokeSuccess, prepare_child_env, read_timeout, render_failure,
+        render_success, select_tools,
     };
 
     #[test]
@@ -376,9 +375,18 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn bad_server_process_fails_and_leaves_the_directory_alone() {
+        use std::collections::BTreeSet;
+        use std::time::Duration;
+
+        use super::{ServerCommand, probe};
+
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("sentinel"), "untouched").unwrap();
-        let mut env = HashMap::new();
+        // /bin/true with only HOME and VYANE_DATA_DIR failed on macOS CI as
+        // std::io::Error, before the client classified the handshake. This
+        // binary's --help starts and is not an MCP server. Home and the data
+        // directory stay in this temp dir.
+        let mut env: HashMap<OsString, OsString> = std::env::vars_os().collect();
         env.insert(
             OsString::from("HOME"),
             root.path().as_os_str().to_os_string(),
@@ -387,18 +395,20 @@ mod tests {
             OsString::from("VYANE_DATA_DIR"),
             root.path().join("vyane-data").as_os_str().to_os_string(),
         );
+        let program = std::env::current_exe().unwrap();
+        let args = [OsString::from("--help")];
         let error = probe(
             ServerCommand {
-                program: Path::new("/bin/true"),
-                args: &[],
+                program: &program,
+                args: &args,
                 cwd: root.path(),
                 env: &env,
             },
-            Duration::from_secs(2),
+            Duration::from_secs(5),
         )
         .await
         .expect_err("a process that is not an MCP server");
-        assert_eq!(error.error_type, "ClientInitializeError");
+        assert_eq!(error.error_type, "ClientInitializeError", "{}", error.error);
         assert!(!error.error.is_empty());
         assert_eq!(
             std::fs::read_to_string(root.path().join("sentinel")).unwrap(),
