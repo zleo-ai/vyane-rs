@@ -2489,12 +2489,14 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio-util",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -18,9 +18,10 @@
 //! provider; a model id is only valid within one provider). Vyane keeps them
 //! as separate fields from configuration all the way into the run ledger.
 //!
-//! This crate contains only types, traits and pure helpers. Runtime behaviour
-//! lives in the sibling crates (`vyane-kernel`, `vyane-protocol`,
-//! `vyane-harness`, `vyane-ledger`, …).
+//! This crate contains types, traits and pure helpers, plus the [`securefile`]
+//! primitives. Those primitives are not used by the kernel, the ledger, or
+//! the CLI. Runtime orchestration lives in the sibling crates
+//! (`vyane-kernel`, `vyane-protocol`, `vyane-harness`, `vyane-ledger`, …).
 
 pub mod chat;
 pub mod cost;
@@ -30,6 +31,7 @@ pub mod identifier;
 pub mod native_authority;
 pub mod receipt;
 pub mod run;
+pub mod securefile;
 pub mod session;
 pub mod target;
 pub mod task;
@@ -55,6 +57,12 @@ pub use receipt::{
     ReviewFindingDisposition, RiskClass, RouteConfig, TaskCase,
 };
 pub use run::{Attempt, AttemptOutcome, RunQuery, RunRecord, RunStatus, Usage};
+pub use securefile::{
+    IS_WINDOWS, LinkStat, OpenFlags, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, PinnedDirectory,
+    PrivateProblem, SecureFileError, SecureTarget, StatSnapshot, current_user_id, fsync_directory,
+    is_link_stat, make_private, make_private_fd, open_nofollow, owned_by_current_user,
+    pin_directory, private_problem, replace,
+};
 pub use session::{
     NativeSessionBinding, NativeSessionDomain, NativeSessionState, NativeSessionTransition,
     SessionRecord, SessionRef, SessionSnapshot, SessionUpdate,
