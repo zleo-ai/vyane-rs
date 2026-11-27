@@ -35,6 +35,7 @@ mod agent_execution;
 mod agent_recovery;
 mod agent_supervisor;
 mod approval_fsm;
+mod codex_sandbox_orphans;
 mod config;
 mod diagnostics;
 mod dispatch_event;
@@ -90,6 +91,12 @@ pub use agent_supervisor::{
 };
 pub use approval_fsm::{
     DeliveryEvent, DeliveryPhase, DeliveryTransitionError, transition as transition_delivery,
+};
+pub use codex_sandbox_orphans::{
+    CodexSandboxOrphan, CodexSandboxOrphanQuery, CodexSandboxOrphanReport,
+    DEFAULT_WARN_AFTER_SECONDS as SANDBOX_ORPHAN_WARN_AFTER_SECONDS,
+    SCHEMA as CODEX_SANDBOX_ORPHANS_SCHEMA, SubjectUid, render_sandbox_orphan_report,
+    scan_codex_sandbox_orphans,
 };
 pub use config::{LoadedConfig, Runtime, StoragePaths, load_config};
 pub use diagnostics::{
