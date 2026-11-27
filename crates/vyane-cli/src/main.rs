@@ -11,6 +11,7 @@ mod agent_process;
 mod agent_spool;
 mod api;
 mod app;
+mod clean;
 mod cli;
 mod command;
 mod daemon;
