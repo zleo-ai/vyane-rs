@@ -28,6 +28,7 @@ pub mod env;
 pub mod error;
 pub mod identifier;
 pub mod native_authority;
+pub mod pathsformats;
 pub mod receipt;
 pub mod run;
 pub mod session;
@@ -47,6 +48,9 @@ pub use identifier::{
     IdentifierProblem, InvalidIdentifier, identifier_problem, validate_identifier,
 };
 pub use native_authority::{NativeExecutionAuthority, NativeSideEffect};
+pub use pathsformats::{
+    local_locator_kind, read_text_exact, strip_extended_path_prefix, windows_filename_problem,
+};
 pub use receipt::{
     AttemptFailureClass, AttemptStatus, BillingModeCategory, CompletionReceipt, CostEvidence,
     EndpointClass, GATE_CI_PACKAGING, GATE_INDEPENDENT_REVIEW, GATE_INTEGRATION, GATE_TRUTH_PROBE,
