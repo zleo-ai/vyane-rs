@@ -100,9 +100,37 @@ pub enum Command {
     },
     /// Run the MCP server over stdio (for use as an MCP tool server).
     Mcp,
+    /// Verify local MCP stdio startup with a real MCP client.
+    McpSmoke(McpSmokeArgs),
     /// Internal: execute a detached run. Not for direct use.
     #[command(name = "__worker", hide = true)]
     Worker(WorkerArgs),
+}
+
+/// Arguments for `vyane mcp-smoke`.
+#[derive(Debug, Args)]
+pub struct McpSmokeArgs {
+    /// MCP client read timeout in seconds (default: 10).
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        allow_negative_numbers = true,
+        default_value_t = 10.0
+    )]
+    pub timeout: f64,
+
+    /// Maximum tool names to print (default: 12).
+    #[arg(
+        long,
+        value_name = "N",
+        allow_negative_numbers = true,
+        default_value_t = 12
+    )]
+    pub tool_limit: i64,
+
+    /// Output as JSON (for scripts and CI).
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1685,5 +1713,51 @@ mod tests {
                 "{unknown} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn mcp_smoke_parser_defaults_and_overrides() {
+        let parsed = Cli::try_parse_from(["vyane", "mcp-smoke"]).unwrap();
+        let Command::McpSmoke(args) = parsed.command else {
+            panic!("expected mcp-smoke");
+        };
+        assert_eq!(args.timeout, 10.0);
+        assert_eq!(args.tool_limit, 12);
+        assert!(!args.json);
+
+        let parsed = Cli::try_parse_from([
+            "vyane",
+            "mcp-smoke",
+            "--timeout",
+            "3.5",
+            "--tool-limit",
+            "2",
+            "--json",
+        ])
+        .unwrap();
+        let Command::McpSmoke(args) = parsed.command else {
+            panic!("expected mcp-smoke");
+        };
+        assert_eq!(args.timeout, 3.5);
+        assert_eq!(args.tool_limit, 2);
+        assert!(args.json);
+
+        let parsed = Cli::try_parse_from([
+            "vyane",
+            "mcp-smoke",
+            "--timeout",
+            "-0.5",
+            "--tool-limit",
+            "-3",
+        ])
+        .unwrap();
+        let Command::McpSmoke(args) = parsed.command else {
+            panic!("expected mcp-smoke");
+        };
+        assert_eq!(args.timeout, -0.5);
+        assert_eq!(args.tool_limit, -3);
+
+        assert!(Cli::try_parse_from(["vyane", "mcp-smoke", "--timeout", "fast"]).is_err());
+        assert!(Cli::try_parse_from(["vyane", "mcp-smoke", "--tool-limit", "1.5"]).is_err());
     }
 }

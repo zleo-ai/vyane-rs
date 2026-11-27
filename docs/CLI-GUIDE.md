@@ -41,6 +41,63 @@ workdirs and sandboxes above read-only are rejected before daemon contact. This 
 workflow control, not general task, board, collaboration, or multi-principal
 MCP parity.
 
+## Local MCP stdio smoke
+
+`vyane mcp-smoke` starts this binary's `mcp` subcommand on stdio and checks it
+with a real MCP client. The client sends `initialize` and `tools/list`. It does
+not call a tool, so it does not dispatch, broadcast, or write the run ledger.
+There is no HTTP or SSE transport.
+
+```sh
+vyane mcp-smoke
+vyane mcp-smoke --json --tool-limit 2 --timeout 10
+```
+
+`--timeout` is the client read timeout in seconds. The default is 10.
+`--tool-limit` is how many tool names to keep after sorting them. The default
+is 12. A limit of zero or less keeps an empty `tools` list; `tool_count` is
+still the number of names the server advertised. `--json` prints one JSON
+object for scripts.
+
+On success the object has `status` `"success"`, `transport` `"stdio"`,
+`tool_count`, `tools`, and `elapsed_ms`. `tools` is a prefix of the sorted
+names the live server advertised. `elapsed_ms` is the measured handshake time.
+With `--tool-limit 2` the shape is:
+
+```json
+{
+  "status": "success",
+  "transport": "stdio",
+  "tool_count": 12,
+  "tools": [
+    "vyane_broadcast",
+    "vyane_check"
+  ],
+  "elapsed_ms": 40
+}
+```
+
+`elapsed_ms` varies from run to run. Without `--json` the same result prints:
+
+```text
+MCP stdio smoke OK: 12 tool(s), 40ms
+  vyane_broadcast, vyane_check
+```
+
+The second line is omitted when `tools` is empty.
+
+On failure the object has `status` `"error"`, `transport` `"stdio"`,
+`error_type` (the error's type name), and `error` (the error text). `--json`
+prints that object. Otherwise the command prints
+`MCP stdio smoke failed: {error_type}: {error}`. The process exits 1.
+
+The server is given a temporary config file and a temporary `VYANE_DATA_DIR`.
+The command does not open the default home data directory, a project config, or
+a `--config` path passed to `mcp-smoke`. The child environment is a copy of the
+parent environment. `PYTHONUNBUFFERED` defaults to `1` and `VYANE_LOG_LEVEL`
+defaults to `WARNING` when those variables are unset. The child working
+directory is the caller's current directory.
+
 ## Agent Client Protocol canned stub
 
 `vyane acp` is a newline-delimited [Agent Client Protocol](https://agentclientprotocol.com)
