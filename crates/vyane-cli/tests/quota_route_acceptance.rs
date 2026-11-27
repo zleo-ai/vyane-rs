@@ -101,6 +101,7 @@ fn route(
     let mut command = Command::cargo_bin("vyane").expect("vyane binary");
     command
         .env("HOME", home)
+        .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join("config-home"))
         .env_remove("VYANE_MANAGED_PERMISSION_CONFIG")
         .env_remove("VYANE_MANAGED_NATIVE_CONFIG")

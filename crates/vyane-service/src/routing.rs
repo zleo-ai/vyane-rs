@@ -388,8 +388,46 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
 fn default_quota_snapshot_path() -> Option<PathBuf> {
     quota_snapshot_path(
         std::env::var_os("XDG_STATE_HOME").as_deref(),
-        dirs::home_dir().as_deref(),
+        process_home_dir().as_deref(),
     )
+}
+
+/// Unix uses `HOME` when it is non-empty, then the password entry. Windows
+/// uses `USERPROFILE` when it is non-empty, then `HOMEDRIVE` joined with
+/// `HOMEPATH`, then the profile folder. An empty variable is skipped.
+fn process_home_dir() -> Option<PathBuf> {
+    home_for_quota_snapshot(
+        cfg!(windows),
+        std::env::var_os("HOME").as_deref(),
+        std::env::var_os("USERPROFILE").as_deref(),
+    )
+    .or_else(home_from_drive)
+    .or_else(dirs::home_dir)
+}
+
+fn home_for_quota_snapshot(
+    windows: bool,
+    home: Option<&OsStr>,
+    user_profile: Option<&OsStr>,
+) -> Option<PathBuf> {
+    let chosen = if windows { user_profile } else { home };
+    chosen.filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+fn home_from_drive() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let drive = std::env::var_os("HOMEDRIVE")?;
+        let path = std::env::var_os("HOMEPATH")?;
+        if drive.is_empty() || path.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(drive).join(path))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 /// `$XDG_STATE_HOME/aios/quota-snapshot.json`, or `home/.local/state/aios/quota-snapshot.json`
@@ -1879,5 +1917,22 @@ tier = "economy"
                 .join("quota-snapshot.json")
         );
         assert!(quota_snapshot_path(None, None).is_none());
+    }
+
+    #[test]
+    fn quota_home_uses_userprofile_on_windows_and_home_on_unix() {
+        let home = OsStr::new("/tmp/home");
+        let profile = OsStr::new(r"C:\Users\ada");
+        assert_eq!(
+            home_for_quota_snapshot(false, Some(home), Some(profile)).unwrap(),
+            Path::new("/tmp/home")
+        );
+        assert_eq!(
+            home_for_quota_snapshot(true, Some(home), Some(profile)).unwrap(),
+            Path::new(r"C:\Users\ada")
+        );
+        assert!(home_for_quota_snapshot(true, Some(home), Some(OsStr::new(""))).is_none());
+        assert!(home_for_quota_snapshot(false, None, Some(profile)).is_none());
+        assert!(home_for_quota_snapshot(false, Some(OsStr::new("")), Some(profile)).is_none());
     }
 }
