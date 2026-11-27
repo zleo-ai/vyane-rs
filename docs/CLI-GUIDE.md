@@ -41,13 +41,32 @@ workdirs and sandboxes above read-only are rejected before daemon contact. This 
 workflow control, not general task, board, collaboration, or multi-principal
 MCP parity.
 
-## Agent Client Protocol echo shell
+## Agent Client Protocol canned stub
 
 `vyane acp` is a newline-delimited [Agent Client Protocol](https://agentclientprotocol.com)
-agent on stdin and stdout. It answers `initialize`, keeps `session/new` in
-memory, and returns the prompt's text blocks as one `agent_message_chunk`
-with `stopReason` `end_turn`. Resource and resource-link blocks are accepted
-and not opened. Closing stdin exits 0.
+agent on stdin and stdout. `--stub` is optional. With or without it, the
+command serves the canned stub. It answers `initialize` and keeps `session/new`
+in memory. `session/prompt` then streams one canned turn, in this order:
+
+1. a `plan` whose entries are "Receive the prompt" (`completed`), "Stream a
+   canned echo turn" (`in_progress`), and "Return a stopReason" (`pending`),
+   each at priority `medium`
+2. four `agent_message_chunk` text frames: `Vyane ACP M1 stub agent — `,
+   `this is a canned turn (no model was dispatched). `, `You said: `, and the
+   prompt text
+3. a demo `tool_call` named `stub.echo` (`toolCallId` `tc-stub-echo`, kind
+   `other`, status `in_progress`) whose `rawInput.prompt` is the prompt text
+   truncated to 200 characters, then a `tool_call_update` that marks it
+   `completed` with the text `stub tool ok`
+
+Text blocks in the prompt are concatenated, then leading and trailing
+whitespace is removed. An empty prompt is echoed as `(empty prompt)`. Resource
+and resource-link blocks are accepted and not opened. Image, audio, and other
+blocks are rejected. The turn then returns `stopReason` `end_turn`.
+
+`session/cancel` for that session during the turn stops it. The same prompt
+returns `stopReason` `cancelled`, and frames that have not been sent yet are
+omitted. Closing stdin exits 0.
 
 This shell is separate from the service layer used by the CLI, REST, and MCP
 entry points. It does not load configuration, read credentials, dispatch a
