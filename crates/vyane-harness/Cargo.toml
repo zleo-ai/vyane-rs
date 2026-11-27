@@ -35,6 +35,9 @@ rustix = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+winapi-util = { workspace = true }
+
 [dev-dependencies]
 serde = { workspace = true }
 static_assertions = { workspace = true }

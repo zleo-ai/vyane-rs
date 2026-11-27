@@ -381,19 +381,39 @@ fn reject_writable(raw: &Path, work: &Path, home: &Path) -> Result<(), ReadOnlyV
     Ok(())
 }
 
-fn link_count(meta: &fs::Metadata) -> u64 {
+fn link_count(path: &Path, meta: &fs::Metadata) -> Result<u64, ReadOnlyViewError> {
     #[cfg(unix)]
     {
-        std::os::unix::fs::MetadataExt::nlink(meta)
+        let _ = path;
+        Ok(std::os::unix::fs::MetadataExt::nlink(meta))
     }
+    // `MetadataExt::number_of_links` is unstable (`windows_by_handle`). Read the
+    // count through the stable handle query. A failed read is an error: the
+    // check must not assume the file has one link.
     #[cfg(windows)]
     {
-        std::os::windows::fs::MetadataExt::number_of_links(meta)
+        let _ = meta;
+        let file = fs::File::open(path).map_err(|err| {
+            view_err(format!(
+                "cannot read hardlink count for {}: {err}",
+                path.display()
+            ))
+        })?;
+        let info = winapi_util::file::information(&file).map_err(|err| {
+            view_err(format!(
+                "cannot read hardlink count for {}: {err}",
+                path.display()
+            ))
+        })?;
+        Ok(info.number_of_links())
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = meta;
-        1
+        Err(view_err(format!(
+            "cannot read hardlink count for {}",
+            path.display()
+        )))
     }
 }
 
@@ -409,13 +429,13 @@ fn path_list(paths: &[impl AsRef<Path>]) -> Vec<PathBuf> {
 /// `limit` stops the walk after that many matches. `None` returns every match.
 /// Symlinks and directories are ignored. An empty path is ignored so it cannot
 /// mean the process working directory. A directory that cannot be listed is
-/// skipped.
+/// skipped. A regular file whose link count cannot be read is an error.
 pub fn find_hardlink_escapes(
     writable_dirs: &[impl AsRef<Path>],
     limit: Option<usize>,
-) -> Vec<PathBuf> {
+) -> Result<Vec<PathBuf>, ReadOnlyViewError> {
     if limit == Some(0) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut offenders = Vec::new();
     for raw in writable_dirs {
@@ -426,15 +446,19 @@ pub fn find_hardlink_escapes(
         let Ok(root) = realpath(raw) else {
             continue;
         };
-        walk_hardlinks(&root, limit, &mut offenders);
+        walk_hardlinks(&root, limit, &mut offenders)?;
         if limit.is_some_and(|max| offenders.len() >= max) {
             break;
         }
     }
-    offenders
+    Ok(offenders)
 }
 
-fn walk_hardlinks(root: &Path, limit: Option<usize>, offenders: &mut Vec<PathBuf>) {
+fn walk_hardlinks(
+    root: &Path,
+    limit: Option<usize>,
+    offenders: &mut Vec<PathBuf>,
+) -> Result<(), ReadOnlyViewError> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -457,10 +481,10 @@ fn walk_hardlinks(root: &Path, limit: Option<usize>, offenders: &mut Vec<PathBuf
                 children.push(path);
                 continue;
             }
-            if file_type.is_file() && link_count(&meta) > 1 {
+            if file_type.is_file() && link_count(&path, &meta)? > 1 {
                 offenders.push(path);
                 if limit.is_some_and(|max| offenders.len() >= max) {
-                    return;
+                    return Ok(());
                 }
             }
         }
@@ -468,6 +492,7 @@ fn walk_hardlinks(root: &Path, limit: Option<usize>, offenders: &mut Vec<PathBuf
             stack.push(child);
         }
     }
+    Ok(())
 }
 
 fn hardlink_refusal(offenders: &[PathBuf]) -> ReadOnlyViewError {
@@ -495,7 +520,7 @@ pub fn assert_no_hardlink_escape(
     writable_dirs: &[impl AsRef<Path>],
 ) -> Result<(), ReadOnlyViewError> {
     let owned = path_list(writable_dirs);
-    let offenders = find_hardlink_escapes(&owned, Some(MAX_HARDLINK_EXAMPLES));
+    let offenders = find_hardlink_escapes(&owned, Some(MAX_HARDLINK_EXAMPLES))?;
     if !offenders.is_empty() {
         return Err(hardlink_refusal(&offenders));
     }
@@ -556,22 +581,22 @@ struct GuardState {
     emitted: BTreeSet<PathBuf>,
 }
 
-fn warnings_from(state: &GuardState) -> Vec<HardlinkEscapeWarning> {
-    let paths = find_hardlink_escapes(&state.writable_dirs, None)
+fn warnings_from(state: &GuardState) -> Result<Vec<HardlinkEscapeWarning>, ReadOnlyViewError> {
+    let paths = find_hardlink_escapes(&state.writable_dirs, None)?
         .into_iter()
         .filter(|path| !state.baseline.contains(path))
         .collect::<Vec<_>>();
     if paths.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let message = hardlink_runtime_message(&paths);
-    vec![HardlinkEscapeWarning {
+    Ok(vec![HardlinkEscapeWarning {
         code: HARDLINK_RUNTIME_WARNING_CODE,
         message,
         paths,
         writable_dirs: state.writable_dirs.clone(),
         action: HARDLINK_RUNTIME_WARNING_ACTION,
-    }]
+    }])
 }
 
 fn fresh_message(state: &mut GuardState, warning: &HardlinkEscapeWarning) -> Option<String> {
@@ -607,12 +632,12 @@ pub struct HardlinkRuntimeGuard {
 }
 
 impl HardlinkRuntimeGuard {
-    fn new(writable_dirs: &[impl AsRef<Path>]) -> Self {
+    fn new(writable_dirs: &[impl AsRef<Path>]) -> Result<Self, ReadOnlyViewError> {
         let writable_dirs = path_list(writable_dirs);
-        let baseline = find_hardlink_escapes(&writable_dirs, None)
+        let baseline = find_hardlink_escapes(&writable_dirs, None)?
             .into_iter()
             .collect();
-        Self {
+        Ok(Self {
             inner: Rc::new(RefCell::new(GuardState {
                 writable_dirs,
                 baseline,
@@ -620,7 +645,7 @@ impl HardlinkRuntimeGuard {
                 closed: false,
                 emitted: BTreeSet::new(),
             })),
-        }
+        })
     }
 
     fn writable_dirs(&self) -> Vec<PathBuf> {
@@ -659,10 +684,13 @@ impl HardlinkRuntimeGuard {
     }
 
     /// Return hardlinks that were not in the baseline. Does not signal a process.
-    pub fn rescan(&self) -> Vec<HardlinkEscapeWarning> {
+    ///
+    /// A link count that cannot be read is an error. The scan does not treat
+    /// that file as a single link.
+    pub fn rescan(&self) -> Result<Vec<HardlinkEscapeWarning>, ReadOnlyViewError> {
         let (found, messages) = {
             let mut state = self.inner.borrow_mut();
-            let found = warnings_from(&state);
+            let found = warnings_from(&state)?;
             let messages = found
                 .iter()
                 .filter_map(|warning| fresh_message(&mut state, warning))
@@ -670,17 +698,20 @@ impl HardlinkRuntimeGuard {
             (found, messages)
         };
         log_messages(&messages);
-        found
+        Ok(found)
     }
 
     /// Scan once. Later calls return the same warnings and do not signal a process.
-    pub fn close(&self) -> Vec<HardlinkEscapeWarning> {
+    ///
+    /// A link count that cannot be read is an error. The scan does not treat
+    /// that file as a single link.
+    pub fn close(&self) -> Result<Vec<HardlinkEscapeWarning>, ReadOnlyViewError> {
         let (warnings, messages) = {
             let mut state = self.inner.borrow_mut();
             if state.closed {
-                return state.warnings.clone();
+                return Ok(state.warnings.clone());
             }
-            let warnings = warnings_from(&state);
+            let warnings = warnings_from(&state)?;
             state.closed = true;
             let messages = warnings
                 .iter()
@@ -690,7 +721,7 @@ impl HardlinkRuntimeGuard {
             (warnings, messages)
         };
         log_messages(&messages);
-        warnings
+        Ok(warnings)
     }
 }
 
@@ -706,7 +737,7 @@ struct CloseOnDrop(HardlinkRuntimeGuard);
 
 impl Drop for CloseOnDrop {
     fn drop(&mut self) {
-        self.0.close();
+        let _ = self.0.close();
     }
 }
 
@@ -714,21 +745,24 @@ impl Drop for CloseOnDrop {
 ///
 /// A second guard for the same directories, opened while the first is still
 /// active, reuses that first guard and does not scan on its own return. The
-/// outer return is the one that warns. The block is not interrupted.
+/// outer return is the one that warns. The block is not interrupted. If the
+/// opening scan cannot read a link count, `body` does not run.
 pub fn hardlink_runtime_guard<R>(
     writable_dirs: &[impl AsRef<Path>],
     body: impl FnOnce(&HardlinkRuntimeGuard) -> R,
-) -> R {
+) -> Result<R, ReadOnlyViewError> {
     let owned = path_list(writable_dirs);
     if let Some(current) = active_guard()
         && !current.is_closed()
         && same_writable_dirs(&current.writable_dirs(), &owned)
     {
-        return body(&current);
+        return Ok(body(&current));
     }
-    let guard = HardlinkRuntimeGuard::new(&owned);
+    let guard = HardlinkRuntimeGuard::new(&owned)?;
     let closer = CloseOnDrop(guard.clone());
-    ACTIVE_HARDLINK_GUARD.sync_scope(guard, || body(&closer.0))
+    let result = ACTIVE_HARDLINK_GUARD.sync_scope(guard, || body(&closer.0));
+    closer.0.close()?;
+    Ok(result)
 }
 
 fn is_sqlite_database(path: &Path) -> bool {
@@ -739,18 +773,19 @@ fn is_sqlite_database(path: &Path) -> bool {
 }
 
 fn is_supported_hide(meta: &fs::Metadata) -> bool {
-    if meta.is_dir() || meta.is_file() {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        meta.file_type().is_socket()
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
+    meta.is_dir() || meta.is_file() || is_hideable_socket(meta)
+}
+
+#[cfg(unix)]
+fn is_hideable_socket(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    meta.file_type().is_socket()
+}
+
+#[cfg(not(unix))]
+fn is_hideable_socket(meta: &fs::Metadata) -> bool {
+    let _ = meta;
+    false
 }
 
 fn sort_hidden(paths: &mut [PathBuf]) {
@@ -1679,7 +1714,10 @@ mod tests {
         let outside = root.path().join("outside");
         let state = root.path().join("state");
         let link = plant(&state.join("worktrees").join("venv"), &outside, "pkg");
-        assert_eq!(find_hardlink_escapes(&[state.clone()], None), vec![link]);
+        assert_eq!(
+            find_hardlink_escapes(&[state.clone()], None).unwrap(),
+            vec![link]
+        );
         let err = assert_no_hardlink_escape(&[state.clone()]).unwrap_err();
         assert!(err.to_string().contains("hardlink"), "{err}");
         assert!(!err.to_string().contains("(and more)"), "{err}");
@@ -1698,7 +1736,11 @@ mod tests {
         let sessions = state.join("sessions");
         fs::create_dir(&sessions).unwrap();
         touch(&sessions.join("s.json"));
-        assert!(find_hardlink_escapes(&[sessions.clone()], None).is_empty());
+        assert!(
+            find_hardlink_escapes(&[sessions.clone()], None)
+                .unwrap()
+                .is_empty()
+        );
         assert_no_hardlink_escape(&[sessions]).unwrap();
     }
 
@@ -1708,9 +1750,17 @@ mod tests {
         let state = root.path().join("state");
         fs::create_dir_all(state.join("nested").join("dir")).unwrap();
         touch(&state.join("plain.txt"));
-        assert!(find_hardlink_escapes(&[state.clone()], None).is_empty());
+        assert!(
+            find_hardlink_escapes(&[state.clone()], None)
+                .unwrap()
+                .is_empty()
+        );
         assert_no_hardlink_escape(&[state]).unwrap();
-        assert!(find_hardlink_escapes(&[PathBuf::new()], None).is_empty());
+        assert!(
+            find_hardlink_escapes(&[PathBuf::new()], None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(unix)]
@@ -1722,7 +1772,7 @@ mod tests {
         let plain = state.join("plain.txt");
         touch(&plain);
         std::os::unix::fs::symlink(&plain, state.join("link.txt")).unwrap();
-        assert!(find_hardlink_escapes(&[state], None).is_empty());
+        assert!(find_hardlink_escapes(&[state], None).unwrap().is_empty());
     }
 
     #[test]
@@ -1734,10 +1784,15 @@ mod tests {
             plant(&state, &outside, &format!("f{index}"));
         }
         assert_eq!(
-            find_hardlink_escapes(&[state.clone()], Some(MAX_HARDLINK_EXAMPLES)).len(),
+            find_hardlink_escapes(&[state.clone()], Some(MAX_HARDLINK_EXAMPLES))
+                .unwrap()
+                .len(),
             MAX_HARDLINK_EXAMPLES
         );
-        assert_eq!(find_hardlink_escapes(&[state.clone()], None).len(), 6);
+        assert_eq!(
+            find_hardlink_escapes(&[state.clone()], None).unwrap().len(),
+            6
+        );
         let err = assert_no_hardlink_escape(&[state]).unwrap_err();
         assert!(err.to_string().contains("(and more)"), "{err}");
     }
@@ -1756,10 +1811,14 @@ mod tests {
             touch(&outside_file);
             fs::create_dir_all(planted.parent().unwrap()).unwrap();
             fs::hard_link(&outside_file, &planted).unwrap();
-            assert_eq!(guard.rescan()[0].paths, vec![realpath(&planted).unwrap()]);
+            assert_eq!(
+                guard.rescan().unwrap()[0].paths,
+                vec![realpath(&planted).unwrap()]
+            );
             assert!(guard.warnings().is_empty());
             guard.clone()
-        });
+        })
+        .unwrap();
         let warning = &guard.warnings()[0];
         assert_eq!(warning.code, HARDLINK_RUNTIME_WARNING_CODE);
         assert_eq!(warning.action, HARDLINK_RUNTIME_WARNING_ACTION);
@@ -1777,9 +1836,10 @@ mod tests {
         touch(&state.join("plain.txt"));
         let guard = hardlink_runtime_guard(&[state.clone()], |guard| {
             touch(&state.join("during.txt"));
-            assert!(guard.rescan().is_empty());
+            assert!(guard.rescan().unwrap().is_empty());
             guard.clone()
-        });
+        })
+        .unwrap();
         assert!(guard.warnings().is_empty());
     }
 
@@ -1793,7 +1853,8 @@ mod tests {
         let guard = hardlink_runtime_guard(&[state], |guard| {
             assert!(guard.baseline().contains(&planted));
             guard.clone()
-        });
+        })
+        .unwrap();
         assert!(guard.warnings().is_empty());
         let baseline = guard.baseline();
         guard.note_successful_build();
@@ -1821,9 +1882,10 @@ mod tests {
             assert_no_hardlink_escape(&[state.clone()]).unwrap();
             assert!(guard.baseline().is_empty());
             fs::hard_link(&replacement, &planted).unwrap();
-            assert_eq!(guard.rescan()[0].paths, vec![planted.clone()]);
+            assert_eq!(guard.rescan().unwrap()[0].paths, vec![planted.clone()]);
             guard.clone()
-        });
+        })
+        .unwrap();
         assert_eq!(guard.warnings()[0].paths, vec![planted]);
         assert_eq!(guard.warnings()[0].action, "warn");
     }
@@ -1850,7 +1912,8 @@ mod tests {
             );
             fs::hard_link(outside.join("p-target"), &planted).unwrap();
             guard.clone()
-        });
+        })
+        .unwrap();
         assert_eq!(guard.warnings()[0].paths, vec![planted]);
     }
 
@@ -1870,7 +1933,8 @@ mod tests {
             assert_eq!(guard.baseline(), old);
             fs::hard_link(&fresh_target, &planted).unwrap();
             guard.clone()
-        });
+        })
+        .unwrap();
         assert_eq!(guard.warnings()[0].paths, vec![realpath(&planted).unwrap()]);
     }
 
@@ -1885,7 +1949,8 @@ mod tests {
                 plant(&state, &outside, &format!("new-{index}"));
             }
             guard.clone()
-        });
+        })
+        .unwrap();
         assert_eq!(guard.warnings()[0].paths.len(), 6);
         assert!(guard.warnings()[0].message.contains("(1 more not listed)"));
         assert!(guard.warnings()[0].message.contains("does not signal"));
@@ -1906,11 +1971,13 @@ mod tests {
                 touch(&target);
                 fs::hard_link(&target, &planted).unwrap();
                 inner.clone()
-            });
+            })
+            .unwrap();
             assert!(!inner.is_closed());
             assert!(inner.warnings().is_empty());
             outer.clone()
-        });
+        })
+        .unwrap();
         assert_eq!(guard.warnings().len(), 1);
         assert_eq!(guard.warnings()[0].paths, vec![realpath(&planted).unwrap()]);
     }
@@ -1926,10 +1993,11 @@ mod tests {
         hardlink_runtime_guard(&[state], |outer| {
             let before = outer.baseline();
             assert!(before.contains(&planted));
-            hardlink_runtime_guard(&[other], |_| ());
+            hardlink_runtime_guard(&[other], |_| ()).unwrap();
             assert_eq!(outer.baseline(), before);
             assert!(!outer.is_closed());
-        });
+        })
+        .unwrap();
     }
 
     #[test]
