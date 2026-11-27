@@ -80,6 +80,11 @@
 //! command configuration and the auto, failover, and broadcast pools do not
 //! select it.
 //!
+//! [`readonly_view`] builds a bubblewrap argv prefix that bind-mounts the host
+//! read-only, with explicit writable directories and hidden-path mounts. No
+//! adapter calls it. Grok Build still refuses a read-only sandbox before
+//! spawn, and Claude Code and Codex are unchanged.
+//!
 //! When the endpoint is `None`, Claude Code and the Codex CLI authenticate
 //! natively and inject nothing for auth — the scrubbed baseline is all the
 //! child sees. The generic adapter never injects endpoint auth.
@@ -108,6 +113,7 @@ mod opencode;
 mod parse;
 pub mod presence;
 mod probe;
+pub mod readonly_view;
 mod spawn;
 
 pub use claude_code::ClaudeCodeHarness;
