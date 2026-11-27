@@ -2,12 +2,15 @@
 //!
 //! CLI harness adapters implementing [`vyane_core::Harness`]: Claude Code, the
 //! Codex CLI, a Cursor CLI one-round JSON adapter, a Grok Build one-round JSON
-//! adapter, a Kimi Code one-shot `stream-json` adapter, and an OpenCode
-//! one-round JSON adapter. Each wraps a coding CLI as a headless one-shot
+//! adapter, a Kimi Code one-shot `stream-json` adapter, an OpenCode one-round
+//! JSON adapter, and a caller-constructed generic CLI template adapter. Each
+//! wraps a command as a headless one-shot
 //! execution shell — a scrubbed child environment built strictly through
 //! [`vyane_core::EnvPolicy`], a process-group spawn so cancel/timeout kills the
-//! whole tree (not just the direct child), and machine-readable output parsed
-//! down to the final answer + native session id + usage.
+//! whole tree (not just the direct child), and, for the named coding CLIs,
+//! machine-readable output parsed down to the final answer, native session id,
+//! and usage. [`GenericCliHarness`] keeps the child's stdout as plain text and
+//! reports neither a session id nor usage.
 //!
 //! ## Environment variable names (endpoint injection)
 //!
@@ -70,9 +73,16 @@
 //! matrix stays Claude Code and Codex CLI. Auto, failover, and broadcast do
 //! not gain an OpenCode default pool. It is not listed in the endpoint table
 //! above: there is no documented environment override to inject or remove.
+//! [`GenericCliHarness`] runs one caller-supplied command. Its argv template
+//! substitutes `{task}`, `{workdir}`, `{sandbox}`, `{session_id}`, and
+//! `params.extra` keys other than those four. The whole stdout is the answer.
+//! It does not read an endpoint. Callers construct it directly. Provider
+//! command configuration and the auto, failover, and broadcast pools do not
+//! select it.
 //!
-//! When the endpoint is `None` the harness authenticates natively and injects
-//! nothing for auth — the scrubbed baseline is all the child sees.
+//! When the endpoint is `None`, Claude Code and the Codex CLI authenticate
+//! natively and inject nothing for auth — the scrubbed baseline is all the
+//! child sees. The generic adapter never injects endpoint auth.
 //!
 //! ## Error classification
 //!
@@ -90,6 +100,7 @@
 mod claude_code;
 mod codex_cli;
 mod cursor_cli;
+mod generic;
 mod grok_build;
 mod kimi_code;
 pub mod native;
@@ -102,6 +113,7 @@ mod spawn;
 pub use claude_code::ClaudeCodeHarness;
 pub use codex_cli::CodexCliHarness;
 pub use cursor_cli::CursorCliHarness;
+pub use generic::{GenericCliHarness, GenericCliOutput};
 pub use grok_build::GrokBuildHarness;
 pub use kimi_code::KimiCodeHarness;
 pub use opencode::OpencodeHarness;
