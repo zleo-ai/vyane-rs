@@ -20,6 +20,7 @@ mod daemon_agent;
 mod daemon_client;
 mod daemon_goal;
 mod daemon_workflow;
+mod export;
 mod factory;
 mod goal;
 mod goal_runtime;

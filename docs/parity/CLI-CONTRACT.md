@@ -9,8 +9,8 @@ cargo test --locked -p vyane-cli --test cli_contract
 ```
 
 The initial fixture was captured from commit
-`4ac9ac7f273cabdccd1530b429610ea0463bc299`. The fixture now has 90 cases:
-root short/long help, all 22 visible top-level command help pages, help for
+`4ac9ac7f273cabdccd1530b429610ea0463bc299`. The fixture now has 91 cases:
+root short/long help, all 23 visible top-level command help pages, help for
 every visible nested command (`session`, `workflow`, `task`, `daemon`, `a2a`,
 `presence`, `goal`, `feedback`, and `liveness`), eleven argument errors, the
 `clean` confirmation refusal, an empty zero-limit JSON history result and

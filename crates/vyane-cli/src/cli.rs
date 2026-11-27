@@ -33,6 +33,11 @@ pub enum Command {
     Broadcast(BroadcastArgs),
     /// Show recent run ledger records.
     History(HistoryArgs),
+    /// Export the live run ledger as CSV, JSON, or Markdown.
+    #[command(
+        long_about = "Export the live run ledger as CSV, JSON, or Markdown. Reads ledger.jsonl for the local owner and does not modify it. Does not read history-archive. Run records have no source field, so there is no --source filter and no source column. timestamp is started_at. duration_seconds is finished_at minus started_at. task_digest is always included. task_preview is included only when that row stored one. The command does not reconstruct a prompt."
+    )]
+    Export(ExportArgs),
     /// Rate your runs from 1 to 5 and list the ratings.
     #[command(subcommand)]
     Feedback(FeedbackCommand),
@@ -1080,6 +1085,48 @@ pub struct BroadcastArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ExportFormat {
+    Csv,
+    Json,
+    Md,
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Output format.
+    #[arg(short = 'f', long, value_enum, default_value = "csv")]
+    pub format: ExportFormat,
+    /// Only runs started in the last N hours; 0 means no hour cutoff.
+    #[arg(
+        long,
+        value_name = "N",
+        allow_negative_numbers = true,
+        value_parser = parse_export_hours,
+        default_value_t = 0.0
+    )]
+    pub hours: f64,
+    /// Filter by provider id.
+    #[arg(long, value_name = "PROVIDER")]
+    pub provider: Option<String>,
+    /// Maximum number of matching records to export; zero writes an empty report.
+    #[arg(short = 'n', long, default_value_t = 1000)]
+    pub limit: usize,
+    /// Write the report to this file instead of stdout.
+    #[arg(short = 'o', long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+}
+
+fn parse_export_hours(raw: &str) -> Result<f64, String> {
+    let hours: f64 = raw
+        .parse()
+        .map_err(|_| "hours must be a finite number greater than or equal to 0".to_owned())?;
+    if !hours.is_finite() || hours < 0.0 {
+        return Err("hours must be a finite number greater than or equal to 0".to_owned());
+    }
+    Ok(hours)
 }
 
 #[derive(Debug, Args)]

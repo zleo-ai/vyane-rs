@@ -72,6 +72,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Dispatch(args) => run_dispatch(cli.config, args).await,
         Command::Broadcast(args) => run_broadcast(cli.config, args).await,
         Command::History(args) => run_history(args).await,
+        Command::Export(args) => crate::export::run(args).await,
         Command::Feedback(command) => run_feedback(command).await,
         Command::Clean(args) => crate::clean::run(args),
         Command::Sessions(args) => run_sessions(args).await,

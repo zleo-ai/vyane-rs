@@ -569,6 +569,61 @@ Ratings and outcome statistics are read-only for routing: `vyane route`,
 `auto` dispatch and failover never read them (ADR 0001). A feedback signal in
 route scoring would be a separate, explicitly enabled feature.
 
+### Export the run ledger
+
+`vyane export` writes the live run ledger as CSV, JSON, or Markdown. It reads
+`<data_dir>/ledger.jsonl` for the local owner (`owner` `local`) and does not
+modify that file. It does not open `ledger.jsonl` when `-n 0` is requested,
+and it never creates the file just to report that it is missing. It does not
+read `history-archive/`. `vyane history` keeps its own output.
+
+```sh
+vyane export
+vyane export --format json --hours 24 --provider openai
+vyane export -f md -n 100 -o report.md
+```
+
+`--format` / `-f` is `csv` (the default), `json`, or `md`. Any other value is
+a command-line error and writes nothing. `--hours` defaults to 0, which
+applies no hour cutoff. A positive value keeps runs whose `started_at` is
+within that many hours of the export, including a run that started exactly on
+the boundary. `--provider` matches the provider id exactly; omit it, or pass
+an empty value, to keep every provider. `-n` / `--limit` defaults to 1000.
+Rows are newest first, and the limit applies before the report is built, so
+`count` and `statistics` describe the exported rows rather than every older
+match. `--output` / `-o` writes the report to that path and prints
+`Exported to <path>`. Omit it to print the report on stdout. The command
+refuses an output path that is the ledger file. A line that does not parse as
+a run record is skipped, as it is for `vyane history`.
+
+CSV columns are `timestamp`, `provider`, `status`, `duration_seconds`,
+`task_digest`, `task_preview`, `model`, `run_id`, `input_tokens`,
+`output_tokens`, and `cost_usd`. `timestamp` is that run's `started_at` in
+RFC 3339 UTC. `duration_seconds` is `finished_at` minus `started_at`, in
+seconds, and is empty when those timestamps are reversed. Token columns and
+`cost_usd` are empty when the row did not store them; a stored zero stays
+zero. Non-finite saved costs are left empty. `task_preview` is empty unless
+that row stored the optional preview. New dispatches leave the preview unset,
+so a default export contains the digest and not the task text. There is no
+`task` column, no `source` column, and no `--source` filter: a `RunRecord`
+does not store a source, and this command does not invent one.
+
+JSON is one object with `exported_at`, `count`, `statistics`, and `entries`.
+`statistics` is the same aggregate `vyane history --stats --json` would
+produce for those exported rows. It is not a second pass over the rest of the
+ledger and it does not estimate a missing price. Each entry uses the CSV
+fields. `task_preview` is omitted when the row has none. Missing duration,
+token counts, and cost are JSON `null`.
+
+Markdown is a report titled "Vyane Report". It has a summary, a provider
+table when any row was exported, a cost section when the exported rows have
+saved input or output tokens or a known saved cost, and a recent-dispatch
+table. That table shows at most 50 rows. A stored preview is shortened to 60
+characters there; CSV and JSON keep the stored preview. The known saved cost
+is labeled as such. An empty or missing ledger still produces a header-only
+CSV, a JSON document with `count` 0 and `entries` `[]`, or a Markdown report
+whose summary total is 0.
+
 SSE streaming events (`POST /v1/dispatch/stream`):
 
 ```
