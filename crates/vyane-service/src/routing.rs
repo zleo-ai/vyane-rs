@@ -8,12 +8,15 @@
 //! [`RoutePreferenceTable`], calls [`vyane_router::route_task`], and maps the
 //! decision back to a profile name the dispatch path understands.
 //!
-//! When the caller supplies a local quota snapshot path, automatic routing
-//! may drop a busy subscription profile before that preference table is
-//! built. The snapshot is not opened otherwise. A missing or unreadable file
-//! leaves the candidate list, and therefore the route, unchanged.
+//! When automatic routing does not name a quota snapshot path, it reads
+//! `$XDG_STATE_HOME/aios/quota-snapshot.json`, or
+//! `~/.local/state/aios/quota-snapshot.json` when `XDG_STATE_HOME` is unset
+//! or empty. An explicit path is read instead. A missing or unreadable file
+//! leaves the candidate list, and therefore the route, unchanged. A named
+//! target does not open either file.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -46,9 +49,12 @@ pub struct RouteParams {
     pub candidate_profiles: Vec<String>,
     /// Whether frontier-tier profiles may be selected. Defaults to true.
     pub allow_frontier: bool,
-    /// Local quota snapshot. `None` does not open a file. A path is read only
-    /// while choosing an automatic route; a missing or unreadable snapshot
-    /// leaves that route unchanged.
+    /// Local quota snapshot. `None` reads
+    /// `$XDG_STATE_HOME/aios/quota-snapshot.json`, or
+    /// `~/.local/state/aios/quota-snapshot.json` when that variable is unset
+    /// or empty. A path is read only while choosing an automatic route. A
+    /// missing or unreadable snapshot leaves that route unchanged. A named
+    /// target does not open either file.
     pub quota_snapshot: Option<PathBuf>,
 }
 
@@ -104,8 +110,9 @@ pub fn plan_dispatch(
 /// Same as [`plan_dispatch`], with an optional local quota snapshot.
 ///
 /// The path is opened only when `selector` is `auto`. Any other selector
-/// ignores it and does not open the file. When the file is missing or the
-/// read fails, the automatic route matches [`plan_dispatch`].
+/// ignores it and does not open the file. `None` uses the same default file
+/// as [`plan_dispatch`]. When the file is missing or the read fails, the
+/// automatic route is the unfiltered one.
 pub fn plan_dispatch_with(
     loaded: &LoadedConfig,
     selector: &str,
@@ -194,7 +201,16 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
         _ => 3,
     });
 
-    if let Some(path) = params.quota_snapshot.as_deref() {
+    let default_snapshot = params
+        .quota_snapshot
+        .is_none()
+        .then(default_quota_snapshot_path)
+        .flatten();
+    if let Some(path) = params
+        .quota_snapshot
+        .as_deref()
+        .or(default_snapshot.as_deref())
+    {
         apply_quota_candidate_filter(&mut candidates, path);
     }
 
@@ -367,6 +383,23 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
         .unwrap_or_else(|| effort_for_tier(decision.tier));
 
     Ok(RouteResult { decision, profile })
+}
+
+fn default_quota_snapshot_path() -> Option<PathBuf> {
+    quota_snapshot_path(
+        std::env::var_os("XDG_STATE_HOME").as_deref(),
+        dirs::home_dir().as_deref(),
+    )
+}
+
+/// `$XDG_STATE_HOME/aios/quota-snapshot.json`, or `home/.local/state/aios/quota-snapshot.json`
+/// when the state home is unset or empty. `None` when neither root is known.
+fn quota_snapshot_path(state_home: Option<&OsStr>, home: Option<&Path>) -> Option<PathBuf> {
+    let root = match state_home {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => home?.join(".local").join("state"),
+    };
+    Some(root.join("aios").join("quota-snapshot.json"))
 }
 
 fn apply_quota_candidate_filter<'a>(
@@ -787,7 +820,7 @@ mod tests {
         profiles.insert(
             "economy-model".into(),
             ProfilePatch {
-                provider: Some("openai".into()),
+                provider: Some("example-openai".into()),
                 protocol: Some(vyane_core::Protocol::OpenaiChat),
                 harness: Some("none".into()),
                 model: Some(ModelId::new("gpt-4o-mini")),
@@ -799,7 +832,7 @@ mod tests {
         profiles.insert(
             "frontier-model".into(),
             ProfilePatch {
-                provider: Some("anthropic".into()),
+                provider: Some("example-anthropic".into()),
                 protocol: Some(vyane_core::Protocol::AnthropicMessages),
                 harness: Some("none".into()),
                 model: Some(ModelId::new("claude-opus")),
@@ -841,7 +874,7 @@ mod tests {
         let result = route_task(&config, params).unwrap();
         // Score 0.0 → economy tier → economy-model profile
         assert_eq!(result.profile, "economy-model");
-        assert_eq!(result.decision.provider, "openai");
+        assert_eq!(result.decision.provider, "example-openai");
     }
 
     #[test]
@@ -903,7 +936,7 @@ mod tests {
         profiles.insert(
             "default-model".into(),
             ProfilePatch {
-                provider: Some("openai".into()),
+                provider: Some("example-openai".into()),
                 protocol: Some(vyane_core::Protocol::OpenaiChat),
                 harness: Some("none".into()),
                 model: Some(ModelId::new("gpt-4o-mini")),
@@ -914,7 +947,7 @@ mod tests {
         profiles.insert(
             "review-model".into(),
             ProfilePatch {
-                provider: Some("anthropic".into()),
+                provider: Some("example-anthropic".into()),
                 protocol: Some(vyane_core::Protocol::AnthropicMessages),
                 harness: Some("none".into()),
                 model: Some(ModelId::new("claude-sonnet")),
@@ -969,7 +1002,7 @@ mod tests {
         };
         let result = route_task(&config, params).unwrap();
         assert_eq!(result.profile, "economy-model");
-        assert_eq!(result.decision.provider, "openai");
+        assert_eq!(result.decision.provider, "example-openai");
         assert_ne!(result.decision.tier, vyane_router::RouteTier::Frontier);
     }
 
@@ -1617,6 +1650,7 @@ tier = "economy"
             &loaded.config,
             RouteParams {
                 task: "ping".into(),
+                quota_snapshot: Some(missing_path.clone()),
                 ..Default::default()
             },
         )
@@ -1656,7 +1690,7 @@ tier = "economy"
         .unwrap();
         assert_eq!(decision_bytes(&stale.decision), off_bytes);
 
-        let ignored = route_task(
+        let omitted = route_task(
             &loaded.config,
             RouteParams {
                 task: "ping".into(),
@@ -1664,7 +1698,6 @@ tier = "economy"
             },
         )
         .unwrap();
-        assert_eq!(decision_bytes(&ignored.decision), off_bytes);
         assert!(!decision_text(&off_bytes).contains("snapshot-note-not-routed"));
 
         let filtered = route_task(
@@ -1683,21 +1716,24 @@ tier = "economy"
         assert!(!filtered_text.contains("snapshot-note-not-routed"));
         assert!(!filtered_text.contains("busy-provider"));
 
-        let mut off_task = TaskSpec::new("ping");
+        let mut omitted_task = TaskSpec::new("ping");
         let mut missing_task = TaskSpec::new("ping");
         let mut filtered_task = TaskSpec::new("ping");
         let mut named_off_task = TaskSpec::new("ping");
         let mut named_on_task = TaskSpec::new("ping");
-        let auto_off = plan_dispatch(&loaded, "auto", &mut off_task).unwrap();
+        let auto_default = plan_dispatch(&loaded, "auto", &mut omitted_task).unwrap();
         let auto_missing =
             plan_dispatch_with(&loaded, "auto", &mut missing_task, Some(&missing_path)).unwrap();
         let auto_filtered =
             plan_dispatch_with(&loaded, "auto", &mut filtered_task, Some(&snapshot_path)).unwrap();
-        assert_eq!(plan_bytes(&auto_missing), plan_bytes(&auto_off));
-        assert_eq!(missing_task.labels, off_task.labels);
-        assert_eq!(auto_off.selector, "busy");
+        assert_eq!(auto_default.selector, omitted.profile);
+        assert_eq!(
+            decision_bytes(&auto_missing.route.as_ref().unwrap().decision),
+            off_bytes
+        );
+        assert_eq!(auto_missing.selector, "busy");
         assert_eq!(auto_filtered.selector, "free");
-        assert_ne!(plan_bytes(&auto_filtered), plan_bytes(&auto_off));
+        assert_ne!(plan_bytes(&auto_filtered), plan_bytes(&auto_missing));
 
         let named_off = plan_dispatch(&loaded, "busy", &mut named_off_task).unwrap();
         let named_on =
@@ -1818,5 +1854,30 @@ tier = "economy"
                 .as_millis(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn omitted_quota_snapshot_uses_the_state_home_or_home_local_state() {
+        let state = Path::new("/tmp/state");
+        let home = Path::new("/tmp/home");
+        assert_eq!(
+            quota_snapshot_path(Some(state.as_os_str()), Some(home)).unwrap(),
+            state.join("aios").join("quota-snapshot.json")
+        );
+        assert_eq!(
+            quota_snapshot_path(Some(OsStr::new("")), Some(home)).unwrap(),
+            home.join(".local")
+                .join("state")
+                .join("aios")
+                .join("quota-snapshot.json")
+        );
+        assert_eq!(
+            quota_snapshot_path(None, Some(home)).unwrap(),
+            home.join(".local")
+                .join("state")
+                .join("aios")
+                .join("quota-snapshot.json")
+        );
+        assert!(quota_snapshot_path(None, None).is_none());
     }
 }

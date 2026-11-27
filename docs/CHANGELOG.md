@@ -9,7 +9,7 @@ This is a curated history, not a complete reconstruction of all development.
 
 ### Added
 
-- `vyane route` and `vyane dispatch --target auto` accept `--quota-snapshot PATH`. The file is a local JSON snapshot of subscription pace. When one subscription is busy and another has more room, automatic routing leaves the busy profile out. Omitting the flag does not open a file. A missing or unreadable snapshot produces the same route as omitting the flag. A named dispatch target ignores the flag.
+- `vyane route` and `vyane dispatch --target auto` read a local JSON snapshot of subscription pace. When `--quota-snapshot` is omitted, the file is `$XDG_STATE_HOME/aios/quota-snapshot.json`, or `~/.local/state/aios/quota-snapshot.json` when `XDG_STATE_HOME` is unset or empty. `--quota-snapshot PATH` reads that path instead. When one subscription is busy and another has more room, automatic routing leaves the busy profile out. A missing or unreadable snapshot leaves the route unchanged. A named dispatch target does not open the file. Provider ids `claude`, `codex`, and `grok-build` also match snapshot providers `anthropic`, `openai-codex`, and `xai-oauth` when the profile id has no subscription group of its own.
 - `vyane acp` serves an Agent Client Protocol echo shell over stdio. It completes `initialize`, stores `session/new` only in memory, and echoes prompt text in one `agent_message_chunk`. It does not load configuration, read credentials, dispatch, call a model, or create a state database.
 - `vyane waiting` prints a read-only list assembled from three existing
   sources: pending kernel approval decisions, kernel deliveries whose phase
