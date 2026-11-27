@@ -11,7 +11,7 @@ This is an early, source-build project with unstable APIs. The workspace version
 | --- | --- |
 | Dispatch, broadcast, explicit failover, streaming and local history | A direct HTTP target provides model responses, not filesystem or shell tools. |
 | Deterministic routing and declarative workflows | Routing depends on your profiles; it is not an automatic quality guarantee. |
-| CLI, loopback REST API, stdio MCP, and an ACP echo shell | The ACP shell handshakes and echoes over stdio. It does not dispatch or write state. Other frontends expose different subsets; see the [CLI guide](CLI-GUIDE.md). |
+| CLI, loopback REST API, stdio MCP, and an ACP canned stub | The ACP stub handshakes over stdio and streams a canned plan, framed echo, and demo tool call. `session/cancel` during the turn stops it. It does not dispatch or write state. Other frontends expose different subsets; see the [CLI guide](CLI-GUIDE.md). |
 | Durable tasks, local messages/goals and Linux resident Process/Native runs | Native runs are fresh and sessionless; approval resume, native session resume, and automatic restart replay remain open. |
 | Explicit permissions, scrubbed child environments and run accounting | CLI sandbox enforcement is delegated to the selected harness. Owner fields and loopback authentication do not provide hostile same-user or multi-user isolation. |
 

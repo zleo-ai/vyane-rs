@@ -67,9 +67,9 @@ pub enum Command {
     Goal(GoalCommand),
     /// Serve an Agent Client Protocol echo shell over stdio.
     #[command(
-        long_about = "Serve an Agent Client Protocol echo shell over stdio. Answers initialize and session/new, then echoes session/prompt text. Does not dispatch, read configuration or credentials, call a model, or create a state database."
+        long_about = "Serve a canned Agent Client Protocol stub over stdio. The --stub flag is optional and selects this same stub, which is the default. Answers initialize and session/new, then streams a plan, framed echo chunks, and a demo tool call. A session/cancel during the turn stops it with stopReason cancelled. Does not dispatch, read configuration or credentials, call a model, or create a state database."
     )]
-    Acp,
+    Acp(AcpArgs),
     /// List read-only items that are waiting for a human.
     Waiting(WaitingArgs),
     /// Run the MCP server over stdio (for use as an MCP tool server).
@@ -77,6 +77,13 @@ pub enum Command {
     /// Internal: execute a detached run. Not for direct use.
     #[command(name = "__worker", hide = true)]
     Worker(WorkerArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AcpArgs {
+    /// Select the canned stub explicitly. Omitting the flag selects the same stub.
+    #[arg(long)]
+    pub stub: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
