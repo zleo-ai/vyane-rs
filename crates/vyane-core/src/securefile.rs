@@ -34,7 +34,10 @@
 //!   still fails. Access-denied and sharing-violation errors are retried for
 //!   about one second.
 //! * `pin_directory` holds every component from the volume root open without
-//!   `FILE_SHARE_DELETE` and rejects a symlink or junction component.
+//!   `FILE_SHARE_DELETE` and rejects a symlink or junction component. The
+//!   absolute path is the path those handles name. On a `\\?\` path, `.` and
+//!   `..` are literal directory names, so they are opened as themselves.
+//!   `GetFullPathNameW` has already removed them from an ordinary path.
 //!
 //! `O_APPEND` without `O_TRUNC` uses `FILE_APPEND_DATA` and not
 //! `FILE_WRITE_DATA`, so writes land at end of file. `O_APPEND` together with
@@ -324,6 +327,8 @@ impl From<io::Error> for SecureFileError {
 ///
 /// On Windows every component from the volume root through `path` is open
 /// without `FILE_SHARE_DELETE`, and none of them is a symlink or junction.
+/// `path`, [`Self::child`], and [`Self::open`] use that same absolute path.
+/// On a `\\?\` path, `.` and `..` are literal components of it.
 /// Dropping the value closes those handles. On POSIX the value cannot be
 /// constructed: [`pin_directory`] returns [`SecureFileError::PinDirectoryUnsupported`].
 #[must_use = "the directory stays pinned only while this value is held"]
@@ -632,6 +637,12 @@ pub fn replace(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<(), Secur
 }
 
 /// Pin `path` on Windows. On POSIX this fails and does not open anything.
+///
+/// Windows opens each component of the absolute path without
+/// `FILE_SHARE_DELETE`. On a `\\?\` path, `.` and `..` stay literal directory
+/// names, so the handles are the objects [`PinnedDirectory::path`],
+/// [`PinnedDirectory::child`], and [`PinnedDirectory::open`] use. An ordinary
+/// path is normalized by `GetFullPathNameW` before that walk.
 pub fn pin_directory(path: impl AsRef<Path>) -> Result<PinnedDirectory, SecureFileError> {
     #[cfg(unix)]
     {
@@ -955,6 +966,7 @@ fn acl_problem(
     reason = "Win32 CreateFile, security-descriptor, and token calls have no safe wrapper in this workspace. The private/link decision is the safe acl_problem and classify_windows_link functions."
 )]
 mod win {
+    use std::ffi::OsStr;
     use std::fs::File;
     use std::io;
     use std::mem::{self, ManuallyDrop, offset_of};
@@ -1866,7 +1878,27 @@ mod win {
         replace_once(src, dst)
     }
 
+    fn append_component(current: &mut PathBuf, part: &OsStr) {
+        // `PathBuf::push` treats `.` and `..` as navigation and deletes them
+        // even when the prefix is verbatim. The `\\?\` namespace does not.
+        let mut joined = current.as_os_str().to_os_string();
+        let needs_sep = joined
+            .as_encoded_bytes()
+            .last()
+            .is_some_and(|byte| *byte != b'\\' && *byte != b'/');
+        if needs_sep {
+            joined.push(r"\");
+        }
+        joined.push(part);
+        *current = PathBuf::from(joined);
+    }
+
     fn pin_stages(path: &Path) -> Vec<PathBuf> {
+        // `pin_directory` passes the result of `std::path::absolute`. An
+        // ordinary path no longer contains `.` or `..`. A `\\?\` path is
+        // returned unchanged, and `components` still reports those names as
+        // `CurDir` and `ParentDir`. Append them so each opened handle is a
+        // prefix of the path `child` and `open` use.
         let mut stages = Vec::new();
         let mut current = PathBuf::new();
         for component in path.components() {
@@ -1877,12 +1909,12 @@ mod win {
                     stages.push(current.clone());
                 }
                 Component::Normal(part) => {
-                    current.push(part);
+                    append_component(&mut current, part);
                     stages.push(current.clone());
                 }
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    current.pop();
+                Component::CurDir | Component::ParentDir => {
+                    append_component(&mut current, component.as_os_str());
+                    stages.push(current.clone());
                 }
             }
         }
@@ -1925,6 +1957,56 @@ mod win {
             pinned.files.push(file);
         }
         Ok(pinned)
+    }
+
+    #[cfg(test)]
+    mod pin_stage_tests {
+        use std::path::Path;
+
+        use super::pin_stages;
+
+        fn texts(path: &str) -> Vec<String> {
+            pin_stages(Path::new(path))
+                .iter()
+                .map(|stage| stage.to_string_lossy().into_owned())
+                .collect()
+        }
+
+        #[test]
+        fn verbatim_dot_and_dotdot_are_literal_prefixes() {
+            assert_eq!(
+                texts(r"\\?\C:\foo\..\bar"),
+                [
+                    r"\\?\C:\",
+                    r"\\?\C:\foo",
+                    r"\\?\C:\foo\..",
+                    r"\\?\C:\foo\..\bar",
+                ]
+            );
+            assert_eq!(
+                texts(r"\\?\C:\foo\.\bar"),
+                [
+                    r"\\?\C:\",
+                    r"\\?\C:\foo",
+                    r"\\?\C:\foo\.",
+                    r"\\?\C:\foo\.\bar",
+                ]
+            );
+            assert_eq!(
+                texts(r"\\?\UNC\server\share\dir\..\child"),
+                [
+                    r"\\?\UNC\server\share\",
+                    r"\\?\UNC\server\share\dir",
+                    r"\\?\UNC\server\share\dir\..",
+                    r"\\?\UNC\server\share\dir\..\child",
+                ]
+            );
+        }
+
+        #[test]
+        fn ordinary_path_stages_are_cumulative_prefixes() {
+            assert_eq!(texts(r"C:\foo\bar"), [r"C:\", r"C:\foo", r"C:\foo\bar"]);
+        }
     }
 }
 
