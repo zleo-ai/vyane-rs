@@ -74,6 +74,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Command::History(args) => run_history(args).await,
         Command::Export(args) => crate::export::run(args).await,
         Command::Feedback(command) => run_feedback(command).await,
+        Command::Clean(args) => crate::clean::run(args),
         Command::Sessions(args) => run_sessions(args).await,
         Command::Session(command) => run_session(command).await,
         Command::Workflow(command) => match command {
