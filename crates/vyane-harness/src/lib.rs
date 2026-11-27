@@ -13,22 +13,26 @@
 //! When a job carries an [`vyane_core::Endpoint`] override, Claude Code and the
 //! Codex CLI inject the base URL, credential, and model into the child env
 //! under the public documented names. Cursor CLI refuses a non-empty base URL
-//! before spawn and injects `CURSOR_API_KEY` only when that URL is empty:
+//! before spawn and does not inject a credential:
 //!
 //! | purpose | Claude Code | Codex CLI | Cursor CLI | Grok Build |
 //! |---------|-------------|-----------|------------|------------|
-//! | base URL | `ANTHROPIC_BASE_URL` | (via `-c model_providers.<name>.base_url`) | refused before spawn | refused before spawn |
-//! | auth (Bearer) | `ANTHROPIC_AUTH_TOKEN` | `OPENAI_API_KEY` | `CURSOR_API_KEY` when the base URL is empty | refused before spawn; `XAI_API_KEY` is removed |
-//! | auth (x-api-key) | `ANTHROPIC_API_KEY` | `OPENAI_API_KEY` | `CURSOR_API_KEY` when the base URL is empty | refused before spawn; `XAI_API_KEY` is removed |
+//! | base URL | `ANTHROPIC_BASE_URL` | (via `-c model_providers.<name>.base_url`) | refused before spawn; `CURSOR_API_ENDPOINT` is removed | refused before spawn |
+//! | auth (Bearer) | `ANTHROPIC_AUTH_TOKEN` | `OPENAI_API_KEY` | not injected; `CURSOR_API_KEY` is removed | refused before spawn; `XAI_API_KEY` is removed |
+//! | auth (x-api-key) | `ANTHROPIC_API_KEY` | `OPENAI_API_KEY` | not injected; `CURSOR_API_KEY` is removed | refused before spawn; `XAI_API_KEY` is removed |
 //! | model | `ANTHROPIC_MODEL` (+ `--model`) | `--model` | `--model` | `-m` |
 //!
-//! [`CursorCliHarness`] invokes the existing `agent` binary for one print-mode
-//! round (`-p --output-format json --sandbox disabled --force`) and maps that
-//! single result object onto [`vyane_core::HarnessOutcome`]. [`vyane_core::Sandbox::ReadOnly`]
-//! and [`vyane_core::Sandbox::Write`] are refused before spawn: documented print mode can
-//! still widen those requests through global `approvalMode`, project allow
-//! rules, and trusted-workspace hooks. A non-empty endpoint base URL is also
-//! refused before spawn. It does not start `agent acp`.
+//! [`CursorCliHarness`] invokes the Windows standalone `cursor-agent` binary
+//! for one print-mode round. Read-only is `-p --output-format json --mode ask`.
+//! `Full` stays `-p --output-format json --sandbox disabled --force`. There is
+//! no `agent` subcommand. It maps that single result object onto
+//! [`vyane_core::HarnessOutcome`]. [`vyane_core::Sandbox::Write`] is refused
+//! before spawn. `CURSOR_API_KEY` and `CURSOR_API_ENDPOINT` are removed after
+//! the child environment is built, so the CLI uses the local subscription
+//! login. A non-empty endpoint base URL is also refused before spawn. It does
+//! not start `agent acp`. The service assembler support matrix stays Claude
+//! Code and Codex CLI; callers construct this adapter directly. Auto,
+//! failover, and broadcast do not gain a Cursor default pool.
 //! [`GrokBuildHarness`] invokes the existing `grok` binary for one POSIX JSON
 //! round (`--prompt-file /dev/stdin --output-format json`) and maps `text`,
 //! `sessionId`, and `usage` onto [`vyane_core::HarnessOutcome`]. The prompt is
@@ -37,9 +41,9 @@
 //! adapter does not build a bubblewrap read-only view, so the bare CLI is not
 //! started. `Write` and `Full` spawn with no sandbox flag. A non-empty endpoint
 //! base URL or any endpoint credential is refused before spawn, and
-//! `XAI_API_KEY` is removed from the child environment. The service assembler
-//! support matrix stays Claude Code and Codex CLI; callers construct the
-//! Cursor and Grok Build adapters directly.
+//! `XAI_API_KEY` is removed from the child environment. Callers construct this
+//! adapter directly. The assembler support matrix stays Claude Code and Codex
+//! CLI.
 //!
 //! When the endpoint is `None` the harness authenticates natively and injects
 //! nothing for auth — the scrubbed baseline is all the child sees.
