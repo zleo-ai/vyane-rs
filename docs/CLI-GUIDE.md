@@ -332,6 +332,33 @@ step and approval fence; there is no decision port, raw dispatch input, retry or
 The crate supplies no concrete queue/execution adapter, so assembly remains
 explicit. See [WP-82](plan/WP-82.md).
 
+## Clean local ledger and feedback
+
+`vyane clean` deletes only the live run ledger and the feedback file in the
+Vyane data directory (`VYANE_DATA_DIR`, or the platform data directory when
+that variable is unset). It does not delete `history-archive/`.
+
+```sh
+vyane clean --dry-run
+vyane clean history --yes
+vyane clean feedback --yes
+vyane clean all --yes
+```
+
+`what` is `all` (the default), `history`, or `feedback`. `history` removes
+`ledger.jsonl` and a sibling temporary rotate file whose name ends in
+`.rotate` and belongs to that ledger (for example `ledger.jsonl.rotate`).
+`feedback` removes `feedback.jsonl` only. `all` is those two. `audit`,
+`status`, and `benchmark` are rejected.
+
+`--dry-run` prints what would be removed and deletes nothing. Without
+`--dry-run`, pass `--yes`. If both are omitted, the command exits 2 and
+leaves every file in place.
+
+`sessions/`, `workflows/`, `worktrees/`, and the goal, task, agent, and
+message SQLite files are not clean targets. A directory is never removed,
+including a `history-archive/` directory that was created by hand.
+
 ## REST API
 
 `vyane serve` exposes a JSON HTTP API with streaming (SSE) and async task

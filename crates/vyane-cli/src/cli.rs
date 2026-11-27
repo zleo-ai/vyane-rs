@@ -36,6 +36,11 @@ pub enum Command {
     /// Rate your runs from 1 to 5 and list the ratings.
     #[command(subcommand)]
     Feedback(FeedbackCommand),
+    /// Delete local ledger and feedback files; never deletes history-archive/.
+    #[command(
+        long_about = "Delete the local run ledger and feedback file. WHAT is all (the default), history, or feedback. history removes ledger.jsonl and a sibling temporary rotate file whose name ends in .rotate and belongs to that ledger, such as ledger.jsonl.rotate. feedback removes feedback.jsonl. all is those two. --dry-run prints what would be removed and deletes nothing. Without --dry-run, --yes is required; otherwise the command exits 2 and leaves every file in place. history-archive/ is never deleted, including a directory placed by hand. sessions/, workflows/, worktrees/, and the goal, task, agent, and message SQLite files are not targets. audit, status, and benchmark are rejected."
+    )]
+    Clean(CleanArgs),
     /// List saved session records.
     Sessions(SessionsArgs),
     /// Inspect and safely reset local continuity sessions.
@@ -194,6 +199,26 @@ pub struct FeedbackRateArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CleanWhat {
+    All,
+    History,
+    Feedback,
+}
+
+#[derive(Debug, Args)]
+pub struct CleanArgs {
+    /// What to clean.
+    #[arg(value_enum, default_value = "all", value_name = "WHAT")]
+    pub what: CleanWhat,
+    /// Show what would be removed without actually deleting.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Confirm deletion of local Vyane data.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1578,6 +1603,39 @@ mod tests {
             assert!(
                 Cli::try_parse_from(argv).is_err(),
                 "{flag} accepted {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn clean_defaults_to_all_and_rejects_unknown_targets() {
+        let parsed = Cli::try_parse_from(["vyane", "clean"]).unwrap();
+        let Command::Clean(args) = parsed.command else {
+            panic!("expected clean");
+        };
+        assert_eq!(args.what, CleanWhat::All);
+        assert!(!args.yes);
+        assert!(!args.dry_run);
+
+        let parsed =
+            Cli::try_parse_from(["vyane", "clean", "--yes", "history", "--dry-run"]).unwrap();
+        let Command::Clean(args) = parsed.command else {
+            panic!("expected clean");
+        };
+        assert_eq!(args.what, CleanWhat::History);
+        assert!(args.yes);
+        assert!(args.dry_run);
+
+        let parsed = Cli::try_parse_from(["vyane", "clean", "feedback", "--yes"]).unwrap();
+        let Command::Clean(args) = parsed.command else {
+            panic!("expected clean");
+        };
+        assert_eq!(args.what, CleanWhat::Feedback);
+
+        for unknown in ["audit", "status", "benchmark", "AUDIT", "sessions"] {
+            assert!(
+                Cli::try_parse_from(["vyane", "clean", unknown]).is_err(),
+                "{unknown} was accepted"
             );
         }
     }

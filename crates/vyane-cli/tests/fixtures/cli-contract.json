@@ -5,7 +5,7 @@
       "--help"
     ],
     "exit_code": 0,
-    "stdout": "Vyane assembles configured providers, protocols, CLI harnesses, the dispatch kernel, and local storage into one command-line tool.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check           Validate configuration and show local readiness\n  dispatch        Run one task against a profile, provider/model, or auto-routed target\n  broadcast       Run one task against several targets concurrently\n  history         Show recent run ledger records\n  feedback        Rate your runs from 1 to 5 and list the ratings\n  sessions        List saved session records\n  session         Inspect and safely reset local continuity sessions\n  workflow        Run, resume, and list declarative workflows\n  review          Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route           Show what the router would pick for a task (dry-run, no dispatch)\n  quota-snapshot  Print a read-only view of the local quota snapshot\n  task            Inspect and manage detached background runs\n  serve           Start the bearer-authenticated loopback HTTP API server\n  daemon          Run and control the authenticated local workflow daemon\n  a2a             Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  presence        Record same-machine session presence in a local JSON table\n  goal            Create, inspect, and advance owner-scoped local goals\n  acp             Serve an Agent Client Protocol echo shell over stdio\n  waiting         List read-only items that are waiting for a human\n  liveness        Read-only process liveness views\n  mcp             Run the MCP server over stdio (for use as an MCP tool server)\n  help            Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n  -h, --help\n          Print help (see a summary with '-h')\n\n  -V, --version\n          Print version\n",
+    "stdout": "Vyane assembles configured providers, protocols, CLI harnesses, the dispatch kernel, and local storage into one command-line tool.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check           Validate configuration and show local readiness\n  dispatch        Run one task against a profile, provider/model, or auto-routed target\n  broadcast       Run one task against several targets concurrently\n  history         Show recent run ledger records\n  feedback        Rate your runs from 1 to 5 and list the ratings\n  clean           Delete local ledger and feedback files; never deletes history-archive/\n  sessions        List saved session records\n  session         Inspect and safely reset local continuity sessions\n  workflow        Run, resume, and list declarative workflows\n  review          Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route           Show what the router would pick for a task (dry-run, no dispatch)\n  quota-snapshot  Print a read-only view of the local quota snapshot\n  task            Inspect and manage detached background runs\n  serve           Start the bearer-authenticated loopback HTTP API server\n  daemon          Run and control the authenticated local workflow daemon\n  a2a             Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  presence        Record same-machine session presence in a local JSON table\n  goal            Create, inspect, and advance owner-scoped local goals\n  acp             Serve an Agent Client Protocol echo shell over stdio\n  waiting         List read-only items that are waiting for a human\n  liveness        Read-only process liveness views\n  mcp             Run the MCP server over stdio (for use as an MCP tool server)\n  help            Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n  -h, --help\n          Print help (see a summary with '-h')\n\n  -V, --version\n          Print version\n",
     "stderr": ""
   },
   {
@@ -14,7 +14,7 @@
       "-h"
     ],
     "exit_code": 0,
-    "stdout": "Run configured AI targets with failover and a local run ledger.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check           Validate configuration and show local readiness\n  dispatch        Run one task against a profile, provider/model, or auto-routed target\n  broadcast       Run one task against several targets concurrently\n  history         Show recent run ledger records\n  feedback        Rate your runs from 1 to 5 and list the ratings\n  sessions        List saved session records\n  session         Inspect and safely reset local continuity sessions\n  workflow        Run, resume, and list declarative workflows\n  review          Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route           Show what the router would pick for a task (dry-run, no dispatch)\n  quota-snapshot  Print a read-only view of the local quota snapshot\n  task            Inspect and manage detached background runs\n  serve           Start the bearer-authenticated loopback HTTP API server\n  daemon          Run and control the authenticated local workflow daemon\n  a2a             Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  presence        Record same-machine session presence in a local JSON table\n  goal            Create, inspect, and advance owner-scoped local goals\n  acp             Serve an Agent Client Protocol echo shell over stdio\n  waiting         List read-only items that are waiting for a human\n  liveness        Read-only process liveness views\n  mcp             Run the MCP server over stdio (for use as an MCP tool server)\n  help            Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help (see more with '--help')\n  -V, --version        Print version\n",
+    "stdout": "Run configured AI targets with failover and a local run ledger.\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nCommands:\n  check           Validate configuration and show local readiness\n  dispatch        Run one task against a profile, provider/model, or auto-routed target\n  broadcast       Run one task against several targets concurrently\n  history         Show recent run ledger records\n  feedback        Rate your runs from 1 to 5 and list the ratings\n  clean           Delete local ledger and feedback files; never deletes history-archive/\n  sessions        List saved session records\n  session         Inspect and safely reset local continuity sessions\n  workflow        Run, resume, and list declarative workflows\n  review          Run a built-in multi-model review pipeline (implement → review → synthesize)\n  route           Show what the router would pick for a task (dry-run, no dispatch)\n  quota-snapshot  Print a read-only view of the local quota snapshot\n  task            Inspect and manage detached background runs\n  serve           Start the bearer-authenticated loopback HTTP API server\n  daemon          Run and control the authenticated local workflow daemon\n  a2a             Use a local SQLite inbox; this is not authenticated A2A protocol transport\n  presence        Record same-machine session presence in a local JSON table\n  goal            Create, inspect, and advance owner-scoped local goals\n  acp             Serve an Agent Client Protocol echo shell over stdio\n  waiting         List read-only items that are waiting for a human\n  liveness        Read-only process liveness views\n  mcp             Run the MCP server over stdio (for use as an MCP tool server)\n  help            Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help (see more with '--help')\n  -V, --version        Print version\n",
     "stderr": ""
   },
   {
@@ -65,6 +65,16 @@
     ],
     "exit_code": 0,
     "stdout": "Rate your runs from 1 to 5 and list the ratings\n\nUsage: vyane feedback [OPTIONS] <COMMAND>\n\nCommands:\n  rate  Record a 1-5 rating for one of your runs (`rate <RUN_ID> <RATING>` or `rate --last <RATING>`)\n  list  List your ratings, most recent first\n  help  Print this message or the help of the given subcommand(s)\n\nOptions:\n      --config <PATH>  Config file to load instead of the default user + project files\n  -h, --help           Print help\n",
+    "stderr": ""
+  },
+  {
+    "name": "clean-help",
+    "args": [
+      "clean",
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout": "Delete the local run ledger and feedback file. WHAT is all (the default), history, or feedback. history removes ledger.jsonl and a sibling temporary rotate file whose name ends in .rotate and belongs to that ledger, such as ledger.jsonl.rotate. feedback removes feedback.jsonl. all is those two. --dry-run prints what would be removed and deletes nothing. Without --dry-run, --yes is required; otherwise the command exits 2 and leaves every file in place. history-archive/ is never deleted, including a directory placed by hand. sessions/, workflows/, worktrees/, and the goal, task, agent, and message SQLite files are not targets. audit, status, and benchmark are rejected.\n\nUsage: vyane clean [OPTIONS] [WHAT]\n\nArguments:\n  [WHAT]\n          What to clean\n          \n          [default: all]\n          [possible values: all, history, feedback]\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n      --dry-run\n          Show what would be removed without actually deleting\n\n      --yes\n          Confirm deletion of local Vyane data\n\n  -h, --help\n          Print help (see a summary with '-h')\n",
     "stderr": ""
   },
   {
@@ -793,7 +803,7 @@
     "args": [],
     "exit_code": 2,
     "stdout": "",
-    "stderr": "error: 'vyane' requires a subcommand but one was not provided\n  [subcommands: check, dispatch, broadcast, history, feedback, sessions, session, workflow, review, route, quota-snapshot, task, serve, daemon, a2a, presence, goal, acp, waiting, liveness, mcp, __worker, help]\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+    "stderr": "error: 'vyane' requires a subcommand but one was not provided\n  [subcommands: check, dispatch, broadcast, history, feedback, clean, sessions, session, workflow, review, route, quota-snapshot, task, serve, daemon, a2a, presence, goal, acp, waiting, liveness, mcp, __worker, help]\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
   },
   {
     "name": "unknown-command",
@@ -803,6 +813,25 @@
     "exit_code": 2,
     "stdout": "",
     "stderr": "error: unrecognized subcommand 'unknown-contract-command'\n\nUsage: vyane [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "clean-unknown-audit",
+    "args": [
+      "clean",
+      "audit"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: invalid value 'audit' for '[WHAT]'\n  [possible values: all, history, feedback]\n\nFor more information, try '--help'.\n"
+  },
+  {
+    "name": "clean-without-yes",
+    "args": [
+      "clean"
+    ],
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "error: Refusing to delete local Vyane data without --yes. Use --dry-run to preview or pass --yes to delete.\n"
   },
   {
     "name": "missing-dispatch-task",
