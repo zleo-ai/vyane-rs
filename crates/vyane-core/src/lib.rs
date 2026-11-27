@@ -30,6 +30,7 @@ pub mod error;
 pub mod identifier;
 pub mod localipc;
 pub mod native_authority;
+pub mod path_map;
 pub mod pathsformats;
 pub mod receipt;
 pub mod run;
@@ -55,6 +56,11 @@ pub use localipc::{
     PORT_FILE_MAGIC, duplicate_socket, send_loopback_datagram, wait_readable,
 };
 pub use native_authority::{NativeExecutionAuthority, NativeSideEffect};
+pub use path_map::{
+    DisplayPathAliases, LocalhostMapping, PathIdentity, checkout_identity_key, default_wsl_distro,
+    display_path_aliases, identify_path, map_localhost_url, parse_gitdir_pointer,
+    paths_refer_to_same_location, probe_checkout_identity, worktree_common_git_dir,
+};
 pub use pathsformats::{
     local_locator_kind, read_text_exact, strip_extended_path_prefix, windows_filename_problem,
 };
