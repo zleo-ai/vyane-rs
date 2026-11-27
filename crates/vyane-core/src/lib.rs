@@ -18,10 +18,10 @@
 //! provider; a model id is only valid within one provider). Vyane keeps them
 //! as separate fields from configuration all the way into the run ledger.
 //!
-//! This crate contains types, traits and pure helpers, plus the [`securefile`]
-//! and [`proc`] primitives. Those primitives are not used by the kernel, the
-//! ledger, the CLI, or the harness spawn path. Runtime orchestration lives in
-//! the sibling crates
+//! This crate contains types, traits and pure helpers, plus the [`securefile`],
+//! [`localipc`], and [`proc`] primitives. Those primitives are not used by the
+//! kernel, the ledger, the CLI, or the harness spawn path. Runtime orchestration
+//! lives in the sibling crates
 //! (`vyane-kernel`, `vyane-protocol`, `vyane-harness`, `vyane-ledger`, …).
 
 pub mod chat;
@@ -29,6 +29,7 @@ pub mod cost;
 pub mod env;
 pub mod error;
 pub mod identifier;
+pub mod localipc;
 pub mod native_authority;
 pub mod path_map;
 pub mod pathsformats;
@@ -51,6 +52,10 @@ pub use env::{BASELINE_ENV, EnvPolicy, InheritMode};
 pub use error::{ErrorKind, Result, VyaneError};
 pub use identifier::{
     IdentifierProblem, InvalidIdentifier, identifier_problem, validate_identifier,
+};
+pub use localipc::{
+    AsWaitable, DuplicateSocketError, LocalIpcError, LoopbackDatagramListener, LoopbackError,
+    PORT_FILE_MAGIC, duplicate_socket, send_loopback_datagram, wait_readable,
 };
 pub use native_authority::{NativeExecutionAuthority, NativeSideEffect};
 pub use path_map::{
