@@ -3,7 +3,8 @@
 //! CLI harness adapters implementing [`vyane_core::Harness`]: Claude Code, the
 //! Codex CLI, a Cursor CLI one-round JSON adapter, a Grok Build one-round JSON
 //! adapter, a Kimi Code one-shot `stream-json` adapter, an OpenCode one-round
-//! JSON adapter, and a caller-constructed generic CLI template adapter. Each
+//! JSON adapter, a CodeBuddy one-shot JSON adapter, and a caller-constructed
+//! generic CLI template adapter. Each
 //! wraps a command as a headless one-shot
 //! execution shell — a scrubbed child environment built strictly through
 //! [`vyane_core::EnvPolicy`], a process-group spawn so cancel/timeout kills the
@@ -73,6 +74,28 @@
 //! matrix stays Claude Code and Codex CLI. Auto, failover, and broadcast do
 //! not gain an OpenCode default pool. It is not listed in the endpoint table
 //! above: there is no documented environment override to inject or remove.
+//! [`CodebuddyHarness`] invokes `codebuddy -p <prompt> --model <id>
+//! --output-format json --setting-sources user` for one shot. The prompt is
+//! an argument and stdin stays closed. The model is the job model when that
+//! id is non-empty, otherwise a non-empty `params.extra["model"]`, otherwise
+//! `deepseek-v4.1-flash`. `Write` passes `--permission-mode acceptEdits`.
+//! `Full` passes `-y`. `ReadOnly` passes no sandbox flag. `job.resume` is
+//! `--resume` when the id is non-empty. Optional extras are `effort`,
+//! `allowed_tools`, `disallowed_tools`, `add_dir`, and `fallback_model`.
+//! `fallback_model` is omitted unless the caller supplied a truthy value.
+//! Every other extra key is ignored, including `owner_user_id`, `bound_owner`,
+//! `run_id`, `task_type`, and `chain_index`. No environment name is removed
+//! after the env policy is applied, and an endpoint on the job is not
+//! injected. On Windows, an npm `codebuddy.cmd` forwarding shim is unwrapped
+//! to `node.exe` plus its script. SGR color is stripped and only the first
+//! JSON value is decoded. A later JSON document fails the run. The last
+//! `type=result` event supplies the answer, `session_id` or `sessionId`, and
+//! usage `input_tokens` and `output_tokens`. `is_error` true, or a `subtype`
+//! other than `success`, fails the run. Truncated JSON and a missing result
+//! fail closed. The harness kind is [`vyane_core::HarnessKind::Other`] with token
+//! `codebuddy`. Callers construct this adapter directly. The assembler
+//! support matrix stays Claude Code and Codex CLI. Auto, failover, and
+//! broadcast do not gain a CodeBuddy default pool.
 //! [`GenericCliHarness`] runs one caller-supplied command. Its argv template
 //! substitutes `{task}`, `{workdir}`, `{sandbox}`, `{session_id}`, and
 //! `params.extra` keys other than those four. The whole stdout is the answer.
@@ -98,6 +121,7 @@
 //! spawn a helper, and it does not change the Claude Code or Codex adapters.
 
 mod claude_code;
+mod codebuddy;
 mod codex_cli;
 mod cursor_cli;
 mod generic;
@@ -111,6 +135,7 @@ mod probe;
 mod spawn;
 
 pub use claude_code::ClaudeCodeHarness;
+pub use codebuddy::CodebuddyHarness;
 pub use codex_cli::CodexCliHarness;
 pub use cursor_cli::CursorCliHarness;
 pub use generic::{GenericCliHarness, GenericCliOutput};
