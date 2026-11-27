@@ -31,6 +31,7 @@ mod native_agent;
 mod native_agent_spool;
 mod output;
 mod presence;
+mod quota_snapshot;
 mod review;
 mod supervisor;
 mod task;

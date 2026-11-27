@@ -693,6 +693,25 @@ is hot only the least-hot profile stays. Provider ids `claude`, `codex`, and
 `xai-oauth` when the profile id has no subscription group of its own.
 `dispatch` to a named target does not open the file.
 
+`vyane quota-snapshot` prints a read-only view of that file. Pass a path to
+read a chosen file instead of the default:
+
+```sh
+vyane quota-snapshot
+vyane quota-snapshot ./quota-snapshot.json
+```
+
+Stdout is one JSON document, schema `quota-snapshot-read.v1`. `state` is
+`fresh`, `stale`, or `missing`. A fresh snapshot has an empty `reasons` list
+and includes the file's JSON object. The other reasons are `file_missing`,
+`unreadable`, `schema_mismatch`, `never_succeeded`, `future_timestamp`,
+`too_old`, `probe_failed`, and `invalidated`. The fresh window is 45 minutes,
+and a `generated_at_ms` more than 60 seconds ahead is `future_timestamp`.
+Only a regular file of at most 1 MiB is read. The command leaves the file
+unchanged and leaves automatic routing unchanged: a stale or unreadable
+snapshot stays visible in this view, while `vyane route` keeps the unfiltered
+route.
+
 Routing hints can also be supplied as `routing.stage`, `routing.tier`,
 `routing.tags`, `routing.candidates`, and `routing.allow_frontier` labels.
 Decision fields such as `routing.provider` and `routing.effort` are reserved so

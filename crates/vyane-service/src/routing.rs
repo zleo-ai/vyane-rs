@@ -385,7 +385,9 @@ pub fn route_task(config: &ResolvedConfig, params: RouteParams) -> Result<RouteR
     Ok(RouteResult { decision, profile })
 }
 
-fn default_quota_snapshot_path() -> Option<PathBuf> {
+/// Local snapshot used when automatic routing, and the read-only snapshot
+/// view, omit a path.
+pub(crate) fn default_quota_snapshot_path() -> Option<PathBuf> {
     quota_snapshot_path(
         std::env::var_os("XDG_STATE_HOME").as_deref(),
         process_home_dir().as_deref(),

@@ -87,6 +87,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         },
         Command::Review(args) => run_review_command(cli.config, args).await,
         Command::Route(args) => run_route_command(cli.config, args).await,
+        Command::QuotaSnapshot(args) => crate::quota_snapshot::run(args),
         Command::Task(task) => run_task(task).await,
         Command::Serve(args) => run_serve(cli.config, args).await,
         Command::Daemon(command) => match command {

@@ -48,6 +48,11 @@ pub enum Command {
     Review(ReviewArgs),
     /// Show what the router would pick for a task (dry-run, no dispatch).
     Route(RouteArgs),
+    /// Print a read-only view of the local quota snapshot.
+    #[command(
+        long_about = "Print a read-only view of the local quota snapshot as one quota-snapshot-read.v1 JSON document. state is fresh, stale, or missing. The command does not probe a provider, write the file, or change routing."
+    )]
+    QuotaSnapshot(QuotaSnapshotArgs),
     /// Inspect and manage detached background runs.
     #[command(subcommand)]
     Task(TaskCommand),
@@ -1240,6 +1245,17 @@ pub struct RouteArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// Arguments for `vyane quota-snapshot`.
+#[derive(Debug, Args)]
+pub struct QuotaSnapshotArgs {
+    /// Snapshot file. When omitted, the file is
+    /// `$XDG_STATE_HOME/aios/quota-snapshot.json`, or
+    /// `~/.local/state/aios/quota-snapshot.json` if that variable is unset or
+    /// empty.
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
