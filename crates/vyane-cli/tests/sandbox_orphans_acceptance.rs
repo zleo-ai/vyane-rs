@@ -36,6 +36,7 @@ fn run(home: &Path, args: &[&str]) -> Output {
     command.output().unwrap()
 }
 
+#[cfg(unix)]
 fn document(output: &Output) -> Value {
     assert_eq!(
         output.status.code(),
@@ -47,6 +48,7 @@ fn document(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+#[cfg(unix)]
 fn stat_text(pid: u32, comm: &str, ppid: u32) -> String {
     let mut fields = vec!["S".to_string(), ppid.to_string()];
     fields.extend(std::iter::repeat_n("0".to_string(), 18));
@@ -54,6 +56,7 @@ fn stat_text(pid: u32, comm: &str, ppid: u32) -> String {
     format!("{pid} ({comm}) {}\n", fields.join(" "))
 }
 
+#[cfg(unix)]
 fn cmdline(argv: &[&str]) -> Vec<u8> {
     let mut raw = Vec::new();
     for (index, arg) in argv.iter().enumerate() {
@@ -66,6 +69,7 @@ fn cmdline(argv: &[&str]) -> Vec<u8> {
     raw
 }
 
+#[cfg(unix)]
 fn write_proc(
     proc: &Path,
     pid: u32,
@@ -87,6 +91,7 @@ fn write_proc(
     fs::write(base.join("status"), status).unwrap();
 }
 
+#[cfg(unix)]
 fn snapshot(proc: &Path) -> Vec<(String, Vec<u8>)> {
     let mut files = Vec::new();
     let mut walk = vec![proc.to_path_buf()];
