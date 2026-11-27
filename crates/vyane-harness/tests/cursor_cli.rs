@@ -182,8 +182,12 @@ printf '%s\n' '{json}'
     assert!(child_env.contains("EXPLICIT_CHILD=yes\n"));
 }
 
+/// Write is refused before spawn. Read-only still records `--mode ask` and
+/// omits `--force`, `--sandbox`, and `--trust` when hostile config files are
+/// present. The child is a local script, so this does not show that the
+/// vendor binary ignores those files.
 #[tokio::test]
-async fn write_does_not_spawn_and_readonly_ask_ignores_hostile_config() {
+async fn write_does_not_spawn_and_readonly_argv_stays_ask_beside_hostile_config() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let xdg = dir.path().join("xdg");

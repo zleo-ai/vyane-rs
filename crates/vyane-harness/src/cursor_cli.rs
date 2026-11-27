@@ -113,7 +113,7 @@ impl CursorCliHarness {
     /// Construct a harness with an explicit binary path or name.
     ///
     /// Tests use this with a fake executable. Production callers normally use
-    /// [`Self::new`] and resolve `agent` through `PATH`.
+    /// [`Self::new`] and resolve `cursor-agent` through `PATH`.
     pub fn with_binary(bin: impl Into<String>) -> Self {
         Self {
             bin: bin.into(),
