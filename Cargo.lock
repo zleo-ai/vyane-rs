@@ -2570,6 +2570,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "flate2",
  "fs4",
  "serde",
  "serde_json",
