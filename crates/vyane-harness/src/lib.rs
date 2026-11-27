@@ -1,12 +1,12 @@
 //! # vyane-harness
 //!
 //! CLI harness adapters implementing [`vyane_core::Harness`]: Claude Code, the
-//! Codex CLI, and a Cursor CLI one-round JSON adapter. Each wraps a coding CLI
-//! as a headless one-shot execution shell — a scrubbed child environment built
-//! strictly through [`vyane_core::EnvPolicy`], a process-group spawn so
-//! cancel/timeout kills the whole tree (not just the direct child), and
-//! machine-readable output parsed down to the final answer + native session id
-//! + usage.
+//! Codex CLI, a Cursor CLI one-round JSON adapter, and a Grok Build one-round
+//! JSON adapter. Each wraps a coding CLI as a headless one-shot execution
+//! shell — a scrubbed child environment built strictly through
+//! [`vyane_core::EnvPolicy`], a process-group spawn so cancel/timeout kills the
+//! whole tree (not just the direct child), and machine-readable output parsed
+//! down to the final answer + native session id + usage.
 //!
 //! ## Environment variable names (endpoint injection)
 //!
@@ -15,12 +15,12 @@
 //! under the public documented names. Cursor CLI refuses a non-empty base URL
 //! before spawn and injects `CURSOR_API_KEY` only when that URL is empty:
 //!
-//! | purpose | Claude Code | Codex CLI | Cursor CLI |
-//! |---------|-------------|-----------|------------|
-//! | base URL | `ANTHROPIC_BASE_URL` | (via `-c model_providers.<name>.base_url`) | refused before spawn |
-//! | auth (Bearer) | `ANTHROPIC_AUTH_TOKEN` | `OPENAI_API_KEY` | `CURSOR_API_KEY` when the base URL is empty |
-//! | auth (x-api-key) | `ANTHROPIC_API_KEY` | `OPENAI_API_KEY` | `CURSOR_API_KEY` when the base URL is empty |
-//! | model | `ANTHROPIC_MODEL` (+ `--model`) | `--model` | `--model` |
+//! | purpose | Claude Code | Codex CLI | Cursor CLI | Grok Build |
+//! |---------|-------------|-----------|------------|------------|
+//! | base URL | `ANTHROPIC_BASE_URL` | (via `-c model_providers.<name>.base_url`) | refused before spawn | refused before spawn |
+//! | auth (Bearer) | `ANTHROPIC_AUTH_TOKEN` | `OPENAI_API_KEY` | `CURSOR_API_KEY` when the base URL is empty | refused before spawn; `XAI_API_KEY` is removed |
+//! | auth (x-api-key) | `ANTHROPIC_API_KEY` | `OPENAI_API_KEY` | `CURSOR_API_KEY` when the base URL is empty | refused before spawn; `XAI_API_KEY` is removed |
+//! | model | `ANTHROPIC_MODEL` (+ `--model`) | `--model` | `--model` | `-m` |
 //!
 //! [`CursorCliHarness`] invokes the existing `agent` binary for one print-mode
 //! round (`-p --output-format json --sandbox disabled --force`) and maps that
@@ -28,9 +28,18 @@
 //! and [`vyane_core::Sandbox::Write`] are refused before spawn: documented print mode can
 //! still widen those requests through global `approvalMode`, project allow
 //! rules, and trusted-workspace hooks. A non-empty endpoint base URL is also
-//! refused before spawn. It does not start `agent acp`. The service assembler
-//! support matrix stays Claude Code and Codex CLI; callers construct this
-//! adapter directly.
+//! refused before spawn. It does not start `agent acp`.
+//! [`GrokBuildHarness`] invokes the existing `grok` binary for one POSIX JSON
+//! round (`--prompt-file /dev/stdin --output-format json`) and maps `text`,
+//! `sessionId`, and `usage` onto [`vyane_core::HarnessOutcome`]. The prompt is
+//! the stdin payload, never an argv token. [`vyane_core::Sandbox::ReadOnly`] is
+//! refused before spawn: vendor sandbox flags are not enforcement, and this
+//! adapter does not build a bubblewrap read-only view, so the bare CLI is not
+//! started. `Write` and `Full` spawn with no sandbox flag. A non-empty endpoint
+//! base URL or any endpoint credential is refused before spawn, and
+//! `XAI_API_KEY` is removed from the child environment. The service assembler
+//! support matrix stays Claude Code and Codex CLI; callers construct the
+//! Cursor and Grok Build adapters directly.
 //!
 //! When the endpoint is `None` the harness authenticates natively and injects
 //! nothing for auth — the scrubbed baseline is all the child sees.
@@ -51,6 +60,7 @@
 mod claude_code;
 mod codex_cli;
 mod cursor_cli;
+mod grok_build;
 pub mod native;
 mod parse;
 pub mod presence;
@@ -60,3 +70,4 @@ mod spawn;
 pub use claude_code::ClaudeCodeHarness;
 pub use codex_cli::CodexCliHarness;
 pub use cursor_cli::CursorCliHarness;
+pub use grok_build::GrokBuildHarness;
