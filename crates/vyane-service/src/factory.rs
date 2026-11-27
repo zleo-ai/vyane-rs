@@ -613,6 +613,54 @@ mod tests {
         assert!(!error.message.contains("https://endpoint.example"));
     }
 
+    /// Auto, failover, and broadcast execute a CLI harness through this
+    /// factory. `kimi-code` stays outside that matrix, so those paths do not
+    /// gain a Kimi Code pool.
+    #[test]
+    fn kimi_code_stays_out_of_assembler_auto_failover_and_broadcast() {
+        let kimi = HarnessKind::Other("kimi-code".into());
+        for protocol in [
+            Protocol::OpenaiChat,
+            Protocol::OpenaiResponses,
+            Protocol::AnthropicMessages,
+        ] {
+            assert!(
+                validate_assembler_combo(AdapterTransport::CliWrap, protocol, Some(&kimi),)
+                    .is_err()
+            );
+        }
+        let Err(constructed) = concrete_harness(kimi.clone()) else {
+            panic!("kimi-code harness was constructed");
+        };
+        assert_eq!(constructed.kind, ErrorKind::Unsupported);
+        assert!(constructed.message.contains("kimi-code"));
+        assert!(!constructed.message.contains("KIMI_API_KEY"));
+
+        let factory = AssemblerFactory::new(ResolvedConfig::default());
+        let mut bound = endpoint_bound_target(
+            AdapterTransport::CliWrap,
+            Some(kimi),
+            Protocol::OpenaiResponses,
+            "https://kimi.example/v1",
+        );
+        let endpoint = bound.endpoint.as_mut().expect("endpoint");
+        endpoint.auth = Some(AuthMaterial {
+            style: AuthStyle::Bearer,
+            secret: Secret::new("endpoint-canary-secret"),
+        });
+        let Err(error) = factory.make(&bound) else {
+            panic!("assembler constructed a kimi-code executor");
+        };
+        assert_eq!(error.kind, ErrorKind::Unsupported);
+        assert_eq!(
+            error.message,
+            "CLI harness is not supported by this assembler"
+        );
+        assert!(!error.message.contains("endpoint-canary-secret"));
+        assert!(!error.message.contains("kimi-code"));
+        assert!(!error.message.contains("https://kimi.example"));
+    }
+
     #[test]
     fn make_rejects_known_unsupported_combo_before_endpoint_or_harness_work() {
         let factory = AssemblerFactory::new(ResolvedConfig::default());
