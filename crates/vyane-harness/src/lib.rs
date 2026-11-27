@@ -2,13 +2,14 @@
 //!
 //! CLI harness adapters implementing [`vyane_core::Harness`]: Claude Code, the
 //! Codex CLI, a Cursor CLI one-round JSON adapter, a Grok Build one-round JSON
-//! adapter, and a caller-constructed generic CLI template adapter. Each wraps
-//! a command as a headless one-shot execution shell — a scrubbed child
-//! environment built strictly through [`vyane_core::EnvPolicy`], a process-group
-//! spawn so cancel/timeout kills the whole tree (not just the direct child),
-//! and, for the named coding CLIs, machine-readable output parsed down to the
-//! final answer + native session id + usage. [`GenericCliHarness`] keeps the
-//! child's stdout as plain text and reports neither a session id nor usage.
+//! adapter, a Kimi Code one-shot `stream-json` adapter, and a caller-constructed
+//! generic CLI template adapter. Each wraps a command as a headless one-shot
+//! execution shell — a scrubbed child environment built strictly through
+//! [`vyane_core::EnvPolicy`], a process-group spawn so cancel/timeout kills the
+//! whole tree (not just the direct child), and, for the named coding CLIs,
+//! machine-readable output parsed down to the final answer + native session id
+//! + usage. [`GenericCliHarness`] keeps the child's stdout as plain text and
+//! reports neither a session id nor usage.
 //!
 //! ## Environment variable names (endpoint injection)
 //!
@@ -46,6 +47,16 @@
 //! `XAI_API_KEY` is removed from the child environment. Callers construct this
 //! adapter directly. The assembler support matrix stays Claude Code and Codex
 //! CLI.
+//! [`KimiCodeHarness`] invokes the existing `kimi` binary for one
+//! `stream-json` round (`kimi -p <prompt> --output-format stream-json`, with
+//! optional `-m` and `-S`). The prompt is an argument. There is no stdin
+//! prompt and no `--prompt-file` flag. Sandbox tiers add no flag. Assistant
+//! `content` is the answer. The session id is the last
+//! `session.resume_hint`. Token usage stays empty. `KIMI_API_KEY` and
+//! `KIMI_MODEL_API_KEY` are removed from the child environment. An endpoint
+//! base URL or credential is not copied into the environment or the argument
+//! list. Callers construct this adapter directly. Auto, failover, and
+//! broadcast do not gain a Kimi Code default pool.
 //! [`GenericCliHarness`] runs one caller-supplied command. Its argv template
 //! substitutes `{task}`, `{workdir}`, `{sandbox}`, `{session_id}`, and
 //! `params.extra` keys other than those four. The whole stdout is the answer.
@@ -75,6 +86,7 @@ mod codex_cli;
 mod cursor_cli;
 mod generic;
 mod grok_build;
+mod kimi_code;
 pub mod native;
 mod parse;
 pub mod presence;
@@ -86,3 +98,4 @@ pub use codex_cli::CodexCliHarness;
 pub use cursor_cli::CursorCliHarness;
 pub use generic::{GenericCliHarness, GenericCliOutput};
 pub use grok_build::GrokBuildHarness;
+pub use kimi_code::KimiCodeHarness;
