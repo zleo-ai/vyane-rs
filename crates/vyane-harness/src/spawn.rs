@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use command_fds::{CommandFdExt as _, FdMapping};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -947,6 +947,7 @@ pub(crate) async fn run_capture_with_pinned_limit(
         None,
         None,
         Vec::new(),
+        None,
     )
     .await
 }
@@ -977,6 +978,7 @@ pub(crate) async fn run_capture_with_pinned_limit_authorized(
         Some(seccomp_filter),
         None,
         Vec::new(),
+        None,
     )
     .await
 }
@@ -1007,6 +1009,7 @@ pub(crate) async fn run_capture_with_pinned_limit_authorized_mounts(
         Some(seccomp_filter),
         None,
         native_mounts,
+        None,
     )
     .await
 }
@@ -1039,6 +1042,66 @@ pub(crate) async fn run_capture_with_pinned_limit_authorized_channel_mounts(
         Some(seccomp_filter),
         Some(network_channel),
         native_mounts,
+        None,
+    )
+    .await
+}
+
+/// Aborts a prompt-stdin write if it is still running when the capture returns.
+struct PromptStdin(Option<JoinHandle<()>>);
+
+impl PromptStdin {
+    fn empty() -> Self {
+        Self(None)
+    }
+}
+
+impl Drop for PromptStdin {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
+fn write_prompt_stdin(payload: &[u8], stdin: Option<tokio::process::ChildStdin>) -> PromptStdin {
+    let bytes = payload.to_vec();
+    let handle = tokio::spawn(async move {
+        let Some(mut pipe) = stdin else {
+            return;
+        };
+        let _ = pipe.write_all(&bytes).await;
+        let _ = pipe.shutdown().await;
+    });
+    PromptStdin(Some(handle))
+}
+
+/// [`run_capture`] that writes `stdin_payload` to the child and then closes
+/// the pipe.
+///
+/// Existing harnesses keep [`run_capture_with_pinned`], which leaves stdin
+/// closed. This entry point is for a CLI whose prompt arrives on stdin.
+pub(crate) async fn run_capture_with_stdin(
+    program: &str,
+    args: &[String],
+    cwd: Option<&std::path::Path>,
+    env: &BTreeMap<String, String>,
+    control: RunControl,
+    stdin_payload: &[u8],
+) -> Result<RunResult> {
+    run_capture_with_pinned_limit_confined(
+        program,
+        args,
+        cwd,
+        None,
+        env,
+        control,
+        UNBOUNDED_CAPTURE,
+        None,
+        None,
+        None,
+        Vec::new(),
+        Some(stdin_payload),
     )
     .await
 }
@@ -1056,6 +1119,7 @@ async fn run_capture_with_pinned_limit_confined(
     seccomp_filter: Option<&[u8]>,
     network_channel: Option<NativeNetworkChannel>,
     native_mounts: Vec<NativeMountHandle>,
+    stdin_payload: Option<&[u8]>,
 ) -> Result<RunResult> {
     #[cfg(not(unix))]
     let _ = seccomp_filter;
@@ -1147,8 +1211,14 @@ async fn run_capture_with_pinned_limit_confined(
         }
         Vec::new()
     };
+    if stdin_payload.is_some() && start_gated {
+        return Err(VyaneError::new(
+            ErrorKind::Unsupported,
+            "harness prompt stdin cannot share the lifecycle start gate",
+        ));
+    }
     let mut cmd = harness_command(program, args, start_gated);
-    cmd.stdin(if start_gated {
+    cmd.stdin(if start_gated || stdin_payload.is_some() {
         Stdio::piped()
     } else {
         Stdio::null()
@@ -1193,6 +1263,14 @@ async fn run_capture_with_pinned_limit_confined(
         },
     )
     .await?;
+
+    // Write the prompt concurrently with stdout/stderr drains. Awaiting the
+    // write first can deadlock once both pipes fill. Drop aborts a write that
+    // is still blocked after the child is gone.
+    let _prompt_stdin = match stdin_payload {
+        Some(payload) => write_prompt_stdin(payload, child.stdin.take()),
+        None => PromptStdin::empty(),
+    };
 
     // The child pid doubles as its process-group id because process_group(0)
     // makes it a group leader (pid == pgid). `None` only if the child already
