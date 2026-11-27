@@ -7,8 +7,8 @@
 //! execution shell — a scrubbed child environment built strictly through
 //! [`vyane_core::EnvPolicy`], a process-group spawn so cancel/timeout kills the
 //! whole tree (not just the direct child), and, for the named coding CLIs,
-//! machine-readable output parsed down to the final answer + native session id
-//! + usage. [`GenericCliHarness`] keeps the child's stdout as plain text and
+//! machine-readable output parsed down to the final answer, native session id,
+//! and usage. [`GenericCliHarness`] keeps the child's stdout as plain text and
 //! reports neither a session id nor usage.
 //!
 //! ## Environment variable names (endpoint injection)
