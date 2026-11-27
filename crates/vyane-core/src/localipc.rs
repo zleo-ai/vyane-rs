@@ -17,8 +17,10 @@
 //! `AF_UNIX` `SOCK_DGRAM` socket: they bind UDP `127.0.0.1` on an ephemeral
 //! port and rendezvous through a port file at the original path. The file
 //! is `{magic} 127.0.0.1 {port} {token}\n` with a 128-bit token. It is
-//! created with a DACL for the current user only. The sender checks the
-//! owner SID before it sends. Datagrams whose token does not match are
+//! created with a DACL for the current user only. Windows may spell a
+//! well-known SID as an SDDL alias when that descriptor is read back; the
+//! sender still compares the full owner SID before it sends. Datagrams whose
+//! token does not match are
 //! dropped. On POSIX both entry points return [`LoopbackError::NotImplemented`].
 //! Callers there keep using a pathname `AF_UNIX` socket. This module does
 //! not invent one.
@@ -1429,7 +1431,7 @@ mod win {
         err.kind() == io::ErrorKind::PermissionDenied || matches!(err.raw_os_error(), Some(5 | 32))
     }
 
-    fn file_owner_sid(path: &Path) -> io::Result<String> {
+    pub(in crate::localipc) fn file_owner_sid(path: &Path) -> io::Result<String> {
         let wide = wide_path(path)?;
         let mut owner: PSID = ptr::null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
@@ -1480,6 +1482,45 @@ mod win {
         let mut out: PWSTR = ptr::null_mut();
         // SAFETY: `descriptor` is the live security descriptor from above.
         // On success `out` is a LocalAlloc wide string owned by `LocalWide`.
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                info,
+                &mut out,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _free = LocalWide(out);
+        wide_to_string(out)
+    }
+
+    /// Windows' own spelling of `sddl`, including aliases such as `LA`.
+    #[cfg(test)]
+    pub(in crate::localipc) fn canonical_sddl(sddl: &str) -> io::Result<String> {
+        let wide = wide_str(sddl);
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated. On success `descriptor` is a
+        // LocalAlloc block owned by `LocalFreeGuard`.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _descriptor = LocalFreeGuard(descriptor);
+        let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+        let mut out: PWSTR = ptr::null_mut();
+        // SAFETY: `descriptor` is the live descriptor from above. On success
+        // `out` is a LocalAlloc wide string owned by `LocalWide`.
         let ok = unsafe {
             ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 descriptor,
@@ -1892,8 +1933,15 @@ mod tests {
         let mut listener = LoopbackDatagramListener::new(&path, |_| {}).unwrap();
         listener.start().unwrap();
         let sid = crate::securefile::current_user_id(false).unwrap();
+        assert_eq!(win::file_owner_sid(&path).unwrap(), sid);
+        // Windows prints a well-known SID as an alias. The built-in
+        // Administrator comes back as `LA`. Compare the file with that
+        // canonical spelling of the descriptor this process wrote.
+        let requested = format!("O:{sid}D:P(A;;FA;;;{sid})");
         let sddl = win::file_security_sddl(&path).unwrap();
-        assert_eq!(sddl, format!("O:{sid}D:P(A;;FA;;;{sid})"));
+        assert_eq!(sddl, win::canonical_sddl(&requested).unwrap());
+        assert!(sddl.contains("D:P(A;;FA;;;"));
+        assert!(!sddl.contains("WD"));
         let text = std::fs::read_to_string(&path).unwrap();
         let fields: Vec<_> = text.split_whitespace().collect();
         assert_eq!(fields[0], PORT_FILE_MAGIC);
