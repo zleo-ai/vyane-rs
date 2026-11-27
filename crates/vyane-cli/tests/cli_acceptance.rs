@@ -1586,6 +1586,7 @@ fn help_lists_all_commands() {
         "quota-snapshot",
         "serve",
         "acp",
+        "liveness",
         "mcp",
         "task",
         "a2a",

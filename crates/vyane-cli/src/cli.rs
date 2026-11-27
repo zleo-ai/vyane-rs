@@ -77,6 +77,17 @@ pub enum Command {
     Acp(AcpArgs),
     /// List read-only items that are waiting for a human.
     Waiting(WaitingArgs),
+    /// Read-only process liveness views.
+    #[command(
+        long_about = "Read-only process liveness views. sandbox-orphans lists Codex Linux sandbox processes reparented to systemd --user, PID 1, or a subreaper. It only reads procfs and does not signal or stop any process."
+    )]
+    Liveness {
+        /// Emit machine-readable JSON.
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        command: LivenessCommand,
+    },
     /// Run the MCP server over stdio (for use as an MCP tool server).
     Mcp,
     /// Internal: execute a detached run. Not for direct use.
@@ -119,6 +130,36 @@ pub struct WaitingArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LivenessCommand {
+    /// Read-only Codex sandbox orphans reparented to systemd --user, PID 1, or a subreaper.
+    SandboxOrphans(SandboxOrphansArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SandboxOrphansArgs {
+    /// Warn when the oldest orphan is older than this many seconds (default 21600, 6 hours). Does not stop any process.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        value_parser = parse_warn_after_seconds,
+        default_value_t = vyane_service::SANDBOX_ORPHAN_WARN_AFTER_SECONDS
+    )]
+    pub warn_after_seconds: u64,
+
+    /// procfs root to read (default /proc). Read-only.
+    #[arg(long, value_name = "PATH")]
+    pub proc_root: Option<PathBuf>,
+}
+
+fn parse_warn_after_seconds(raw: &str) -> Result<u64, String> {
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("warn-after-seconds must be a non-negative integer".to_string());
+    }
+    raw.parse::<u64>()
+        .map_err(|_| "warn-after-seconds must be a non-negative integer".to_string())
 }
 
 #[derive(Debug, Args)]
