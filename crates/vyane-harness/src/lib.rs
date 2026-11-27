@@ -2,8 +2,9 @@
 //!
 //! CLI harness adapters implementing [`vyane_core::Harness`]: Claude Code, the
 //! Codex CLI, a Cursor CLI one-round JSON adapter, a Grok Build one-round JSON
-//! adapter, a Kimi Code one-shot `stream-json` adapter, and a caller-constructed
-//! generic CLI template adapter. Each wraps a command as a headless one-shot
+//! adapter, a Kimi Code one-shot `stream-json` adapter, an OpenCode one-round
+//! JSON adapter, and a caller-constructed generic CLI template adapter. Each
+//! wraps a command as a headless one-shot
 //! execution shell — a scrubbed child environment built strictly through
 //! [`vyane_core::EnvPolicy`], a process-group spawn so cancel/timeout kills the
 //! whole tree (not just the direct child), and, for the named coding CLIs,
@@ -57,6 +58,21 @@
 //! base URL or credential is not copied into the environment or the argument
 //! list. Callers construct this adapter directly. Auto, failover, and
 //! broadcast do not gain a Kimi Code default pool.
+//! [`OpencodeHarness`] invokes `opencode run <prompt> --format json` for one
+//! shot. The prompt is an argument and stdin stays closed. `--model` comes
+//! from the job model, or from `params.extra["model"]` when the job model is
+//! empty. A provider string in `params.extra` is joined as `provider/model`
+//! when the model does not already contain `/`. `job.resume` is `--session`.
+//! No sandbox tier adds a flag, and no environment name is removed after the
+//! policy is applied. An endpoint on the job is not injected and is not
+//! refused. NDJSON `type=text` parts, plus non-JSON lines other than a
+//! `Session:` fallback, are the answer. `sessionID` is the session id.
+//! `type=error` and `event_error` fail the run. `type=step_finish` token
+//! input and output map onto [`vyane_core::Usage`]; `total` is not a field of
+//! that type. Callers construct this adapter directly. The assembler support
+//! matrix stays Claude Code and Codex CLI. Auto, failover, and broadcast do
+//! not gain an OpenCode default pool. It is not listed in the endpoint table
+//! above: there is no documented environment override to inject or remove.
 //! [`GenericCliHarness`] runs one caller-supplied command. Its argv template
 //! substitutes `{task}`, `{workdir}`, `{sandbox}`, `{session_id}`, and
 //! `params.extra` keys other than those four. The whole stdout is the answer.
@@ -88,6 +104,7 @@ mod generic;
 mod grok_build;
 mod kimi_code;
 pub mod native;
+mod opencode;
 mod parse;
 pub mod presence;
 mod probe;
@@ -99,3 +116,4 @@ pub use cursor_cli::CursorCliHarness;
 pub use generic::{GenericCliHarness, GenericCliOutput};
 pub use grok_build::GrokBuildHarness;
 pub use kimi_code::KimiCodeHarness;
+pub use opencode::OpencodeHarness;
