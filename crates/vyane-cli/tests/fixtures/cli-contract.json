@@ -228,7 +228,7 @@
       "--help"
     ],
     "exit_code": 0,
-    "stdout": "Serve an Agent Client Protocol echo shell over stdio. Answers initialize and session/new, then echoes session/prompt text. Does not dispatch, read configuration or credentials, call a model, or create a state database.\n\nUsage: vyane acp [OPTIONS]\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n  -h, --help\n          Print help (see a summary with '-h')\n",
+    "stdout": "Serve a canned Agent Client Protocol stub over stdio. The --stub flag is optional and selects this same stub, which is the default. Answers initialize and session/new, then streams a plan, framed echo chunks, and a demo tool call. A session/cancel during the turn stops it with stopReason cancelled. Does not dispatch, read configuration or credentials, call a model, or create a state database.\n\nUsage: vyane acp [OPTIONS]\n\nOptions:\n      --config <PATH>\n          Config file to load instead of the default user + project files\n\n      --stub\n          Select the canned stub explicitly. Omitting the flag selects the same stub\n\n  -h, --help\n          Print help (see a summary with '-h')\n",
     "stderr": ""
   },
   {
