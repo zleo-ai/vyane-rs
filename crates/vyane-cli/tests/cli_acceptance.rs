@@ -1583,6 +1583,7 @@ fn help_lists_all_commands() {
         "workflow",
         "review",
         "route",
+        "quota-snapshot",
         "serve",
         "acp",
         "mcp",
