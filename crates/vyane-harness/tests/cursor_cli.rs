@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use vyane_core::HarnessSpawnAuthority;
-use vyane_core::env::EnvPolicy;
+use vyane_core::env::{EnvPolicy, InheritMode};
 use vyane_core::error::ErrorKind;
 use vyane_core::target::{AuthMaterial, AuthStyle, Endpoint, ModelId, Protocol, Sandbox, Secret};
 use vyane_core::task::GenParams;
@@ -67,6 +67,20 @@ fn read_lines(path: &Path) -> Vec<String> {
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+fn assert_subscription_env_absent(child_env: &str) {
+    for line in child_env.lines() {
+        let name = line.split_once('=').map(|(key, _)| key).unwrap_or(line);
+        assert!(
+            !name.eq_ignore_ascii_case("CURSOR_API_KEY"),
+            "child environment kept CURSOR_API_KEY"
+        );
+        assert!(
+            !name.eq_ignore_ascii_case("CURSOR_API_ENDPOINT"),
+            "child environment kept CURSOR_API_ENDPOINT"
+        );
+    }
 }
 
 fn contains_window(lines: &[String], expected: &[&str]) -> bool {
@@ -163,13 +177,13 @@ printf '%s\n' '{json}'
     }
 
     let child_env = fs::read_to_string(&env_file).unwrap();
-    assert!(child_env.contains("CURSOR_API_KEY=test-cursor-child-key\n"));
-    assert!(!child_env.contains("CURSOR_API_ENDPOINT="));
+    assert_subscription_env_absent(&child_env);
+    assert!(!child_env.contains("test-cursor-child-key"));
     assert!(child_env.contains("EXPLICIT_CHILD=yes\n"));
 }
 
 #[tokio::test]
-async fn restricted_modes_do_not_spawn_under_hostile_ambient_config() {
+async fn write_does_not_spawn_and_readonly_ask_ignores_hostile_config() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let xdg = dir.path().join("xdg");
@@ -231,27 +245,63 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
         ),
     ];
 
-    for sandbox in [Sandbox::ReadOnly, Sandbox::Write] {
-        let mut job = base_job("do not run");
-        job.sandbox = sandbox;
-        job.workdir = Some(work.clone());
-        job.env.allow.extend([
-            "HOME".to_string(),
-            "XDG_CONFIG_HOME".to_string(),
-            "CURSOR_CONFIG_DIR".to_string(),
-        ]);
-        let err = CursorCliHarness::with_binary_and_parent_env_for_tests(
-            bin.to_string_lossy(),
-            parent.clone(),
-        )
-        .run(job, CancellationToken::new())
-        .await
-        .unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Unsupported);
-        assert!(err.message.contains("refuses to spawn"), "{}", err.message);
-        assert!(err.message.contains(sandbox.as_str()), "{}", err.message);
-        assert!(!marker.exists(), "restricted sandbox spawned the child");
-        assert!(!argv_file.exists(), "restricted sandbox wrote argv");
+    let mut write_job = base_job("do not run");
+    write_job.sandbox = Sandbox::Write;
+    write_job.workdir = Some(work.clone());
+    write_job.env.allow.extend([
+        "HOME".to_string(),
+        "XDG_CONFIG_HOME".to_string(),
+        "CURSOR_CONFIG_DIR".to_string(),
+    ]);
+    let err = CursorCliHarness::with_binary_and_parent_env_for_tests(
+        bin.to_string_lossy(),
+        parent.clone(),
+    )
+    .run(write_job, CancellationToken::new())
+    .await
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Unsupported);
+    assert!(err.message.contains("refuses to spawn"), "{}", err.message);
+    assert!(err.message.contains("write"), "{}", err.message);
+    assert!(!marker.exists(), "write sandbox spawned the child");
+    assert!(!argv_file.exists(), "write sandbox wrote argv");
+
+    let mut readonly = base_job("ask only");
+    readonly.sandbox = Sandbox::ReadOnly;
+    readonly.workdir = Some(work.clone());
+    readonly.env.allow.extend([
+        "HOME".to_string(),
+        "XDG_CONFIG_HOME".to_string(),
+        "CURSOR_CONFIG_DIR".to_string(),
+    ]);
+    let outcome = CursorCliHarness::with_binary_and_parent_env_for_tests(
+        bin.to_string_lossy(),
+        parent.clone(),
+    )
+    .run(readonly, CancellationToken::new())
+    .await
+    .unwrap();
+    assert_eq!(outcome.text, "ran");
+    assert!(marker.is_file());
+    let readonly_argv = read_lines(&argv_file);
+    let readonly_flags = flags_before_prompt(&readonly_argv);
+    assert!(contains_window(readonly_flags, &["--mode", "ask"]));
+    assert_eq!(
+        readonly_flags.iter().filter(|arg| *arg == "--mode").count(),
+        1
+    );
+    for forbidden in [
+        "--force",
+        "--sandbox",
+        "--trust",
+        "--yolo",
+        "--api-key",
+        "agent",
+    ] {
+        assert!(
+            !readonly_flags.iter().any(|arg| arg == forbidden),
+            "{readonly_argv:?}"
+        );
     }
 
     let mut explicit = spawning_job("explicit full");
@@ -273,6 +323,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
     assert!(contains_window(flags, &["--sandbox", "disabled"]));
     assert_eq!(flags.iter().filter(|arg| *arg == "--force").count(), 1);
     assert!(!flags.iter().any(|arg| arg == "--trust"));
+    assert!(!flags.iter().any(|arg| arg == "--mode"));
 }
 
 #[tokio::test]
@@ -282,23 +333,26 @@ async fn custom_endpoint_does_not_spawn() {
     let body = format!("#!/bin/sh\nprintf spawned > {}\n", shell_quote(&marker));
     let bin = write_script(&dir, "endpoint-agent", &body);
 
-    let mut job = spawning_job("do not retarget");
-    job.endpoint = Some(Endpoint {
-        base_url: "https://endpoint.example".into(),
-        auth: Some(AuthMaterial {
-            style: AuthStyle::Bearer,
-            secret: Secret::new("must-not-matter"),
-        }),
-    });
-    let err = CursorCliHarness::with_binary(bin.to_string_lossy())
-        .run(job, CancellationToken::new())
-        .await
-        .unwrap_err();
-    assert_eq!(err.kind, ErrorKind::Unsupported);
-    assert!(err.message.contains("custom endpoint"), "{}", err.message);
-    assert!(!err.message.contains("must-not-matter"));
-    assert!(!err.message.contains("https://endpoint.example"));
-    assert!(!marker.exists());
+    for sandbox in [Sandbox::ReadOnly, Sandbox::Full] {
+        let mut job = base_job("do not retarget");
+        job.sandbox = sandbox;
+        job.endpoint = Some(Endpoint {
+            base_url: "https://endpoint.example".into(),
+            auth: Some(AuthMaterial {
+                style: AuthStyle::Bearer,
+                secret: Secret::new("must-not-matter"),
+            }),
+        });
+        let err = CursorCliHarness::with_binary(bin.to_string_lossy())
+            .run(job, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Unsupported);
+        assert!(err.message.contains("custom endpoint"), "{}", err.message);
+        assert!(!err.message.contains("must-not-matter"));
+        assert!(!err.message.contains("https://endpoint.example"));
+        assert!(!marker.exists());
+    }
 }
 
 #[tokio::test]
@@ -335,7 +389,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
 }
 
 #[tokio::test]
-async fn parent_cursor_credentials_stay_out_of_the_child() {
+async fn readonly_fake_process_passes_ask_mode_and_strips_key_and_endpoint() {
     let dir = TempDir::new().unwrap();
     let env_file = dir.path().join("env.txt");
     let argv_file = dir.path().join("argv.txt");
@@ -361,26 +415,94 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
             "parent-cursor-key".to_string(),
         ),
         (
+            "cursor_api_key".to_string(),
+            "parent-cursor-key-lower".to_string(),
+        ),
+        (
             "CURSOR_API_ENDPOINT".to_string(),
             "https://parent.example".to_string(),
         ),
+        (
+            "Cursor_Api_Endpoint".to_string(),
+            "https://parent-mixed.example".to_string(),
+        ),
     ];
+
+    let mut job = base_job("--mode");
+    job.sandbox = Sandbox::ReadOnly;
+    job.model = ModelId::new("grok-4.7");
+    job.env = EnvPolicy {
+        mode: InheritMode::Full,
+        ..EnvPolicy::scrubbed()
+    };
+    job.env.allow.extend([
+        "CURSOR_API_KEY".to_string(),
+        "CURSOR_API_ENDPOINT".to_string(),
+    ]);
+    job.env = job
+        .env
+        .clone()
+        .inject("CURSOR_API_KEY", "injected-cursor-key")
+        .inject("CURSOR_API_ENDPOINT", "https://injected.example")
+        .inject("cursor_api_key", "injected-cursor-key-lower")
+        .inject("EXPLICIT_CHILD", "yes");
+    job.endpoint = Some(Endpoint {
+        base_url: String::new(),
+        auth: Some(AuthMaterial {
+            style: AuthStyle::Bearer,
+            secret: Secret::new("endpoint-cursor-secret"),
+        }),
+    });
 
     let outcome =
         CursorCliHarness::with_binary_and_parent_env_for_tests(bin.to_string_lossy(), parent_env)
-            .run(spawning_job("native auth"), CancellationToken::new())
+            .run(job, CancellationToken::new())
             .await
             .unwrap();
     assert_eq!(outcome.text, "native");
 
-    let child_env = fs::read_to_string(env_file).unwrap();
-    assert!(!child_env.contains("parent-cursor-key"));
-    assert!(!child_env.contains("https://parent.example"));
-    assert!(!child_env.contains("CURSOR_API_KEY="));
-    assert!(!child_env.contains("CURSOR_API_ENDPOINT="));
-    let argv = fs::read_to_string(argv_file).unwrap();
-    assert!(!argv.contains("parent-cursor-key"));
-    assert!(!argv.contains("--api-key"));
+    let child_env = fs::read_to_string(&env_file).unwrap();
+    assert_subscription_env_absent(&child_env);
+    assert!(child_env.contains("EXPLICIT_CHILD=yes\n"));
+    assert!(child_env.contains("HOME=/tmp/cursor-home\n"));
+    for forbidden in [
+        "parent-cursor-key",
+        "parent-cursor-key-lower",
+        "https://parent.example",
+        "https://parent-mixed.example",
+        "injected-cursor-key",
+        "injected-cursor-key-lower",
+        "https://injected.example",
+        "endpoint-cursor-secret",
+    ] {
+        assert!(
+            !child_env.contains(forbidden),
+            "{forbidden} reached the child environment"
+        );
+    }
+
+    let argv = read_lines(&argv_file);
+    assert_eq!(argv.first().map(String::as_str), Some("-p"));
+    assert_eq!(argv[argv.len() - 2], "--");
+    assert_eq!(argv[argv.len() - 1], "--mode");
+    let flags = flags_before_prompt(&argv);
+    assert!(contains_window(flags, &["--output-format", "json"]));
+    assert!(contains_window(flags, &["--model", "grok-4.7"]));
+    assert!(contains_window(flags, &["--mode", "ask"]));
+    assert_eq!(flags.iter().filter(|arg| *arg == "--mode").count(), 1);
+    for forbidden in [
+        "--force",
+        "--sandbox",
+        "--trust",
+        "--yolo",
+        "--api-key",
+        "agent",
+        "parent-cursor-key",
+        "injected-cursor-key",
+        "endpoint-cursor-secret",
+    ] {
+        assert!(!flags.iter().any(|arg| arg == forbidden), "{argv:?}");
+    }
 }
 
 #[tokio::test]
@@ -447,28 +569,30 @@ async fn nonzero_exit_is_harness_failed() {
 }
 
 #[tokio::test]
-async fn restricted_missing_binary_is_unsupported_before_spawn() {
-    for sandbox in [Sandbox::ReadOnly, Sandbox::Write] {
-        let mut job = base_job("fail");
-        job.sandbox = sandbox;
-        let err = CursorCliHarness::with_binary("/no/such/cursor-agent")
-            .run(job, CancellationToken::new())
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Unsupported);
-        assert!(err.message.contains("refuses to spawn"), "{}", err.message);
-        assert!(err.message.contains(sandbox.as_str()), "{}", err.message);
-    }
+async fn write_missing_binary_is_unsupported_before_spawn() {
+    let mut job = base_job("fail");
+    job.sandbox = Sandbox::Write;
+    let err = CursorCliHarness::with_binary("/no/such/cursor-agent")
+        .run(job, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Unsupported);
+    assert!(err.message.contains("refuses to spawn"), "{}", err.message);
+    assert!(err.message.contains("write"), "{}", err.message);
 }
 
 #[tokio::test]
 async fn missing_binary_is_spawn_failed() {
     let dir = TempDir::new().unwrap();
-    let err = CursorCliHarness::with_binary(dir.path().join("missing").to_string_lossy())
-        .run(spawning_job("fail"), CancellationToken::new())
-        .await
-        .unwrap_err();
-    assert_eq!(err.kind, ErrorKind::SpawnFailed);
+    for sandbox in [Sandbox::ReadOnly, Sandbox::Full] {
+        let mut job = base_job("fail");
+        job.sandbox = sandbox;
+        let err = CursorCliHarness::with_binary(dir.path().join("missing").to_string_lossy())
+            .run(job, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::SpawnFailed);
+    }
 }
 
 #[tokio::test]
