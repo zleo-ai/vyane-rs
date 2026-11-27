@@ -380,7 +380,7 @@ fn reaped_child_is_gone_and_a_zombie_still_counts() {
 fn contained_child_is_its_own_session() {
     let dir = tempfile::tempdir().unwrap();
     let child = Reap::contained("sleep", &["30"], dir.path()).unwrap();
-    let sid = ps_field(child.id(), "sid=").unwrap();
+    let sid = ps_field(child.id(), "sess=").unwrap();
     assert_eq!(sid, child.id().to_string());
 }
 
@@ -420,7 +420,7 @@ fn contained_tree_can_be_killed() {
         .parse()
         .unwrap();
     assert_ne!(grandchild, child.id());
-    let sid = ps_field(child.id(), "sid=").unwrap();
+    let sid = ps_field(child.id(), "sess=").unwrap();
     assert_eq!(sid, child.id().to_string());
     let before = std::fs::read(&heartbeat).unwrap();
     std::thread::sleep(Duration::from_millis(500));
@@ -896,6 +896,10 @@ fn wait_until(timeout: Duration, mut ready: impl FnMut() -> bool) -> bool {
 }
 
 #[cfg(unix)]
+/// Read one `ps -o` column.
+///
+/// The keyword has to exist in both procps and BSD `ps`. The session id is
+/// `sess`; `sid` is procps-only and macOS rejects it. Process state is `state`.
 fn ps_field(pid: u32, field: &str) -> Result<String, String> {
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", field])
