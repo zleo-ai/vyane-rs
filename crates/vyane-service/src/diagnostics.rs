@@ -5,7 +5,9 @@
 //! endpoint URLs, environment-variable names, credential values, prompts, or
 //! source-error text. Both operations are local computations: they never
 //! probe a provider, inspect a harness binary, make a network request, or
-//! spawn a process.
+//! spawn a process. Route preview follows automatic routing, so it may read
+//! the default local quota snapshot. It does not copy that file into the
+//! report.
 
 use std::fmt;
 
@@ -101,7 +103,10 @@ impl fmt::Display for DiagnosticError {
 
 impl std::error::Error for DiagnosticError {}
 
-/// Bounded inputs for a deterministic route preview.
+/// Bounded inputs for a route preview.
+///
+/// The preview uses the same automatic route as [`crate::routing::route_task`],
+/// including the default local quota snapshot when that path is omitted.
 #[derive(Debug, Clone)]
 pub struct RoutePreviewParams {
     pub task: String,

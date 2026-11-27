@@ -3,7 +3,8 @@
 //! The caller passes a snapshot path. This module reads that file, and only
 //! that file: it does not probe a provider, open a network connection, or
 //! choose a route by itself. [`narrow_auto_candidates`] returns the profile
-//! names that remain eligible. The routing adapter applies that list.
+//! names that remain eligible. The routing adapter applies that list, and
+//! supplies the default local path when the caller omits one.
 //!
 //! A missing, unreadable, stale, or schema-mismatched snapshot returns
 //! `None`. The caller then keeps the unfiltered candidate list, so the route
@@ -37,7 +38,9 @@ const SUBVIEW_GLOBS: &[&str] = &[
 /// Profile names to keep, in candidate order.
 ///
 /// `candidates` are `(profile name, provider id)` pairs. The snapshot's
-/// `provider` field is matched to that provider id. `None` means the snapshot
+/// `provider` field is matched to that provider id. When that id has no
+/// subscription group, `claude`, `codex`, and `grok-build` also match
+/// `anthropic`, `openai-codex`, and `xai-oauth`. `None` means the snapshot
 /// must not change the candidate list.
 pub(crate) fn narrow_auto_candidates(
     candidates: &[(String, String)],
@@ -97,9 +100,36 @@ fn choose_pool(candidates: &[(String, String)], snapshot: &SnapshotFile) -> Opti
 }
 
 fn weekly_window(snapshot: &SnapshotFile, provider: &str) -> Option<WeeklyWindow> {
-    let group = snapshot.providers.iter().find(|group| {
-        group.provider == provider && group.kind.as_deref() == Some("subscription")
-    })?;
+    if let Some(window) = weekly_window_for(snapshot, provider) {
+        return Some(window);
+    }
+    // An exact subscription group that has no usable weekly window stays
+    // unknown. Falling through to an alias would turn that profile into a
+    // known subscription and change which names remain eligible.
+    if subscription_group(snapshot, provider).is_some() {
+        return None;
+    }
+    weekly_window_for(snapshot, provider_alias(provider)?)
+}
+
+fn provider_alias(provider: &str) -> Option<&'static str> {
+    match provider {
+        "claude" => Some("anthropic"),
+        "codex" => Some("openai-codex"),
+        "grok-build" => Some("xai-oauth"),
+        _ => None,
+    }
+}
+
+fn subscription_group<'a>(snapshot: &'a SnapshotFile, provider: &str) -> Option<&'a ProviderGroup> {
+    snapshot
+        .providers
+        .iter()
+        .find(|group| group.provider == provider && group.kind.as_deref() == Some("subscription"))
+}
+
+fn weekly_window_for(snapshot: &SnapshotFile, provider: &str) -> Option<WeeklyWindow> {
+    let group = subscription_group(snapshot, provider)?;
     for window in &group.windows {
         let Some(id) = window.id.as_deref() else {
             continue;
@@ -411,6 +441,128 @@ mod tests {
         ];
         let pool = narrow_auto_candidates(&candidates, &path).unwrap();
         assert_eq!(pool, vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn provider_aliases_match_snapshot_ids_only_when_the_exact_group_is_absent() {
+        let directory = crate::test_support::private_tempdir();
+        let week_ms = 7 * 24 * 3_600 * 1_000;
+        let aliased = [
+            ("claude", "anthropic"),
+            ("codex", "openai-codex"),
+            ("grok-build", "xai-oauth"),
+        ];
+        for (profile_provider, snapshot_provider) in aliased {
+            let path = directory.path().join(format!("{profile_provider}.json"));
+            write_snapshot(
+                &path,
+                &[
+                    provider(snapshot_provider, 20.0, 0.4, week_ms),
+                    provider("free-provider", 30.0, 1.0, week_ms),
+                ],
+            );
+            let candidates = [
+                ("aliased".into(), profile_provider.to_string()),
+                ("free".into(), "free-provider".into()),
+            ];
+            let pool = narrow_auto_candidates(&candidates, &path).unwrap();
+            assert_eq!(pool, vec!["aliased".to_string()], "{profile_provider}");
+        }
+
+        let exact = directory.path().join("exact-claude.json");
+        write_snapshot(
+            &exact,
+            &[
+                provider("claude", 80.0, 2.0, week_ms),
+                provider("anthropic", 10.0, 0.4, week_ms),
+                provider("free-provider", 30.0, 1.0, week_ms),
+            ],
+        );
+        let candidates = [
+            ("aliased".into(), "claude".into()),
+            ("free".into(), "free-provider".into()),
+        ];
+        let pool = narrow_auto_candidates(&candidates, &exact).unwrap();
+        assert_eq!(pool, vec!["free".to_string()]);
+
+        let direct = directory.path().join("direct-anthropic.json");
+        write_snapshot(
+            &direct,
+            &[
+                provider("anthropic", 10.0, 0.4, week_ms),
+                provider("free-provider", 30.0, 1.0, week_ms),
+            ],
+        );
+        let direct_candidates = [
+            ("aliased".into(), "anthropic".into()),
+            ("free".into(), "free-provider".into()),
+        ];
+        let pool = narrow_auto_candidates(&direct_candidates, &direct).unwrap();
+        assert_eq!(pool, vec!["aliased".to_string()]);
+
+        let blocked = directory.path().join("blocked-alias.json");
+        let five_hours_ms = 5 * 3_600 * 1_000;
+        write_snapshot(
+            &blocked,
+            &[
+                serde_json::json!({
+                    "provider": "claude",
+                    "kind": "subscription",
+                    "windows": [{
+                        "id": "claude:5h",
+                        "duration_ms": five_hours_ms,
+                        "used_pct": 10.0,
+                        "pace_ratio": 0.1,
+                    }]
+                }),
+                provider("anthropic", 10.0, 0.4, week_ms),
+                provider("free-provider", 30.0, 1.0, week_ms),
+            ],
+        );
+        let blocked_candidates = [
+            ("aliased".into(), "claude".into()),
+            ("free".into(), "free-provider".into()),
+        ];
+        let pool = narrow_auto_candidates(&blocked_candidates, &blocked).unwrap();
+        assert_eq!(pool, vec!["free".to_string()]);
+
+        let unrelated = directory.path().join("unrelated.json");
+        write_snapshot(
+            &unrelated,
+            &[
+                provider("anthropic", 10.0, 0.4, week_ms),
+                provider("free-provider", 30.0, 1.0, week_ms),
+            ],
+        );
+        for provider_id in ["claude-code", "Claude", "codex-cli", "openai"] {
+            let candidates = [
+                ("other".into(), provider_id.to_string()),
+                ("free".into(), "free-provider".into()),
+            ];
+            let pool = narrow_auto_candidates(&candidates, &unrelated).unwrap();
+            assert_eq!(pool, vec!["free".to_string()], "{provider_id}");
+        }
+    }
+
+    fn write_snapshot(path: &std::path::Path, providers: &[serde_json::Value]) {
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        std::fs::write(
+            path,
+            serde_json::to_string(&serde_json::json!({
+                "schema_version": 1,
+                "generated_at_ms": now,
+                "probe_status": "ok",
+                "providers": providers,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     }
 
     fn provider(name: &str, used_pct: f64, pace_ratio: f64, duration_ms: i64) -> serde_json::Value {
