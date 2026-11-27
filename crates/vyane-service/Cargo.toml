@@ -39,6 +39,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 rusqlite = { workspace = true }
+rustix = { workspace = true, features = ["param"] }
 
 [dev-dependencies]
 static_assertions = { workspace = true }
