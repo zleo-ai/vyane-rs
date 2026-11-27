@@ -19,8 +19,9 @@
 //! as separate fields from configuration all the way into the run ledger.
 //!
 //! This crate contains types, traits and pure helpers, plus the [`securefile`]
-//! primitives. Those primitives are not used by the kernel, the ledger, or
-//! the CLI. Runtime orchestration lives in the sibling crates
+//! and [`proc`] primitives. Those primitives are not used by the kernel, the
+//! ledger, the CLI, or the harness spawn path. Runtime orchestration lives in
+//! the sibling crates
 //! (`vyane-kernel`, `vyane-protocol`, `vyane-harness`, `vyane-ledger`, …).
 
 pub mod chat;
@@ -30,6 +31,7 @@ pub mod error;
 pub mod identifier;
 pub mod native_authority;
 pub mod pathsformats;
+pub mod proc;
 pub mod receipt;
 pub mod run;
 pub mod securefile;
@@ -52,6 +54,15 @@ pub use identifier::{
 pub use native_authority::{NativeExecutionAuthority, NativeSideEffect};
 pub use pathsformats::{
     local_locator_kind, read_text_exact, strip_extended_path_prefix, windows_filename_problem,
+};
+pub use proc::{
+    CTRL_BREAK_EVENT, CTRL_C_EVENT, JobObject, ProcError, SIGINT, SIGKILL, SIGTERM, SpawnKwargs,
+    StdioMode, TREE_KILLED_EXIT_CODE, TrackedProcess, UnsupportedOnWindows,
+    WINDOWS_COMPLETED_TURN_EXIT_CODE, add_loop_signal_handler, available_signals, boot_id,
+    contain_process, contained_spawn_kwargs, create_subprocess_exec_contained, kill_exact_process,
+    kill_process_tree, pid_running, popen_contained, probe_pid, process_job,
+    remove_loop_signal_handler, signal_process_tree, terminate_completed_turn,
+    terminate_process_tree, windows_process_start_time,
 };
 pub use receipt::{
     AttemptFailureClass, AttemptStatus, BillingModeCategory, CompletionReceipt, CostEvidence,
