@@ -1588,6 +1588,7 @@ fn help_lists_all_commands() {
         "acp",
         "liveness",
         "mcp",
+        "mcp-smoke",
         "task",
         "a2a",
         "presence",

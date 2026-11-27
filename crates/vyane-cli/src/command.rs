@@ -105,6 +105,7 @@ pub async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Waiting(args) => crate::waiting::run(args),
         Command::Liveness { json, command } => crate::liveness::run(json, command),
         Command::Mcp => run_mcp(cli.config).await,
+        Command::McpSmoke(args) => crate::mcp_smoke::run(args).await,
         Command::Worker(args) => run_worker(cli.config, args).await,
     }
 }

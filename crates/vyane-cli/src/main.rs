@@ -25,6 +25,7 @@ mod factory;
 mod goal;
 mod goal_runtime;
 mod liveness;
+mod mcp_smoke;
 mod mcp_workflow;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]

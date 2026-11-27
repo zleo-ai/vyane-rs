@@ -50,6 +50,8 @@ axum = { workspace = true }
 reqwest = { workspace = true }
 tower = { workspace = true }
 dashmap = "6"
+rmcp = { workspace = true, features = ["client"] }
+tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 command-fds = { workspace = true }
@@ -61,8 +63,6 @@ rustix = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 rusqlite = { workspace = true }
-rmcp = { workspace = true, features = ["client"] }
-tempfile = { workspace = true }
 toml = { workspace = true }
 vyane-provider = { workspace = true }
 wiremock = { workspace = true }
