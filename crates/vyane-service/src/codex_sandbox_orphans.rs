@@ -948,7 +948,15 @@ fn effective_clk(explicit: Option<u64>) -> Option<u64> {
 }
 
 fn lookup_clk() -> Option<u64> {
-    #[cfg(not(any(target_os = "horizon", target_os = "vita", target_os = "wasi")))]
+    // `rustix::param` is not compiled for Windows or ESP-IDF. Horizon, Vita,
+    // and WASI build the module without `clock_ticks_per_second`.
+    #[cfg(not(any(
+        windows,
+        target_os = "espidf",
+        target_os = "horizon",
+        target_os = "vita",
+        target_os = "wasi"
+    )))]
     {
         let ticks = rustix::param::clock_ticks_per_second();
         if (1..=1_000_000).contains(&ticks) {
@@ -957,7 +965,13 @@ fn lookup_clk() -> Option<u64> {
             None
         }
     }
-    #[cfg(any(target_os = "horizon", target_os = "vita", target_os = "wasi"))]
+    #[cfg(any(
+        windows,
+        target_os = "espidf",
+        target_os = "horizon",
+        target_os = "vita",
+        target_os = "wasi"
+    ))]
     {
         None
     }
