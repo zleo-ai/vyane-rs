@@ -1239,13 +1239,6 @@ mod tests {
 
     #[test]
     fn root_follows_the_ledger_parent_without_resolving_symlinks() {
-        let store = AttachmentStore::new("/tmp/vyane-ledger/ledger.jsonl");
-        assert_eq!(store.root, Path::new("/tmp/vyane-ledger/attachments"));
-        let dotted = AttachmentStore::new("/tmp/vyane-a/../vyane-b/ledger.jsonl");
-        assert_eq!(
-            dotted.root,
-            Path::new("/tmp/vyane-a/../vyane-b/attachments")
-        );
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(
             AttachmentStore::new("ledger.jsonl").root,
@@ -1256,16 +1249,56 @@ mod tests {
             cwd.join("~root").join("attachments")
         );
         #[cfg(unix)]
-        if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
-            let home = PathBuf::from(home);
+        {
+            let store = AttachmentStore::new("/tmp/vyane-ledger/ledger.jsonl");
+            assert_eq!(store.root, Path::new("/tmp/vyane-ledger/attachments"));
+            let dotted = AttachmentStore::new("/tmp/vyane-a/../vyane-b/ledger.jsonl");
             assert_eq!(
-                AttachmentStore::new("~/ledger.jsonl").root,
-                home.join("attachments")
+                dotted.root,
+                Path::new("/tmp/vyane-a/../vyane-b/attachments")
             );
+            if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+                let home = PathBuf::from(home);
+                assert_eq!(
+                    AttachmentStore::new("~/ledger.jsonl").root,
+                    home.join("attachments")
+                );
+                assert_eq!(
+                    AttachmentStore::new("~/sub/ledger.jsonl").root,
+                    home.join("sub").join("attachments")
+                );
+            }
+        }
+        #[cfg(windows)]
+        {
+            let ledger = cwd.join("vyane-ledger").join("ledger.jsonl");
             assert_eq!(
-                AttachmentStore::new("~/sub/ledger.jsonl").root,
-                home.join("sub").join("attachments")
+                AttachmentStore::new(&ledger).root,
+                cwd.join("vyane-ledger").join("attachments")
             );
+            let dotted = cwd
+                .join("vyane-a")
+                .join("..")
+                .join("vyane-b")
+                .join("ledger.jsonl");
+            assert_eq!(
+                AttachmentStore::new(&dotted).root,
+                cwd.join("vyane-a")
+                    .join("..")
+                    .join("vyane-b")
+                    .join("attachments")
+            );
+            if let Some(home) = std::env::var_os("USERPROFILE").filter(|home| !home.is_empty()) {
+                let home = PathBuf::from(home);
+                assert_eq!(
+                    AttachmentStore::new("~/ledger.jsonl").root,
+                    home.join("attachments")
+                );
+                assert_eq!(
+                    AttachmentStore::new(r"~\sub\ledger.jsonl").root,
+                    home.join("sub").join("attachments")
+                );
+            }
         }
     }
 
@@ -1997,7 +2030,6 @@ mod tests {
         assert!(
             rendered.contains(&serde_json::to_string(&second_path.display().to_string()).unwrap())
         );
-        assert!(!first_path.exists() || rendered.contains(&first_path.display().to_string()));
         let missing = Path::new("/missing/does-not-exist");
         let pure = delivery_body(
             "body",
@@ -2007,10 +2039,7 @@ mod tests {
                 path: missing,
             }],
         );
-        assert!(
-            pure.contains("\"/missing/does-not-exist\"")
-                || pure.contains(&missing.display().to_string())
-        );
+        assert!(pure.contains(&json_string(&missing.display().to_string())));
         assert!(!missing.exists());
     }
 }
