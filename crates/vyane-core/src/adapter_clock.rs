@@ -455,15 +455,18 @@ impl Drop for BootIdOverride {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    #[cfg(not(windows))]
     use std::fs;
 
     use rusqlite::{Connection, TransactionBehavior, params};
     use tempfile::NamedTempFile;
 
+    #[cfg(target_os = "linux")]
+    use super::monotonic_time;
     use super::{
         BootIdOverride, ClockAnchor, MonotonicFreeze, MonotonicScript, accepted_platform_boot,
-        expiry_proof_time, fence_expired_claim, freeze_monotonic, load_anchor, monotonic_time,
-        process_boot_id, raw_monotonic_seconds, resolve_boot_id, server_time,
+        expiry_proof_time, fence_expired_claim, freeze_monotonic, load_anchor, process_boot_id,
+        raw_monotonic_seconds, resolve_boot_id, server_time,
     };
 
     const OWNER: &str = "owner";
