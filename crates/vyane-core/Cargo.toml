@@ -13,6 +13,7 @@ rust-version.workspace = true
 async-trait = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -27,7 +28,7 @@ process-wrap = { version = "=8.0.2", default-features = false, features = [
     "std",
     "process-session",
 ] }
-rustix = { workspace = true }
+rustix = { workspace = true, features = ["time"] }
 
 [target.'cfg(windows)'.dependencies]
 getrandom = { workspace = true }
@@ -42,6 +43,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_JobObjects",
     "Win32_System_Pipes",
     "Win32_System_Registry",
+    "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
 ] }
