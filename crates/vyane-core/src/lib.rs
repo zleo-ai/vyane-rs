@@ -19,11 +19,13 @@
 //! as separate fields from configuration all the way into the run ledger.
 //!
 //! This crate contains types, traits and pure helpers, plus the [`securefile`],
-//! [`localipc`], and [`proc`] primitives. Those primitives are not used by the
-//! kernel, the ledger, the CLI, or the harness spawn path. Runtime orchestration
-//! lives in the sibling crates
+//! [`localipc`], [`proc`], and [`attachments`] primitives. Those primitives are
+//! not used by the kernel, the ledger, the CLI, or the harness spawn path.
+//! [`attachments`] is not called by conversation, HTTP, or the CLI. Runtime
+//! orchestration lives in the sibling crates
 //! (`vyane-kernel`, `vyane-protocol`, `vyane-harness`, `vyane-ledger`, …).
 
+pub mod attachments;
 pub mod chat;
 pub mod cost;
 pub mod env;
@@ -46,6 +48,10 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod workdir;
 
+pub use attachments::{
+    ATTACHMENT_TYPES, AttachmentError, AttachmentMetadata, AttachmentStore, DeliveryAttachment,
+    MAX_ATTACHMENT_BYTES, delivery_body, validate_upload,
+};
 pub use chat::{ChatMessage, ChatOutcome, ChatRequest, Role, StreamEvent};
 pub use cost::{ModelTokenRate, estimate_configured_cost};
 pub use env::{BASELINE_ENV, EnvPolicy, InheritMode};
