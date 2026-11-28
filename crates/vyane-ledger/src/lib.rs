@@ -18,6 +18,9 @@
 //!   them so the latest rating per run and source wins.
 //! - [`PriceTable`] turns recorded [`vyane_core::Usage`] into a `cost_usd`,
 //!   never guessing an unknown model (it returns `None`).
+//! - [`pricing_source`] reports unit-price provenance from a copied rate list.
+//!   That list is not the billing source for [`PriceTable`]. The builtin
+//!   price table does not read it, and cost display does not call it.
 //!
 //! See `docs/plan/WP-05.md` for the work-package specification.
 
@@ -26,6 +29,7 @@ pub mod event;
 pub mod feedback;
 pub mod history_archive;
 pub mod jsonl;
+pub mod pricing_source;
 pub mod session;
 
 pub use cost::{ModelPricing, PriceTable};
@@ -42,4 +46,8 @@ pub use history_archive::{
     month_of_record, query_recent, read_record_lines,
 };
 pub use jsonl::JsonlLedger;
+pub use pricing_source::{
+    CHECKED_TODAY, OPENROUTER_SYNC_CHECKED, PriceSource, PriceStatus, SpendClass,
+    list_price_sources, lookup_price_source, real_metered_spend_usd,
+};
 pub use session::FsSessionStore;
