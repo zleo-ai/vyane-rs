@@ -1,7 +1,8 @@
 //! Owner-private content-addressed attachment files.
 //!
 //! [`AttachmentStore`] keeps one directory beside a ledger:
-//! `absolute(expanduser(ledger_path)).parent / "attachments"`. That directory
+//! `absolute(expanduser(ledger_path)).parent / "attachments"`. That absolute
+//! step does not normalize `..` or follow a symlink. That directory
 //! is backed up with the ledger. The store does not take a storage directory
 //! from a caller-supplied root, an HTTP field, or attachment metadata. The
 //! ledger path is the only location input, and the attachment directory is
@@ -255,8 +256,9 @@ impl AttachmentStore {
     /// `~` and `~/...` expand to the current user's home directory (`HOME` on
     /// POSIX, `USERPROFILE` or `HOMEDRIVE`+`HOMEPATH` on Windows). A `~user`
     /// path is left unchanged. The path is then made absolute without
-    /// resolving symlinks, and the store root is that path's parent joined
-    /// with `attachments`.
+    /// normalizing `..` or resolving symlinks, and the store root is that
+    /// path's parent joined with `attachments`. On Windows the ledger path is
+    /// not passed to `GetFullPathNameW`, which would resolve `..`.
     #[must_use]
     pub fn new(ledger_path: impl AsRef<Path>) -> Self {
         Self {
@@ -446,11 +448,80 @@ fn inconsistent_attachment_id() -> AttachmentError {
 
 fn attachments_root(ledger_path: &Path) -> PathBuf {
     let expanded = expanduser(ledger_path);
-    let absolute = std::path::absolute(&expanded).unwrap_or(expanded);
+    let absolute = ledger_absolute(&expanded);
     match absolute.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join("attachments"),
         _ => PathBuf::from("attachments"),
     }
+}
+
+/// `Path.absolute()`: make `path` absolute and keep every `..`.
+///
+/// POSIX [`std::path::absolute`] already keeps `..`. Windows
+/// [`std::path::absolute`] is `GetFullPathNameW`, which resolves `..` and
+/// would drop a symlink that appears only before that `..`.
+fn ledger_absolute(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        absolute_like_python(path)
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+#[cfg(windows)]
+fn absolute_like_python(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return path.to_path_buf();
+    }
+    // Relative, or root-relative (`\foo`, `/foo`). `join` keeps a root and
+    // appends a relative tail without resolving `..`.
+    let has_prefix = matches!(path.components().next(), Some(Component::Prefix(_)));
+    if !has_prefix {
+        return match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        };
+    }
+    // Drive-relative `C:name\..\rest`. The anchor is `ntpath.abspath("C:")`,
+    // the current directory on that drive. The tail is appended as text.
+    let Some(prefix) = path
+        .components()
+        .next()
+        .and_then(|component| match component {
+            Component::Prefix(prefix) => Some(prefix),
+            _ => None,
+        })
+    else {
+        return path.to_path_buf();
+    };
+    let anchor = std::path::absolute(Path::new(prefix.as_os_str()))
+        .unwrap_or_else(|_| PathBuf::from(prefix.as_os_str()));
+    let mut tail = PathBuf::new();
+    for component in path.components().skip(1) {
+        match component {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => tail.push(".."),
+            Component::Normal(name) => tail.push(name),
+        }
+    }
+    if tail.as_os_str().is_empty() {
+        return anchor;
+    }
+    let mut joined = std::ffi::OsString::from(anchor.as_os_str());
+    let needs_sep = joined
+        .as_encoded_bytes()
+        .last()
+        .is_some_and(|byte| *byte != b'\\' && *byte != b'/');
+    if needs_sep {
+        joined.push(r"\");
+    }
+    joined.push(tail.as_os_str());
+    PathBuf::from(joined)
 }
 
 fn expanduser(path: &Path) -> PathBuf {
